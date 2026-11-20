@@ -5,18 +5,15 @@ import Foundation
 // rules against committed LIVE fixtures.
 //
 // Compiles the REAL `SharedModels.swift`, `SharedStore.swift`,
-// `WidgetDataClient.swift` and `CardsRunningProjection.swift`, plus two blocks
-// sliced out of `CardsRunningActivity.swift` (the `RunningCardMetric(row:)`
-// mapping and the Live Activity's reading rules). Nothing here re-declares a
-// subject type, so a green run proves the shipped rules against the fixture,
-// not a transcription of them.
+// `WidgetDataClient.swift` and `CardsRunningProjection.swift`. Nothing here
+// re-declares a subject type, so a green run proves the shipped rules against
+// the fixture, not a transcription of them.
 //
 // One section per family. Each asserts the values that family draws equal the
 // fixture's own fields:
 //   * iOS systemSmall / systemMedium / systemLarge + accessoryInline /
 //     accessoryCircular / accessoryRectangular
 //   * macOS systemSmall / systemMedium / systemLarge / systemExtraLarge
-//   * Live Activity Lock Screen + compact / expanded / minimal vocabulary
 // `hscc cards monitor --short` is the reference: running cards with title,
 // board, worker and run time, and a count equal to the number of running cards.
 // ---------------------------------------------------------------------------
@@ -142,36 +139,13 @@ check("macOS systemMedium inherits the 3-row budget", projection.rows.prefix(3).
 check("macOS systemLarge inherits the 8-row cap", projection.rows.prefix(8).count == 3)
 check("macOS systemExtraLarge reuses that same cap", projection.rows.prefix(8).count == 3)
 
-print("\nLive Activity — Lock Screen + Dynamic Island vocabulary\n")
+print("\nHonesty rules — no invented number, no stale cache shown fresh\n")
 
-let metrics = projection.rows.prefix(CardsRunningLimits.rowLimit)
-    .map(RunningCardMetric.init(row:))
-check("Lock Screen draws the same rows as the widget",
-      metrics.map(\.cardID) == projection.rows.prefix(3).map(\.cardID))
-for (metric, row) in zip(metrics, projection.rows) {
-    check("metric \(row.cardID): board/title/worker/status/age map 1:1",
-          metric.board == row.board && metric.title == row.title
-          && metric.worker == row.worker && metric.status == row.status
-          && metric.ageSeconds == row.ageSeconds)
-}
 checkText("a card under a minute prints the CLI's seconds, not 0m",
           CardsRunningRow(board: "hscc", cardID: "t_short", title: "Just started",
                           worker: "ios-engineer", status: "running",
                           ageSeconds: 30).ageText,
           "30s")
-checkInt("expanded/Lock Screen headline count",
-         CardsRunningReading.displayCount(runningCount: projection.runningCount,
-                                          rowCount: projection.rows.count,
-                                          rowsAreComplete: projection.rowsAreComplete), 3)
-checkText("expanded/Lock Screen headline",
-          CardsRunningReading.headline(count: projection.runningCount, failureLabel: nil),
-          "3 running")
-checkText("compact trailing", CardsRunningReading.compactTrailing(count: 3, failureLabel: nil), "3")
-checkText("minimal/compact age comes from the push timestamp",
-          CardsRunningReading.pushedAgeText(updatedAt: now.addingTimeInterval(-185), now: now),
-          "3m ago")
-
-print("\nHonesty rules — no invented number, no stale cache shown fresh\n")
 
 check("a blind read has no count to print", CardsRunningCopy.runningText(nil) == nil)
 checkText("a blind inline names the reason",
@@ -192,9 +166,6 @@ checkText("a blocked read that did not answer is a dash, not zero",
           "blocked —")
 checkInt("the secondary blocked figure is the blocked route's own count",
          projection.blockedCount, blockedFixture.count ?? -1)
-check("blocked is never the running headline",
-      CardsRunningReading.headline(count: projection.runningCount, failureLabel: nil)
-      == "3 running")
 
 print("\nContract shape — worker / run_s / hb_s from CARD_VIEW_FIELDS\n")
 

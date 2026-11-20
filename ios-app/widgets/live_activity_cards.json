@@ -1,9 +1,0 @@
-{
-  "order": 13,
-  "kind": "live_activity",
-  "surface_case": "liveActivityCards",
-  "surface_raw": "liveActivity.cards",
-  "display_name": "Running Cards Live Activity",
-  "icon": "square.stack.3d.up",
-  "id": "live_activity_cards"
-}

@@ -2,7 +2,7 @@
 # generate.sh — regenerate HSCC.xcodeproj from project.yml with signing set up.
 #
 # Why this exists: the app AND both app-extension targets (HSCCWidgets,
-# HSCCLiveActivity) each need a DEVELOPMENT_TEAM. Setting it on the app alone
+# HSCCLiveActivityMonitor) each need a DEVELOPMENT_TEAM. Setting it on the app alone
 # still fails the extensions with:
 #     Signing for "HSCCWidgets" requires a development team.
 # And a team picked in the Xcode UI is LOST on the next `xcodegen generate`,
@@ -53,8 +53,8 @@ if [ -z "$team" ]; then
   cat >&2 <<'MSG'
 error: no development team.
 
-All four targets (HSCC, HSCCWidgets, HSCCLiveActivity, HSCCLiveActivityMonitor)
-need one. Find your team
+All three targets (HSCC, HSCCWidgets, HSCCLiveActivityMonitor) need one.
+Find your team
 id in Xcode > Settings > Accounts (or the OU field of your signing certificate),
 then either export it for this shell:
 
@@ -79,7 +79,7 @@ HSCC_DEVELOPMENT_TEAM="$team" xcodegen generate --spec project.yml
 
 # Prove it actually landed on every target, rather than assuming inheritance.
 missing=0
-for t in HSCC HSCCWidgets HSCCLiveActivity HSCCLiveActivityMonitor; do
+for t in HSCC HSCCWidgets HSCCLiveActivityMonitor; do
   got=$(DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
         xcodebuild -project HSCC.xcodeproj -target "$t" -showBuildSettings 2>/dev/null \
         | awk '/^ *DEVELOPMENT_TEAM = /{print $3; exit}')

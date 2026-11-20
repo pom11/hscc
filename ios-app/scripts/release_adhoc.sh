@@ -152,8 +152,8 @@ if [ -z "$TEAM" ]; then
   cat >&2 <<'MSG'
 error: HSCC_DEVELOPMENT_TEAM is not set.
 
-All four targets (HSCC, HSCCWidgets, HSCCLiveActivity, HSCCLiveActivityMonitor)
-need the same team. Find it in Xcode → Settings → Accounts (the "Team ID" next
+All three targets (HSCC, HSCCWidgets, HSCCLiveActivityMonitor) need the same
+team. Find it in Xcode → Settings → Accounts (the "Team ID" next
 to the team), then run:
 
     export HSCC_DEVELOPMENT_TEAM=YOURTEAMID

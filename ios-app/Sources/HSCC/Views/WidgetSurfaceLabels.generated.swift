@@ -13,11 +13,7 @@ extension WidgetSurfaceKind {
         case .widgetKanbanMonitor: return "Boards"
         case .widgetNeedsMe: return "Needs Me"
         case .widgetMergeQueue: return "Merge Queue"
-        case .liveActivityWake: return "Wake Live Activity"
-        case .liveActivityMonitor: return "Monitor Live Activity"
-        case .liveActivityClusterHealth: return "Cluster Health Live Activity"
-        case .liveActivityCards: return "Running Cards Live Activity"
-        case .liveActivityBoardProgress: return "Board Progress Live Activity"
+        case .liveActivityClusterHealth: return "Cluster watch"
         }
     }
 
@@ -29,11 +25,7 @@ extension WidgetSurfaceKind {
         case .widgetKanbanMonitor: return "list.bullet.rectangle"
         case .widgetNeedsMe: return "bell.badge"
         case .widgetMergeQueue: return "arrow.triangle.merge"
-        case .liveActivityWake: return "bolt"
-        case .liveActivityMonitor: return "waveform.path.ecg"
         case .liveActivityClusterHealth: return "heart.text.square"
-        case .liveActivityCards: return "square.stack.3d.up"
-        case .liveActivityBoardProgress: return "chart.bar.xaxis"
         }
     }
 }

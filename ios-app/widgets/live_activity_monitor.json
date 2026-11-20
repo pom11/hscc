@@ -1,9 +1,0 @@
-{
-  "order": 11,
-  "kind": "live_activity",
-  "surface_case": "liveActivityMonitor",
-  "surface_raw": "liveActivity.monitor",
-  "display_name": "Monitor Live Activity",
-  "icon": "waveform.path.ecg",
-  "id": "live_activity_monitor"
-}

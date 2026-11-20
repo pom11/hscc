@@ -28,11 +28,7 @@ WIDGET_VIEWS=(
   Sources/HSCCWidgets/CardsRunningWidget.swift
   Sources/HSCCWidgets/NeedsMeWidget.swift
   Sources/HSCCWidgets/MergeQueueWidget.swift
-  Sources/HSCCLiveActivity/HSCCLiveActivity.swift
-  Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
-  Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift
   Sources/HSCCLiveActivityMonitor/ClusterHealthLiveActivity.swift
-  Sources/HSCCLiveActivityMonitor/BoardProgressLiveActivity.swift
 )
 
 fail=0
@@ -253,11 +249,11 @@ if [ "$nbg" -gt 0 ] && [ "$bgok" -eq 1 ] && [ "$nadapt" -eq "$nbg" ] && [ "$adap
 else
   bad "a widget root does not paint containerBackground through the rendering-mode adapter (roots=$nbg wrapped=$nadapt bg=$bgok adapter=$adapter_ok)"
 fi
-nla=$(grep -l 'activityBackgroundTint(style.backgroundColor)' Sources/HSCCLiveActivityMonitor/*.swift Sources/HSCCLiveActivity/*.swift | wc -l | tr -d ' ')
-if [ "$nla" -eq 5 ]; then
-  ok "all 5 Live Activity roots tint from style.backgroundColor"
+nla=$(grep -l 'activityBackgroundTint(style.backgroundColor)' Sources/HSCCLiveActivityMonitor/*.swift | wc -l | tr -d ' ')
+if [ "$nla" -eq 1 ]; then
+  ok "the one Live Activity root tints from style.backgroundColor"
 else
-  bad "only $nla/5 Live Activity roots tint from style.backgroundColor"
+  bad "only $nla/1 Live Activity roots tint from style.backgroundColor"
 fi
 
 if [ "$fail" -ne 0 ]; then

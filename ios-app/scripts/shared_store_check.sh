@@ -91,12 +91,11 @@ grep -q 'HSCC_APP_GROUP: group\.$(HSCC_BUNDLE_PREFIX)\.ios' project.yml \
   && ok "project.yml derives the App Group from HSCC_BUNDLE_PREFIX" \
   || fail "project.yml does not derive HSCC_APP_GROUP from HSCC_BUNDLE_PREFIX"
 for plist in Sources/Info.plist Sources/HSCCWidgets/Info.plist \
-             Sources/HSCCLiveActivity/Info.plist \
              Sources/HSCCLiveActivityMonitor/Info.plist; do
   grep -q 'HSCCAppGroup' "$plist" \
     || fail "$plist does not carry the HSCCAppGroup key"
 done
-ok "all four iOS Info.plists carry HSCCAppGroup"
+ok "all three iOS Info.plists carry HSCCAppGroup"
 if grep -q 'group\.com\.hscc\.ios' "$SHARED_DIR/SharedStore.swift"; then
   fail "SharedStore.swift still names the App Group literal"
 else

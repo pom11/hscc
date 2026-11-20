@@ -61,12 +61,11 @@ struct HSCCApp: App {
                 // `UIUserInterfaceStyle=Dark` key backs this up at launch.
                 .preferredColorScheme(.dark)
         }
-        // HSCC Monitor Live Activity (t_03d318cd). Scene phase drives the
-        // foreground poll loop (active → poll; background → stop the tight loop
-        // + schedule a BGAppRefresh). The one-time launch hooks (task
-        // registration + orphan sweep) run in `LaunchAppDelegate`
-        // `didFinishLaunching` — a Scene has no `.task`, and the delegate is
-        // the correct launch seam.
+        // Cluster watch (A2), the one Live Activity. Scene phase resumes or
+        // stops its foreground loop; the one-time hooks (task registration +
+        // orphan sweep) run in `LaunchAppDelegate.didFinishLaunching`. An
+        // `.active` transition only ADOPTS an operator-started watch — it never
+        // starts one.
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
@@ -74,34 +73,9 @@ struct HSCCApp: App {
                 // entry, throttled to one attempt per six hours by
                 // UpdatePreferences. Never touches the cluster connection.
                 Task { await updates.checkIfDue() }
-                // Re-hydrate leftover orphans + resume the foreground poll loop.
-                MonitorActivityDriver.sweepLeftoverMonitors()
-                MonitorActivityDriver.shared.sceneDidBecomeActive()
-                // Cluster-health (t_f2867fb3): resume the poll loop. Deliberately
-                // NO sweep call here — this surface's sweep is age-based (six
-                // hours of silence) rather than settings-based, and running it on
-                // every foreground entry would END a bubble the driver still
-                // holds a live handle to, after which every push would land on
-                // an activity that no longer exists. The sweep runs at launch,
-                // which is when a dead handle is actually a dead handle.
                 ClusterHealthActivityDriver.shared.sceneDidBecomeActive()
-                // The running-cards activity (t_71deac83): same seam, its own
-                // driver, so the two Live Activities never share a cadence, a
-                // toggle or a background task. Same rule as above about the
-                // sweep — `CardsRunningActivitySweep` runs at launch and not
-                // here, because the driver may be holding a handle the sweep
-                // would end from underneath it.
-                CardsRunningActivityDriver.shared.sceneDidBecomeActive()
-                // The per-board progress activity (t_451cbe25) is
-                // operator-started, so there is nothing to sweep: adopting a
-                // bubble left by a previous process and resuming its poll is
-                // all this hook does. No activity up → no reads.
-                BoardProgressActivityDriver.shared.sceneDidBecomeActive()
             case .background, .inactive:
-                MonitorActivityDriver.shared.sceneDidEnterBackground()
                 ClusterHealthActivityDriver.shared.sceneDidEnterBackground()
-                CardsRunningActivityDriver.shared.sceneDidEnterBackground()
-                BoardProgressActivityDriver.shared.sceneDidEnterBackground()
             @unknown default:
                 break
             }

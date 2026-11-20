@@ -10,8 +10,7 @@ import ActivityKit
 // bubble keeps its last pushed state forever — a mint "Serving · 4/4 up" from
 // before the kill, with nothing behind it. Releasing the `Activity` object does
 // not end it and no `deinit` ran to end it, so the app reconciles whatever it
-// finds at launch, exactly as `CardsRunningActivitySweep` does for the
-// running-cards activity.
+// finds at launch.
 //
 // The DECISION is not made here. It is `ClusterHealthOrphanRule.isOrphan`, a
 // pure rule that lives beside the content state in
@@ -21,18 +20,15 @@ import ActivityKit
 // activities and act on the answer.
 //
 // This is also why the sweep does not consult `AppGroupWidgetSettings`: the
-// monitor activity's sweep keys its decision on a `liveActivity.monitor`
-// settings entry, and `WidgetSurfaceKind` has no case for this surface (adding
-// one means SharedStore.swift plus the config screen — a different card's file
-// set). A rule with no settings dependency is the one that can be executed by a
-// gate, so this surface has a rule instead of a flag.
+// rule is pure, so the launch sweep and the gate execute the same decision
+// instead of two copies of a settings read.
 // ---------------------------------------------------------------------------
 
 enum ClusterHealthActivitySweep {
     /// End any leftover cluster-health activity the launch found to be an orphan.
     ///
-    /// Call once at launch (the delegate's `didFinishLaunching`, beside the
-    /// monitor and cards sweeps). Safe on every launch: it only reads the static
+    /// Call once at launch (the delegate's `didFinishLaunching`). Safe on every
+    /// launch: it only reads the static
     /// `Activity.activities` snapshot and ends the ones the rule flagged, and
     /// ends run on their own Tasks because `end` is async. A no-op while no
     /// cluster-health activity exists.

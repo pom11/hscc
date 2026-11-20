@@ -1,64 +1,25 @@
 #!/bin/bash
-# live_activity_rehydration_check.sh — prove the re-hydration STALENESS DECIDERS.
+# live_activity_rehydration_check.sh — prove the ONE Live Activity's rules.
 #
-# PART 1 — the fleet-wake activity. The launch sweep reads `Activity.activities`,
-# which only exists on iOS at runtime — no ActivityKit here. So the DECIDER
-# logic (transcribed from LiveActivityManager.sweepLeftoverWakes) is compiled
-# into a macOS CLI and the full decision table is asserted. See main.swift.
+# The 2026-11-20 picks left a single activity, "Cluster watch" (A2), reusing the
+# Cluster Health activity's plumbing. This gate therefore covers only
+# `Sources/Shared/ClusterHealthActivity.swift`:
 #
-# PART 2 — the running-cards activity (t_f9cc34e0). NOT transcribed. The two
-# marker-bracketed blocks in Sources/Shared/CardsRunningActivity.swift
-# (`GATE-SLICE-BEGIN/END: cards-reading-rules` and `…: cards-orphan-decision`)
-# are sliced out of the source file at gate time and compiled alongside the
-# harness, so what executes is the code the app's launch sweep calls
-# (CardsRunningOrphanRule) and the code the extension's views draw
-# (CardsRunningReading). Slicing is why a rule change cannot be shipped while
-# the table still passes: a moved or renamed marker fails this script by name
-# instead of quietly shrinking the table, which is the failure mode every
-# path-anchored harness in this directory has eventually died of.
+#   * `cluster-health-reading-rules` — every word, count and colour the Lock
+#     Screen and all three Island regions draw, including the new A2 layouts
+#     (header, four node columns, compact/minimal strings and footer);
+#   * `cluster-health-orphan-decision` — the launch sweep's pure decision;
+#   * `cluster-health-projection-rules` — how the sanctioned reads become the
+#     pushed signals, including the stale-snapshot data clock (a snapshot keeps
+#     its real `updatedAt`, never `Date()`).
 #
-# PART 3 — the cluster-health activity (t_0120475a). The same arrangement in a
-# SECOND file: the two blocks in Sources/Shared/ClusterHealthActivity.swift
-# (`…: cluster-health-reading-rules` and `…: cluster-health-orphan-decision`)
-# are sliced by the identical awk rule, so the table executes the
-# `ClusterHealthOrphanRule` that `ClusterHealthActivitySweep` applies at launch
-# and the words, tally and colour that `ClusterHealthLiveActivity` draws. The
-# specs below therefore name the FILE each marker lives in — a spec that only
-# named the marker would silently start slicing the wrong file the day a rule
-# moved, and a green table would be proving nothing.
+# The blocks are SLICED out of the source at gate time and compiled with this
+# harness, so a rule change cannot be shipped while the table still passes. The
+# wake/monitor/running-cards/board-progress activities and their gates were
+# removed with the activities themselves.
 #
 # Every sliced block is Foundation-only on purpose (no ActivityKit, no Theme),
 # which is what lets it compile on the macOS SDK with this harness.
-#
-# PART 4 (t_f2867fb3, the driver) — the third cluster-health block,
-# `cluster-health-projection-rules`: the rule that turns the two sanctioned reads
-# (`/v1/autodown/status` + `/v1/cluster/monitor`) into the signals a push
-# carries. It is the half that can lie about a degraded fleet — a route that
-# degraded to `{speak}`, a host list with errors in it, a section the operator
-# switched off — so it is sliced and executed here too, rather than being left
-# to a driver that no gate can run. `Sources/Shared/ClusterNodeTally.swift`
-# compiles alongside because the projection calls it: that file is the ONE host
-# tally, and the cluster widget runs the same call (`cluster_widget_check.sh`
-# executes it from the widget's side). Since t_b009f32d the same is true of
-# `Sources/Shared/ClusterMonitorViewModel.swift`: the activity's per-host lines,
-# total draw and peak GPU ARE that file's CLI-formatted cells and thresholds, so
-# this table executes the shipped formatting rather than a copy of it — and
-# dropping that file from the list fails the compile, rather than quietly
-# narrowing what is proved.
-#
-# PART 5 — the running-cards FEED rule (t_71deac83). A THIRD block in the cards
-# file (`…: cards-feed-decision`) holds the driver's decision — push, end, or
-# leave alone — because the driver itself is ActivityKit code this host cannot
-# compile, and a rule the driver decided privately is a rule no gate can see.
-# Part 5 of the table also compiles `Sources/Shared/CardsRunningProjection.swift`
-# (the type the push is built from) rather than restating it, so "a blind read
-# cannot print 0 running" is asserted against the shipped projection.
-#
-# SharedModels.swift + model_decode_check/ThemeStub.swift are compiled in for
-# exactly one reason: PART 3 asserts this activity's state table against the real
-# `ClusterState` the app and the widget share — the one agreement a sliced copy
-# of a table cannot prove about itself. No other model is used here, and nothing
-# in this script decodes a fixture (that is model_decode_check's job).
 #
 # Usage: scripts/live_activity_rehydration_check.sh
 set -uo pipefail
@@ -67,7 +28,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 . scripts/swift_source_groups.sh
 
-CARDS_SRC=Sources/Shared/CardsRunningActivity.swift
 CLUSTER_SRC=Sources/Shared/ClusterHealthActivity.swift
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 
@@ -78,10 +38,7 @@ slice() {  # slice <file> <marker-name> — print the bracketed block, markers e
 
 printf 'import Foundation\n' > "$OUT/SlicedRules.swift"
 # <file>|<marker name>|<the func that block must declare>
-for spec in "$CARDS_SRC|cards-reading-rules|displayCount" \
-            "$CARDS_SRC|cards-orphan-decision|isOrphan" \
-            "$CARDS_SRC|cards-feed-decision|decide" \
-            "$CLUSTER_SRC|cluster-health-reading-rules|headline" \
+for spec in "$CLUSTER_SRC|cluster-health-reading-rules|headline" \
             "$CLUSTER_SRC|cluster-health-orphan-decision|isOrphan" \
             "$CLUSTER_SRC|cluster-health-projection-rules|signals"; do
   src="${spec%%|*}"; rest="${spec#*|}"; name="${rest%%|*}"; want="${rest##*|}"
@@ -104,20 +61,35 @@ done
 
 cp scripts/live_activity_rehydration_check/main.swift "$OUT/main.swift"
 
-# PART 4 (t_71deac83) executes the projection the driver pushes FROM, so the
-# real file is compiled rather than transcribed: `CardsRunningProjection`
-# decides whether a push says "0 running" or `—`, and that claim is only worth
-# anything if the table runs the shipped type. `SharedStore.swift` comes with it
-# because the snapshot store in the same file writes through `SharedStore.suite`
-# — both files are Foundation/Security-only, which is what lets them build on
-# the macOS SDK (model_decode_check.sh compiles the same pair).
+# `ClusterNodeTally` and `ClusterMonitorViewModel` are compiled in, not sliced:
+# they are the Foundation-only files the cluster widget also runs, and the
+# projection calls them. Dropping either fails the compile rather than quietly
+# narrowing what is proved.
 swiftc -o "$OUT/check" \
   "$OUT/main.swift" "$OUT/SlicedRules.swift" \
   "${SWIFT_GROUP_WIDGET_CLIENT[@]}" \
   Sources/Shared/ClusterNodeTally.swift \
-  Sources/Shared/CardsRunningProjection.swift \
   Sources/Shared/ClusterMonitorViewModel.swift \
   scripts/model_decode_check/ThemeStub.swift 2>&1 || {
   echo "compile failed" >&2; exit 1; }
+
+# The driver is ActivityKit + BackgroundTasks and cannot run here; these
+# structural checks pin the two audit fixes so a future edit cannot quietly
+# restore them (stale data dated "now", and Off becoming a one-minute poll).
+DRIVER=Sources/HSCC/ClusterHealthActivityDriver.swift
+gate_fail=0
+grep -q 'ClusterHealthReading.snapshotDate(ageMinutes:' "$DRIVER" \
+  && echo "  ok: a stale snapshot keeps its real date" \
+  || { echo "  FAIL: stale snapshots are not dated from their age" >&2; gate_fail=1; }
+grep -q 'showingStale ? dataAt' "$DRIVER" \
+  && echo "  ok: a failed refresh dates staleDate from the snapshot" \
+  || { echo "  FAIL: staleDate is refreshed to now" >&2; gate_fail=1; }
+grep -q 'guard let cadence = refreshMinutes() else' "$DRIVER" \
+  && echo "  ok: Off stops the poll instead of scheduling one minute" \
+  || { echo "  FAIL: the Off guard is gone" >&2; gate_fail=1; }
+grep -q 'max(1, setting().refreshMinutes)' "$DRIVER" \
+  && { echo "  FAIL: the max(1, …) Off bug is back" >&2; gate_fail=1; } \
+  || echo "  ok: no max(1, refreshMinutes) coercion"
+[ "$gate_fail" -eq 0 ] || exit 1
 
 "$OUT/check"

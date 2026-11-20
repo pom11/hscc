@@ -238,12 +238,12 @@ check("every registry key is namespaced by surface kind",
 // not a gap the editor has to paper over: the bounded read path must keep the
 // set empty rather than invent one.
 check("a surface with no sections stays section-less through the bounded path",
-      defaults.setting(for: .liveActivityCards).showSections.isEmpty)
-check("the running-cards surface is push-fed (15-min default)",
-      WidgetSurfaceKind.liveActivityCards.isLiveActivity
-        && noEntries.setting(for: .liveActivityCards).refreshMinutes == 15)
-check("the running-cards registry key is stable",
-      WidgetSurfaceKind.liveActivityCards.rawValue == "liveActivity.cards")
+      defaults.setting(for: .widgetCardsRunning).showSections.isEmpty)
+check("the Cluster watch surface is push-fed (15-min default)",
+      WidgetSurfaceKind.liveActivityClusterHealth.isLiveActivity
+        && noEntries.setting(for: .liveActivityClusterHealth).refreshMinutes == 15)
+check("the Cluster watch registry key is stable",
+      WidgetSurfaceKind.liveActivityClusterHealth.rawValue == "liveActivity.clusterHealth")
 
 // 2. empty store (no entry for a surface) -> setting(for:) still returns ON
 //    defaults (the pre-existing Cluster widget must render unchanged).
@@ -251,8 +251,8 @@ let empty = AppGroupWidgetSettings(surfaces: [:])
 let clusterDefault = empty.setting(for: .widgetCluster)
 check("absent surface defaults ON backward compatible", clusterDefault.isActive)
 check("absent widget defaults 5 min", clusterDefault.refreshMinutes == 5)
-let wakeDefault = empty.setting(for: .liveActivityWake)
-check("absent Live Activity defaults 15 min", wakeDefault.refreshMinutes == 15)
+let watchDefault = empty.setting(for: .liveActivityClusterHealth)
+check("absent Live Activity defaults 15 min", watchDefault.refreshMinutes == 15)
 
 // 3. bounded set: a stale/foreign section id is stripped by setting(for:).
 var foreign = AppGroupWidgetSettings(surfaces: [
@@ -265,8 +265,8 @@ check("foreign section stripped (bounded set)",
 
 // 4. Codable round-trip: encode -> decode yields an equal registry.
 foreign = AppGroupWidgetSettings(surfaces: [
-    .liveActivityMonitor: WidgetSurfaceSettings(isActive: false, refreshMinutes: 30,
-                                                showSections: ["state", "host"]),
+    .liveActivityClusterHealth: WidgetSurfaceSettings(isActive: false, refreshMinutes: 30,
+                                                      showSections: ["nodes"]),
     .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 60,
                                           showSections: ["state", "board"]),
 ])
@@ -305,7 +305,7 @@ check("Off (0) refresh is stored", off.setting(for: .widgetCluster).refreshMinut
 //    (The t_fa7926fb pair is the reason this list exists at all — a permanent
 //    identifier chosen in a card body deserves one assertion that says so.)
 check("widget.cluster registry key", WidgetSurfaceKind.widgetCluster.rawValue == "widget.cluster")
-check("liveActivity.monitor registry key", WidgetSurfaceKind.liveActivityMonitor.rawValue == "liveActivity.monitor")
+check("liveActivity.clusterHealth registry key", WidgetSurfaceKind.liveActivityClusterHealth.rawValue == "liveActivity.clusterHealth")
 check("widget.cardsRunning registry key", WidgetSurfaceKind.widgetCardsRunning.rawValue == "widget.cardsRunning")
 check("widget.kanbanMonitor registry key", WidgetSurfaceKind.widgetKanbanMonitor.rawValue == "widget.kanbanMonitor")
 
@@ -476,14 +476,14 @@ let mixed = AppGroupWidgetSettings(
         .widgetNeedsMe: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                               showSections: ["state"], scope: WidgetScope()),
         // A surface with NO choice of its own: absent key on disk, inherits.
-        .liveActivityWake: WidgetSurfaceSettings(isActive: true, refreshMinutes: 15,
-                                                 showSections: ["state"]),
+        .liveActivityClusterHealth: WidgetSurfaceSettings(isActive: true, refreshMinutes: 15,
+                                                          showSections: ["nodes"]),
     ],
     scope: WidgetScope(node: ".244"))
 check("scope(for:) keeps the surface own board",
       mixed.scope(for: .widgetCluster) == WidgetScope(board: "radio"))
 check("scope(for:) inherits the fleet default when the surface never chose",
-      mixed.scope(for: .liveActivityWake) == WidgetScope(node: ".244"))
+      mixed.scope(for: .liveActivityClusterHealth) == WidgetScope(node: ".244"))
 check("an explicit All on the surface does not inherit the fleet default",
       mixed.scope(for: .widgetNeedsMe) == WidgetScope() && (mixed.scope(for: .widgetNeedsMe)?.isAll ?? false))
 
@@ -509,8 +509,8 @@ if let mixedData = try? JSONEncoder().encode(mixed),
    let mixedDict = try? JSONSerialization.jsonObject(with: mixedData) as? [String: Any] {
     check("the surfaces map is stored as the flat key/value array Swift writes",
           mixedDict["surfaces"] is [Any])
-    let wakeEntry = surfaceEntry(mixedDict, "liveActivity.wake")
-    check("a never-chosen surface stores no scope key", wakeEntry != nil && wakeEntry?["scope"] == nil)
+    let watchEntry = surfaceEntry(mixedDict, "liveActivity.clusterHealth")
+    check("a never-chosen surface stores no scope key", watchEntry != nil && watchEntry?["scope"] == nil)
     let monitorScope = surfaceEntry(mixedDict, "widget.needsMe")?["scope"] as? [String: Any]
     check("an explicit All stores an empty scope object",
           monitorScope != nil && monitorScope?.isEmpty == true)
@@ -942,16 +942,12 @@ fi
 # closed rather than being skipped.
 la_case_for() {
   case "$1" in
-    WakingActivityAttributes) echo liveActivityWake ;;
-    MonitorActivityAttributes) echo liveActivityMonitor ;;
     ClusterHealthActivityAttributes) echo liveActivityClusterHealth ;;
-    CardsRunningActivityAttributes) echo liveActivityCards ;;
-    BoardProgressActivityAttributes) echo liveActivityBoardProgress ;;
     *) echo "" ;;
   esac
 }
 la_types=$(grep -rhoE 'ActivityConfiguration\(for: [A-Za-z][A-Za-z0-9]*\.self\)' \
-  Sources/HSCCLiveActivity Sources/HSCCLiveActivityMonitor \
+  Sources/HSCCLiveActivityMonitor \
   | sed -E 's/.*for: ([A-Za-z][A-Za-z0-9]*)\.self.*/\1/' | sort -u)
 la_count=$(printf '%s\n' "$la_types" | sed '/^$/d' | wc -l | tr -d ' ')
 sok "the Live Activity extensions declare $la_count activity surface(s)"
@@ -978,12 +974,17 @@ else
 fi
 # A raw value IS the App Group key: pin the newest one to its literal for the
 # same reason every older surface is pinned in the executed harness.
-grep -q 'case liveActivityBoardProgress = "liveActivity.boardProgress"' "$ENUM" \
-  && sok "liveActivity.boardProgress registry key" \
-  || sfail "liveActivity.boardProgress registry key"
-grep -q 'setting(for: .liveActivityBoardProgress)' Sources/HSCC/BoardProgressActivityDriver.swift \
-  && sok "the board-progress driver reads its registry entry" \
-  || sfail "the board-progress driver reads its registry entry"
+grep -q 'case liveActivityClusterHealth = "liveActivity.clusterHealth"' "$ENUM" \
+  && sok "liveActivity.clusterHealth registry key" \
+  || sfail "liveActivity.clusterHealth registry key"
+grep -q 'setting(for: .liveActivityClusterHealth)' Sources/HSCC/ClusterHealthActivityDriver.swift \
+  && sok "the Cluster watch driver reads its registry entry" \
+  || sfail "the Cluster watch driver reads its registry entry"
+for removed in liveActivityWake liveActivityMonitor liveActivityCards liveActivityBoardProgress; do
+  grep -q "case $removed" "$ENUM" \
+    && sfail "removed Live Activity $removed is still in the registry" \
+    || sok "removed Live Activity $removed is gone from the registry"
+done
 
 # Gate-integrity assertions (the generated harness): reported with the greps
 # because they are assertions about THIS gate rather than about the app, and

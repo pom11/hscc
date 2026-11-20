@@ -79,7 +79,7 @@ app_files = (
     'Sources/HSCC/UpdateChecker.swift',
     'Sources/HSCC/Views/UpdateBanner.swift',
 )
-extensions = ('HSCCWidgets', 'HSCCLiveActivity', 'HSCCLiveActivityMonitor')
+extensions = ('HSCCWidgets', 'HSCCLiveActivityMonitor')
 problems = []
 ok = 0
 
@@ -97,8 +97,7 @@ for name in extensions:
             problems.append(f'{name} must not compile {path}')
     ok += 1
 
-for root in ('Sources/HSCCWidgets', 'Sources/HSCCLiveActivity',
-             'Sources/HSCCLiveActivityMonitor'):
+for root in ('Sources/HSCCWidgets', 'Sources/HSCCLiveActivityMonitor'):
     for base, _, files in os.walk(root):
         for name in files:
             if not name.endswith('.swift'):
