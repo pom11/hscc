@@ -58,8 +58,22 @@
         the cards up — with a review step before anything lands.</p>
       </div>
       <div class="card">
+        <span class="title">One agent runs the whole show.</span>
+        <p>Bootstrap creates one main orchestrator, named <code>general</code>
+        unless you pick another name. It knows every project and the cluster,
+        watches the boards, steers the other orchestrators, and does everything
+        except a LIVE publish.</p>
+      </div>
+      <div class="card">
+        <span class="title">Green PRs merge in order, not all at once.</span>
+        <p>The local merge queue rebases each one onto the latest main, runs the
+        project's gates, and merges it. It is on by default for GitHub projects
+        that declare gates.</p>
+      </div>
+      <div class="card">
         <span class="title">You see everything from your phone or Mac.</span>
-        <p>Six widgets, Live Activities, and a menu-bar tile — no laptop required.</p>
+        <p>Five widgets, Lock Screen gauges, one Live Activity, and a menu-bar
+        app — no laptop required.</p>
       </div>
     </div>
   </section>
@@ -83,8 +97,8 @@
       </div>
       <div class="card">
         <span class="title">💤 Saves power when idle</span>
-        <p>Puts the GPU serving layer to sleep after a quiet period and wakes it
-        when work arrives.</p>
+        <p>Puts the GPU serving layer to sleep after a quiet period once you turn
+        autodown on, and wakes it when work arrives.</p>
       </div>
       <div class="card">
         <span class="title">📋 Runs agents on boards</span>
@@ -92,9 +106,20 @@
         standup digest.</p>
       </div>
       <div class="card">
+        <span class="title">🧭 Keeps one agent in charge</span>
+        <p>The main orchestrator, <code>general</code> by default, wakes on a
+        schedule, checks every board and pane, and does everything except a LIVE
+        publish, which asks you first.</p>
+      </div>
+      <div class="card">
+        <span class="title">🔀 Merges green PRs in order</span>
+        <p>One local queue rebases, gates and squash-merges one PR at a time;
+        <code>hscc merge-queue status</code> shows the queue.</p>
+      </div>
+      <div class="card">
         <span class="title">📱 Shows it on your devices</span>
-        <p>The same state as widgets on iOS and macOS, plus live tiles on the Lock
-        Screen and Dynamic Island.</p>
+        <p>Five widgets on iOS and macOS, Lock Screen gauges, one Live Activity,
+        and a CarPlay screen. There are no push notifications to configure.</p>
       </div>
     </div>
   </section>
@@ -175,7 +200,7 @@
 <div class="cmdgroup">
 <h3>Health &amp; monitoring</h3>
 <ul class="cmds">
-<li><code>hscc check</code><span class="say">run the health checks now instead of waiting, or just one stream (machines, gateway, local, heartbeat, storage, watchdog, triggers).</span></li>
+<li><code>hscc check</code><span class="say">run the health checks now instead of waiting, or just one stream (dgx, gateway, local, heartbeat, nas, watchdog, triggers).</span></li>
 <li><code>hscc check --repo &lt;path&gt;</code><span class="say">is a given checkout still protected by the commit-time leak guard? Says so plainly when it isn't.</span></li>
 <li><code>hscc watch</code><span class="say">follow the check results live.</span></li>
 <li><code>hscc triggers</code><span class="say">the alert rules and what fired recently.</span></li>
@@ -206,12 +231,12 @@
 <li><code>hscc template apply &lt;name&gt; --confirm</code><span class="say">rebuild the cluster to match the template.</span></li>
 <li><code>hscc profiles</code><span class="say">how many cards each agent role is holding.</span></li>
 <li><code>hscc project …</code><span class="say">mission control for several projects at once: standup, decompose, review, qa, verify, doctor, metrics and more.</span></li>
-<li><code>hscc api start</code><span class="say">the read-only HTTP API your phone and Mac read from; prints the pairing QR code (<code>stop</code> / <code>status</code> too).</span></li>
-<li><code>hscc autodown</code><span class="say">the idle sleep/wake for the GPU layer: <code>status</code>, <code>enable</code>, <code>disable</code>, <code>wake</code>, <code>cancel</code>.</span></li>
+<li><code>hscc api start</code><span class="say">the read-only HTTP API your phone, Mac and CarPlay screen read from; prints the pairing QR code (<code>stop</code> / <code>status</code> too).</span></li>
+<li><code>hscc autodown</code><span class="say">the idle sleep/wake for the GPU layer, off until you enable it: <code>status</code>, <code>enable</code>, <code>disable</code>, <code>wake</code>, <code>cancel</code>.</span></li>
 <li><code>hscc kanban</code><span class="say">board hygiene: blocked cards (list and recover), stale cards (list and archive), and a live board monitor.</span></li>
-<li><code>hscc merge-queue</code><span class="say">the local queue of green PRs: <code>status</code>, <code>list</code>, <code>add</code>, <code>remove</code>, <code>pause</code>, <code>resume</code>, <code>enable</code>, <code>disable</code>.</span></li>
+<li><code>hscc merge-queue</code><span class="say">the local queue of green PRs, on by default for GitHub projects with gates: <code>status</code>, <code>list</code>, <code>add</code>, <code>remove</code>, <code>pause</code>, <code>resume</code>, <code>enable</code>, <code>disable</code>.</span></li>
 <li><code>hscc cards monitor</code><span class="say">one live panel per running card, streaming what its worker is doing.</span></li>
-<li><code>hscc main</code><span class="say">the main orchestrator's own pane: bring it up, see whether it is busy, and edit the wake-up schedule the watcher fires into it.</span></li>
+<li><code>hscc main</code><span class="say">the main orchestrator (<code>general</code> by default): bring its pane up, see whether it is busy, and edit the wake-up schedule the watcher fires into it.</span></li>
 <li><code>hscc orch inject</code><span class="say">send a message into a running agent's session.</span></li>
 <li><code>hscc orch waker</code><span class="say">the built-in orchestrator waker: <code>status</code>, <code>enable</code>, <code>disable</code>.</span></li>
 </ul>
@@ -219,8 +244,8 @@
 <div class="cmdgroup">
 <h3>Utility</h3>
 <ul class="cmds">
-<li><code>hscc notify "&lt;title&gt;" "&lt;body&gt;"</code><span class="say">post an alert to the feed (<code>--level</code>, <code>--key</code>); <code>hscc notify list</code> reads it newest first (<code>--since</code>, <code>--limit</code>, <code>--json</code>) and <code>hscc notify ack</code> marks one seen.</span></li>
-<li><code>hscc bootstrap</code><span class="say">the installer, runnable from a repo checkout, a plugin tree or a Homebrew install.</span></li>
+<li><code>hscc notify "&lt;title&gt;" "&lt;body&gt;"</code><span class="say">post an alert to the feed (<code>--level</code>, <code>--key</code>); <code>hscc notify list</code> reads it newest first (<code>--since</code>, <code>--limit</code>, <code>--json</code>) and <code>hscc notify ack</code> marks one seen. The feed is what the Needs Me widget shows; hscc sends no push notifications.</span></li>
+<li><code>hscc bootstrap</code><span class="say">the installer, runnable from a repo checkout, a plugin tree or a Homebrew install; it creates the main orchestrator and its board.</span></li>
 <li><code>hscc update --check</code><span class="say">ask GitHub whether a newer release exists. Reads only; it never installs anything.</span></li>
 </ul>
 </div>
@@ -230,47 +255,62 @@
   <!-- 6. How it looks -->
   <section aria-labelledby="s-looks">
     <h2 id="s-looks">How it looks</h2>
-    <p>Six widgets, the same six on iPhone and on the Mac desktop, so the cluster
-    is a glance instead of a login:</p>
+    <p>Five widgets — Cluster, Boards, Running, Needs Me and Merge Queue — the same
+    five on iPhone and on the Mac desktop, in a Native look: system colours, SF Pro
+    Rounded numbers, and colour used only for state.</p>
     <div class="grid">
       <div class="card">
         <span class="title">Cluster</span>
-        <p>Is it serving, waking up, or down, with a small map of the machines and
-        how long before an idle cluster goes to sleep.</p>
+        <p>Is it serving, waking up, or down, with throughput and a row per machine
+        showing load and temperature.</p>
       </div>
       <div class="card">
-        <span class="title">Monitor</span>
-        <p>CPU, memory and GPU per machine.</p>
+        <span class="title">Boards</span>
+        <p>Open cards per board as stacked bars (running, todo, blocked), with the
+        worker-slot cap and cards done today.</p>
       </div>
       <div class="card">
-        <span class="title">Running cards</span>
-        <p>The jobs being worked right now, who is doing them, and for how long.</p>
+        <span class="title">Running</span>
+        <p>The longest-running card, its elapsed time and a heartbeat, then the
+        other cards being worked right now.</p>
       </div>
       <div class="card">
-        <span class="title">Kanban monitor</span>
-        <p>Running, ready and blocked at a glance.</p>
+        <span class="title">Needs Me</span>
+        <p>What is waiting for you from the alert feed, and a calm "All clear" when
+        nothing is. It says "All clear" only when the last check actually succeeded;
+        a failed check shows offline instead.</p>
       </div>
       <div class="card">
-        <span class="title">Board status</span>
-        <p>Todo / ready / running / blocked / done for one board you pick.</p>
+        <span class="title">Merge Queue</span>
+        <p>The PR at the front of the local merge queue, its stage (rebase, gates,
+        push, merge), what is waiting behind it, and the last result.</p>
       </div>
       <div class="card">
-        <span class="title">Projects</span>
-        <p>Your projects and the board each one owns.</p>
+        <span class="title">Lock Screen</span>
+        <p>All five also have gauge layouts for the Lock Screen, so a glance shows
+        the hottest node, worker slots, the longest run, what needs you, or the merge
+        queue.</p>
       </div>
     </div>
     <div class="card">
-      <p class="title">Live Activities</p>
-      <p>Put the same information on the Lock Screen and the Dynamic Island while
-      something is happening: the cluster waking, models serving, cards running, a
-      board making progress, or the fleet's overall health.</p>
+      <p class="title">One Live Activity: Cluster watch.</p>
+      <p>It puts the cluster's serving state on the Lock Screen and in the Dynamic
+      Island: four node columns with temperature and load, throughput, the daemon
+      state and whether autodown is off. It starts from the app's Cluster screen and
+      ends after 8 hours or when you stop it.</p>
     </div>
     <div class="card">
-      <p class="title">You can restyle it.</p>
-      <p>One global style for every widget and Live Activity, or a different one per
-      tile — colour (including a transparent background), font, weight, text size,
-      density, and whether the header and icons show. Presets get you most of the
-      way there, and everything has a live preview.</p>
+      <p class="title">A CarPlay screen</p>
+      <p>Shows cluster health, boards, running work, what needs you and the merge
+      queue on the car display. It runs in Apple's CarPlay simulator today; shipping
+      it on the road needs Apple's CarPlay entitlement, which hscc does not have
+      yet.</p>
+    </div>
+    <div class="card">
+      <p class="title">No push notifications.</p>
+      <p>hscc does not ask for notification permission and sends nothing to your
+      phone. The Needs Me widget is the at-a-glance view, and
+      <code>hscc notify list</code> is the full alert feed on the command line.</p>
     </div>
   </section>
 
