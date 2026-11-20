@@ -668,6 +668,15 @@ class _ApiServer(http.server.ThreadingHTTPServer):
 
     daemon_threads = True
 
+    # Hard ceiling on simultaneous handler threads (t_c24521ef). launchd's
+    # default soft NOFILE was 256, so an unbounded ThreadingHTTPServer could
+    # hit EMFILE even with the idle timeout in place: every accepted socket
+    # is one FD. 128 leaves room for the listener, token/state files and the
+    # gateway sidecar while still admitting far more clients than the widgets
+    # ever open. Excess connections get an immediate 503 + close, never a
+    # thread and never a half-read request.
+    max_connections = 128
+
     def __init__(self, server_address, handler_cls, context: ApiContext):
         # ThreadingHTTPServer defaults to AF_INET; an explicit IPv6 bind (::1)
         # must use the matching family or it fails with EAFNOSUPPORT.
@@ -675,6 +684,41 @@ class _ApiServer(http.server.ThreadingHTTPServer):
             self.address_family = socket.AF_INET6
         super().__init__(server_address, handler_cls)
         self.ctx = context
+        self._active_connections = 0
+        self._connection_lock = threading.Lock()
+
+    def process_request(self, request, client_address):
+        """Admit a connection only while below ``max_connections``."""
+        with self._connection_lock:
+            if self._active_connections >= self.max_connections:
+                admit = False
+            else:
+                self._active_connections += 1
+                admit = True
+        if not admit:
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\n"
+                    b"Content-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            # The thread was never started, so its finally below will not run.
+            with self._connection_lock:
+                self._active_connections -= 1
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._connection_lock:
+                self._active_connections -= 1
 
     def handle_error(self, request, client_address):
         """Do not print a stack trace when a client simply hung up.
@@ -707,6 +751,14 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
     # handshake parser rejects an "HTTP/1.0" reply, which BaseHTTPRequestHandler
     # emits by default. Our WS upgrade response already writes "HTTP/1.1 101".
     protocol_version = "HTTP/1.1"
+    # t_c24521ef: an idle keep-alive socket is still an FD. Without a timeout
+    # the API accumulated CLOSE_WAIT/idle connections until launchd's 256-FD
+    # soft limit produced EMFILE on every route. BaseHTTPRequestHandler's
+    # handle_one_request turns this socket timeout into close_connection, so a
+    # client that walks away is reclaimed instead of pinning a thread forever.
+    # WebSocket upgrades clear it in _dispatch_ws: their session is long-lived
+    # by design and the WS route sets its own peer-liveness timeout.
+    timeout = 15
     # Silence the default "logged to stderr" request line; we manage our own log.
     def log_message(self, format, *args):
         log.debug("(%s) %s", self.address_string(), format % args)
@@ -779,6 +831,11 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
                 merged.update(
                     {k: v for k, v in m.groupdict().items() if v is not None}
                 )
+                # The HTTP idle timeout must never cut a live WS session: the
+                # upgrade is a protocol switch, not a keep-alive request. The
+                # WS handler owns liveness from here (routes_ws sets its own
+                # peer timeout before the handshake).
+                self.connection.settimeout(None)
                 handler(self.server, self.ctx, merged, self)
                 return True
         # A WebSocket upgrade for a path we don't serve → reject before any

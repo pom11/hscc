@@ -430,6 +430,13 @@ func runAll() async {
     // 4. Timeout: the ceiling is the client's, not URLSession's, and it clamps.
     check("default ceiling is 8 s", WidgetDataClient.defaultTimeout == 8)
     check("a fresh client uses the default ceiling", client.timeout == 8)
+    // t_c24521ef: a refresh used to build a NEW URLSession and never invalidate
+    // it, leaving one keep-alive pool per refresh until EMFILE. Production
+    // clients (no injected session) must all hold the same one.
+    let sharedSessionClientA = WidgetDataClient(config: testConfig)
+    let sharedSessionClientB = WidgetDataClient(config: testConfig)
+    check("production clients share ONE URLSession",
+          sharedSessionClientA.session === sharedSessionClientB.session)
     check("a non-positive ceiling is clamped, not trusted",
           WidgetDataClient(config: testConfig, timeout: 0).timeout == 1)
     check("an explicit ceiling survives", stubbedClient(timeout: 3).timeout == 3)
