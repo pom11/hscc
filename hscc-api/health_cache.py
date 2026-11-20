@@ -23,6 +23,14 @@ The posture this module implements
 * **Never invent a verdict.** A verify that raises or returns something that is
   not a verdict stores nothing; the caller gets ``None`` and the health route
   says so. A failed refresh never overwrites a good snapshot.
+* **One attempt per window, verdict or not** (t_a09ce4ed). When there is nothing
+  to serve *and* the attempt produced no verdict either, the next attempt on the
+  request thread waits ``TTL_SECONDS``. The stamp is in-process only and is
+  never persisted — a failed attempt is not a verdict and must not be written as
+  if it were one. During that window the health route answers the *same* honest
+  shape it always has (``{"speak": "health check unavailable"}``, no ``ok``
+  key): the backoff defers a probe, it never becomes an answer. See
+  :func:`get_snapshot` for why it defers rather than stops.
 
 The cache lives here, in hscc-api, **not** in the daemon. Publishing a verify
 verdict into the daemon's periodic-streams dir would feed the verdict back into
@@ -53,11 +61,17 @@ INLINE_WAIT_SECONDS = 180.0
 
 SNAPSHOT_FILE = "health_snapshot.json"
 
-# Guards _CACHE / _IN_FLIGHT and is the Condition waiters sleep on while a
-# single verify is in flight.
+# Guards _CACHE / _IN_FLIGHT / _RETRY_AFTER and is the Condition waiters sleep
+# on while a single verify is in flight.
 _COND = threading.Condition()
 _CACHE: "dict | None" = None
 _IN_FLIGHT = False
+
+# The no-verdict retry backoff: the monotonic instant before which the "nothing
+# cached anywhere" path starts NO new verify. In-process only, and deliberately
+# never written to snapshot_path() — a failed attempt is not a verdict, and a
+# persisted failure would come back next boot looking like one.
+_RETRY_AFTER: "float | None" = None
 
 
 # --------------------------------------------------------------------------- #
@@ -184,14 +198,55 @@ def _safe_verify(runner):
 
 
 # --------------------------------------------------------------------------- #
+# The no-verdict retry backoff (t_a09ce4ed)
+# --------------------------------------------------------------------------- #
+
+def _clock() -> float:
+    """Now, for the retry window — monotonic on purpose.
+
+    Never ``time.time()``: a backward clock step (NTP correcting a drifted
+    clock — exactly what a misconfigured offline fleet looks like) would either
+    stretch the silence indefinitely or erase it. Monotonic cannot go backwards,
+    so the window is bounded by what we set, not by the wall clock.
+    """
+    return time.monotonic()
+
+
+def _backoff_open_locked() -> bool:
+    """True while a recent no-verdict attempt forbids starting another one.
+
+    Caller holds ``_COND``. Consulted ONLY on the "no snapshot anywhere" path,
+    so it can never hide a verdict: with a snapshot to serve, this is never
+    asked. It defers a probe; it does not answer a question.
+    """
+    return _RETRY_AFTER is not None and _clock() < _RETRY_AFTER
+
+
+def _arm_backoff_locked() -> None:
+    """Record that the attempt just made produced no verdict.
+
+    Caller holds ``_COND``. Cleared by the next snapshot that is actually stored
+    (``_store_snapshot_locked``), so the window only ever covers "we have
+    nothing to serve and probing did not help".
+    """
+    global _RETRY_AFTER
+    _RETRY_AFTER = _clock() + TTL_SECONDS
+
+
+# --------------------------------------------------------------------------- #
 # Single-flight refresh
 # --------------------------------------------------------------------------- #
 
 def _store_snapshot_locked(snap: dict) -> dict:
-    """Cache + persist an already-normalised snapshot. Caller holds _COND."""
-    global _CACHE
+    """Cache + persist an already-normalised snapshot. Caller holds _COND.
+
+    Storing a verdict also ends any no-verdict retry window: the backoff only
+    exists while there is nothing to serve.
+    """
+    global _CACHE, _RETRY_AFTER
     _write_disk(snap)
     _CACHE = snap
+    _RETRY_AFTER = None
     return snap
 
 
@@ -247,10 +302,34 @@ def get_snapshot(verify=None) -> "dict | None":
     exists and none could be produced — the caller must then say it has no
     health, never guess one.
 
-    Three paths, and only the third may run a verify on the calling thread:
+    Four paths, and only the third may run a verify on the calling thread:
       1. fresh snapshot  → return it, verify untouched;
       2. stale snapshot  → return it now and kick the single background refresh;
-      3. nothing anywhere → one inline verify; every other caller waits for it.
+      3. nothing anywhere, and no attempt within the last ``TTL_SECONDS`` → one
+         inline verify; every other caller waits for it;
+      4. nothing anywhere, but the last attempt produced no verdict and is
+         younger than ``TTL_SECONDS`` → ``None``, WITHOUT another verify.
+
+    Why path 4 exists (t_a09ce4ed). When no verdict is obtainable at all —
+    sparkrun gone, the GPU fleet powered down, the deployed ``verify.py`` broken
+    — path 3 caches nothing, so every poll re-ran a whole fleet smoke test: the
+    storm this module exists to remove, surviving in exactly the case where the
+    operator is already troubleshooting a broken fleet. And it nests: ``hscc
+    verify`` → ``check_api_routes`` → the route sweep curls ``/v1/health`` (its
+    probed set comes from ``api_route_sweep.client_routes()``, which reads the
+    Swift client, and the client references that path) → path 3 → a *second*
+    inline verify inside a verify. A bounded retry keeps a broken fleet probed —
+    one attempt per ``TTL_SECONDS`` window, so the fix is noticed within one
+    window of it happening — while removing the per-poll storm. The alternative
+    considered and rejected was "no verdict means keep probing on every poll";
+    what it buys is a probe every 15 s that cannot succeed, and what it costs is
+    a full verify each time.
+
+    Path 4 must never become a served verdict: it returns ``None``, and the
+    health route answers ``{"speak": "health check unavailable"}`` with no
+    ``ok`` key — byte-identical to what a failed attempt always answered.
+    ``GET /v1/verify`` is not gated by it either: the explicit trigger runs a
+    verify every single time, window open or not.
     """
     global _CACHE, _IN_FLIGHT
     runner = verify or _default_verify
@@ -266,6 +345,8 @@ def get_snapshot(verify=None) -> "dict | None":
                 if not _COND.wait(INLINE_WAIT_SECONDS):
                     return None      # wedged verify: no verdict, say so
                 continue
+            if _backoff_open_locked():
+                return None          # probed recently, no verdict: say so again
             _IN_FLIGHT = True
             break
 
@@ -279,6 +360,12 @@ def get_snapshot(verify=None) -> "dict | None":
         with _COND:
             _IN_FLIGHT = False
             snap = _store_result_locked(result)
+            if snap is None:
+                # No verdict: remember the attempt so the next poll does not
+                # spend another verify on the same broken fleet. A store that
+                # did succeed already cleared the window (see
+                # _store_snapshot_locked).
+                _arm_backoff_locked()
             _COND.notify_all()
     return _view(snap, "inline") if snap is not None else None
 
@@ -305,13 +392,17 @@ def record(result, generated_at=None):
 
 
 def reset_state() -> None:
-    """Forget the in-process copy (the on-disk snapshot is left alone).
+    """Forget the in-process copy and the retry window (the snapshot file is
+    left alone).
 
     The cache is process-global, so a test suite that exercises the health
     route must start each test from an empty in-process copy — otherwise one
-    test's verdict leaks into the next and the assertions prove nothing.
+    test's verdict leaks into the next and the assertions prove nothing. The
+    retry window is cleared for the same reason: a test that armed it by
+    failing must not leave the next test unable to probe.
     """
-    global _CACHE, _IN_FLIGHT
+    global _CACHE, _IN_FLIGHT, _RETRY_AFTER
     with _COND:
         _CACHE = None
         _IN_FLIGHT = False
+        _RETRY_AFTER = None

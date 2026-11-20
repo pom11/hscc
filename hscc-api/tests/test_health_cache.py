@@ -18,6 +18,9 @@ Covered:
     refresh) while one — and only one — background refresh runs;
   * no verdict is ever invented: a verify that raises or returns a non-verdict
     stores nothing and cannot overwrite the last good snapshot;
+  * with no verdict obtainable at all, sequential polls still cost ONE verify
+    per ``TTL_SECONDS`` window — and the window never becomes an answer, never
+    hides a snapshot, and never gates ``GET /v1/verify`` (t_a09ce4ed);
   * the payload stays a strict superset of {ok, checks, speak} for the iOS
     HealthResponse, and a stale snapshot says so in ``speak``;
   * GET /v1/verify keeps inline semantics and records into the same cache.
@@ -386,6 +389,248 @@ def test_an_unparseable_snapshot_file_is_not_a_verdict(running, token, monkeypat
 
     assert payload["ok"] is True and payload["source"] == "inline"
     assert fake.calls == 1
+
+
+# --------------------------------------------------------------------------- #
+# The no-verdict retry window (t_a09ce4ed)
+#
+# Everything above proves a verdict is served once one exists. This section is
+# the case where one never will: sparkrun gone, the GPU fleet powered down, the
+# deployed verify.py broken. Nothing gets cached, so single-flight protects
+# concurrent polls and nothing protected sequential ones — until the window.
+# --------------------------------------------------------------------------- #
+
+UNAVAILABLE = {"speak": "health check unavailable"}
+
+
+def _window_open() -> bool:
+    """Whether the retry window is armed (a failed attempt is being honoured)."""
+    with health_cache._COND:
+        return health_cache._RETRY_AFTER is not None and (
+            health_cache._clock() < health_cache._RETRY_AFTER)
+
+
+def _close_backoff_window():
+    """Declare the retry window over, without waiting TTL seconds for it.
+
+    The window is one monotonic deadline, so "the window has passed" is a fact
+    about that number; moving it into the past is exactly what the passage of
+    TTL_SECONDS does to it, minus a two-minute test.
+    """
+    with health_cache._COND:
+        assert health_cache._RETRY_AFTER is not None, "no window to close"
+        health_cache._RETRY_AFTER = health_cache._clock() - 0.001
+
+
+def test_repeated_polls_with_no_verdict_obtainable_run_one_verify(
+        running, token, monkeypatch):
+    """THE case this card exists for. Four SEQUENTIAL health polls (the iOS
+    ConnectionMonitor's cadence; single-flight is no help to sequential ones)
+    on a fleet whose verify cannot produce a verdict, must cost ONE verify —
+    and every poll must be answered with the failure shape the route has always
+    used for "no verdict", with NO ``ok`` key. A backoff that answered
+    ``ok: False`` would be inventing the verdict the card forbids."""
+    fake = FakeVerify(raises=RuntimeError("sparkrun gone"))
+    monkeypatch.setattr(routes_cluster, "_backing_verify", fake)
+
+    for poll in range(4):
+        status, payload = _req(running, token, "/v1/health")
+        assert status == 200, poll
+        assert payload == UNAVAILABLE, poll
+        assert "ok" not in payload and "checks" not in payload, poll
+
+    assert fake.calls == 1, (
+        f"{fake.calls} verifies for 4 sequential no-verdict polls")
+    # And the failure left no durable trace: a failed attempt is not a verdict,
+    # so it must never reach the snapshot file (which would be served as one).
+    assert not os.path.exists(health_cache.snapshot_path())
+
+
+def test_a_verify_that_returns_no_verdict_arms_the_window_too(
+        running, token, monkeypatch):
+    """The window is about "no verdict", not about "the seam raised". A verify
+    that comes back with no bool ``ok`` is the same broken fleet and must not
+    be re-run on the next poll either."""
+    fake = FakeVerify(result={"ok": None, "checks": CHECKS_OK})
+    monkeypatch.setattr(routes_cluster, "_backing_verify", fake)
+
+    for poll in range(3):
+        status, payload = _req(running, token, "/v1/health")
+        assert payload == UNAVAILABLE, poll
+
+    assert fake.calls == 1
+    assert not os.path.exists(health_cache.snapshot_path())
+
+
+def test_the_window_defers_a_probe_it_does_not_stop_it(running, token,
+                                                       monkeypatch):
+    """The bound on the silence, pinned from both sides.
+
+    A broken fleet must still be probed — the window throttles how often a
+    probe may run, it never removes the probe. So while the window is open no
+    poll may spend a verify, and the first poll after it closes must spend
+    exactly one, then park again.
+    """
+    fake = FakeVerify(raises=RuntimeError("gpu fleet down"))
+    monkeypatch.setattr(routes_cluster, "_backing_verify", fake)
+
+    assert _req(running, token, "/v1/health")[1] == UNAVAILABLE
+    assert fake.calls == 1 and _window_open()
+    assert _req(running, token, "/v1/health")[1] == UNAVAILABLE
+    assert fake.calls == 1                           # window open: no probe
+
+    _close_backoff_window()
+    assert _req(running, token, "/v1/health")[1] == UNAVAILABLE
+    assert fake.calls == 2                           # window shut: probed again
+
+    assert _req(running, token, "/v1/health")[1] == UNAVAILABLE
+    assert fake.calls == 2                           # and the window is armed again
+
+
+def test_a_fleet_that_recovers_is_served_within_one_window(running, token,
+                                                           monkeypatch):
+    """What the window costs, and the bound on the cost: once the seam works
+    again, the next probe after the window returns the real verdict, the window
+    is cleared by storing it, and every later poll is a cache hit."""
+    fake = FakeVerify(result={"ok": True, "checks": CHECKS_OK},
+                      raises=RuntimeError("sparkrun gone"))
+    monkeypatch.setattr(routes_cluster, "_backing_verify", fake)
+
+    assert _req(running, token, "/v1/health")[1] == UNAVAILABLE
+
+    fake.raises = None                                # the operator fixed it
+    assert _req(running, token, "/v1/health")[1] == UNAVAILABLE   # still parked
+    assert fake.calls == 1
+
+    _close_backoff_window()
+    status, payload = _req(running, token, "/v1/health")
+    assert payload["ok"] is True and payload["source"] == "inline"
+    assert fake.calls == 2
+    assert not _window_open()                         # storing a verdict ends it
+
+    status, again = _req(running, token, "/v1/health")
+    assert again["ok"] is True and again["source"] == "cache"
+    assert fake.calls == 2                            # no verify since the recovery
+
+
+def test_concurrent_pollers_do_not_each_run_a_failed_verify(monkeypatch):
+    """The concurrent case was NOT safe either once the verify FAILS.
+
+    ``test_concurrent_first_callers_share_one_verify`` pins the succeeding
+    verify. When it fails, every waiter used to wake to an empty cache and the
+    first one became the next runner — 8 polls, 8 back-to-back verifies. With
+    the shared failure arming the window, all 8 are answered "no verdict" and
+    the seam is reached once.
+    """
+    gate = threading.Event()
+    fake = FakeVerify(raises=RuntimeError("gpu offline"), gate=gate)
+    monkeypatch.setattr(routes_cluster, "_backing_verify", fake)
+
+    seen = []
+    threads = [threading.Thread(
+        target=lambda: seen.append(routes_cluster.handle_health(None, None, {}, None)))
+        for _ in range(8)]
+    for t in threads:
+        t.start()
+
+    deadline = time.time() + 5
+    while fake.calls < 1 and time.time() < deadline:
+        time.sleep(0.01)
+    gate.set()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert fake.calls == 1, f"{fake.calls} verifies for 8 concurrent failing polls"
+    assert len(seen) == 8
+    assert all(response == (200, UNAVAILABLE) for response in seen)
+
+
+def test_the_window_does_not_gate_v1_verify(running, token, monkeypatch):
+    """``GET /v1/verify`` is the explicit trigger: window open or not, it runs
+    every time. Pinned end-to-end — a failing health poll arms the window, the
+    operator's manual verify still runs, and its verdict then answers
+    /v1/health from cache without health verifying anything itself."""
+    health_fake = FakeVerify(raises=RuntimeError("sparkrun gone"))
+    monkeypatch.setattr(routes_cluster, "_backing_verify", health_fake)
+
+    assert _req(running, token, "/v1/health")[1] == UNAVAILABLE
+    assert health_fake.calls == 1 and _window_open()
+
+    ops_fake = FakeVerify(result={"ok": True, "checks": CHECKS_OK})
+    monkeypatch.setattr(routes_ops, "_backing_verify", ops_fake)
+
+    status, payload = _req(running, token, "/v1/verify")
+    assert status == 200
+    assert ops_fake.calls == 1                        # never gated by the window
+    assert payload["ok"] is True
+
+    status, health = _req(running, token, "/v1/health")
+    assert health["ok"] is True and health["source"] == "cache"
+    assert health_fake.calls == 1                     # health ran none of its own
+
+
+def test_an_open_window_never_hides_a_snapshot(running, token, monkeypatch):
+    """Scope pin: the window is consulted ONLY when there is nothing to serve.
+
+    Arm it with a failed probe, then put a STALE verdict where the route can
+    find it (the failed probe stored nothing, so the in-process copy is still
+    empty and the next poll reads the disk). The route must serve the stale
+    verdict and kick its background refresh as if no window existed — deferring
+    a cold-path probe must never mute a real answer or its revalidation.
+    """
+    fake = FakeVerify(raises=RuntimeError("gpu offline"))
+    monkeypatch.setattr(routes_cluster, "_backing_verify", fake)
+
+    assert _req(running, token, "/v1/health")[1] == UNAVAILABLE
+    assert _window_open()
+
+    _write_snapshot(generated_at=int(time.time()) - (TTL + 30),
+                    ok=True, checks=CHECKS_OK)
+    fake.raises = None
+
+    status, payload = _req(running, token, "/v1/health")
+    assert payload["ok"] is True and payload["stale"] is True
+    assert payload["source"] == "cache"
+    assert "Health from" in payload["speak"]
+    assert fake.calls == 2                            # the revalidation still ran
+    _wait_idle()
+
+
+def test_reset_state_clears_the_window():
+    """The isolation contract the autouse fixture in conftest.py relies on: a
+    test that armed the window by failing must not leave its neighbour unable
+    to probe at all."""
+    fake = FakeVerify(raises=RuntimeError("boom"))
+
+    assert health_cache.get_snapshot(verify=fake) is None
+    assert _window_open()
+
+    health_cache.reset_state()
+    with health_cache._COND:
+        assert health_cache._RETRY_AFTER is None
+
+    assert health_cache.get_snapshot(verify=fake) is None
+    assert fake.calls == 2                            # probed, not parked
+
+
+def test_storing_a_verdict_ends_the_window():
+    """The window covers ONLY "nothing to serve", so a verdict ends it.
+
+    Pinned as state, not as behaviour: while a verdict is in the in-process copy
+    the route answers from path 1 and never reaches the check, so the observable
+    calls are identical either way — what must not drift is the stamp. A window
+    left armed next to a verdict could outlive the copy it was reasoned about
+    and defer the next probe for no reason.
+    """
+    fake = FakeVerify(raises=RuntimeError("gpu down"))
+
+    assert health_cache.get_snapshot(verify=fake) is None
+    assert _window_open()
+
+    health_cache.record({"ok": True, "checks": CHECKS_OK, "unverified": []})
+    assert not _window_open()
+    view = health_cache.get_snapshot(verify=_never_verify)
+    assert view is not None and view["result"]["ok"] is True
 
 
 # --------------------------------------------------------------------------- #
