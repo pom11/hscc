@@ -246,6 +246,11 @@ and the merge queue on the car display. It runs in Apple's CarPlay simulator
 today; shipping it on the road needs Apple's CarPlay entitlement, which hscc
 does not have yet.
 
+**Fresher widgets on the Mac.** iPhone widgets refresh about every 30 minutes,
+the most often iOS allows, and whenever you open the app. On the Mac, the
+menu-bar app can refresh the desktop widgets every 1, 2, 5 or 15 minutes while
+it runs (Settings → Desktop Widgets). Every widget shows how old its data is.
+
 **No push notifications.** hscc does not ask for notification permission and
 sends nothing to your phone. The Needs Me widget is the at-a-glance view, and
 `hscc notify list` is the full alert feed on the command line.

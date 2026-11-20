@@ -42,8 +42,8 @@ settings:
     # it survives every regenerate. A team picked in the Xcode UI is lost on the
     # next `xcodegen generate`.
     DEVELOPMENT_TEAM: ${HSCC_DEVELOPMENT_TEAM}
-    MARKETING_VERSION: "1.4.2"
-    CURRENT_PROJECT_VERSION: "7"
+    MARKETING_VERSION: "1.4.3"
+    CURRENT_PROJECT_VERSION: "8"
     SWIFT_VERSION: "5.9"
     SWIFT_EMIT_LOC_STRINGS: YES
     # Same derivation as the iOS spec: one prefix moves the bundle id and the
