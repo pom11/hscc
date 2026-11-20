@@ -115,6 +115,8 @@ def _status_doc(registry_path=None, state_path=None):
             "paused": bool(ps.get("paused")),
             "queue_len": len(ps.get("queue") or []),
             "queue": list(ps.get("queue") or []),
+            "waiting_len": len(ps.get("waiting") or []),
+            "waiting": list(ps.get("waiting") or []),
             "in_flight": ps.get("in_flight"),
             "last": ps.get("last"),
             "repo": (cfg or {}).get("repo"),
@@ -151,6 +153,7 @@ def cmd_merge_queue(argv):
                 "enabled" if row["enabled"] else "disabled")
             console.print(
                 f"{name}: {state}, queued={row['queue_len']}, "
+                f"waiting={row['waiting_len']}, "
                 f"in-flight={row['in_flight']['pr'] if row['in_flight'] else '-'}, "
                 f"last={(row['last'] or {}).get('result', '-')}")
         return 0
@@ -173,6 +176,12 @@ def cmd_merge_queue(argv):
                 empty = False
                 console.print(
                     f"{name}  PR #{entry.get('pr')}  "
+                    f"card={entry.get('card') or '-'}  "
+                    f"assignee={entry.get('assignee') or '-'}")
+            for entry in row["waiting"]:
+                empty = False
+                console.print(
+                    f"{name}  PR #{entry.get('pr')}  waiting  "
                     f"card={entry.get('card') or '-'}  "
                     f"assignee={entry.get('assignee') or '-'}")
         if empty:

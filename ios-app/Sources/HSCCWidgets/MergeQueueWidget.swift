@@ -62,7 +62,7 @@ struct MergeQueueEntry: TimelineEntry {
             return Date().addingTimeInterval(-Double(ageMinutes) * 60)
         }
         if let generated = Self.parseStamp(feed.generatedAt) { return generated }
-        if failure != nil { return nil }
+        if failure != nil || feed.isUnavailable { return nil }
         return date
     }
 
@@ -75,7 +75,16 @@ struct MergeQueueEntry: TimelineEntry {
         return formatter.date(from: raw)
     }
 
-    var isOffline: Bool { failure != nil || partialReason != nil }
+    var isOffline: Bool {
+        failure != nil || partialReason != nil || feed.isUnavailable
+    }
+
+    /// Draw the failure panel when there is no usable data. A stale snapshot
+    /// WITH rows keeps its rows and the stale overlay; an `ok:false` answer is
+    /// a failure, never an empty queue.
+    var showsFailure: Bool {
+        failure != nil || feed.isUnavailable
+    }
 
     var staleState: StaleState? {
         guard configured, !paused else { return nil }
@@ -87,7 +96,7 @@ struct MergeQueueEntry: TimelineEntry {
     // MARK: The values the families draw
 
     var rows: [MergeQueueRow] { feed.rows }
-    var isOff: Bool { feed.isOff && failure == nil }
+    var isOff: Bool { feed.isOff && failure == nil && !feed.isUnavailable }
     var offProject: String? { feed.offProject }
     var head: MergeQueueRow? { feed.headRow }
 
@@ -118,6 +127,7 @@ struct MergeQueueEntry: TimelineEntry {
     var inlineLine: String {
         if !configured || paused { return shortGateLabel }
         if let failure { return failure.shortLabel }
+        if feed.isUnavailable { return "merge queue offline" }
         if isOff { return "merge queue off for \(offProject ?? "project")" }
         guard let head else { return "merge queue empty" }
         return "⇢ \(head.prLabel) \(MergeQueueReading.stageName(head.state)) · \(feed.waitingCount) waiting"
@@ -530,7 +540,7 @@ struct SmallMergeQueue: View {
         Group {
             if !entry.configured || entry.paused {
                 MergeQueueGateView(entry: entry)
-            } else if entry.failure != nil {
+            } else if entry.showsFailure {
                 MergeQueueFailureView(entry: entry)
             } else if entry.isOff {
                 MergeQueueOffView(entry: entry)
@@ -579,7 +589,7 @@ struct MediumMergeQueue: View {
         Group {
             if !entry.configured || entry.paused {
                 MergeQueueGateView(entry: entry)
-            } else if entry.failure != nil {
+            } else if entry.showsFailure {
                 MergeQueueFailureView(entry: entry)
             } else if entry.isOff {
                 MergeQueueOffView(entry: entry)
@@ -632,7 +642,7 @@ struct LargeMergeQueue: View {
         Group {
             if !entry.configured || entry.paused {
                 MergeQueueGateView(entry: entry)
-            } else if entry.failure != nil {
+            } else if entry.showsFailure {
                 MergeQueueFailureView(entry: entry, detailed: true)
             } else if entry.isOff {
                 MergeQueueOffView(entry: entry, detailed: true)
