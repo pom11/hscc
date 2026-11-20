@@ -1556,6 +1556,10 @@ DEFAULT_CONFIG_PATH = "~/.hscc/orch_waker.json"
 #:                        named profile maps it in the config file himself.
 #:   ``fail_threshold`` — consecutive failed attempts that arm the backoff.
 #:   ``backoff_s``      — seconds the board stays skipped once armed.
+#:   ``skip_boards``    — slugs the waker never nudges (a finished project whose
+#:                        ``<board>-orch`` profile still exists but has no pane).
+#:                        Treated exactly like a paused board, without pausing
+#:                        its cards or holding ``auto_decompose`` fleet-wide.
 CONFIG_DEFAULTS = {
     "enabled": True,      # default ON (W3 card) — see the fail-open note above
     "debounce_s": DEBOUNCE_S,
@@ -1564,6 +1568,7 @@ CONFIG_DEFAULTS = {
     "orch_map": {},
     "fail_threshold": DEFAULT_FAIL_THRESHOLD,
     "backoff_s": DEFAULT_BACKOFF_S,
+    "skip_boards": [],
 }
 
 #: Hard floors for the numeric knobs. Zero/negative would turn the debounce
@@ -1625,6 +1630,13 @@ def config_path(path=None) -> str:
     return _resolve(path or DEFAULT_CONFIG_PATH)
 
 
+def _coerce_skip_boards(value) -> list:
+    """A sorted list of board slugs, or ``[]``; non-string entries dropped."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return sorted({b.strip() for b in value if isinstance(b, str) and b.strip()})
+
+
 def load_config(path=None) -> dict:
     """The waker's config file merged over defaults (always a COMPLETE dict).
 
@@ -1645,6 +1657,7 @@ def load_config(path=None) -> dict:
     """
     cfg = dict(CONFIG_DEFAULTS)
     cfg["orch_map"] = {}
+    cfg["skip_boards"] = []
     file = config_path(path)
     try:
         with open(file) as f:
@@ -1664,6 +1677,7 @@ def load_config(path=None) -> dict:
                 "backoff_s"):
         cfg[key] = _coerce_knob(key, doc.get(key, CONFIG_DEFAULTS[key]))
     cfg["orch_map"] = _coerce_orch_map(doc.get("orch_map"))
+    cfg["skip_boards"] = _coerce_skip_boards(doc.get("skip_boards"))
     return cfg
 
 
@@ -1696,6 +1710,7 @@ def set_enabled(enabled: bool, path=None) -> dict:
     # `orch_map` is a mutable default: give the document its own dict so this
     # writer can never mutate CONFIG_DEFAULTS through it (t_f1122b7a knob).
     merged["orch_map"] = {}
+    merged["skip_boards"] = []
     merged.update({k: v for k, v in doc.items() if k in CONFIG_DEFAULTS})
     merged["enabled"] = bool(enabled)
     doc.update(merged)
@@ -1934,7 +1949,7 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
             report=report,
             debounce_s=cfg["debounce_s"], min_gap_s=cfg["min_gap_s"],
             orch_map=cfg["orch_map"], fail_threshold=cfg["fail_threshold"],
-            backoff_s=cfg["backoff_s"])
+            backoff_s=cfg["backoff_s"], skip_boards=cfg["skip_boards"])
         if report.get("unevaluable"):
             entry.update(ok=False, last_scan=now,
                          boards_unevaluable=True,
@@ -2231,7 +2246,7 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
              audit_path=None, warned=None, report=None,
              debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S,
              orch_map=None, fail_threshold=DEFAULT_FAIL_THRESHOLD,
-             backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None):
+             backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None, skip_boards=()):
     """One waker pass wired end to end: scan -> decide -> inject -> audit.
 
     The public entry (W3 calls it every ~30 s from the daemon loop). Defaults
@@ -2262,7 +2277,7 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
         return tick(
             now=now,
             boards=boards,
-            paused=read_paused(paused_path),
+            paused=read_paused(paused_path) | set(skip_boards or ()),
             has_orch=has_orch if has_orch is not None else _resolve,
             inject=inject if inject is not None else make_inject(
                 repl=repl, mode=mode, profiles_dir=profiles_dir,

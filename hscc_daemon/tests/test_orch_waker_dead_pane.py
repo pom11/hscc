@@ -531,3 +531,33 @@ def test_backoff_survives_the_stamp_at_the_deployed_entry(deployed):
 
     tick_at(180 + 900)                            # window expired -> one attempt
     assert len(repl.calls) == 4
+
+
+# ── skip_boards: a finished project's board is never nudged ────────────────
+
+def test_skip_boards_is_loaded_coerced_and_threaded(tmp_path, monkeypatch):
+    seen = {}
+
+    def spy_run(**kw):
+        seen.update(kw)
+        return []
+    monkeypatch.setattr(ow, "run_tick", spy_run)
+    p = write_cfg(tmp_path, {"skip_boards": ["b", " b ", 5, "", "a"]})
+    assert ow.load_config(p)["skip_boards"] == ["a", "b"]
+    ow.waker_tick(now=NOW, config_path=p, write=StreamlessWrite(),
+                  read=lambda name: None)
+    assert seen["skip_boards"] == ["a", "b"]
+    assert ow.load_config(write_cfg(tmp_path, {"skip_boards": "b"}))["skip_boards"] == []
+
+
+def test_a_skipped_board_gets_no_attempt_and_no_audit(tmp_path, state_path):
+    env = make_env(tmp_path, profiles=("b-orch",))
+    db = make_board(tmp_path / "b" / "kanban.db", tasks=[("t_1", "One")])
+    ow.tick(now=NOW, boards={"b": db}, state_path=state_path)
+    add_events(db, [("t_1", 1, "completed", None)])
+    ow.tick(now=NOW + 10, boards={"b": db}, state_path=state_path)
+    repl = FakeRepl()
+    assert ow.run_tick(now=NOW + 100, boards={"b": db}, state_path=state_path,
+                       repl=repl, skip_boards=["b"], **env) == []
+    assert repl.calls == []
+    assert not os.path.exists(env["audit_path"])  # never audited

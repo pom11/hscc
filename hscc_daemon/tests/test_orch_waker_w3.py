@@ -65,7 +65,7 @@ def test_config_defaults_are_on_with_the_stopgap_tuning():
     assert ow.CONFIG_DEFAULTS == {"enabled": True, "debounce_s": 90,
                                   "min_gap_s": 300, "poll_s": 30,
                                   "orch_map": {}, "fail_threshold": 3,
-                                  "backoff_s": 900}
+                                  "backoff_s": 900, "skip_boards": []}
 
 
 def test_config_defaults_when_file_absent(tmp_path):
