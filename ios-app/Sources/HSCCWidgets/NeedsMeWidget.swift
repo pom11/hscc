@@ -125,7 +125,7 @@ struct NeedsMeEntry: TimelineEntry {
 // MARK: - Timeline provider
 
 struct NeedsMeTimelineProvider: TimelineProvider {
-    static let defaultRefreshMinutes = 15
+    static let defaultRefreshMinutes = 30
 
     // GATE-SLICE-BEGIN: needs_me_cadence
     static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {
@@ -174,7 +174,7 @@ struct NeedsMeTimelineProvider: TimelineProvider {
             using: client,
             lastKnown: NeedsMeSnapshotStore.lastKnown
         ) { c in
-            switch await c.alerts(limit: 100) {
+            switch await c.allAlerts() {
             case .success(let payload):
                 return .success(NeedsMeFeed.from(payload))
             case .failure(let failure):

@@ -294,7 +294,7 @@ let allDown = await HostFailover.run(hosts: ["host-a.example", "host-b.example"]
     attempted.append(host)
     return .transport(URLError(.cannotConnectToHost))
 }
-if case .failed(let lastError) = allDown {
+if case .failed(let lastError, _) = allDown {
     assert((lastError as? URLError)?.code == .cannotConnectToHost,
            "all addresses down returns ONE failure carrying the last transport error")
 } else {

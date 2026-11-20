@@ -1,4 +1,5 @@
 import SwiftUI
+import WidgetKit
 
 /// HSCC — a private iOS app to manage the owner's DGX cluster + project kanban
 /// over Tailscale. This app is NEVER distributed (no App Store); it is
@@ -73,6 +74,10 @@ struct HSCCApp: App {
                 // entry, throttled to one attempt per six hours by
                 // UpdatePreferences. Never touches the cluster connection.
                 Task { await updates.checkIfDue() }
+                // A foreground entry is new data's best chance to reach a
+                // widget. WidgetKit coalesces scheduled reloads, so ask for a
+                // rebuild now rather than waiting out the timeline.
+                WidgetCenter.shared.reloadAllTimelines()
                 ClusterHealthActivityDriver.shared.sceneDidBecomeActive()
             case .background, .inactive:
                 ClusterHealthActivityDriver.shared.sceneDidEnterBackground()

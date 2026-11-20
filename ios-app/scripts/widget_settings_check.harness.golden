@@ -124,11 +124,13 @@ struct AppGroupWidgetSettings: Codable, Equatable {
     /// The settings for one surface, defaulting to ON when the store is absent
     /// or the surface has no entry yet (backward compatible — a surface that
     /// predates this store must keep working unchanged). Widgets default to a
-    /// 5-minute cadence; Live Activities (push-fed) default to 15 minutes.
+    /// 30-minute cadence: WidgetKit's reload budget (~40–70/day) cannot deliver
+    /// the old 5/15-minute presets, as the 2026-11-19 widget audit measured.
+    /// Live Activities (push-fed) default to 15 minutes.
     func setting(for kind: WidgetSurfaceKind) -> WidgetSurfaceSettings {
         guard let s = surfaces[kind] else {
             return WidgetSurfaceSettings(isActive: true,
-                                         refreshMinutes: kind.isLiveActivity ? 15 : 5,
+                                         refreshMinutes: kind.isLiveActivity ? 15 : 30,
                                          showSections: Set(kind.availableSections))
         }
         // Bound the set to the surface's known sections so a stale/foreign
@@ -180,21 +182,29 @@ struct AppGroupWidgetSettings: Codable, Equatable {
         surfaces[kind]?.scope ?? scope
     }
 
-    /// The full defaults (all on, 5/15-min cadence, all sections), used to
+    /// The full defaults (all on, 30/15-min cadence, all sections), used to
     /// seed a brand-new store before the operator edits anything.
     static func defaults() -> AppGroupWidgetSettings {
         AppGroupWidgetSettings(surfaces: Dictionary(
             uniqueKeysWithValues: WidgetSurfaceKind.allCases.map { ($0, WidgetSurfaceSettings(
                 isActive: true,
-                refreshMinutes: $0.isLiveActivity ? 15 : 5,
+                refreshMinutes: $0.isLiveActivity ? 15 : 30,
                 showSections: Set($0.availableSections))) }
         ))
     }
 }
 
+/// The three things a stored scope can name. Kept separate from the raw
+/// `WidgetScope` fields so a surface can declare which pickers it honours.
+enum WidgetScopeLevel: String, CaseIterable, Sendable {
+    case board
+    case project
+    case node
+}
+
 extension WidgetSurfaceKind {
     /// True for the push-fed Live Activity surfaces (15-min default cadence).
-    /// Widgets are self-fetching (5-min default).
+    /// Widgets are self-fetching (30-min default).
     var isLiveActivity: Bool {
         switch self {
         case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
@@ -204,45 +214,30 @@ extension WidgetSurfaceKind {
         }
     }
 
-    /// Whether this surface can render a `WidgetScope` at all.
+    /// The scope levels this surface can honestly honour.
     ///
-    /// Not every dataset can be scoped, and a scope picker that the network
-    /// ignores is a control that lies: the operator picks a board, the row
-    /// says "board radio", and the surface keeps showing the whole fleet.
-    /// `/v1/kanban/running` and `/v1/kanban/blocked` were measured to IGNORE
-    /// `?board=` (WIDGET_DATA_CONTRACT §4.3), so the running-cards surfaces are
-    /// fleet-wide whatever the store holds — and the app-side driver for this
-    /// surface therefore does not consult `scope(for:)` at all.
+    /// Only the Boards widget reads a scope: it narrows `/v1/mobile/summary`
+    /// with `?boards=<slug>` (and filters the running-title read client-side).
+    /// Its project and node choices were removed with the dead controls the
+    /// 2026-11-19 audit found (W4) — the route has no project or node filter,
+    /// so offering those pickers would write a value nothing reads.
     ///
-    /// Every other surface keeps `true` because that is what ships today: each
-    /// was measured by its own card against a route that honours a scope. A new
-    /// surface that turns out not to honour one opts out HERE, and the config
-    /// screen then hides the pickers rather than writing a value nothing reads.
-    var supportsScope: Bool {
+    /// Every other surviving surface renders the whole fleet: Cluster's monitor
+    /// route has no node parameter on the widget path, `/v1/kanban/running`
+    /// ignores `?board=` (WIDGET_DATA_CONTRACT §4.3), Needs Me is the global
+    /// alert feed, and Merge Queue is read fleet-wide by design. Those surfaces
+    /// therefore get no scope section at all rather than a control that lies.
+    var scopeLevels: Set<WidgetScopeLevel> {
         switch self {
-        case .widgetNeedsMe: return false
-        // The merge-queue widget draws every project's FIFO rows, in registry
-        // order, and its provider sends no `?board=` — the surface has no
-        // configuration intent. A board picker in Settings would write a value
-        // this widget never reads, so it is suppressed here (the route itself
-        // DOES honour `?board=`, which is why the client exposes it for a
-        // future scoped surface).
-        case .widgetMergeQueue: return false
-        // The graph widget's answer is scoped by NODE and WINDOW, both of which the
-        // operator already picks in the widget's own configuration sheet
-        // (`ClusterGraphConfigurationIntent`). `GET /v1/cluster/history` takes no
-        // board parameter — it answers 400 for any query key outside
-        // `node`/`metrics`/`window` — so a board picker here would write a value
-        // nothing reads, which is exactly the control this property exists to
-        // suppress.
-        // Every other surface keeps true: each is fetched through a route its
-        // own card measured against a scope. A new case has to be judged here
-        // deliberately rather than by an exhaustive-switch build error.
-        case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
-             .liveActivityClusterHealth:
-            return true
+        case .widgetKanbanMonitor: return [.board]
+        case .widgetCluster, .widgetCardsRunning, .widgetNeedsMe,
+             .widgetMergeQueue, .liveActivityClusterHealth:
+            return []
         }
     }
+
+    /// Whether this surface can render a `WidgetScope` at all.
+    var supportsScope: Bool { !scopeLevels.isEmpty }
 
     /// The content sections this surface can render — the vocabulary the
     /// settings UI offers and the sibling cards' rendering consumes.
@@ -264,7 +259,11 @@ extension WidgetSurfaceKind {
     /// group for exactly this case).
     var availableSections: Set<String> {
         switch self {
-        case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
+        // C1 always draws the state headline, the node table and the model
+        // footer; the only optional block is the per-node table itself. The
+        // old "state"/"topology"/"models"/"board" toggles were dead controls
+        // (audit W11) and are gone rather than left to lie.
+        case .widgetCluster:    return ["nodes"]
         // One dataset, nothing optional — see the rule above. The running-cards
         // widget is the row list plus the running/blocked counts its header and
         // footer are built from; Boards is one bar per board plus the same
@@ -667,7 +666,7 @@ func check(_ name: String, _ cond: Bool) {
     if cond { print("  ok: \(name)") } else { failures.append(name); print("FAIL: \(name)") }
 }
 
-// 1. defaulting is backward compatible: absent store -> every surface on, 5/15
+// 1. defaulting is backward compatible: absent store -> every surface on, 30/15
 //    min, all sections.
 let defaults = AppGroupWidgetSettings.defaults()
 // The count is READ, not remembered. This line used to be
@@ -684,8 +683,8 @@ for kind in WidgetSurfaceKind.allCases {
     check("\(kind.rawValue) defaults active", s.isActive)
     check("\(kind.rawValue) defaults all sections",
           s.showSections == Set(kind.availableSections))
-    check("\(kind.rawValue) defaults cadence \(kind.isLiveActivity ? 15 : 5)",
-          s.refreshMinutes == (kind.isLiveActivity ? 15 : 5))
+    check("\(kind.rawValue) defaults cadence \(kind.isLiveActivity ? 15 : 30)",
+          s.refreshMinutes == (kind.isLiveActivity ? 15 : 30))
 }
 
 // 1a. The registry's own invariants (t_71deac83 added a surface; these are the
@@ -718,18 +717,18 @@ check("the Cluster watch registry key is stable",
 let empty = AppGroupWidgetSettings(surfaces: [:])
 let clusterDefault = empty.setting(for: .widgetCluster)
 check("absent surface defaults ON backward compatible", clusterDefault.isActive)
-check("absent widget defaults 5 min", clusterDefault.refreshMinutes == 5)
+check("absent widget defaults 30 min", clusterDefault.refreshMinutes == 30)
 let watchDefault = empty.setting(for: .liveActivityClusterHealth)
 check("absent Live Activity defaults 15 min", watchDefault.refreshMinutes == 15)
 
 // 3. bounded set: a stale/foreign section id is stripped by setting(for:).
 var foreign = AppGroupWidgetSettings(surfaces: [
     .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
-                                          showSections: ["state", "bogus_section"])
+                                          showSections: ["nodes", "bogus_section"])
 ])
 let bounded = foreign.setting(for: .widgetCluster)
 check("foreign section stripped (bounded set)",
-      bounded.showSections == ["state"] && !bounded.showSections.contains("bogus_section"))
+      bounded.showSections == ["nodes"] && !bounded.showSections.contains("bogus_section"))
 
 // 4. Codable round-trip: encode -> decode yields an equal registry.
 foreign = AppGroupWidgetSettings(surfaces: [
@@ -788,17 +787,17 @@ check("widget.kanbanMonitor registry key (permanent App Group key)",
 //     NEVER "paused" — and the seed a brand-new store gets must not pause them
 //     either. `AppGroupWidgetSettings.defaults()` DERIVES from `isLiveActivity`
 //     and `availableSections`, so this is the executed proof that the pair
-//     landed in the 5-minute widget branch and not the 15-minute Live Activity
-//     one; a wrong branch there is a widget that refreshes three times too
-//     slowly on every device, quietly.
+//     landed in the 30-minute widget branch and not the 15-minute Live Activity
+//     one; a wrong branch there is a widget that refreshes on the wrong
+//     schedule on every device, quietly.
 for kind in [WidgetSurfaceKind.widgetCardsRunning, .widgetKanbanMonitor] {
     let s = AppGroupWidgetSettings(surfaces: [:]).setting(for: kind)
     check("\(kind.rawValue) with no entry is ON (absent is not paused)", s.isActive)
-    check("\(kind.rawValue) with no entry takes the 5-min widget cadence",
-          s.refreshMinutes == 5)
+    check("\(kind.rawValue) with no entry takes the 30-min widget cadence",
+          s.refreshMinutes == 30)
     let seeded = AppGroupWidgetSettings.defaults().setting(for: kind)
     check("\(kind.rawValue) is ON at the widget cadence in the first-launch seed",
-          seeded.isActive && seeded.refreshMinutes == 5)
+          seeded.isActive && seeded.refreshMinutes == 30)
     check("\(kind.rawValue) is not a Live Activity", !kind.isLiveActivity)
     check("\(kind.rawValue) declares no sections (one dataset, nothing optional)",
           kind.availableSections.isEmpty)

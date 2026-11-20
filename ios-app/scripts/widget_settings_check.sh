@@ -199,7 +199,7 @@ func check(_ name: String, _ cond: Bool) {
     if cond { print("  ok: \(name)") } else { failures.append(name); print("FAIL: \(name)") }
 }
 
-// 1. defaulting is backward compatible: absent store -> every surface on, 5/15
+// 1. defaulting is backward compatible: absent store -> every surface on, 30/15
 //    min, all sections.
 let defaults = AppGroupWidgetSettings.defaults()
 // The count is READ, not remembered. This line used to be
@@ -216,8 +216,8 @@ for kind in WidgetSurfaceKind.allCases {
     check("\(kind.rawValue) defaults active", s.isActive)
     check("\(kind.rawValue) defaults all sections",
           s.showSections == Set(kind.availableSections))
-    check("\(kind.rawValue) defaults cadence \(kind.isLiveActivity ? 15 : 5)",
-          s.refreshMinutes == (kind.isLiveActivity ? 15 : 5))
+    check("\(kind.rawValue) defaults cadence \(kind.isLiveActivity ? 15 : 30)",
+          s.refreshMinutes == (kind.isLiveActivity ? 15 : 30))
 }
 
 // 1a. The registry's own invariants (t_71deac83 added a surface; these are the
@@ -250,18 +250,18 @@ check("the Cluster watch registry key is stable",
 let empty = AppGroupWidgetSettings(surfaces: [:])
 let clusterDefault = empty.setting(for: .widgetCluster)
 check("absent surface defaults ON backward compatible", clusterDefault.isActive)
-check("absent widget defaults 5 min", clusterDefault.refreshMinutes == 5)
+check("absent widget defaults 30 min", clusterDefault.refreshMinutes == 30)
 let watchDefault = empty.setting(for: .liveActivityClusterHealth)
 check("absent Live Activity defaults 15 min", watchDefault.refreshMinutes == 15)
 
 // 3. bounded set: a stale/foreign section id is stripped by setting(for:).
 var foreign = AppGroupWidgetSettings(surfaces: [
     .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
-                                          showSections: ["state", "bogus_section"])
+                                          showSections: ["nodes", "bogus_section"])
 ])
 let bounded = foreign.setting(for: .widgetCluster)
 check("foreign section stripped (bounded set)",
-      bounded.showSections == ["state"] && !bounded.showSections.contains("bogus_section"))
+      bounded.showSections == ["nodes"] && !bounded.showSections.contains("bogus_section"))
 
 // 4. Codable round-trip: encode -> decode yields an equal registry.
 foreign = AppGroupWidgetSettings(surfaces: [
@@ -320,17 +320,17 @@ check("widget.kanbanMonitor registry key (permanent App Group key)",
 //     NEVER "paused" — and the seed a brand-new store gets must not pause them
 //     either. ${BT}AppGroupWidgetSettings.defaults()${BT} DERIVES from ${BT}isLiveActivity${BT}
 //     and ${BT}availableSections${BT}, so this is the executed proof that the pair
-//     landed in the 5-minute widget branch and not the 15-minute Live Activity
-//     one; a wrong branch there is a widget that refreshes three times too
-//     slowly on every device, quietly.
+//     landed in the 30-minute widget branch and not the 15-minute Live Activity
+//     one; a wrong branch there is a widget that refreshes on the wrong
+//     schedule on every device, quietly.
 for kind in [WidgetSurfaceKind.widgetCardsRunning, .widgetKanbanMonitor] {
     let s = AppGroupWidgetSettings(surfaces: [:]).setting(for: kind)
     check("\(kind.rawValue) with no entry is ON (absent is not paused)", s.isActive)
-    check("\(kind.rawValue) with no entry takes the 5-min widget cadence",
-          s.refreshMinutes == 5)
+    check("\(kind.rawValue) with no entry takes the 30-min widget cadence",
+          s.refreshMinutes == 30)
     let seeded = AppGroupWidgetSettings.defaults().setting(for: kind)
     check("\(kind.rawValue) is ON at the widget cadence in the first-launch seed",
-          seeded.isActive && seeded.refreshMinutes == 5)
+          seeded.isActive && seeded.refreshMinutes == 30)
     check("\(kind.rawValue) is not a Live Activity", !kind.isLiveActivity)
     check("\(kind.rawValue) declares no sections (one dataset, nothing optional)",
           kind.availableSections.isEmpty)

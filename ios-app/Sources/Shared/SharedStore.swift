@@ -240,30 +240,37 @@ enum AppGroup {
 // The rules, in one place so they cannot drift:
 //   * Start with the address that last answered (App Group), then the primary,
 //     then the remaining fallbacks in their saved order.
-//   * Fail over ONLY when the transport failed (timeout, cannot connect, DNS,
-//     TLS/connection lost). An HTTP answer — even 401/403/404/5xx — proves the
-//     daemon is reachable, so it is returned immediately and never retried.
-//   * All addresses down produces ONE failure (the last transport error), not
-//     one error per address.
-//   * In a multi-address cluster every attempt gets a short ceiling, so a dead
-//     first address cannot consume a widget's whole time budget.
+//   * Fail over when the transport failed (timeout, cannot connect, DNS,
+//     TLS/connection lost) AND when an address answered a route it cannot serve
+//     (404) or a server error (5xx). Pinning a broken/older address after a 404
+//     or 500 is how a healthy fallback never got tried (audit W20). Auth
+//     answers (401/403) still stop the loop: the token is the same everywhere.
+//   * All addresses down produces ONE failure (the last transport error), or
+//     the last unusable HTTP answer when every address answered but none was
+//     usable.
+//   * In a multi-address cluster every transport attempt gets a short ceiling,
+//     so a dead first address cannot consume a widget's whole time budget.
 enum HostFailover {
     /// Per-attempt ceiling when there is more than one address to try.
     static let perAttemptTimeout: TimeInterval = 4
 
     /// One address's result. `.answered` means the daemon answered over HTTP
-    /// (any status) or produced a non-connectivity outcome that must be shown
-    /// as-is; `.transport` means try the next address.
+    /// with a usable response and may be remembered. `.answeredUnusable` means
+    /// it answered but the answer cannot serve this read (404/5xx): try the
+    /// next address and never pin this one. `.transport` means try the next.
     enum Attempt<Value> {
         case answered(Value)
+        case answeredUnusable(Value)
         case transport(Error?)
     }
 
     /// The loop's aggregate: one value + the host that produced it, or one
-    /// failure after every address was tried.
+    /// failure after every address was tried. `lastValue` carries the last
+    /// unusable HTTP answer so a single-address cluster keeps its precise
+    /// 404/5xx instead of collapsing into "unreachable".
     enum Outcome<Value> {
         case success(Value, host: String)
-        case failed(lastError: Error?)
+        case failed(lastError: Error?, lastValue: Value?)
     }
 
     /// Primary → fallbacks, blanks removed, duplicates folded case-insensitively.
@@ -324,24 +331,27 @@ enum HostFailover {
         return min(base, perAttemptTimeout)
     }
 
-    /// Try the ordered hosts until one ANSWERS. Transport failures continue;
-    /// anything the attempt classifies as `.answered` stops the loop. Records
-    /// the working host in the App Group before returning it.
+    /// Try the ordered hosts until one ANSWERS USABLY. Transport failures and
+    /// unusable HTTP answers continue; a usable answer stops the loop and is
+    /// the only outcome that records a working host.
     static func run<Value>(
         hosts: [String],
         attempt: (String) async -> Attempt<Value>
     ) async -> Outcome<Value> {
         var lastError: Error?
+        var lastValue: Value?
         for host in orderedHosts(hosts) {
             switch await attempt(host) {
             case .answered(let value):
                 remember(host)
                 return .success(value, host: host)
+            case .answeredUnusable(let value):
+                lastValue = value
             case .transport(let error):
                 lastError = error
             }
         }
-        return .failed(lastError: lastError)
+        return .failed(lastError: lastError, lastValue: lastValue)
     }
 }
 
@@ -449,11 +459,13 @@ struct AppGroupWidgetSettings: Codable, Equatable {
     /// The settings for one surface, defaulting to ON when the store is absent
     /// or the surface has no entry yet (backward compatible — a surface that
     /// predates this store must keep working unchanged). Widgets default to a
-    /// 5-minute cadence; Live Activities (push-fed) default to 15 minutes.
+    /// 30-minute cadence: WidgetKit's reload budget (~40–70/day) cannot deliver
+    /// the old 5/15-minute presets, as the 2026-11-19 widget audit measured.
+    /// Live Activities (push-fed) default to 15 minutes.
     func setting(for kind: WidgetSurfaceKind) -> WidgetSurfaceSettings {
         guard let s = surfaces[kind] else {
             return WidgetSurfaceSettings(isActive: true,
-                                         refreshMinutes: kind.isLiveActivity ? 15 : 5,
+                                         refreshMinutes: kind.isLiveActivity ? 15 : 30,
                                          showSections: Set(kind.availableSections))
         }
         // Bound the set to the surface's known sections so a stale/foreign
@@ -505,21 +517,29 @@ struct AppGroupWidgetSettings: Codable, Equatable {
         surfaces[kind]?.scope ?? scope
     }
 
-    /// The full defaults (all on, 5/15-min cadence, all sections), used to
+    /// The full defaults (all on, 30/15-min cadence, all sections), used to
     /// seed a brand-new store before the operator edits anything.
     static func defaults() -> AppGroupWidgetSettings {
         AppGroupWidgetSettings(surfaces: Dictionary(
             uniqueKeysWithValues: WidgetSurfaceKind.allCases.map { ($0, WidgetSurfaceSettings(
                 isActive: true,
-                refreshMinutes: $0.isLiveActivity ? 15 : 5,
+                refreshMinutes: $0.isLiveActivity ? 15 : 30,
                 showSections: Set($0.availableSections))) }
         ))
     }
 }
 
+/// The three things a stored scope can name. Kept separate from the raw
+/// `WidgetScope` fields so a surface can declare which pickers it honours.
+enum WidgetScopeLevel: String, CaseIterable, Sendable {
+    case board
+    case project
+    case node
+}
+
 extension WidgetSurfaceKind {
     /// True for the push-fed Live Activity surfaces (15-min default cadence).
-    /// Widgets are self-fetching (5-min default).
+    /// Widgets are self-fetching (30-min default).
     var isLiveActivity: Bool {
         switch self {
         case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
@@ -529,45 +549,30 @@ extension WidgetSurfaceKind {
         }
     }
 
-    /// Whether this surface can render a `WidgetScope` at all.
+    /// The scope levels this surface can honestly honour.
     ///
-    /// Not every dataset can be scoped, and a scope picker that the network
-    /// ignores is a control that lies: the operator picks a board, the row
-    /// says "board radio", and the surface keeps showing the whole fleet.
-    /// `/v1/kanban/running` and `/v1/kanban/blocked` were measured to IGNORE
-    /// `?board=` (WIDGET_DATA_CONTRACT §4.3), so the running-cards surfaces are
-    /// fleet-wide whatever the store holds — and the app-side driver for this
-    /// surface therefore does not consult `scope(for:)` at all.
+    /// Only the Boards widget reads a scope: it narrows `/v1/mobile/summary`
+    /// with `?boards=<slug>` (and filters the running-title read client-side).
+    /// Its project and node choices were removed with the dead controls the
+    /// 2026-11-19 audit found (W4) — the route has no project or node filter,
+    /// so offering those pickers would write a value nothing reads.
     ///
-    /// Every other surface keeps `true` because that is what ships today: each
-    /// was measured by its own card against a route that honours a scope. A new
-    /// surface that turns out not to honour one opts out HERE, and the config
-    /// screen then hides the pickers rather than writing a value nothing reads.
-    var supportsScope: Bool {
+    /// Every other surviving surface renders the whole fleet: Cluster's monitor
+    /// route has no node parameter on the widget path, `/v1/kanban/running`
+    /// ignores `?board=` (WIDGET_DATA_CONTRACT §4.3), Needs Me is the global
+    /// alert feed, and Merge Queue is read fleet-wide by design. Those surfaces
+    /// therefore get no scope section at all rather than a control that lies.
+    var scopeLevels: Set<WidgetScopeLevel> {
         switch self {
-        case .widgetNeedsMe: return false
-        // The merge-queue widget draws every project's FIFO rows, in registry
-        // order, and its provider sends no `?board=` — the surface has no
-        // configuration intent. A board picker in Settings would write a value
-        // this widget never reads, so it is suppressed here (the route itself
-        // DOES honour `?board=`, which is why the client exposes it for a
-        // future scoped surface).
-        case .widgetMergeQueue: return false
-        // The graph widget's answer is scoped by NODE and WINDOW, both of which the
-        // operator already picks in the widget's own configuration sheet
-        // (`ClusterGraphConfigurationIntent`). `GET /v1/cluster/history` takes no
-        // board parameter — it answers 400 for any query key outside
-        // `node`/`metrics`/`window` — so a board picker here would write a value
-        // nothing reads, which is exactly the control this property exists to
-        // suppress.
-        // Every other surface keeps true: each is fetched through a route its
-        // own card measured against a scope. A new case has to be judged here
-        // deliberately rather than by an exhaustive-switch build error.
-        case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
-             .liveActivityClusterHealth:
-            return true
+        case .widgetKanbanMonitor: return [.board]
+        case .widgetCluster, .widgetCardsRunning, .widgetNeedsMe,
+             .widgetMergeQueue, .liveActivityClusterHealth:
+            return []
         }
     }
+
+    /// Whether this surface can render a `WidgetScope` at all.
+    var supportsScope: Bool { !scopeLevels.isEmpty }
 
     /// The content sections this surface can render — the vocabulary the
     /// settings UI offers and the sibling cards' rendering consumes.
@@ -589,7 +594,11 @@ extension WidgetSurfaceKind {
     /// group for exactly this case).
     var availableSections: Set<String> {
         switch self {
-        case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
+        // C1 always draws the state headline, the node table and the model
+        // footer; the only optional block is the per-node table itself. The
+        // old "state"/"topology"/"models"/"board" toggles were dead controls
+        // (audit W11) and are gone rather than left to lie.
+        case .widgetCluster:    return ["nodes"]
         // One dataset, nothing optional — see the rule above. The running-cards
         // widget is the row list plus the running/blocked counts its header and
         // footer are built from; Boards is one bar per board plus the same

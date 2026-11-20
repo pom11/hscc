@@ -25,7 +25,7 @@ final class WidgetSettingsStore: ObservableObject {
 
     init() {
         // Load the saved registry; fall back to sensible defaults (all on,
-        // 5 min for widgets / 15 min for Live Activities, all sections) on a
+        // 30 min for widgets / 15 min for Live Activities, all sections) on a
         // fresh install or a corrupt blob. We do NOT persist defaults on init:
         // a surface the operator never touched should keep defaulting ON so a
         // pre-existing widget renders unchanged (backward compatible) — writing

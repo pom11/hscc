@@ -459,17 +459,20 @@ struct InlineClusterWidget: View {
 
     var body: some View {
         let c1 = entry.c1
-        if !entry.configured || entry.paused {
-            Text(entry.shortGateLabel)
-                .font(NativeStyle.small())
-        } else if let failure = entry.failure {
-            Text(failure.shortLabel)
-                .font(NativeStyle.small())
-        } else {
-            Text(c1.inlineL2)
-                .font(NativeStyle.small())
-                .monospacedDigit()
-                .accessibilityLabel(c1.inlineL2)
+        Group {
+            if !entry.configured || entry.paused {
+                Text(entry.shortGateLabel)
+                    .font(NativeStyle.small())
+            } else if let failure = entry.failure {
+                Text(failure.shortLabel)
+                    .font(NativeStyle.small())
+            } else {
+                Text(c1.inlineL2)
+                    .font(NativeStyle.small())
+                    .monospacedDigit()
+                    .accessibilityLabel(c1.inlineL2)
+            }
         }
+        .stale(c1.stale)
     }
 }

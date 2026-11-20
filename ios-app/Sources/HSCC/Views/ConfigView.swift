@@ -385,7 +385,7 @@ struct ConfigView: View {
                 } header: {
                     Text("Widgets & Live Activities")
                 } footer: {
-                    Text("Shared settings every widget and Live Activity reads. Each surface can be turned on or off, set its refresh rate, choose which content to show, and be pointed at one board, project or node — a surface with no choice of its own follows the fleet-wide scope. The OS does not reliably honor widget refresh rates below about 5 minutes.")
+                    Text("Shared settings every widget and Live Activity reads. Each surface can be turned on or off, set its refresh rate, and choose which content to show; the Boards widget can be pointed at one board. WidgetKit delivers about 40–70 reloads per day across every placed widget, so the refresh presets start at 30 minutes.")
                 }
 
                 Section {
@@ -1016,8 +1016,21 @@ struct ConfigView: View {
 // the display mapping below. No bespoke per-surface editors.
 
 /// Presets offered for refresh cadence. `nil` = Off (surface not refreshed).
-/// WidgetKit does not reliably honor rates below ~5 minutes, noted in the UI.
-private let refreshPresets: [(label: String, minutes: Int?)] = [
+///
+/// WidgetKit delivers roughly 40–70 timeline reloads per day, and every placed
+/// widget shares that budget. The old 5/15-minute presets asked for 96–288
+/// reloads/day and were silently coalesced, so the UI promised a cadence the OS
+/// could not honour (audit W16). Widgets now offer deliverable values only.
+/// Live Activities are pushed by the app, not WidgetKit, so they keep the
+/// shorter cadences.
+private let widgetRefreshPresets: [(label: String, minutes: Int?)] = [
+    ("Off", nil),
+    ("30 min", 30),
+    ("60 min", 60),
+    ("2 hours", 120),
+]
+
+private let activityRefreshPresets: [(label: String, minutes: Int?)] = [
     ("Off", nil),
     ("5 min", 5),
     ("15 min", 15),
@@ -1076,7 +1089,8 @@ struct WidgetSurfaceEditor: View {
                     get: { surface.refreshMinutes },
                     set: { store.setRefreshMinutes($0, for: kind) }
                 )) {
-                    ForEach(refreshPresets, id: \.label) { preset in
+                    ForEach(kind.isLiveActivity ? activityRefreshPresets : widgetRefreshPresets,
+                            id: \.label) { preset in
                         if let minutes = preset.minutes {
                             Text(preset.label).tag(minutes)
                         } else {
@@ -1089,7 +1103,7 @@ struct WidgetSurfaceEditor: View {
             } footer: {
                 Text(kind.isLiveActivity
                     ? "How often the app pushes an update while the Live Activity is active. Live Activities cannot fetch on their own — this is the app's push cadence."
-                    : "How often the widget refreshes its timeline. The OS does not reliably honor widget refresh rates below about 5 minutes.")
+                    : "How often the widget refreshes its timeline. WidgetKit delivers about 40–70 reloads per day across every placed widget, so 30 minutes is the shortest cadence it can honour reliably; the app also reloads timelines when it opens and after a successful fetch.")
             }
 
             // MARK: Scope — what THIS widget points at (t_3dd38411)
@@ -1103,14 +1117,20 @@ struct WidgetSurfaceEditor: View {
                         Text((store.scope(for: kind) ?? WidgetScope()).summaryLine)
                             .multilineTextAlignment(.trailing)
                     }
-                    Picker("Board", selection: scopeSelection(.board)) {
-                        scopeRows(boardOptions ?? [], showSubtitle: false)
+                    if kind.scopeLevels.contains(.board) {
+                        Picker("Board", selection: scopeSelection(.board)) {
+                            scopeRows(boardOptions ?? [], showSubtitle: false)
+                        }
                     }
-                    Picker("Project", selection: scopeSelection(.project)) {
-                        scopeRows(projectOptions ?? [], showSubtitle: true)
+                    if kind.scopeLevels.contains(.project) {
+                        Picker("Project", selection: scopeSelection(.project)) {
+                            scopeRows(projectOptions ?? [], showSubtitle: true)
+                        }
                     }
-                    Picker("Node", selection: scopeSelection(.node)) {
-                        scopeRows(nodeOptions ?? [], showSubtitle: false)
+                    if kind.scopeLevels.contains(.node) {
+                        Picker("Node", selection: scopeSelection(.node)) {
+                            scopeRows(nodeOptions ?? [], showSubtitle: false)
+                        }
                     }
 
                     if loadingScopeOptions {
@@ -1145,7 +1165,7 @@ struct WidgetSurfaceEditor: View {
                     Text("Scope")
                 } footer: {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                        Text("Point this widget at one slice of the fleet. The picker you touch decides the whole scope: choosing a board drops a project or node, and choosing All in any of them clears it for this widget.")
+                        Text("Point this widget at one board. The picker decides the scope: choosing a board narrows the Boards tile, and choosing All clears it for this widget.")
                         if store.setting(for: kind).scope == nil {
                             Text("This widget has no choice of its own, so it follows the fleet-wide scope — currently \((store.settings.scope ?? WidgetScope()).summaryLine). That one is set in the widget's own configuration sheet, or by Siri.")
                         } else {
@@ -1206,9 +1226,11 @@ struct WidgetSurfaceEditor: View {
     /// i.e. the cluster answered nothing. Reported as such, never as an empty
     /// fleet.
     private var scopeListsAreEmpty: Bool {
-        (boardOptions?.count ?? 0) <= 1
-            && (projectOptions?.count ?? 0) <= 1
-            && (nodeOptions?.count ?? 0) <= 1
+        var lists: [[ScopeChoice]?] = []
+        if kind.scopeLevels.contains(.board) { lists.append(boardOptions) }
+        if kind.scopeLevels.contains(.project) { lists.append(projectOptions) }
+        if kind.scopeLevels.contains(.node) { lists.append(nodeOptions) }
+        return lists.allSatisfy { ($0?.count ?? 0) <= 1 }
     }
 
     /// The rows of one picker. "All" is ALWAYS present and needs no network, so

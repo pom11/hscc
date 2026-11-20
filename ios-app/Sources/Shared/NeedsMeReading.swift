@@ -69,12 +69,16 @@ struct AlertsLite: Codable, Equatable, Sendable {
     let count: Int?
     let latestID: Int?
     let hasMore: Bool?
+    /// The cursor to send as `since=` for the next ascending page. Present on
+    /// the route; kept so the client can prove paging advanced (audit W15).
+    let nextSince: Int?
     let speak: String?
 
     enum CodingKeys: String, CodingKey {
         case alerts, count, speak
         case latestID = "latest_id"
         case hasMore = "has_more"
+        case nextSince = "next_since"
     }
 }
 

@@ -42,7 +42,7 @@ struct ClusterTimelineProvider: TimelineProvider {
     private func fetchEntry(family: WidgetFamily) async -> ClusterEntry {
         let surface = AppGroupWidgetSettings.load()?.setting(for: .widgetCluster)
         if let surface, !surface.isActive { return .paused() }
-        let refresh = surface?.refreshMinutes ?? 15
+        let refresh = surface?.refreshMinutes ?? 30
         let showSections = surface?.showSections ?? ClusterEntry.availableSections
 
         guard let client = WidgetDataClient.makeIfConfigured() else {

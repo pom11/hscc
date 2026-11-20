@@ -292,9 +292,9 @@ struct ClusterEntry: TimelineEntry {
     /// history read deliberately does NOT set `failure` either; the trend is
     /// an extra the tile can live without, and the rows above it are live.
     let history: ClusterHistoryResponse?
-    /// Operator content toggles. Only "nodes" and "models" are drawn; the old
-    /// "topology"/"board" values are kept in the shared model for the settings
-    /// editor but no longer have pixels here.
+    /// Operator content toggles. Only "nodes" is offered/drawn; the old
+    /// "state"/"topology"/"models"/"board" values were dead controls (audit
+    /// W11) and no longer exist in `availableSections`.
     let showSections: Set<String>
     /// The four Lock Screen metrics, projected from the CLI view-model over the
     /// SAME monitor read as `fleet`. Nil when that read never answered — the
@@ -325,7 +325,7 @@ struct ClusterEntry: TimelineEntry {
          lockScreen: CLILockScreenMetrics? = nil,
          history: ClusterHistoryResponse? = nil,
          dataAt: Date? = nil,
-         refreshMinutes: Int = 15,
+         refreshMinutes: Int = 30,
          daemonHost: MonitorDaemonHost? = nil,
          throughput: [ClusterThroughputPoint] = []) {
         self.date = date

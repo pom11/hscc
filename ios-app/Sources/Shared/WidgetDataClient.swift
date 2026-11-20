@@ -115,6 +115,16 @@ struct WidgetDataClient {
     /// link is a `.timeout` a human can read, not a silent blank.
     static let defaultTimeout: TimeInterval = 8
 
+    /// Cluster reads have a larger budget than the rest of the datasets.
+    ///
+    /// `/v1/cluster/monitor` shells out with a 10 s inner budget and
+    /// `/v1/cluster/status` with 15 s (`hscc-cluster/hscc.py`). A client that
+    /// shrinks a healthy read to 4 s just because a fallback address exists
+    /// classifies a working daemon as "Timed out" (audit W19). The API's own
+    /// 20 s snapshot cache (routes_cluster.py) makes the steady-state read
+    /// cheap; this ceiling covers the cold fill.
+    static let clusterReadTimeout: TimeInterval = 18
+
     let config: APIConfig
     /// The ceiling this client puts on every request it builds.
     let timeout: TimeInterval
@@ -225,16 +235,24 @@ struct WidgetDataClient {
 
     /// Dataset 5 — `GET /v1/cluster/monitor`. `output` (54% of the body, an
     /// ANSI table) is not declared in `MonitorResponse`, so it is never decoded.
-    /// When the fleet is DOWN the route answers 38 B with no `json` key: that is
-    /// a successful read with no nodes, not a transport failure.
+    /// A degraded body (`success:false`, an `error`, or no `json`) is a failure,
+    /// not an empty fleet: the route now answers 503, and an older server's 200
+    /// with a `speak`-only body must take the same offline path (audit W5).
     func clusterMonitor() async -> Result<MonitorResponse, WidgetDataFailure> {
-        await load(WidgetDataPath.clusterMonitor, as: MonitorResponse.self)
+        switch await load(WidgetDataPath.clusterMonitor, as: MonitorResponse.self,
+                          ceiling: max(timeout, Self.clusterReadTimeout)) {
+        case .success(let response) where response.isDegraded:
+            return .failure(.decoding(detail: "cluster/monitor answered without a fleet sample"))
+        case let result:
+            return result
+        }
     }
 
     /// Dataset 5 — `GET /v1/cluster/status` (the `large` cluster family's
     /// host/workload line).
     func clusterStatus() async -> Result<ClusterStatusResponse, WidgetDataFailure> {
-        await load(WidgetDataPath.clusterStatus, as: ClusterStatusResponse.self)
+        await load(WidgetDataPath.clusterStatus, as: ClusterStatusResponse.self,
+                   ceiling: max(timeout, Self.clusterReadTimeout))
     }
 
     /// The history surface's read — `GET /v1/cluster/history`, the recorder's
@@ -314,14 +332,52 @@ struct WidgetDataClient {
 
     /// Dataset 7 — `GET /v1/alerts`, the operator feed (`hscc notify`'s read).
     /// `limit` is the page size (the route caps it at 500 and defaults to 100);
-    /// no `since` cursor is offered because the "Needs me" surface renders the
-    /// current unacknowledged set, not a drain loop. Ordering and the
+    /// `since` is the exclusive ascending cursor. Ordering and the
     /// unacknowledged filter belong to `NeedsMeFeed.from`, the one projection
     /// the widget and the macOS dropdown share.
-    func alerts(limit: Int = 100) async -> Result<AlertsLite, WidgetDataFailure> {
-        await load(WidgetDataPath.alerts, as: AlertsLite.self,
-                   queryItems: [URLQueryItem(name: "limit",
-                                             value: String(min(max(limit, 1), 500)))])
+    func alerts(since: Int? = nil, limit: Int = 100) async -> Result<AlertsLite, WidgetDataFailure> {
+        var query = [URLQueryItem(name: "limit",
+                                  value: String(min(max(limit, 1), 500)))]
+        if let since {
+            query.append(URLQueryItem(name: "since", value: String(max(0, since))))
+        }
+        return await load(WidgetDataPath.alerts, as: AlertsLite.self, queryItems: query)
+    }
+
+    /// Every alert the feed holds, oldest first, by following `next_since`
+    /// while `has_more` is true (audit W15). The store is bounded to 500 rows,
+    /// so a normal read is one request; the loop exists so a future larger
+    /// store cannot make "All clear" hide an older unacknowledged alert.
+    /// `maxPages` is a hard stop: a server that keeps claiming `has_more`
+    /// without advancing is refused rather than looped forever.
+    func allAlerts(limit: Int = 500, maxPages: Int = 8) async -> Result<AlertsLite, WidgetDataFailure> {
+        var collected: [AlertLite] = []
+        var cursor: Int? = 0
+        var latest: Int?
+        var lastSpeak: String?
+        for _ in 0..<max(1, maxPages) {
+            let page: AlertsLite
+            switch await alerts(since: cursor, limit: limit) {
+            case .success(let payload): page = payload
+            case .failure(let failure): return .failure(failure)
+            }
+            collected.append(contentsOf: page.alerts)
+            latest = page.latestID ?? latest
+            lastSpeak = page.speak
+            guard page.hasMore == true else {
+                return .success(AlertsLite(alerts: collected,
+                                           count: collected.count,
+                                           latestID: latest,
+                                           hasMore: false,
+                                           nextSince: page.nextSince,
+                                           speak: lastSpeak))
+            }
+            guard let next = page.nextSince, let current = cursor, next > current else {
+                return .failure(.decoding(detail: "alerts has_more without advancing next_since"))
+            }
+            cursor = next
+        }
+        return .failure(.decoding(detail: "alerts paging exceeded the page ceiling"))
     }
 
     /// Dataset 8 — `GET /v1/merge-queue`, the local queue's read-only rows.
@@ -344,7 +400,8 @@ struct WidgetDataClient {
     /// The only place a request is built. Private, and the ONLY non-GET-free
     /// word in this type: everything above is a thin named wrapper over it.
     private func load<T: Decodable>(_ path: String, as type: T.Type,
-                                    queryItems: [URLQueryItem] = []) async -> Result<T, WidgetDataFailure> {
+                                    queryItems: [URLQueryItem] = [],
+                                    ceiling: TimeInterval? = nil) async -> Result<T, WidgetDataFailure> {
         guard WidgetDataPath.isReadPath(path) else {
             // Refused before a URL is built, so a mutating path never reaches the
             // transport — no request, no side effect, an honest failure.
@@ -352,8 +409,11 @@ struct WidgetDataClient {
         }
 
         let hosts = config.hosts
-        let attemptCeiling = HostFailover.attemptTimeout(base: timeout,
-                                                         hostCount: hosts.count)
+        // A cluster read brings its own ceiling that already exceeds the
+        // server's cluster budgets, so it must NOT be shrunk to the 4 s
+        // multi-address cap; the other datasets keep that cap.
+        let attemptCeiling = ceiling
+            ?? HostFailover.attemptTimeout(base: timeout, hostCount: hosts.count)
         let outcome = await HostFailover.run(hosts: hosts) { host -> HostFailover.Attempt<Result<T, WidgetDataFailure>> in
             guard let url = self.url(for: path, host: host, queryItems: queryItems) else {
                 // A bad address is a transport-class failure: try the next one
@@ -376,11 +436,16 @@ struct WidgetDataClient {
                     return .answered(.failure(.unreachable(code: nil)))
                 }
                 guard (200...299).contains(http.statusCode) else {
-                    // ANY HTTP answer proves the daemon is reachable. A 401/404
-                    // or 5xx must be surfaced as-is, never retried on another
-                    // address (same token, same daemon).
-                    return .answered(.failure(Self.httpFailure(status: http.statusCode,
-                                                               body: data, path: path)))
+                    let failure = Self.httpFailure(status: http.statusCode,
+                                                   body: data, path: path)
+                    // A 404/5xx is an answer this address cannot serve: try the
+                    // next address and never pin it as "last working" (W20).
+                    // 401/403 still stop the loop — the token is the same
+                    // everywhere, so another address cannot fix it.
+                    if http.statusCode == 404 || http.statusCode >= 500 {
+                        return .answeredUnusable(.failure(failure))
+                    }
+                    return .answered(.failure(failure))
                 }
                 do {
                     return .answered(.success(try JSONDecoder().decode(T.self, from: data)))
@@ -401,9 +466,11 @@ struct WidgetDataClient {
         switch outcome {
         case .success(let result, _):
             return result
-        case .failed(let lastError):
-            // Every address failed the transport. ONE failure leaves this
-            // function, so a surface renders one honest line, not N errors.
+        case .failed(let lastError, let lastValue):
+            // Every address failed transport or answered unusably. Prefer the
+            // last precise HTTP answer (404/5xx) over collapsing it into
+            // "unreachable"; otherwise emit ONE transport failure.
+            if let lastValue { return lastValue }
             if let error = lastError as? URLError, error.code == .timedOut {
                 return .failure(.timeout(seconds: attemptCeiling))
             }
@@ -603,6 +670,11 @@ enum WidgetDataOutcome<Value> {
 
     var isStale: Bool {
         if case .stale = self { return true }
+        return false
+    }
+
+    var isLive: Bool {
+        if case .live = self { return true }
         return false
     }
 

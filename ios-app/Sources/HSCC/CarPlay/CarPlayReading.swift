@@ -248,9 +248,9 @@ struct CarPlayBoardsReading: Equatable {
     var topBoards: [CarPlayBoardReading] { Array(boards.prefix(3)) }
     var maxOpen: Int { max(boards.map(\.openCards).max() ?? 0, 1) }
 
-    /// "2 running · 36 blocked · 89 done today" — the SPEC's row detail.
+    /// "2 running · 36 blocked · 89 done 24h" — the SPEC's row detail.
     var detailLine: String {
-        "\(running) running · \(blocked) blocked · \(done) done today"
+        "\(running) running · \(blocked) blocked · \(done) done 24h"
     }
 }
 

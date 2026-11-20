@@ -16,7 +16,7 @@ import WidgetKit
 //   medium — "Open cards by board" + as-of, four rows with the board name,
 //            stacked bar and "N done" today, plus the legend row.
 //   large  — every active board (up to ten) as medium rows, the worker-slot
-//            strip "R of C slots" and the footer "D done today · B blocked".
+//            strip "R of C slots" and the footer "D done 24h · B blocked".
 //   scoped — the same bar for ONE board (the existing scope intent), its
 //            column counts and the titles of that board's running cards.
 //
@@ -49,17 +49,34 @@ struct KanbanBoardRow: Codable, Identifiable, Equatable, Hashable, Sendable {
     let todo: Int?
     let blocked: Int?
     let done: Int?
+    /// Cards in scheduled/review/triage (the server folds them into `other`).
+    /// Without this a board whose only open cards are those statuses was
+    /// dropped from the table entirely (audit W14).
+    let other: Int?
+
+    init(board: String, running: Int?, ready: Int?, todo: Int?,
+         blocked: Int?, done: Int?, other: Int? = nil) {
+        self.board = board
+        self.running = running
+        self.ready = ready
+        self.todo = todo
+        self.blocked = blocked
+        self.done = done
+        self.other = other
+    }
 
     var id: String { board }
 
-    /// The B3 bar: running + todo + blocked. `ready` and `done` are shown as
-    /// separate facts, never folded into the bar length.
-    var openCards: Int { (running ?? 0) + (todo ?? 0) + (blocked ?? 0) }
+    /// The B3 bar: running + todo + blocked, plus the folded `other` bucket so
+    /// a scheduled/review/triage card is still an open card. `ready` and `done`
+    /// are separate facts, never folded into the bar length.
+    var openCards: Int { (running ?? 0) + (todo ?? 0) + (blocked ?? 0) + (other ?? 0) }
 
     /// The CLI's idle-board rule: a board with nothing open and nothing finished
-    /// today is skipped by `boards_table`, so it is skipped here too.
+    /// today is skipped by `boards_table`, so it is skipped here too. `other`
+    /// is included for the same reason the open bar includes it.
     var hasActivity: Bool {
-        [running, ready, todo, blocked, done].contains { ($0 ?? 0) > 0 }
+        [running, ready, todo, blocked, done, other].contains { ($0 ?? 0) > 0 }
     }
 
     /// The response → rows, ordered by open cards (the B3 question), then name.
@@ -73,7 +90,8 @@ struct KanbanBoardRow: Codable, Identifiable, Equatable, Hashable, Sendable {
                                   ready: counts.ready,
                                   todo: counts.todo,
                                   blocked: counts.blocked,
-                                  done: counts.done)
+                                  done: counts.done,
+                                  other: counts.other ?? 0)
         }
         .filter(\.hasActivity)
         .sorted { lhs, rhs in
@@ -87,12 +105,20 @@ struct KanbanBoardRow: Codable, Identifiable, Equatable, Hashable, Sendable {
     /// degraded, truncated, or wholly-unreadable payload is refused (the
     /// last-known rows stay on screen); a single board-level error drops only
     /// that board, and the entry announces the count.
-    static func readResult(from summary: MobileSummaryResponse) -> Result<KanbanBoardTable, WidgetDataFailure> {
+    static func readResult(from summary: MobileSummaryResponse,
+                           scopedBoard: String? = nil) -> Result<KanbanBoardTable, WidgetDataFailure> {
         guard !summary.degraded else {
             return .failure(.decoding(detail: "mobile/summary carried no boards"))
         }
         if summary.truncated == true || (summary.omitted_boards ?? 0) > 0 {
             return .failure(.decoding(detail: "mobile/summary was truncated"))
+        }
+        // The all-boards tile's totals are a sum of the tiles present. A board
+        // the server could not read is not a zero, so refuse the read rather
+        // than draw a total that is low by construction (audit W13). A
+        // one-board scope is unaffected by another board being unreadable.
+        if scopedBoard == nil, (summary.unreadable_boards ?? 0) > 0 {
+            return .failure(.decoding(detail: "mobile/summary had unreadable boards"))
         }
         let usable = summary.entries.filter { $0.error == nil && $0.counts != nil }
         guard !usable.isEmpty || summary.entries.isEmpty else {
@@ -153,7 +179,15 @@ enum KanbanMonitorReading {
 /// integers only — no card title, no path, no address, no token (§7). Running
 /// titles are deliberately not persisted: the next timeline asks the server.
 enum KanbanMonitorSnapshotStore {
+    /// One slot per board scope, so two Boards widgets pointed at different
+    /// boards keep their own last-known rows (audit W12). The unscoped surface
+    /// keeps the original key so an existing snapshot survives the upgrade.
     static let storageKey = "hscc.kanbanmonitor.rows"
+
+    static func storageKey(board: String?) -> String {
+        guard let board, !board.isEmpty else { return storageKey }
+        return storageKey + "." + board
+    }
 
     struct Snapshot: Codable {
         let date: Date
@@ -162,23 +196,23 @@ enum KanbanMonitorSnapshotStore {
     }
 
     static func save(_ rows: [KanbanBoardRow], maxInProgress: Int?,
-                     at date: Date = Date()) {
+                     board: String? = nil, at date: Date = Date()) {
         guard !rows.isEmpty,
               let data = try? JSONEncoder().encode(
                 Snapshot(date: date, rows: rows, maxInProgress: maxInProgress))
         else { return }
-        SharedStore.suite?.set(data, forKey: storageKey)
+        SharedStore.suite?.set(data, forKey: storageKey(board: board))
     }
 
-    static func load() -> Snapshot? {
-        guard let data = SharedStore.suite?.data(forKey: storageKey),
+    static func load(board: String? = nil) -> Snapshot? {
+        guard let data = SharedStore.suite?.data(forKey: storageKey(board: board)),
               let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
         else { return nil }
         return snapshot
     }
 
-    static func lastKnown() -> (value: KanbanBoardTable, at: Date)? {
-        guard let snapshot = load(), !snapshot.rows.isEmpty else { return nil }
+    static func lastKnown(board: String? = nil) -> (value: KanbanBoardTable, at: Date)? {
+        guard let snapshot = load(board: board), !snapshot.rows.isEmpty else { return nil }
         return (KanbanBoardTable(rows: snapshot.rows,
                                  boardCount: snapshot.rows.count,
                                  unreadableBoards: nil,
@@ -326,7 +360,7 @@ struct KanbanMonitorEntry: TimelineEntry {
     var rectangularLine: String {
         if !configured || paused { return shortGateLabel }
         if let failure { return failure.shortLabel }
-        return "\(KanbanMonitorReading.text(doneTotal)) done today · "
+        return "\(KanbanMonitorReading.text(doneTotal)) done 24h · "
             + "\(KanbanMonitorReading.text(blockedTotal)) blocked"
     }
 
@@ -406,7 +440,7 @@ struct KanbanMonitorEntry: TimelineEntry {
 // MARK: - Timeline provider
 
 struct KanbanMonitorTimelineProvider: TimelineProvider {
-    static let defaultRefreshMinutes = 15
+    static let defaultRefreshMinutes = 30
 
     // GATE-SLICE-BEGIN: kanban_monitor_cadence
     static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {
@@ -455,7 +489,7 @@ struct KanbanMonitorTimelineProvider: TimelineProvider {
         let board = scope?.board
         let outcome = await WidgetData.read(
             using: client,
-            lastKnown: KanbanMonitorSnapshotStore.lastKnown
+            lastKnown: { KanbanMonitorSnapshotStore.lastKnown(board: board) }
         ) { c in
             await Self.readBoards(client: c, board: board)
         }
@@ -463,7 +497,7 @@ struct KanbanMonitorTimelineProvider: TimelineProvider {
         switch outcome {
         case .live(let table, let fetchedAt):
             KanbanMonitorSnapshotStore.save(table.rows, maxInProgress: table.maxInProgress,
-                                            at: fetchedAt)
+                                            board: board, at: fetchedAt)
             return KanbanMonitorEntry(date: fetchedAt, configured: true, rows: table.rows,
                                       boardCount: table.boardCount,
                                       unreadableBoards: table.unreadableBoards,
@@ -504,7 +538,7 @@ struct KanbanMonitorTimelineProvider: TimelineProvider {
         case .failure(let failure):
             return .failure(failure)
         case .success(let summary):
-            let result = KanbanBoardRow.readResult(from: summary)
+            let result = KanbanBoardRow.readResult(from: summary, scopedBoard: board)
             guard case .success(var table) = result else { return result }
             if let board, !board.isEmpty,
                case .success(let running) = await client.kanbanRunning() {
@@ -706,7 +740,7 @@ private struct BoardBarRow: View {
     private var accessibilityLine: String {
         "\(row.board): \(row.openCards) open, \(row.running ?? 0) running, "
             + "\(row.todo ?? 0) todo, \(row.blocked ?? 0) blocked, "
-            + "\(row.done ?? 0) done today"
+            + "\(row.done ?? 0) done 24h"
     }
 }
 
@@ -1018,7 +1052,7 @@ struct LargeKanbanMonitor: View {
             Spacer(minLength: 0)
             WorkerSlotStrip(running: entry.runningTotal, cap: entry.maxInProgress)
             HStack(spacing: 6) {
-                Text("\(KanbanMonitorReading.text(entry.doneTotal)) done today · "
+                Text("\(KanbanMonitorReading.text(entry.doneTotal)) done 24h · "
                      + "\(KanbanMonitorReading.text(entry.blockedTotal)) blocked")
                     .font(NativeStyle.small())
                     .foregroundStyle(.secondary)

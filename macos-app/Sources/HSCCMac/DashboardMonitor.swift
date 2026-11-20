@@ -149,6 +149,13 @@ struct DashboardSnapshot {
     /// The first honest failure from this refresh, already reduced to the
     /// shared client's address-free `shortLabel`/`operatorLine` vocabulary.
     var failure: String?
+    /// When the menu-bar stat's own data was last refreshed successfully.
+    /// The label uses this to age/dim a number that survived a failed poll
+    /// (audit W6).
+    var menuBarDataAt: Date?
+    /// True when the last read behind the menu-bar stat failed, so the label
+    /// dims the retained number and prints its age.
+    var menuBarStale = false
 
     // MARK: The two CLI surfaces (t_f5fdc6b2)
 
@@ -225,10 +232,63 @@ final class DashboardMonitor: ObservableObject {
 
     private func runLoop() async {
         while !Task.isCancelled {
-            await refresh()
+            // The always-visible label only needs the one dataset its chosen
+            // stat draws. The full eight-read dashboard refresh belongs to the
+            // dropdown opening, not to a 60 s poll (audit W17/W6).
+            await refreshMenuBar()
             let seconds = MacPreferences.storedRefreshSeconds()
             try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
         }
+    }
+
+    /// Refresh ONLY what the menu bar label shows. `.off` makes no request.
+    private func refreshMenuBar() async {
+        let stat = MacPreferences.storedMenuBarStat()
+        guard stat != .off else {
+            snapshot.menuBarStale = false
+            snapshot.menuBarDataAt = nil
+            return
+        }
+        guard let client = WidgetDataClient.makeIfConfigured() else {
+            var fresh = DashboardSnapshot()
+            fresh.configured = false
+            fresh.lastRefresh = Date()
+            fresh.menuBarStale = true
+            snapshot = fresh
+            return
+        }
+
+        var next = snapshot
+        next.configured = true
+        switch stat {
+        case .runningCards:
+            switch await client.kanbanRunning() {
+            case .success(let running):
+                next.running = CardsRunningProjection(running: running, blocked: nil, now: Date())
+                next.menuBarDataAt = Date()
+                next.menuBarStale = false
+            case .failure(let failure):
+                next.menuBarStale = true
+                next.failure = failure.shortLabel
+            }
+        case .clusterNodes, .fleetGpu, .hottestTemp:
+            switch await client.clusterMonitor() {
+            case .success(let monitor):
+                let tally = ClusterNodeTally.project(monitor)
+                next.nodesUp = tally.nodesUp
+                next.nodesTotal = tally.nodesTotal
+                let view = ClusterMonitorViewModel.project(monitor)
+                next.fleetStats = MenuBarFleet.Stats.project(view)
+                next.menuBarDataAt = Date()
+                next.menuBarStale = false
+            case .failure(let failure):
+                next.menuBarStale = true
+                next.failure = failure.shortLabel
+            }
+        case .off:
+            break
+        }
+        snapshot = next
     }
 
     func refresh() async {
@@ -248,6 +308,8 @@ final class DashboardMonitor: ObservableObject {
         next.configured = true
         var failures: [String] = []
         var anySuccess = false
+        var monitorOK = false
+        var runningOK = false
 
         switch await client.autodownStatus() {
         case .success(let auto):
@@ -279,6 +341,7 @@ final class DashboardMonitor: ObservableObject {
             next.fleetEmptyText = monitor.speak
             next.fleetStats = MenuBarFleet.Stats.project(view)
             anySuccess = true
+            monitorOK = true
         case .failure(let failure):
             failures.append(failure.shortLabel)
             next.fleetEmptyText = failure.shortLabel
@@ -318,6 +381,7 @@ final class DashboardMonitor: ObservableObject {
         case .success(let running):
             next.running = CardsRunningProjection(running: running, blocked: nil, now: Date())
             anySuccess = true
+            runningOK = true
         case .failure(let failure):
             failures.append(failure.shortLabel)
         }
@@ -341,7 +405,7 @@ final class DashboardMonitor: ObservableObject {
 
         // The alert feed is the one surface that still answers "what needs the
         // operator"; it is a read-only GET, not a notification registration.
-        switch await client.alerts(limit: 100) {
+        switch await client.allAlerts() {
         case .success(let payload):
             next.needsMe = NeedsMeFeed.from(payload)
             next.needsMeFailure = nil
@@ -366,6 +430,17 @@ final class DashboardMonitor: ObservableObject {
         }
 
         if anySuccess { next.lastRefresh = Date() }
+        switch MacPreferences.storedMenuBarStat() {
+        case .clusterNodes, .fleetGpu, .hottestTemp:
+            if monitorOK { next.menuBarDataAt = Date(); next.menuBarStale = false }
+            else { next.menuBarStale = true }
+        case .runningCards:
+            if runningOK { next.menuBarDataAt = Date(); next.menuBarStale = false }
+            else { next.menuBarStale = true }
+        case .off:
+            next.menuBarDataAt = nil
+            next.menuBarStale = false
+        }
         next.failure = failures.first
         snapshot = next
     }
