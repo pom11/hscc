@@ -11,6 +11,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.17.1] - 2026-11-20
+
+### Added
+- **iOS: install button in Settings → About.** Under "Check for updates" a button opens the install page in Safari. It reads "Install <version>" when the last check found a newer release and opens that release's install URL; otherwise it reads "Open install page" and opens the public install page.
+- **macOS: Desktop Widgets refresh setting.** Settings → Desktop Widgets → Refresh every 1, 2, 5 or 15 minutes, or System (about 30 minutes). While the menu bar app runs it asks WidgetKit to reload every desktop widget on that cadence (default 5 minutes), instead of leaving them on their own 30-minute timeline. The polling loop wakes for whichever of the menu bar and widget cadences is shorter. macOS may still delay app-driven reloads to save energy; every widget shows its data age.
+
+### Fixed
+- **Widgets show tokens per second again.** `/v1/cluster/monitor` built a new `ServingPoller` for every request, and tok/s is the delta of vLLM's token counter between two scrapes, so every `serving[].gen_tps` was null and every widget read "— tok/s". The API now keeps one poller for the process; when its last scrape is missing or older than 60 s it takes a priming scrape 2 s before the real one, so the rate is always current rather than a long average.
+- **Widgets now look like the approved mock (iOS and macOS).** Every widget sits on a solid card (white in light mode, #1C1C1E in dark) instead of the translucent `.fill.tertiary` grey that read as washed out over the wallpaper. Cluster names nodes S1–S4 in route order (hostnames truncated to "gx10-…" in the medium column and did not fit a Lock Screen ring; the hostname stays in the accessibility label). An idle fleet — live backends, nothing running, no rate — reads **0 tok/s** instead of "— tok/s" and a bare dash as the large hero; no serving answer at all still reads unknown. The small Merge Queue PR number uses the mock's 22 pt size.
+
+### Verified
+- `ios-app/scripts/build_check.sh` (all three targets, 0 warnings), `update_check.sh`, `widget_style_check.sh`. Compile only; never run on a device.
+- `HSCC_TEST_LEGS="scripts" <hermes-venv python> -m pytest -q -rs scripts/tests
+  -p no:cacheprovider` on a worktree at `origin/main` (`a2088f2d`) + this
+  entry: **521 passed, 4 skipped in 187.89 s** (0 failed; the red tip read
+  `1 failed, 520 passed, 4 skipped` — same 525 collected).
+- `hscc-api/tests/test_serving_snapshot_rates.py` (first call primes and reports a rate; a 30-minute-old sample is re-primed, not averaged). Full `hscc-api` suite: 1251 passed, 1 skipped.
+- `macos-app/scripts/build_check.sh` (both targets, 0 warnings), `widget_parity_check.sh`, `cli_dropdown_check.sh`, `update_check.sh`. Compile only; not installed on this Mac.
+- `ios-app/scripts/cluster_widget_check.sh`: 141 executed checks, including the new idle-0 and no-serving-unknown cases and the S1–S4 / hostname split. Every offline app gate and both build checks run locally; renders of the real views compared against the mock.
+
+### Docs
+- **`docs/README.md` indexes the CarPlay mock — scripts leg green again.**
+  `docs/design/2026-11-20-carplay-mock.html` (added by PR #509) was tracked
+  under `docs/` with no backtick-quoted entry in the docs index, so
+  `readme_lint.py` rule (4) (DOC-UNLISTED) failed
+  `scripts/tests/test_readme_lint.py::test_repo_readmes_pass_the_lint` — the
+  red gate that blocked the merge queue from landing any PR. The one-line
+  index entry (design/ section, **live** companion to the CarPlay section of
+  `docs/design/2026-11-20-widget-redesign.md`) is the whole fix; no
+  allowlists, exemptions or lint suppressions were added.
 ## [2.17.0] - 2026-11-20
 
 ### Added
