@@ -178,6 +178,17 @@ CURL_TIMED_OUT = 28
 # be claimed.
 NOT_PROBED_STATUS = "unprobed"
 
+# Suffixes whose handler MUTATES the fleet. The Swift client's own naming
+# convention: a route ending in /stop, /up or /down is POST-only, so a bare GET
+# at it answers 405 at best and the probe learns nothing a read path cares
+# about. Excluding them up front beats firing and reading the 405 afterwards.
+#
+# It lives HERE rather than in each consumer because it already had two copies:
+# this file's `gets` filter and `scripts/perf_measure.py`'s own route list, and
+# the second one drifted (t_b0c302b8). A consumer that needs the rule imports
+# this constant instead of restating the tuple.
+MUTATION_SUFFIXES = ("/stop", "/up", "/down")
+
 
 def api_base():
     cfg = os.path.expanduser("~/.hscc/api.json")
@@ -265,7 +276,7 @@ def sweep():
         return _bail(3, "cannot sweep: no iOS client source to derive routes "
                         "from (%s: %s)" % (CLIENT, exc.strerror or exc))
 
-    gets = [r for r in literal if not r.endswith(("/stop", "/up", "/down"))]
+    gets = [r for r in literal if not r.endswith(MUTATION_SUFFIXES)]
     # A route in NOT_SWEPT is reported, never called, so it must not count as
     # coverage either: a client source whose only literal GET were /v1/verify
     # would otherwise "sweep" nothing and still print every route answering.
