@@ -94,6 +94,56 @@ def test_pattern_comes_from_the_shipped_guard():
     assert redactor.load_pattern() is not None
 
 
+# ── selecting the step under test ────────────────────────────────────────────
+#
+# Every behavioural test here drives ONE step of the real workflow: the one that
+# runs the guard and pipes BOTH of its streams through the redactor. That step
+# used to be reached as ``steps[-1]``, which reads as "the step under test" only
+# while it happens to be the job's last step. PR #524 appended a docs-index lint
+# lane after it, so the index silently re-pointed 33 of these tests at the LINT
+# command; each died with exit 127 in the throwaway checkout (`.lint-venv` is
+# provisioned by a workflow step that no test reproduces) and the whole leg went
+# red on main without one line of guard behaviour changing — t_5646c5d3.
+#
+# So select by what the step DOES. The anchor is the redactor the step execs: it
+# is the reason the step exists, and no other step in the job can carry it. An
+# anchor matching zero or several steps is a hard error rather than a guess,
+# because a wrong-but-plausible step here would redden nothing while testing
+# nothing — which is the exact failure mode this file is written to refuse.
+GUARD_STEP_ANCHOR = "redact_guard_report.py"
+LINT_STEP_ANCHOR = "readme_lint.py"
+
+
+def _job_steps():
+    """Every step of the `guard` job, in job order."""
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    return doc["jobs"]["guard"]["steps"]
+
+
+def _steps_running(anchor):
+    """The job steps whose run script names ANCHOR, in job order."""
+    return [s for s in _job_steps() if anchor in s.get("run", "")]
+
+
+def _guard_step():
+    """The single guard-lane step — the script the behavioural tests execute.
+
+    Refuses to pick one for you. Two steps carrying the anchor would mean the
+    redaction logic had been split across steps, and each test here would then
+    cover only half the story while still looking green; that ambiguity has to
+    be a decision made by whoever splits the step, not one taken silently here.
+    """
+    hits = _steps_running(GUARD_STEP_ANCHOR)
+    if len(hits) != 1:
+        pytest.fail(
+            f"expected exactly one step running {GUARD_STEP_ANCHOR!r} in the "
+            f"guard job, found {len(hits)}. The step under test is identified by "
+            "what it runs, never by its position — a step appended to this job "
+            "must not re-point these tests (t_5646c5d3)."
+        )
+    return hits[0]
+
+
 # ── the workflow shape (structural) ─────────────────────────────────────────
 
 def test_workflow_exists_and_is_valid_yaml():
@@ -125,8 +175,7 @@ def test_workflow_is_advisory_by_default_and_opt_in_blocking():
     Advisory must still fail when the guard cannot run (rc=2) — a silent pass is
     the failure mode this whole card exists to close.
     """
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    step = doc["jobs"]["guard"]["steps"][-1]
+    step = _guard_step()
     assert "continue-on-error" not in step, \
         "continue-on-error would swallow rc=2; the step decides its own exit code"
     run = step["run"]
@@ -147,8 +196,7 @@ def test_guard_cannot_run_is_reported_before_the_redactor():
     but misleading, since the missing file is the guard's. rc=2 must be checked
     first so the annotation names the component that is actually absent.
     """
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    run = doc["jobs"]["guard"]["steps"][-1]["run"]
+    run = _guard_step()["run"]
     assert run.index('"$rc" -eq 2') < run.index('"$redact_out_rc" -ne 0'), \
         "rc=2 must be diagnosed before the redactor's own failure"
     # both captured streams are gated, so neither can slip past the diagnosis
@@ -335,8 +383,12 @@ def test_the_real_repo_passes_the_job_leg():
 # copy of it.
 
 def _step_script():
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    return doc["jobs"]["guard"]["steps"][-1]["run"]
+    """The guard-lane step's shell script, verbatim as it ships.
+
+    Reached only through ``_guard_step()`` — see the selector block above for why
+    the positional form (``steps[-1]``) is the bug that reddened this leg.
+    """
+    return _guard_step()["run"]
 
 
 def _run_step(tmp_path, guard_rc, report, enforce, guard_source=None):
