@@ -287,7 +287,20 @@ def _backing_cluster_info():
     return eng.cmd_info()
 
 
-def _backing_serving_snapshot():
+#: tok/s is a counter delta between two scrapes, so the poller must outlive a
+#: request: a fresh poller per call had no previous sample and reported
+#: ``gen_tps: null`` on every row, forever (every widget read "— tok/s").
+_SERVING_POLLER = None
+_SERVING_LOCK = threading.Lock()
+_SERVING_LAST_AT: float | None = None
+#: A previous sample older than this would turn the rate into a long average
+#: (a widget polls every 30 min), so the call re-primes instead.
+SERVING_RATE_MAX_GAP_S = 60.0
+#: The gap between the priming scrape and the measured one.
+SERVING_RATE_WINDOW_S = 2.0
+
+
+def _backing_serving_snapshot(clock=time.monotonic, sleep=time.sleep):
     """The CLI monitor's serving section: one ``ServingPoller`` sample.
 
     ``cluster_render.render_monitor`` builds exactly this object for
@@ -295,15 +308,25 @@ def _backing_serving_snapshot():
     the rows alongside the sparkrun frame is what gives a widget the model
     served per node, running/waiting, KV, and token totals/rates — the parts of
     the CLI view that the raw sparkrun frame does not carry.
+
+    The poller is process-wide so consecutive calls rate against each other.
+    When the last scrape is missing or older than ``SERVING_RATE_MAX_GAP_S``,
+    one priming scrape runs ``SERVING_RATE_WINDOW_S`` before the real one, so
+    the rate is always a current one.
     """
+    global _SERVING_POLLER, _SERVING_LAST_AT
     _ensure_repo_root_on_path()
     from hscc_daemon import cluster_live
-    poller = cluster_live.ServingPoller()
-    try:
+    with _SERVING_LOCK:
+        if _SERVING_POLLER is None:
+            _SERVING_POLLER = cluster_live.ServingPoller()
+        poller = _SERVING_POLLER
+        if _SERVING_LAST_AT is None or clock() - _SERVING_LAST_AT > SERVING_RATE_MAX_GAP_S:
+            poller.poll()
+            sleep(SERVING_RATE_WINDOW_S)
         rows = poller.poll()
-    finally:
-        poller.close()
-    return {"rows": rows, "proxy_error": poller.proxy_error}
+        _SERVING_LAST_AT = clock()
+        return {"rows": rows, "proxy_error": poller.proxy_error}
 
 
 def _backing_verify():
