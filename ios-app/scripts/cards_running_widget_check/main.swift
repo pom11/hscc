@@ -212,8 +212,24 @@ checkText("started_at is the fallback when run_s is null",
           contractRows[1].workerText, "ios-engineer")
 checkInt("started_at fallback age", contractRows[1].ageMinutes, 31)
 checkInt("run_s alone (no started_at) still ages", contractRows[2].ageMinutes, 3)
-check("hb_s is decoded for a future heartbeat label, not fabricated",
+check("hb_s is decoded for the R3 heartbeat label, not fabricated",
       contract.tasks?.first?.hb_s == 12.4)
+checkInt("hb_s is projected into the stored row", contractRows[0].heartbeatSeconds, 12)
+checkText("a fresh heartbeat reads as seconds", contractRows[0].heartbeatText, "beat 12s")
+check("a missing hb_s is unknown, never a fresh beat",
+      contractRows[1].heartbeatSeconds == nil
+        && contractRows[1].heartbeatText == "beat —"
+        && contractRows[1].heartbeatIsFresh == nil)
+checkText("an old heartbeat reads as minutes and turns warn",
+          CardsRunningRow(board: "hscc", cardID: "t_old", title: "Old",
+                          worker: "worker", status: "running",
+                          ageSeconds: 4000, heartbeatSeconds: 720)
+              .heartbeatText,
+          "beat 12m")
+check("the R3 hero clock keeps hours readable",
+      CardsRunningRow(board: "hscc", cardID: "t_long", title: "Long",
+                      worker: "worker", status: "running",
+                      ageSeconds: 3900).heroAgeText == "1h 05m")
 
 print("")
 if failures == 0 {

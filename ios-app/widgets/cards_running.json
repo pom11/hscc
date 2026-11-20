@@ -4,7 +4,7 @@
   "kind": "widget",
   "surface_case": "widgetCardsRunning",
   "surface_raw": "widget.cardsRunning",
-  "display_name": "Running Cards Widget",
+  "display_name": "Running",
   "icon": "rectangle.stack.badge.play",
   "widget_type": "CardsRunningWidget",
   "sources": [

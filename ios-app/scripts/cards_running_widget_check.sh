@@ -110,10 +110,12 @@ report "the driver does not rebuild a metric field by field" \
 expect "the row-metric block declares the mapping" "1" \
   "$(grep -c 'init(row: CardsRunningRow)' "$ACTIVITY")"
 
-# Freshness: both surfaces must draw a self-updating relative age, and neither
+# Freshness: the Native widget draws the DATA's own clock through the shared
+# AsOfStamp (the 2026-11-20 redesign replaced the render-relative age on the
+# widget), while the Live Activity keeps its self-updating push age. Neither
 # may keep the old frozen "read just now" copy.
-expect "the widget footer draws a relative updated age" "1" \
-  "$(grep -c 'Text(entry.updatedAt, style: .relative)' "$WIDGET")"
+expect "the widget draws the data's own clock (AsOfStamp)" "1" \
+  "$([ "$(grep -c 'AsOfStamp(date: entry.dataAt)' "$WIDGET")" -ge 1 ] && echo 1)"
 expect "the Lock Screen draws a relative updated age" "1" \
   "$(grep -c 'Text(state.updatedAt, style: .relative)' "$LIVE_ACTIVITY")"
 report "no surface hard-codes a fresh 'read just now' claim" \
