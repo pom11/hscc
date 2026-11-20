@@ -11,6 +11,723 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.17.0] - 2026-11-20
+
+### Added
+- **The merge queue is now on by default for a project that can actually run
+  it.** A registry project is enabled without any flag when (1) its `repo` is
+  the root of a git work tree, (2) `origin` is a `github.com` remote, and
+  (3) it declares `merge_queue.gates` or is `hscc` (whose built-in address
+  guard + pytest legs count). A project missing any one stays off, so the
+  default can never rebase, force-push or squash-merge a checkout with no
+  local gate and no GitHub destination.
+- **`hscc merge-queue status` says why a project is off.** The status line names
+  the failed condition — `disabled (no repo)`, `disabled (no GitHub remote)` or
+  `disabled (no gates)` — and `--json` carries `enabled_source`,
+  `default_enabled` and `default_reason`. `view()` (the CLI table, the API
+  route and the widget) exposes the same fields.
+- **An explicit `hscc merge-queue disable <project>` always wins and persists.**
+  Precedence is CLI override in the ledger, then the registry's
+  `merge_queue.enabled`, then the default-on rule. `enable` still forces an
+  ineligible project on, and `disable` survives a fresh ledger read (daemon
+  restart) even after the project becomes eligible.
+- **`--help`, the design contract and the registry example now describe the
+  default-on rule instead of calling the queue opt-in.**
+- **The iOS Fleet screen now says when the server's own health verdict is old.**
+  PR #486 made `GET /v1/health` answer from a cached verify snapshot and gave
+  the payload four new keys — `age_seconds`, `generated_at`, `stale` and
+  `source` — while `ConnectionMonitor` keeps polling that route every 15 s. The
+  app decoded none of them, so a five-minute-old fleet verdict rendered exactly
+  like one that had just run: the server had stopped implying a fresh check, the
+  screen had not. `HealthResponse` (`ios-app/Sources/HSCC/Models.swift`) decodes
+  all four as **optional** (`Int?` / `Bool?` / `String?`), so a server older
+  than PR #486 — which sends none of them — still decodes, and `FleetView`'s
+  Health section adds a caption row under the verdict when the server flags
+  `stale`: `Server says this verdict is 4m old — served from the server's
+  cache.` The age reuses the app's one and only relative-age formatter,
+  `Offline.agePhrase` — the same one `Offline.load` already feeds to the
+  offline `StaleBanner` — and for 260 s it prints `4m`, the very string
+  PR #486's `_humanize_age` puts in `speak`, so the app repeats the server's
+  number instead of restating it in a second age dialect. The server's `speak`
+  stays on screen verbatim — it already carries the `Health from 4m ago.`
+  sentence — and the row deliberately is *not* a `StaleBanner`, because that
+  banner means the app could not reach the cluster, which here it plainly did.
+  When `stale` is true but the server sent no age, the row says the verdict is
+  stale and prints **no number** rather than defaulting to `0s`, which would be
+  the very implication this change exists to remove. Nothing about what the app
+  *asks* changed: the endpoint stays `/v1/health` at the same cadence and no
+  `/v1/verify` call was added — that route runs the whole fleet smoke test with
+  real GPU chat round-trips — and a new text guard in the probe gate fails any
+  Fleet change that reaches for it.
+- **CarPlay scene: design C "Rows with gauges".** One `CPListTemplate` titled
+  "HSCC": four node temperature gauges, top-three board stacked bars, the
+  longest running card, the unacknowledged count (never "All clear" after a
+  failed fetch) and the merge queue's four-stage track, each opening a pushed
+  read-only detail list. The scene reuses the widget readers, refreshes every
+  30 s while connected, and says `as of` / `stale` / `offline` from the data's
+  own clock.
+- **The CarPlay entitlement is simulator-only.** `com.apple.developer.carplay-driving-task`
+  lives only in `ios-app/Sources/HSCC.simulator.entitlements`, selected by
+  `CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]`; device and release signing
+  keep the existing entitlement files byte for byte (pinned by
+  `ios-app/scripts/carplay_check.sh`).
+
+### Changed
+- **The landing page now describes the apps and the fleet people run today.**
+  It lists the five widgets (Cluster, Boards, Running, Needs Me, Merge Queue) in
+  the Native look with their Lock Screen gauges, the single Cluster watch Live
+  Activity, the CarPlay screen (simulator today; Apple's CarPlay entitlement is
+  still required for the road), the main orchestrator (`general`, created by
+  bootstrap, does everything except a LIVE publish), and the local merge queue
+  (on by default for GitHub projects with gates; `hscc merge-queue status`). It
+  drops the retired Monitor / Kanban monitor / Board status / Projects cards,
+  the plural Live Activities, the push-notification and widget-restyle claims,
+  and corrects the `hscc check` stream names to the CLI's `dgx` and `nas`. The
+  command block is regenerated from the CLI, and every command the page names
+  is one this checkout publishes.
+- **Kanban Monitor rebuilt as the Boards widget (B3 Stacked bars); Board Status
+  and Projects retired.** The existing `KanbanMonitorWidget` kind now renders
+  the Native kit's stacked bar per board — running / todo / blocked, length
+  proportional to open cards — with done-today on the medium row, the worker-slot
+  strip and totals at large, and a one-board scope (the existing scope intent)
+  showing that board's columns plus its running card titles.
+  `GET /v1/mobile/summary` now carries `max_in_progress`, the server's
+  `kanban.max_in_progress`, so the slot cap is never a client literal. Board
+  Status and Projects leave the bundle, registry, settings rows and gates.
+- **Running, Needs Me and Merge Queue rebuilt on the Native kit (R3 / N3 /
+  M1).** The Running tile leads with the longest-running card's elapsed clock,
+  title and heartbeat (green under five minutes, orange after); Needs Me stays
+  calm with a green "All clear" only after a successful fetch and draws the
+  offline state otherwise; Merge Queue draws the head PR's rebase → gates →
+  push → merge track, the waiting count, the last results, and "Merge queue off
+  for <project>" when every queue is disabled. All three keep their WidgetKit
+  kinds, use the shared `NativeStyleKit` timestamps and stale/offline rule, and
+  the settings rows now call them Running, Needs Me and Merge Queue.
+- **Widget refresh is now deliverable and the settings cadence drives every
+  timeline.** Widgets default to 30 minutes and the Settings presets are
+  Off/30/60/120 — WidgetKit's ~40–70 reloads/day budget cannot honour the old
+  5/15-minute promises (audit W16). The app also reloads all timelines on
+  foreground and after the Cluster watch driver gets live data.
+- **Staleness is drawn on every widget family.** The shared `StaleModifier`
+  dims old/offline data to 50% and names the data's own `HH:mm`; the Cluster
+  inline family now uses it too (W2/SPEC).
+- **The macOS menu bar polls only what it draws and marks stale numbers.** A
+  60 s tick reads the selected stat's one dataset instead of eight routes; on a
+  failed read the retained number dims and prints its data clock (W6/W17).
+- **Dead widget controls are gone.** Only the Boards widget offers a scope
+  picker (one board, the one scope its route honours); Cluster's
+  state/topology/models/board toggles and every other surface's scope pickers
+  were removed (W4/W11).
+- **Fallback caches are per configuration.** Boards snapshots are keyed by
+  board slug; the retired Board Status and graph stores are keyed by board and
+  by window+node so one instance cannot overwrite another's last-known data
+  (W12).
+- **Boards honours the summary envelope.** Truncated, omitted or unreadable
+  boards refuse the all-boards read instead of under-counting, and scheduled /
+  review / triage cards (the server's `other` bucket) keep a board in the table
+  (W13/W14).
+- **Needs Me pages the alert feed.** `has_more`/`next_since` are followed until
+  the feed is drained, so an older unacknowledged alert cannot hide behind a
+  newer page before the widget says "All clear" (W15).
+- **Cluster reads get a real timeout budget and failover no longer pins a
+  broken address.** Cluster monitor/status use an 18 s ceiling above the
+  server's 10/15 s sparkrun budgets, and 404/5xx answers try the next address
+  instead of being remembered as last-working (W19/W20). A 200 monitor body
+  with no fleet sample is a failure, never an empty healthy fleet (W5).
+- **"Done today" is labelled "done 24h"** everywhere the route's rolling
+  24-hour window is drawn (W21).
+- **One Live Activity left: Cluster watch (A2).** It reuses the Cluster Health
+  activity's plumbing and redraws the four surfaces the operator picked — Lock
+  Screen header + four node temperatures/util columns + the
+  `tok/s · daemon · autodown` footer, compact `4/4` and `72° · 231 t/s`,
+  minimal hottest temperature, and the Lock Screen layout expanded. It is
+  operator-started from the app's cluster section, ends after eight hours or on
+  Stop, and is never auto-started by a foreground transition. Wake, Monitor,
+  Running Cards and Board Progress leave the bundle, their drivers/attributes,
+  settings rows, registry manifests, BG task identifiers and gates.
+- **Stale Cluster watch data keeps its real time.** A `.stale` snapshot's
+  `updatedAt` is the snapshot's date (the oldest read the push draws), so the
+  age line and `staleDate` cannot present last-known data as fresh. Refresh
+  "Off" now stops both the foreground loop and the BG submit instead of
+  becoming a one-minute poll.
+- **Lock Screen families rebuilt as L2 Gauges.** Cluster draws a hottest-node
+  temperature ring (0–90 °C) with the node label, a `CLUSTER · N TOK/S` row
+  with four node temperatures, and `4/4 up · N tok/s` inline. Boards draws the
+  server worker-slot cap as a running/slots ring, done/blocked rectangular, and
+  running/blocked inline. Running keeps its elapsed clock and `32m · title`
+  rows, Needs Me draws its count with a green check at zero, and Merge Queue
+  keeps the head PR/stage/waiting line. The rings use the shared `L2Gauge`
+  (`Gauge` with `.accessoryCircular`) and `.widgetAccentable()` so the same
+  bodies read in vibrant and monochrome rendering; the settings rows name the
+  three families each widget ships.
+- **Cluster widget rebuilt as the C1 Health line; HSCC Monitor and Cluster Graph
+  retired.** The shared `NativeStyleKit` adds the native tokens, `AsOfStamp`,
+  `MeterBar`, `Tile` and the stale/offline `StaleModifier`; the Cluster tile
+  shows the fleet state, tok/s and hottest node at small, per-node util/temp at
+  medium, and the 2 h throughput chart plus node table at large. Monitor and
+  Cluster Graph leave the bundle, registry, settings rows and gates; the macOS
+  menu-bar Graphs section keeps the shared history marks.
+
+### Fixed
+- **`scripts/release_apps.sh` takes `HSCC_APPS_NOTES_FILE`.** A CLI release archives every `changelog.d/` fragment, so an apps release cut after it rendered "No app-facing changes recorded." The variable supplies the notes file directly.
+- **`hscc project chat` now opens its window in a session named `0`.** The
+  tmux target was `=<session>`, which tmux reads as a *window* target, so the
+  session `0` resolved to window 0 and `new-window` failed with
+  `index 0 in use` — a chat-less session never got its chat. The target is
+  `=<session>:`, which pins the session and lets tmux choose the next free
+  window index (same fix as #483 for the main pane).
+- **The session's profile check no longer reads window 0 of another session.**
+  `_session_profiles` used `list-panes -t =<session>`, also a window target;
+  for a numeric session name it inspected window 0 of whatever session was
+  current, and it could not see the chat window opened with `new-window -d`.
+  It now lists `-s -t =<session>:` — the whole named session.
+- **`hscc verify`'s `api_routes` row no longer runs a second full verify while it
+  is running.** `check_api_routes` shells out to
+  `hscc_daemon/api_route_sweep.py`, and that sweep probed every literal GET route
+  parsed out of `ios-app/Sources/HSCC/HSCCClient.swift` — a file that names
+  `/v1/verify`, whose handler IS `hscc_daemon.verify.run_all()`. One `hscc
+  verify` therefore seeded a nested full verify per probe, each of them doing
+  real chat round-trips against the GPU units, and each of those sweeps probed
+  `/v1/verify` again: a branching-factor-2 chain of fleet smoke tests hanging
+  behind one reachability check, hidden as `000` because the probe's own timeout
+  fired first. The route now sits in the sweep's `NOT_SWEPT` table and is
+  reported the way a POST-only route already is — a row with `ok` true and a
+  `note` naming the gap (`route exists; verify-triggered, not swept from inside
+  verify`) — so the gap stays visible in the report instead of the route
+  silently disappearing from it.
+- **`/v1/health` can no longer report `000` on a healthy API.** The sweep handed
+  every route one `curl -m 30`, but `/v1/health` runs one inline verify when it
+  has no cached snapshot to serve — measured 64.4 s — so the probe was cut off
+  mid-request and the row printed curl's "no answer" code for a route that was
+  answering: a gate that false-flags a healthy system. Probe budgets are now
+  data: `HEAVY_ROUTES = {"/v1/health": 120}` sets that route's `-m`, while
+  `PROBE_TIMEOUT` (30 s) still applies to every other route on purpose, so a
+  route that turns slow for a reason nobody predicted stays a finding instead of
+  quietly getting a longer leash. A client source whose only literal GET is a
+  never-swept route now exits 3 (`could not run`) rather than reporting every
+  route as answering, and the human view shows a never-swept route as `skip`,
+  never as `FAIL`.
+- **`GET /v1/health` ran the whole fleet smoke test on the request thread,
+  once per poll.** `handle_health` called `verify.run_all()` — every one of its
+  17 checks, real chat round-trips to every serving GPU unit included — and the
+  API is a `ThreadingHTTPServer` with no cache, no dedupe and no
+  single-flight, so every concurrent client paid for its own verify. It was
+  also self-referential: `run_all` includes `check_api_routes`, whose route
+  sweep curls both `/v1/health` and `/v1/verify`, so one verify started two
+  more inside the API. `/v1/health` now serves the snapshot kept by the new
+  `hscc-api/health_cache.py`: TTL 120 s, stale-while-revalidate,
+  single-flight (concurrent polls share one verify), persisted atomically to
+  `~/.hscc/health_snapshot.json` with an in-process copy so the hot path never
+  reads the disk. It runs a verify inline only when no snapshot exists
+  anywhere, and it never invents a verdict. The payload stays a strict superset
+  for the iOS `HealthResponse` — `ok`, `checks` and `speak` unchanged — plus
+  `age_seconds`, `generated_at`, `stale` and `source`; a stale verdict says
+  `Health from 4m ago.` rather than implying a check that just ran.
+  `GET /v1/verify` keeps its inline semantics as the explicit trigger and now
+  records its result into the same snapshot, so a manual verify refreshes the
+  health screen and the two routes cannot drift.
+- **The merge queue's production `git`/`gh` runner no longer raises
+  `TypeError`.** `_default_runner` passed `capture_output`/`text` while
+  `_git`/`_gh` already supplied them, so every default-runner call failed and
+  the queue was inert in production.
+- **Auto-enqueue only accepts a card's PR URL when its owner/repo matches the
+  project's `origin` remote.** A link to another repo's same-numbered PR is
+  ignored instead of being rebased and merged in this project's repo.
+- **`merge_queue` state, worktrees and lock honour `HSCC_HOME`/`HSCC_DIR`.**
+  Like `alerts.py`, a sandboxed instance no longer reads or writes the live
+  `~/.hscc` ledger.
+* The live session WebSocket now answers client pings. `ws_frame.iter_data_messages`
+  dropped control frames while reassembling data, so the `OP_PING` branch in
+  `routes_ws._drain_socket` was dead: a client keepalive ping was never ponged and
+  a strict client eventually closed the stream. A new `ws_frame.iter_frames` yields
+  ping/pong/close in arrival order (data messages still reassembled);
+  `_drain_socket` consumes it, echoing a pong for every ping and completing the
+  close handshake. `iter_data_messages` keeps its existing data-only contract.
+* `test_detector_matches_only_live_cli_surface` is hermetic: it monkeypatches
+  `hermes_cli.profiles.profile_exists` and points `HERMES_HOME` at `tmp_path`
+  instead of depending on a real `hscc-orch` profile on the host. The production
+  `detect_active_cli_owner` check is unchanged.
+- **Remove/pause/disable during a run now stops before the push and the
+  merge.** The tick re-reads the claim under the file lock after the rebase,
+  after the gates, and again after the post-push probe; a cleared claim means
+  the operator removed the PR and it is dropped without a force-push or merge,
+  while pause/disable keep the entry at the head of the queue for later.
+- **The queue re-reads the PR after its force-push and merges only the exact
+  green head it pushed.** `headRefOid`, `statusCheckRollup` and `mergeable` are
+  checked on the new head, the merge is pinned with
+  `gh pr merge --match-head-commit <pushed sha>`, and an empty rollup is no
+  longer assumed green: it is accepted only when the base branch's
+  required-status-checks endpoint says the repo requires none (a 404), not when
+  the answer is unknown.
+- **Auto-enqueue only considers cards in `running`, `ready` or `review`.** A
+  `blocked`/`scheduled`/`todo` card is never merged just because its PR looks
+  green, and a PR with `reviewDecision: CHANGES_REQUESTED` is skipped even on
+  a ready card.
+- **A fleet with no obtainable verify verdict re-ran the whole smoke test on
+  every health poll.** `health_cache.get_snapshot` runs an inline verify when
+  there is no snapshot anywhere, and when the verify seam cannot produce a
+  verdict nothing gets cached — so single-flight deduped *concurrent* polls
+  while every *sequential* one started a fresh full verify. It also nested:
+  `hscc verify` → `check_api_routes` → the route sweep curls `/v1/health` (its
+  probed set is read out of the Swift client) → that cold path → a second
+  inline verify inside a verify, the nesting this lane exists to remove,
+  surviving exactly while the operator is troubleshooting a broken fleet. The
+  cold path now remembers its last failed attempt in-process (a monotonic
+  deadline, `_RETRY_AFTER`) and starts no new verify within `TTL_SECONDS` (120
+  s) of it: a broken fleet is probed once per window instead of once per poll,
+  and a fix is noticed within one window of happening. The stamp is
+  deliberately never persisted and never written to
+  `~/.hscc/health_snapshot.json` — a failed attempt is not a verdict and must
+  not come back next boot looking like one. A backed-off poll is answered with
+  the same honest shape the route always used for "no verdict":
+  `{"speak": "health check unavailable"}` with no `ok` key. `GET /v1/verify` is
+  the explicit trigger and still runs a verify every time, window open or not.
+- **A tick no longer clobbers a concurrent `hscc merge-queue add`.** Auto-enqueue
+  probes the network first, then reloads the ledger under the file lock and
+  merges only its candidates into that fresh document. A PR added while the
+  probe was running stays queued instead of being erased by the tick's
+  start-of-tick snapshot.
+- **A red-gated PR is not auto-re-enqueued until its head SHA changes.** The
+  red-gate outcome now records the head it gated; auto-enqueue compares the
+  PR's current `headRefOid` against it and skips the candidate at the same
+  SHA, so the gate, PR comment and card handback do not repeat every minute.
+  A worker push (or an explicit operator `add`) makes it eligible again.
+- **A non-green head leaves the head slot for a wait list.** Entries waiting on
+  pending checks move to `waiting` instead of being reinserted at position 0,
+  so later FIFO entries keep running. Wait-listed PRs are retried when the
+  active queue is empty (or promoted when auto-enqueue sees them go green) and
+  appear in the CLI/API/widget view in their own `waiting` state.
+- **`view()` reports the ledger's last write time, not the read time.**
+  `generated_at` is stamped on every state write (including a no-work tick), so
+  two reads with no tick between them share one timestamp. An `ok:false` route
+  answer now maps to an unavailable feed in `MergeQueueReading` and renders as
+  offline/failed in `MergeQueueWidget`, never as a fresh empty queue.
+- **The merge queue fetches `origin` before every entry, not only when its
+  worktree is first created.** A PR merged between two entries advanced the
+  base on GitHub while the queue worktree kept the old remote-tracking ref, so
+  the next PR was rebased and gated against a stale base.
+- **The queue uses each PR's `baseRefName` and the repo's real default
+  branch.** `origin/main` was hard-coded, so `master` projects
+  (`ecofire-app`, `kronos`) could never create a worktree; a PR targeting
+  `release` was silently rebased onto `main`. The default is now detected from
+  `origin/HEAD` (falling back to an existing `origin/main`/`origin/master`),
+  `merge_queue.base_branch` can pin another base, and a PR on any other base is
+  refused once with a clear reason.
+- **Cross-repository (fork) PRs are refused, not retried.** `isCrossRepository`
+  is now read; the queue only pushes branches in the project's own `origin`,
+  so a fork PR gets a terminal `refused` outcome and the reason on the PR
+  instead of three failed fetches and a permanent retry loop. Auto-enqueue
+  skips fork and wrong-base PRs for the same reason.
+- **Projects that share one repo path now share one FIFO and one per-repo
+  lock.** Two registry names on the same checkout (`ecofire-bc`,
+  `ecofire-pontaje`) each ran a PR per tick from separate worktrees; entries
+  are now ordered together and only one PR per repo is claimed per tick, under
+  a lock keyed by the canonical repo path.
+- **Cluster widget refreshes share a 20 s server-side snapshot.** `/v1/cluster/monitor`
+  and `/v1/cluster/status` cache their live sparkrun/SSH answer for
+  `CLUSTER_SNAPSHOT_TTL_S` and coalesce concurrent misses into one in-flight read
+  (single-flight). Every envelope carries `taken_at`, the cache-fill time, so a
+  widget can show the age of the sample it is drawing instead of multiplying the
+  subprocess/SSH work on every reload (W17).
+- **A degraded `/v1/cluster/monitor` is a 503, not a 200 without `json`.** The
+  body states `success: false`, `degraded: true`, the real `error` and a `speak`
+  line; `MonitorResponse` decodes `success`/`error` and exposes `isDegraded`, and
+  the Monitor Live Activity only calls a frame with host rows `serving`. A
+  reachable daemon host alone is `degraded`, never a serving fleet (W5).
+- **`/v1/projects` uses the mobile summary's rolling 24 h `done`.** `counts.done`
+  and the explicit `counts.done_24h` now match `/v1/mobile/summary` for the same
+  board, and `counts.total` uses that route's open + archived + done-24h
+  definition. The all-time facts remain as `done_all_time` and `total_all_time`,
+  named so they cannot be mistaken for the rolling window (W10).
+- **Cluster history defaults to 1 h everywhere.** The route, `hscc cluster
+  history`, `WidgetDataClient.clusterHistory`, `ClusterGraphWindow.recommended`
+  and the macOS menu-bar graphs all choose `1h`; `15m` is still requestable where
+  the recorder ring is resident, but it is no longer a default that renders
+  `recorder_ring_absent` on the deployed API (W7).
+- **`scripts/perf_measure.py` no longer runs the fleet smoke test while it is
+  measuring latency.** It kept its own copy of the sweep's route discovery and
+  probe loop, and none of PR #485's fixes reached it: `client_routes()` there
+  returned every literal `/v1/...` path in `HSCCClient.swift` with no exclusions
+  at all, and `measure()` looped a plain `curl -m 30` `--passes` times (default
+  **5**). So one ordinary run of the command quoted in
+  `docs/audits/phone-performance.md` fired `/v1/verify` — whose handler IS
+  `hscc_daemon.verify.run_all()` — five times in a row, each hit a full fleet
+  smoke test doing real chat round-trips against the GPU units, and the 30 s cap
+  only cut the *measurement* off while the verify behind it ran on to completion.
+  The table then ranked those numbers as if they were endpoint timings. The route
+  now comes out of the probed set via the sweep's own `NOT_SWEPT` and gets a
+  `skip` row naming the gap (`route exists; verify-triggered, not swept from
+  inside verify`) with `median`/`p95`/`max`/`mean` left as `null` rather than
+  `0.00s` — a route that was never called has no latency to report — plus a
+  closing line in the human view saying how many routes were not measured and
+  why. POST-only mutation routes (`MUTATION_SUFFIXES`) are excluded up front
+  instead of being fired at and dropped by `if status == "405": continue`, an
+  unpredicted 405 is reported with its real code and no timings, and a client
+  file that yields nothing to time now exits 3 (`could not run`) instead of
+  printing a green, empty "everything is fast" table. The `--json` rows keep
+  every key a consumer reads — `route`/`status`/`median`/`p95` — with `note`
+  appended, so the published shape is unchanged.
+- **The script now derives its rules instead of keeping a second copy.** It
+  imports `PROBE_TIMEOUT`, `HEAVY_ROUTES`, `NOT_SWEPT`, `NOT_SWEPT_STATUS`,
+  `NEEDS_PARAM`, `MUTATION_SUFFIXES` and `client_routes` from
+  `hscc_daemon/api_route_sweep.py` (that module already bootstraps its own
+  `sys.path`, and the script bootstraps its own the same way for the bare-script
+  invocation an operator uses). Two consequences: `/v1/health` gets its own
+  `curl -m 120` — its cold start runs one inline verify, measured 64.4 s, which
+  the blanket 30 s cap cut off so the table ranked a route that was answering as
+  a fast one — while every other route keeps 30 s on purpose; and the param map
+  stops lying. The local copy was a route→param-NAME map holding only
+  `/v1/sessions` and `/v1/memory`, so `/v1/logs` was timed against the 400
+  `handle_logs` answers for an omitted `source`: the number in the table was the
+  latency of a rejection. It is now the sweep's route→dict-of-values table, so
+  the probe sends `?source=daemon&limit=1` on the URL the app actually uses.
+  `MUTATION_SUFFIXES` was added to the sweep as the single home for the
+  `/stop` `/up` `/down` rule it had been stating inline, and the sweep's own
+  filter now reads it from there.
+- **The API can no longer exhaust the process FD limit.** `ApiHandler` now
+  reaps idle HTTP keep-alives after 15 s (`BaseHTTPRequestHandler.timeout`),
+  WebSocket upgrades clear that timeout before the protocol switch, and
+  `_ApiServer` caps simultaneous connections at 128 (excess gets `503` and a
+  closed socket). The launchd template also raises `SoftResourceLimits.
+  NumberOfFiles` to 4096 instead of inheriting launchd's 256, which the live API
+  hit as EMFILE (258 FDs) on 2026-11-20.
+- **`WidgetDataClient` no longer leaks one URLSession per timeline refresh.**
+  Every client without an injected session now shares one process-wide
+  `URLSession` (bounded to four connections per host), so keep-alive sockets are
+  reused and drained with the pool instead of accumulating until the extension
+  dies.
+- **`hscc main start` now opens its window in a session named `0`.** The tmux
+  target was `=<session>`, which tmux reads as a *window* target, so the
+  operator's session `0` resolved to window 0 and `new-window` failed with
+  `index 0 in use`; bootstrap's main-orchestrator stage and `hscc main start`
+  never started the pane. The target is `=<session>:`, which pins the session
+  and lets tmux choose the next free window index.
+- **A skipped git-hooks install no longer reads as a failure.** Bootstrap runs
+  `install_hooks.py` against `$REPO_ROOT`; when that path is not a git checkout
+  (brew's Cellar, the runtime plugin dir) the installer correctly reports
+  `skipped`, but exited 1, so `bootstrap.sh` took the failure branch and warned
+  that the commit-time address guard was INACTIVE. `skipped` now exits 0 with
+  its JSON action intact, and only a real config write error is non-zero.
+* `hscc verify`'s `api_routes` row can no longer be truncated by its own parent.
+  The route sweep bounded each request (`PROBE_TIMEOUT` 30 s, `HEAVY_ROUTES`
+  120 s for `/v1/health`) but nothing bounded the SWEEP, while the parent that
+  runs it — `check_api_routes` through `verify._capture` — allows 120 s of wall
+  clock in total. The iOS client names 34 literal GETs the sweep calls, so the
+  worst case was 33 × 30 s + 120 s = 1110 s: Python killed the sweep mid-loop, no
+  `--json` arrived, and the row could only read `unverified: api route sweep did
+  not produce a route report (exit -9)` — throwing away every route that HAD
+  answered, including the slow one the operator needed to see.
+* The sweep now bounds its own total wall clock. `SWEEP_BUDGET` (80 s) is
+  `PARENT_BUDGET` (120 s — `verify._capture`'s outer default) minus
+  `STARTUP_RESERVE` (40 s for interpreter start, `api_base()`'s `hscc api status`
+  fallback, the Swift parse and printing); all three are data in
+  `hscc_daemon/api_route_sweep.py`, and `HSCC_SWEEP_BUDGET_SECONDS` overrides the
+  total the way `HSCC_NAS_PROBE_TIMEOUT` overrides the NAS probe. Every probe gets
+  `-m min(its own cap, the whole seconds left)`, so the loop cannot overrun the
+  budget by more than one curl's overshoot.
+* A route the budget never reached keeps a row — the same six keys as every other
+  row — with status `unprobed` and the reason in `note`. A budget-limited sweep
+  exits 3 (unverified, never red) rather than 0: "every route the app calls
+  answers" over a report with holes is a false green. A route that really did not
+  answer still outranks it and exits 1, and the exit-code mapping itself is
+  unchanged.
+* A request `curl` cut off at a cap the SWEEP chose (curl exit 28 at a shrunk
+  `-m`) is a named gap, not a dead route — it may have answered a second later.
+  Cut off at the route's own cap it stays exactly the finding it always was.
+* `--json` gains `not_probed` and `budget`, and a limited run also carries
+  `error`/`could_not_run`, so the operator's row names the routes instead of
+  printing `{`. The human view shows such a row as `gap` (never `FAIL`) and
+  refuses the "All swept routes answered" panel.
+
+### Verified
+- `hscc_daemon/tests/test_merge_queue.py`: **67 passed** (40 before; 27 new
+  cases) on the venv python with temp `HSCC_HOME`/registry. New cases cover
+  each eligibility branch (eligible with declared gates; hscc built-in gates;
+  explicit empty gates; no repo path; non-git directory; local-path or missing
+  origin; absent and empty gates), the GitHub URL forms, the explicit CLI
+  disable winning and persisting, explicit enable on a no-gate project,
+  registry true/false, the human status reason, the `--help` contract, and a
+  real tick with no registry `enabled` flag. Each new case fails on the
+  pre-fix module (checked by stashing only the two source files).
+- CLI smoke under a temp `HSCC_HOME` + temp `FLIGHTDECK_REGISTRY`:
+  `hscc merge-queue status` prints the reason, `disable` flips a
+  default-enabled project off and a second `status` keeps it off.
+- `python3 scripts/address_guard.py --tracked`: clean.
+- `hscc-project/tests/test_tmux_chat.py`: fake-runner target assertions for a
+  chat-less session named `0`, the `list-panes` target, and a real throwaway
+  tmux server (`tmux -L`, never the default) holding session `0` whose window 0
+  exists — the chat opens at window index 1 instead of failing.
+- `hscc_daemon/tests/test_api_route_sweep_standalone.py`: **4 new cases** pinning
+  both rules from the argv the sweep actually builds. They capture the whole
+  argument list a stand-in `curl` is handed — the existing query-parameter pin
+  recorded only the URL, and a probe budget lives in the flags — and assert (a)
+  no probe URL ends in `/v1/verify` while the route is still reported, `ok` true,
+  with the not-exercised note and the same six-key row shape as a probed route,
+  and (b) the `/v1/health` probe is built with `-m 120` while `/v1/ping` and
+  `/v1/activity/feed` keep `-m 30`. Still fully hermetic — a fake keg in
+  `tmp_path`, a closed loopback port and a fake `curl` — so no socket is opened
+  and the fleet is never reached.
+- `pytest scripts/tests/test_site_landing.py` (30 passed), `python3
+  scripts/gen_site_commands.py --help-file
+  scripts/tests/fixtures/hscc_help_landing.txt`, `HSCC_DRY_RUN=1
+  scripts/publish_site.sh` (staged, not committed, protected subtrees intact),
+  `hscc merge-queue status` / `list` and `hscc main status` in a temporary
+  `HSCC_HOME`, and `python3 scripts/address_guard.py --tracked` (clean).
+- `ios-app/scripts/widget_registry.py --check`, `kanban_monitor_widget_check.sh`,
+  `cluster_widget_check.sh`, `widget_style_check.sh`,
+  `widget_view_dispatch_check.sh`, `widget_settings_check.sh`,
+  `model_decode_check.sh`, both app `build_check.sh` targets,
+  `macos-app/scripts/widget_parity_check.sh`,
+  `pytest hscc-api/tests/test_routes_mobile.py
+  hscc-api/tests/test_widget_route_parity*.py scripts/tests/test_widget_registry.py`
+  (40 passed), `hscc kanban monitor` against a temp HERMES_HOME, and
+  `python3 scripts/address_guard.py --tracked` (clean).
+- `ios-app/scripts/connection_probe_check`: **67 → 87 PASS**, and the gate's
+  built-in negative test still trips. The committed live capture of `/v1/health`
+  — a pre-#486 body carrying none of the four new keys — still decodes into
+  `HealthResponse` with all four `nil`; it was not touched, because it *is* the
+  backward-compatibility contract. Four new fixtures, synthesised from what
+  `handle_health` returns at `96a5cc14` (`age_seconds` = `max(0, now -
+  generated_at)`, `stale` = `age_seconds > 120`, `source` = `cache`|`inline`)
+  and decoded by the REAL model types — this card never called the live API —
+  pin `stale == true` / `age_seconds == 260` / `source == "cache"`, the exact
+  rendered sentence, and that a verdict the server did not flag renders no age
+  line at all. Two of them were proven load-bearing by sabotage: reading an
+  absent `stale` as "stale" fails the gate, and a Fleet screen reaching for
+  `EndpointPath.verify` fails the new cheap-route guard before it even compiles.
+- `ios-app/scripts/fleet_offline_check`: **3 → 8 PASS**. The new cases pin
+  `Offline.agePhrase` — the app's one relative-age formatter, now feeding both
+  the offline `StaleBanner` and the server-age row — at `260s → "4m"`, the same
+  string PR #486's `_humanize_age` puts in `speak` for that age, plus its
+  hour/day boundaries and its floor at `0s` for a negative stamp.
+- `ios-app/scripts/build_check.sh`: HSCC 78 files, HSCCWidgets 39,
+  HSCCLiveActivity 6, HSCCLiveActivityMonitor 22 — 0 errors, 0 warnings, so the
+  real `FleetView.swift` compiles for the iphonesimulator target. Compile only;
+  nothing here was built or run on a device.
+- `ios-app/scripts/widget_registry.py --check`, `cards_running_widget_check.sh`,
+  `widget_style_check.sh`, `widget_view_dispatch_check.sh`,
+  `widget_settings_check.sh`, `model_decode_check.sh`, both app
+  `build_check.sh` targets, `macos-app/scripts/widget_parity_check.sh`, every
+  offline app gate (the app-build-checks glob),
+  `pytest scripts/tests/test_widget_registry.py
+  hscc-api/tests/test_widget_route_parity*.py` (14 passed), and
+  `python3 scripts/address_guard.py --tracked` (clean).
+- `hscc-api/tests/test_health_cache.py`: 31 new cases, every one asserting how
+  often the fake verify seam is reached rather than a wall clock — a fresh
+  snapshot answers with the seam hit zero times, eight concurrent first polls
+  produce exactly one verify, a stale snapshot is returned while its single
+  background refresh is still blocked, and a verify that raises stores nothing
+  and cannot overwrite the last good verdict. `hscc-api/tests/conftest.py`
+  gained an autouse reset of the process-global snapshot, so one test's verdict
+  cannot answer a sibling test's `/v1/health`.
+- `hscc_daemon/tests/test_merge_queue.py`: real `_default_runner` on a
+  throwaway git repo (no subprocess mock), cross-repo and own-origin
+  auto-enqueue, and `HSCC_HOME`/`HSCC_DIR` path + write isolation; the four
+  defect tests fail on the pre-fix file.
+- `hscc-api/tests/test_routes_merge_queue.py`, `hscc merge-queue
+  add/status/remove` under a temp `HSCC_HOME`, and
+  `python3 scripts/address_guard.py --tracked` (clean).
+* Gate under `~/.hermes/hermes-agent/venv/bin/python`:
+  `test_ws_frame.py` + `test_ws_route.py` + `test_send_working_indicator.py`
+  = **40 passed**. The new real-client ping test
+  (`test_client_ping_gets_pong`, the `websockets` client) timed out against the
+  pre-fix tree; the detector test failed with an empty `HERMES_HOME` before the
+  hermeticity fix.
+* `hscc api --help` smoke-tested with an isolated `HSCC_HOME` (argparse prints
+  the unchanged verb help); no server was started.
+* `python3 scripts/address_guard.py --tracked` clean.
+- `hscc_daemon/tests/test_merge_queue.py`: ten new cases cover the three
+  fixed defects — remove mid-gate, pause/disable mid-gate (queue entry kept),
+  post-push pending checks, a changed head SHA, empty rollup with and without
+  required checks, the `--match-head-commit` argument, card-status filtering,
+  and `CHANGES_REQUESTED`; each fails on the pre-fix file.
+- `hscc_daemon/tests/test_merge_queue.py`,
+  `hscc-api/tests/test_routes_merge_queue.py` and
+  `hscc_daemon/tests/test_kanban_live.py`: 91 passed. `hscc merge-queue
+  add/list/status/remove` under a temp `HSCC_HOME`, and
+  `python3 scripts/address_guard.py --tracked` (clean).
+- `hscc-api/tests/test_health_cache.py`: 9 new cases, all of them about how
+  often the fake verify seam is reached on a fleet that can never produce a
+  verdict. Four sequential polls cost ONE verify and every one of them is
+  answered `{speak: "health check unavailable"}` with no `ok` key and no
+  snapshot file written; the window defers a probe without stopping one, so a
+  fleet that recovers is served within one window; eight concurrent failing
+  polls share a single verify (they used to queue up eight); the window never
+  gates `GET /v1/verify`, never hides a snapshot or its stale revalidation, and
+  is ended by storing a verdict or by `reset_state()`. Mutation-checked against
+  three edits of `health_cache.py` — drop the window check (5 of these cases
+  fail), never arm the stamp (9 fail), never clear it on store (1 fails) —
+  against a green 40-case control.
+- `hscc_daemon/tests/test_merge_queue.py` (40 passed) and
+  `hscc_daemon/tests/test_kanban_live.py` (54 passed): 94 passed. New cases
+  cover the concurrent CLI add, red-gate suppression until the head moves,
+  the wait list letting FIFO entry #8 merge while #7 is pending, and
+  `generated_at` stability plus the idle-tick stamp; each fails on the pre-fix
+  file.
+- `hscc-api/tests/test_routes_merge_queue.py` and
+  `tests/test_widget_route_parity.py`: 7 passed.
+- `ios-app/scripts/model_decode_check.sh`: 363/363 checks, including the new
+  `v1_merge_queue_not_ok.json` fixture (ok:false is offline, not empty).
+  `build_check.sh`: 4 targets, 0 errors, 0 warnings;
+  `widget_style_check.sh`: passed.
+- CLI smoke under a temp `HSCC_HOME`: `merge-queue add/status/list/remove`
+  round-trips (status shows `waiting=`), and
+  `python3 scripts/address_guard.py --tracked` is clean.
+- `hscc_daemon/tests/test_merge_queue.py`: six new tests (fresh fetch on an
+  existing worktree after a second clone advances the base, `master` default,
+  wrong-base refusal plus auto-enqueue skip, configured `base_branch`, fork
+  refusal plus auto-enqueue skip, and shared-repo FIFO/lock). Each fails on the
+  pre-fix file.
+- `hscc-api/tests/test_routes_merge_queue.py`, `hscc merge-queue status/list`
+  under a temp `HSCC_HOME`, and `python3 scripts/address_guard.py --tracked`
+  (clean).
+- `hscc-api/tests/test_routes_cluster.py`: snapshot TTL and single-flight, the
+  `taken_at` envelope, and the 503 `success:false` monitor degradation.
+- `hscc-api/tests/test_routes_project.py`: `done`/`done_24h`/`total` match
+  `kanban_live.board_status_counts`, with `done_all_time`/`total_all_time` kept.
+- `hscc-api/tests/test_contract_swift_routes.py`: the Swift history defaults are
+  the durable `.oneHour`, not `.fifteenMinutes`.
+- `ios-app/scripts/model_decode_check.sh` (356 checks) decodes the new degraded
+  monitor fixture and executes `MonitorActivityState`, including "daemon host
+  alone is degraded"; `ios-app/scripts/cluster_widget_check.sh` (134 checks).
+- `pytest hscc-api/tests/test_routes_cluster.py test_routes_project.py
+  test_contract_swift_routes.py test_cluster_history_parity.py
+  test_cluster_history_cli_parity.py test_widget_route_parity.py
+  test_widget_route_parity_cards.py` (210 passed).
+- `hscc cluster history --json` (read-only, local recorder) answers
+  `window=1h`, `tier=1`, `source=sqlite_store` when no flag names a window.
+- `python3 scripts/address_guard.py --tracked` (clean).
+- `scripts/tests/test_perf_measure_routes.py`: **new file, 15 cases** — there was
+  no test for this script at all. Same harness as
+  `hscc_daemon/tests/test_api_route_sweep_standalone.py`: a fake project tree in
+  `tmp_path` holding the real script and the real sweep module beside a planted
+  Swift client, a closed loopback port, and a fake `curl` on PATH whose recorded
+  argv is asserted, so the proof is about the request that did not go out and
+  not about what the report claims. It pins that no argv names `/v1/verify` or a
+  mutation route while both stay in the report; that `/v1/health` is built with
+  `-m 120` and `/v1/ping` with `-m 30`; that the tables the script uses are the
+  **same objects** as the sweep's (identity, not equality — `==` would still hold
+  after a re-pinned copy drifted) and that its source re-declares none of them;
+  and that every row keeps the published key order with `null` rather than a
+  number where nothing was measured. Nothing in the file touches the live API or
+  runs `hscc verify`; the fleet was never reached.
+- `ios-app/scripts/widget_settings_check.sh` (golden refreshed),
+  `widget_data_client_check.sh`, `cluster_widget_check.sh`,
+  `kanban_monitor_widget_check.sh`, `cards_running_widget_check.sh`,
+  `carplay_check.sh`, `widget_style_check.sh`, `widget_view_dispatch_check.sh`,
+  `live_activity_rehydration_check.sh`, `shared_store_check.sh`,
+  `snapshot_store_check.sh`, both app `build_check.sh` targets, and every
+  offline app gate in the CI glob: green.
+- `pytest hscc-api/tests/test_routes_cluster.py test_routes_mobile.py
+  test_routes_alerts.py` — 94 passed; `hscc_daemon` `test_alerts.py` +
+  `test_kanban_live.py` — 72 passed.
+- `python3 scripts/address_guard.py --tracked`: clean. No CLI verb changed; no
+  live HSCC/Hermes state was written.
+- `ios-app/scripts/widget_registry.py --check`, `live_activity_rehydration_check.sh`,
+  `cards_running_widget_check.sh`, `widget_style_check.sh`,
+  `widget_settings_check.sh`, `model_decode_check.sh`, `shared_store_check.sh`,
+  `update_check.sh`, both app `build_check.sh` targets, every offline app gate
+  (the app-build-checks glob), `macos-app/scripts/widget_parity_check.sh`,
+  `pytest scripts/tests/test_widget_registry.py scripts/tests/test_apps_release.py`,
+  and `python3 scripts/address_guard.py --tracked` (clean). No CLI verb changed;
+  no live HSCC/Hermes state was written.
+- `hscc-api/tests/test_keepalive_bounds.py`: 24 idle authenticated keep-alives
+  are reclaimed after the real timeout, the server-side FD count drops while the
+  clients are still open, and the whole process returns to baseline; a
+  two-connection cap refuses the third with `503`.
+- `hscc-api/tests/test_ws_route.py::test_websocket_outlives_the_http_idle_timeout`:
+  a live stream survives longer than the HTTP idle timeout and still carries
+  events.
+- `hscc_daemon/tests/test_api_launchd.py`: the generated plist raises the NOFILE
+  soft limit (template only).
+- `ios-app/scripts/widget_data_client_check.sh`: two production clients hold the
+  same `URLSession` instance.
+- `ios-app/scripts/widget_registry.py --check`, `cluster_widget_check.sh`,
+  `cards_running_widget_check.sh`, `kanban_monitor_widget_check.sh`,
+  `widget_style_check.sh`, `widget_view_dispatch_check.sh`,
+  `widget_settings_check.sh`, `model_decode_check.sh`, both app
+  `build_check.sh` targets, `macos-app/scripts/widget_parity_check.sh`,
+  `pytest scripts/tests/test_widget_registry.py scripts/tests/test_ios_manifest.py`,
+  and `python3 scripts/address_guard.py --tracked` (clean).
+- `ios-app/scripts/widget_registry.py --check`, `cluster_widget_check.sh`,
+  `widget_style_check.sh`, `widget_view_dispatch_check.sh`,
+  `widget_settings_check.sh`, `model_decode_check.sh`, both app
+  `build_check.sh` targets, `macos-app/scripts/widget_parity_check.sh`,
+  `pytest scripts/tests/test_widget_registry.py scripts/tests/test_ios_manifest.py
+  hscc-api/tests/test_widget_route_parity*.py` (21 passed), and
+  `python3 scripts/address_guard.py --tracked` (clean).
+- `hscc_daemon/tests/test_main_cli.py`: fake-runner target assertion plus a
+  real throwaway tmux server (`tmux -L`, never the default) with a session
+  named `0` whose window 0 exists — the pane opens at window index 1.
+- `hscc-bootstrap/tests/test_install_hooks.py`: CLI rc for `skipped` is 0, and
+  the extracted real bootstrap stage prints `git hooks not armed: not a git
+  checkout` instead of `install failed … INACTIVE`.
+* Gate under the runner's interpreter (`~/.hermes/hermes-agent/venv/bin/python`):
+  `hscc_daemon/tests/test_api_route_sweep_standalone.py` +
+  `test_sweep_roundtrip_no_ansi.py` = **42 passed** (34 passed was the baseline at
+  `176f8042`) — 8 new cases. Full `hscc_daemon` leg: **3962 passed, 1 skipped**.
+* 6/6 source-mutation probes CAUGHT against a green control (budget stop deleted;
+  budget-limited run reporting green; shrunk-cap timeout reported as a dead route;
+  per-probe cap no longer wrapped; gap row rendered as FAIL; `PARENT_BUDGET` set
+  to a number `verify._capture` does not use). Mutants restored byte-exact.
+* Nothing touched the live API, `hscc verify` or the fleet: every case runs the
+  fake keg in `tmp_path`, the closed loopback port `127.0.0.1:1`, and a fake
+  `curl` on PATH that sleeps and sets curl's own exit code.
+- `ios-app/scripts/carplay_check.sh`: 59 executed reading checks (temperature
+  bands, the five row sentences, queue stages, the 30 s stale rule, no
+  "All clear" after a failed fetch), the iOS-SDK compile leg clean, and the
+  three release entitlement files' SHA-256 pins unchanged.
+- `ios-app/scripts/build_check.sh`: all four targets compile clean;
+  `check_sources.sh` and `widget_registry.py --check` green; `xcodegen` emits
+  the CarPlay scene role and keeps the device `CODE_SIGN_ENTITLEMENTS`.
+- No CLI verb changed; no server route added. The CarPlay scene was never
+  built for a device, signed, installed or launched.
+
+### Docs
+- **`docs/audits/phone-performance.md` now says what its latency table was
+  actually measured by.** The table under "Slowest endpoints (measured
+  read-only, median of 5 passes, live API)" is one run of `python3
+  scripts/perf_measure.py --passes 5` at `d26a7fb0` (2026-09-02) — still the
+  only revision of that script on `main` before PR #490 — and that revision's
+  run fired `/v1/verify` five times (each hit a fleet smoke test doing real
+  chat round-trips on the GPU units), fired the POST-only `/stop` `/up` `/down`
+  family, timed `/v1/logs` without the query the app always sends, and cut
+  `/v1/health`'s cold start off at `curl -m 30`. So the heading's "measured
+  read-only" was not true of the run that produced the numbers. The audit now
+  pins the command, the revision, and that the run predates the never-fire
+  rule, so a reader does not take the table as something a current
+  `--passes 5` reproduces byte for byte; the repro block states what
+  `/v1/verify` and `/v1/health` do differently now (never fired / a
+  `HEAVY_ROUTES` `-m 120` of its own) and points at
+  `hscc_daemon/api_route_sweep.py`'s tables as the single home of those rules
+  instead of re-deriving them per script. Nothing was re-measured and no
+  ranking changed: the six routes in the table are read paths, and the note
+  says plainly that the contention the five verifies caused is an inference,
+  not a corrected number.
+- **`docs/API.md` told a client author that `GET /v1/health` runs
+  `verify.run_all()`.** It does not: since the cached-snapshot work (#486) the
+  route answers from the health cache — the last fleet verdict plus how old it
+  is — and `GET /v1/verify` is the only route that runs the check inline. The
+  endpoint row now lists the payload the route actually returns
+  (`age_seconds`, `generated_at`, `stale`, `source`) and spells out that a poll
+  never runs a verify except when no snapshot exists anywhere; the
+  "`/v1/ping` vs `/v1/health`" note became the three-way split — `/v1/ping` is
+  the API process being alive, `/v1/health` is the last fleet verdict and its
+  age, `/v1/verify` is "run the fleet check now", the one route worth keeping
+  off a timer. `docs/DESIGN-api.md` carried the same stale claim in its
+  `GET /v1/health` section and is corrected the same way; its `speak`
+  contract now also names the stale-age suffix the server already emits.
+- **`docs/README.md` now indexes the two 2026-11-20 widget-redesign files.**
+  `docs/design/2026-11-20-widget-redesign.md` and its mock companion
+  `docs/design/2026-11-20-widget-redesign-mock.html` landed in PR #487
+  without the entries `readme_lint.py` rule (4) requires, so the whole
+  `scripts` leg was red on `main` — `1 failed, 39 passed` at `3c44e9d8`,
+  and the failure blocked every card gating on `scripts/tests`. Both lines
+  are labelled **live**: the spec is the operator-pick contract later widget
+  cards build against (Cluster C1 and the Monitor/Cluster Graph retirement
+  shipped in #487, Boards B3 and the Board Status/Projects retirement in
+  #492), and the mock is its visual reference — the same pairing the index
+  already uses for `docs/design/ios_redesign_mockup.html`.
 ## [2.16.0] - 2026-11-19
 
 ### Added
