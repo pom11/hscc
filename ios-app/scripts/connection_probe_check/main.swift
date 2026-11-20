@@ -65,6 +65,100 @@ do {
     exit(1)
 }
 
+// 1b) The PR #486 freshness keys (t_67c5b0f2). The capture above is a PRE-#486
+//     body and carries none of them, so it is the backward-compatibility half of
+//     the contract: the four new keys must decode as nil, and `stale == nil`
+//     must never be read as "fresh".
+//
+//     The other fixtures below are SYNTHESISED from the payload `handle_health`
+//     returns at 96a5cc14 — `age_seconds` = max(0, now - generated_at),
+//     `stale` = age_seconds > 120, `source` = "cache" | "inline" — and are
+//     fixtures, not captures: this card never called the live API.
+func decodeHealthFixture(_ file: String) -> HealthResponse {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/" + file)) else {
+        print("FAIL: cannot read fixtures/\(file) — the gate's fixture set is incomplete")
+        exit(1)
+    }
+    do {
+        return try JSONDecoder().decode(HealthResponse.self, from: data)
+    } catch {
+        print("FAIL: fixtures/\(file) no longer decodes into HealthResponse — \(error)")
+        exit(1)
+    }
+}
+
+let preCache = decodeHealthFixture("v1_health.json")
+assert(preCache.age_seconds == nil && preCache.generated_at == nil
+       && preCache.stale == nil && preCache.source == nil,
+       "the pre-#486 capture decodes with all four PR #486 keys nil (strict superset holds)")
+assert(!preCache.serverSaysVerdictIsStale,
+       "a server that cannot say stale is NOT reported as stale (nil is not false)")
+assert(preCache.serverVerdictAgeSeconds == nil,
+       "a server that sent no age yields no age — never a defaulted 0s")
+
+let staleCached = decodeHealthFixture("v1_health_stale.json")
+assert(staleCached.stale == true && staleCached.source == "cache",
+       "the stale cached verdict decodes stale + source")
+assert(staleCached.generated_at != nil,
+       "generated_at decodes as the epoch the verify ran")
+assert(staleCached.age_seconds == 260 && staleCached.serverVerdictAgeSeconds == 260,
+       "the server's own age_seconds is what the view is handed (260s)")
+assert(staleCached.speak.contains("Health from 4m ago."),
+       "the server's own age sentence stays inside speak, untouched")
+assert(staleCached.serverSaysVerdictIsStale,
+       "the stale cached verdict is the case the screen must flag")
+// The sentence the screen renders. "4m" is what fleet_offline_check proves
+// Offline.agePhrase yields for 260 s — the SAME string the server's own
+// _humanize_age puts in speak for the same age — so the app repeats the
+// server's number rather than restating it in a second age dialect.
+assert(staleCached.serverVerdictAgeLine(agePhrase: "4m")
+       == "Server says this verdict is 4m old — served from the server's cache.",
+       "the stale line states the server's age and where the verdict came from")
+
+let staleNoAge = decodeHealthFixture("v1_health_stale_no_age.json")
+assert(staleNoAge.serverSaysVerdictIsStale,
+       "stale without an age still flags the verdict stale")
+assert(staleNoAge.serverVerdictAgeSeconds == nil,
+       "stale without an age yields NO number — rendering 0s here is the lie this prevents")
+assert(staleNoAge.serverVerdictAgeLine(agePhrase: nil)
+       == "Server says this verdict is stale — served from the server's cache.",
+       "stale without an age says 'stale' and prints no number at all")
+assert(!staleNoAge.serverVerdictAgeLine(agePhrase: nil)!.contains("0s"),
+       "the no-age line never falls back to a fabricated '0s' (that reads as just-checked)")
+
+let freshCached = decodeHealthFixture("v1_health_fresh_cache.json")
+assert(freshCached.age_seconds == 45 && !freshCached.serverSaysVerdictIsStale,
+       "an age under the TTL flags nothing (a fresh cached verdict is not bad news)")
+assert(freshCached.serverVerdictAgeLine(agePhrase: "45s") == nil,
+       "a verdict the server did not flag renders no age line — no crying wolf")
+
+let coldStart = decodeHealthFixture("v1_health_inline.json")
+assert(coldStart.source == "inline" && !coldStart.serverSaysVerdictIsStale,
+       "the cold-start inline verdict is never flagged stale — it ran for this very request")
+assert(coldStart.serverVerdictAgeLine(agePhrase: "0s") == nil,
+       "an inline verdict shows no age line either (0s old would be noise, not honesty)")
+// An unrecognised source is echoed, never folded onto cache/inline prose, so a
+// source added server-side later cannot be silently mislabelled on screen.
+// Inline JSON rather than a fixture file: this shape is not a wire capture, it
+// is the defensive arm of the mapping.
+let unknownSource: HealthResponse
+do {
+    let unknownSourceBody = """
+    {"ok":true,"checks":[],"speak":"x","age_seconds":300,"stale":true,"source":"ring"}
+    """
+    unknownSource = try JSONDecoder().decode(HealthResponse.self,
+                                             from: Data(unknownSourceBody.utf8))
+} catch {
+    print("FAIL: an unknown source value must still decode — \(error)")
+    exit(1)
+}
+assert(unknownSource.serverVerdictAgeLine(agePhrase: "5m")
+       == "Server says this verdict is 5m old — source: ring.",
+       "an unrecognised source is echoed verbatim, not folded onto the cache/inline wording")
+assert(preCache.stale == nil, "the pre-#486 capture genuinely has no stale flag to phrase")
+assert(staleNoAge.serverVerdictAgeLine(agePhrase: "4m") != nil,
+       "the no-age line is still produced when a phrase is offered (age wins when known)")
+
 // 2) Classification: the file's long-standing ANY-HTTP-RESPONSE contract holds
 //    (a 500 or a 404 proves reachability), while auth refusal is the ONE
 //    non-transport failure that counts as unreachable (operator spec:

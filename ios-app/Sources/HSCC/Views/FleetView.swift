@@ -225,6 +225,22 @@ struct FleetView: View {
         Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
             .font(.subheadline)
             .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
+        // PR #486 made /v1/health answer from a cached verify snapshot, so the
+        // verdict above can be old while the request that carried it succeeded.
+        // Say so when the SERVER says so. This is a different fact from the
+        // `StaleBanner` above (which means *we* could not reach the cluster and
+        // are showing our own cache), and it stays deliberately out of that
+        // banner: here the cluster answered fine — its answer is just aged.
+        // `speak` is left untouched above and still carries the server's own
+        // "Health from 4m ago." sentence; this row is the always-visible,
+        // non-spoken form of the same fact, so the age is not only audible.
+        if let ageLine = state.serverVerdictAgeLine(
+            agePhrase: state.serverVerdictAgeSeconds
+                .map { Offline.agePhrase(TimeInterval($0)) }) {
+            Label(ageLine, systemImage: "clock.arrow.circlepath")
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.warn)
+        }
         // Spec §5: was a byte-twin of Ops' `verifyBody`; both now render
         // through the one HealthCheckList so the check rows cannot drift.
         HealthCheckList(state.checks, emptyMessage: "No health checks reported.")
