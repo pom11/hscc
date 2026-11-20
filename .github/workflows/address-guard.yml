@@ -12,6 +12,11 @@ name: address-guard
 # Detection is the SAME module the hook and the pytest gate use
 # (scripts/address_guard.py) — never a second regex.
 #
+# Since t_2895cb8e this job ALSO hard-gates the docs-index lint
+# (scripts/readme_lint.py --strict). It lives here, in the fast guard lane
+# that every PR already runs, rather than as a new required status — see the
+# step's own comment for why the pytest `scripts` leg was not enough.
+#
 # Enforcement is a repository variable, not an edit to this file, so the
 # advisory-vs-blocking decision stays an operator setting:
 #
@@ -64,7 +69,8 @@ permissions:
 concurrency:
   group: address-guard-${{ github.ref }}
   # Keep this false once the job is made a required check: a CANCELLED check
-  # counts against branch protection, and at ~13 s the job is not worth racing.
+  # counts against branch protection, and at well under a minute (even with
+  # the lint venv cached) the job is not worth racing.
   cancel-in-progress: false
 
 jobs:
@@ -128,3 +134,63 @@ jobs:
             echo "::warning::real operator address in the committed tree (advisory: ADDRESS_GUARD_ENFORCE is not set to true) — see the file:line list above"
           fi
           exit 0
+
+      # ── docs-index lint (t_2895cb8e) ─────────────────────────────────────
+      # Rule (4) of scripts/readme_lint.py compares every file git tracks
+      # under docs/ (`git ls-files docs`) against the backtick-quoted entries
+      # in docs/README.md. Until now it ran only inside the pytest `scripts`
+      # leg, and leg_verdict.sh maps a failing leg to an ADVISORY green unless
+      # HSCC_TESTS_ENFORCE=true — so three PRs merged unlisted docs/ files and
+      # each became a catch-up card on main's behalf (t_d55365c9 / PR #496,
+      # t_970e0067 / PR #518, t_c242073f dup). The lint works; it never ran
+      # before merge.
+      #
+      # This step is HARD: rc=1 (a finding) and rc=2 (the lint could not run)
+      # both fail `guard` — same fail-closed posture as the address scan
+      # above, and NOT gated by ADDRESS_GUARD_ENFORCE / HSCC_TESTS_ENFORCE.
+      # Flipping the global leg switch stays the operator's call (t_3f56c95f:
+      # the 2.17 CI measured 6 of 12 legs red while advisory — flipping it now
+      # would freeze every merge). Gating one rule with a proven-green
+      # baseline is the one notch that cannot freeze anything: at 0ab64ded
+      # `readme_lint --repo . --strict` reported `docs-index: 215/215
+      # findings: 0` (rc=0, 0.5 s). Never ship a red-by-default gate.
+      - name: Set up the lint interpreter
+        # The runner's bare python3 CANNOT run the lint: lint_repo() always
+        # builds the CLI oracle (build_oracle -> hscc_cli_help_audit ->
+        # flightdeck.cli / hscc_daemon modules), which imports third-party
+        # packages. Measured on a clean --without-pip venv: rc=2 "CANNOT RUN:
+        # ModuleNotFoundError: No module named 'rich'". So the interpreter
+        # needs deps; requirements.txt is the deployed-runtime contract, and
+        # installing the WHOLE file means this step never has to track which
+        # module of that import chain happens to need `rich` (or the next
+        # package) today — a new import cannot silently turn this guard red
+        # on every PR. Same setup-python + venv-cache pattern as pytest-legs
+        # (python 3.13, so both lanes share one CPython posture). The lint
+        # itself is ~0.5 s; the ~30 s cost is the interpreter + deps, cached
+        # per requirements.txt hash after the first run.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Restore the lint venv
+        id: lint-venv
+        uses: actions/cache@v4
+        with:
+          path: .lint-venv
+          key: lint-venv-${{ runner.os }}-${{ runner.arch }}-py313-${{ hashFiles('requirements.txt') }}
+
+      - name: Build the lint venv
+        if: steps.lint-venv.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          python3 -m venv .lint-venv
+          .lint-venv/bin/python -m pip install --quiet --upgrade pip
+          .lint-venv/bin/python -m pip install --quiet -r requirements.txt
+
+      - name: Docs-index lint (readme_lint --strict)
+        # Plain run: any non-zero exit (finding or cannot-run) fails the step,
+        # hence `guard`, hence the PR. The summary line (files / docs-index /
+        # findings counts) lands in the log for the reviewer either way.
+        run: .lint-venv/bin/python scripts/readme_lint.py --repo . --strict
