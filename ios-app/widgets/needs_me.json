@@ -14,9 +14,9 @@
     "declared-and-renders (`SmallNeedsMe`)",
     "declared-and-renders (`MediumNeedsMe`)",
     "declared-and-renders (`LargeNeedsMe`)",
-    "declared-and-renders (`Text(entry.inlineLine)`)",
-    "declared-and-renders (`NeedsMeCircular`)",
-    "declared-and-renders (`NeedsMeRectangular`)"
+    "declared-and-renders (`Text(entry.inlineLine)` — `N need you` / `nothing needs you`)",
+    "declared-and-renders (`NeedsMeCircular` — L2 count gauge, green check at zero)",
+    "declared-and-renders (`NeedsMeRectangular` — `N need you` + top item)"
   ],
   "coverage_macos": [
     "declared-and-renders (`SmallNeedsMe`)",

@@ -118,6 +118,24 @@ expect("rectangular", "two-line tally + detail",
 expect("rectangular", "first node row is present, compact",
        rect.rows.first?.title == "node-1 · model-a")
 
+// ---------------------------------------------------------------------------
+// 2b — L2 Lock Screen families (2026-11-20 operator pick). The accessory
+// bodies draw these values, so they are executed here without a simulator.
+// ---------------------------------------------------------------------------
+
+let l2Entry = ClusterEntry(date: .now, fleet: fleet, configured: true, paused: false)
+let l2 = l2Entry.c1
+expect("l2", "the hottest C1 node is node-3 at its GPU reading (78 °C)",
+       l2.hottestNode?.label == "node-3" && l2.hottestNode?.tempC == 78)
+expect("l2", "the circular gauge fills inside the 0...90 °C contract",
+       l2.hottestGaugeValue == 78)
+expect("l2", "the rectangular header is CLUSTER · N TOK/S",
+       l2.rectangularHeadline == "CLUSTER · 12 TOK/S")
+expect("l2", "the rectangular row carries four node temperatures",
+       l2.rectangularTemps == ["63°", "63°", "78°", "74°"])
+expect("l2", "the inline line is the tally + tok/s",
+       l2.inlineL2 == "4/4 up · 12 tok/s")
+
 // The entry's gate states and failure/age footer.
 let timedOut = ClusterEntry(date: .now, fleet: nil, failure: .timeout(seconds: 8),
                             configured: true, paused: false, lastKnownAgeMinutes: 3)

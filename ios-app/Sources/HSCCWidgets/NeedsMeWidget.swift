@@ -399,23 +399,27 @@ struct NeedsMeCircular: View {
                 .font(.body)
                 .foregroundStyle(.primary)
         } else if entry.count == 0 {
-            VStack(spacing: 0) {
+            Gauge(value: 0.0, in: 0...1) {
+                Text("Need you")
+            } currentValueLabel: {
                 Image(systemName: "checkmark")
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                Text("all clear")
-                    .font(NativeStyle.small())
-                    .foregroundStyle(.secondary)
+                    .font(NativeStyle.number(20, weight: .bold))
+                    .foregroundStyle(NativeStyle.ok)
             }
+            .gaugeStyle(.accessoryCircular)
+            .tint(NativeStyle.ok)
+            .widgetAccentable()
+            .stale(entry.staleState)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("All clear, nothing needs you")
         } else {
-            VStack(spacing: 0) {
-                Text("\(entry.count)")
-                    .font(NativeStyle.hero(22))
-                    .foregroundStyle(.primary)
-                Text("need you")
-                    .font(NativeStyle.small())
-                    .foregroundStyle(.secondary)
-            }
+            L2Gauge(value: Double(min(entry.count, 99)),
+                    range: 0...Double(max(entry.count, 1)),
+                    tint: NativeStyle.bad,
+                    valueText: "\(entry.count)",
+                    caption: "need you",
+                    label: "\(entry.count) need you")
+                .stale(entry.staleState)
         }
     }
 }
@@ -451,6 +455,7 @@ struct NeedsMeRectangular: View {
                 Text(entry.count == 1 ? "1 needs you" : "\(entry.count) need you")
                     .font(NativeStyle.sub())
                     .foregroundStyle(.primary)
+                    .widgetAccentable()
                 if let newest = entry.newest {
                     Text(newest.title)
                         .font(NativeStyle.small())
@@ -458,6 +463,7 @@ struct NeedsMeRectangular: View {
                         .lineLimit(2)
                 }
             }
+            .stale(entry.staleState)
         }
     }
 }

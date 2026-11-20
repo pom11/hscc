@@ -10,9 +10,10 @@ import WidgetKit
 //          table (node ◆ orchestrator, util, temp, power, tok/s), and a footer
 //          naming the models and daemon state.
 //
-// The Lock Screen accessory bodies below keep their previous layout; the
-// 2026-11-20 redesign of those families is a later card. They still draw the
-// existing gated text model and the same monitor read as the Home Screen tile.
+// The Lock Screen accessory bodies below are the L2 Gauges pick: a
+// 0...90 °C hottest-node ring, a "CLUSTER · N TOK/S" row with four node temps,
+// and "4/4 up · N tok/s" inline. They read the same C1 projection as the Home
+// Screen tile, so no family can disagree about a node, a temperature or tok/s.
 // ---------------------------------------------------------------------------
 
 struct ClusterWidget: Widget {
@@ -363,89 +364,112 @@ private struct ClusterThroughputChart: View {
     }
 }
 
-// MARK: - Lock Screen accessories (kept; redesigned by a later card)
+// MARK: - Lock Screen accessories — L2 Gauges (2026-11-20)
 
-/// The Lock Screen ring: the fleet's GPU load as a capacity gauge, with the
-/// wattage underneath. Both strings come from the entry's text model.
+/// The L2 ring: the hottest node's temperature on a 0...90 °C gauge, with the
+/// node's short label inside the ring. No reading is an em dash, never 0 °C.
 struct CircularClusterWidget: View {
     let entry: ClusterEntry
 
     var body: some View {
-        let text = entry.text(for: .circular)
-        if let fill = entry.lockScreenGaugeValue {
-            VStack(spacing: 0) {
-                Gauge(value: min(max(fill, 0), 100), in: 0...100) {
-                    Text(CLILockScreenCopy.gaugeLabel)
-                } currentValueLabel: {
-                    Text(text.headline)
-                        .font(NativeStyle.number(11))
-                }
-                .gaugeStyle(.accessoryCircularCapacity)
-                .tint(.primary)
-                if let watts = text.detail {
-                    Text(watts)
-                        .font(NativeStyle.small())
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
-        } else {
-            Text(text.headline)
-                .font(NativeStyle.number(9))
+        let c1 = entry.c1
+        if !entry.configured || entry.paused {
+            Text(entry.shortGateLabel)
+                .font(NativeStyle.small())
                 .foregroundStyle(.secondary)
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
-                .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
+        } else if let node = c1.hottestNode, let celsius = node.tempC,
+                  let fill = c1.hottestGaugeValue {
+            L2Gauge(value: fill, range: 0...90,
+                    tint: NativeStyle.temperature(celsius),
+                    valueText: "\(Int(celsius.rounded()))°",
+                    caption: node.label,
+                    label: "Hottest \(node.label)")
+                .stale(c1.stale)
+        } else if let failure = entry.failure {
+            Text(failure.shortLabel)
+                .font(NativeStyle.small())
+                .foregroundStyle(.primary)
+                .minimumScaleFactor(0.6)
+                .multilineTextAlignment(.center)
+        } else {
+            VStack(spacing: 0) {
+                Text("—")
+                    .font(NativeStyle.number(17, weight: .bold))
+                Text("temp")
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel("No node reported a temperature")
         }
     }
 }
 
-/// The Lock Screen row: the CLI's four numbers, then the queue/host coverage,
-/// then the age or failure reason. The fallback's node rows stay.
+/// The L2 row: "CLUSTER · N TOK/S", then the four node temperatures in one row.
 struct RectangularClusterWidget: View {
     let entry: ClusterEntry
 
     var body: some View {
-        let text = entry.text(for: .rectangular)
-        VStack(alignment: .leading, spacing: 2) {
-            Text(text.headline)
-                .font(NativeStyle.number(12))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-            if let detail = text.detail {
-                Text(detail)
-                    .font(NativeStyle.number(10, weight: .medium))
+        let c1 = entry.c1
+        if !entry.configured || entry.paused {
+            Text(entry.shortGateLabel)
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
+        } else if c1.nodes.isEmpty, let failure = entry.failure {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("CLUSTER")
+                    .font(NativeStyle.label())
+                    .foregroundStyle(.secondary)
+                Text(failure.shortLabel)
+                    .font(NativeStyle.sub())
                     .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
             }
-            ForEach(Array(text.rows.prefix(1).enumerated()), id: \.offset) { _, row in
-                Text(row.title + (row.detail.map { " · \($0)" } ?? ""))
-                    .font(NativeStyle.small())
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(c1.rectangularHeadline)
+                    .font(NativeStyle.label())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                HStack(spacing: 4) {
+                    ForEach(c1.nodes.prefix(4)) { node in
+                        Text(node.tempC.map { "\(Int($0.rounded()))°" } ?? "—")
+                            .font(NativeStyle.number(15, weight: .bold))
+                            .foregroundStyle(NativeStyle.temperature(node.tempC))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .widgetAccentable()
+                Spacer(minLength: 0)
             }
-            if let footer = text.footer {
-                Text(footer)
-                    .font(NativeStyle.small())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
+            .stale(c1.stale)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Cluster, \(c1.tokText), node temperatures "
+                                + c1.rectangularTemps.joined(separator: ", "))
         }
-        .accessibilityLabel(entry.lockScreenVoice ?? text.headline)
     }
 }
 
-/// One line: headline and detail, nothing truncated into soup.
+/// One line: "4/4 up · N tok/s".
 struct InlineClusterWidget: View {
     let entry: ClusterEntry
 
     var body: some View {
-        Text(entry.inlineLine)
-            .font(NativeStyle.small())
-            .accessibilityLabel(entry.inlineLine)
+        let c1 = entry.c1
+        if !entry.configured || entry.paused {
+            Text(entry.shortGateLabel)
+                .font(NativeStyle.small())
+        } else if let failure = entry.failure {
+            Text(failure.shortLabel)
+                .font(NativeStyle.small())
+        } else {
+            Text(c1.inlineL2)
+                .font(NativeStyle.small())
+                .monospacedDigit()
+                .accessibilityLabel(c1.inlineL2)
+        }
     }
 }

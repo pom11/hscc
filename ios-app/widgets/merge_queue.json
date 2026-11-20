@@ -14,9 +14,9 @@
     "declared-and-renders (`SmallMergeQueue`)",
     "declared-and-renders (`MediumMergeQueue`)",
     "declared-and-renders (`LargeMergeQueue`)",
-    "declared-and-renders (`Text(entry.inlineLine)`)",
-    "declared-and-renders (`MergeQueueCircular`)",
-    "declared-and-renders (`MergeQueueRectangular`)"
+    "declared-and-renders (`Text(entry.inlineLine)` — `⇢ #485 gates · 2 waiting`)",
+    "declared-and-renders (`MergeQueueCircular` — queued count)",
+    "declared-and-renders (`MergeQueueRectangular` — head PR + stage + waiting)"
   ],
   "coverage_macos": [
     "declared-and-renders (`SmallMergeQueue`)",

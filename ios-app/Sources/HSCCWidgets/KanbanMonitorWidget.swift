@@ -330,6 +330,38 @@ struct KanbanMonitorEntry: TimelineEntry {
             + "\(KanbanMonitorReading.text(blockedTotal)) blocked"
     }
 
+    // MARK: L2 Lock Screen copy
+
+    /// The server's worker-slot cap, widened to the running count when a stale
+    /// row claims more workers than the cap. Nil means the route sent no cap;
+    /// the ring then says "N running" instead of inventing "of 6".
+    var slotCap: Int? {
+        guard let maxInProgress, maxInProgress > 0 else { return nil }
+        return max(maxInProgress, runningTotal)
+    }
+
+    /// `accessoryCircular`: "2/6" when the cap is known, otherwise "2".
+    var slotValueText: String {
+        slotCap.map { "\(runningTotal)/\($0)" } ?? "\(runningTotal)"
+    }
+
+    /// `accessoryCircular`: "slots" when the cap is known, otherwise "running".
+    var slotCaption: String { slotCap == nil ? "running" : "slots" }
+
+    var slotGaugeRange: ClosedRange<Double> {
+        let upper = Double(slotCap ?? max(runningTotal, 1))
+        return 0...max(upper, 1)
+    }
+
+    var slotGaugeValue: Double {
+        min(Double(runningTotal), slotGaugeRange.upperBound)
+    }
+
+    /// The rectangular header: "BOARDS · N RUNNING".
+    var rectangularHeadline: String {
+        "BOARDS · \(KanbanMonitorReading.text(runningTotal)) RUNNING"
+    }
+
     /// The freshness line the Home Screen families can afford.
     var updatedLine: String {
         if !configured { return "Set up the app to see the board" }
@@ -809,31 +841,18 @@ struct KanbanMonitorCircular: View {
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
         } else if let failure = entry.failure {
-            Image(systemName: "exclamationmark.triangle.fill")
             Text(failure.shortLabel)
                 .font(NativeStyle.small())
+                .foregroundStyle(.primary)
+                .minimumScaleFactor(0.6)
+                .multilineTextAlignment(.center)
         } else {
-            let running = entry.runningTotal
-            let cap = entry.maxInProgress.map { max($0, running) } ?? max(running, 1)
-            let fraction = cap > 0 ? min(Double(running) / Double(cap), 1) : 0
-            ZStack {
-                Circle()
-                    .stroke(.quaternary, lineWidth: 4)
-                Circle()
-                    .trim(from: 0, to: fraction)
-                    .stroke(NativeStyle.accent,
-                            style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                VStack(spacing: 0) {
-                    Text("\(running)")
-                        .font(NativeStyle.number(15, weight: .bold))
-                        .foregroundStyle(.primary)
-                    Text(entry.maxInProgress.map { "of \($0)" } ?? "run")
-                        .font(NativeStyle.small())
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(3)
+            L2Gauge(value: entry.slotGaugeValue,
+                    range: entry.slotGaugeRange,
+                    valueText: entry.slotValueText,
+                    caption: entry.slotCaption,
+                    label: "Boards, \(entry.slotValueText) \(entry.slotCaption)")
+                .stale(entry.staleState)
         }
     }
 }
@@ -855,19 +874,21 @@ struct KanbanMonitorRectangular: View {
             }
         } else {
             VStack(alignment: .leading, spacing: 1) {
-                Text("Boards · \(KanbanMonitorReading.text(entry.runningTotal)) running")
+                Text(entry.rectangularHeadline)
                     .font(NativeStyle.label())
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .widgetAccentable()
                 Text(entry.rectangularLine)
                     .font(NativeStyle.small())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(entry.updatedLine)
                     .font(NativeStyle.small())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            .stale(entry.staleState)
         }
     }
 }

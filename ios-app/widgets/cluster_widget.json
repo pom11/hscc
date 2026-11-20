@@ -16,9 +16,9 @@
     "declared-and-renders (`SmallClusterWidget`)",
     "declared-and-renders (`MediumClusterWidget`)",
     "declared-and-renders (`LargeClusterWidget`)",
-    "declared-and-renders (`InlineClusterWidget`)",
-    "declared-and-renders (`CircularClusterWidget`)",
-    "declared-and-renders (`RectangularClusterWidget`)"
+    "declared-and-renders (`InlineClusterWidget` — `4/4 up · N tok/s`)",
+    "declared-and-renders (`CircularClusterWidget` — L2 hottest-temp gauge 0–90 °C)",
+    "declared-and-renders (`RectangularClusterWidget` — `CLUSTER · N TOK/S` + four node temps)"
   ],
   "coverage_macos": [
     "declared-and-renders (`SmallClusterWidget`)",

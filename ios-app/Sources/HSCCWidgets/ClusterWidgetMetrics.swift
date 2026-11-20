@@ -166,6 +166,42 @@ struct ClusterC1: Equatable {
         return "Hottest \(Int(hottestC.rounded()))°"
     }
 
+    // MARK: L2 Lock Screen copy
+    //
+    // The three accessory families read these values. They are computed here
+    // rather than in a body so the executed gate can pin the exact strings and
+    // numbers a Lock Screen draws without a simulator.
+
+    /// The hottest node and its reading, or nil when no node reported one.
+    /// A missing temperature keeps the ring empty instead of claiming 0 °C.
+    var hottestNode: ClusterC1Node? {
+        nodes.filter { $0.tempC != nil }
+            .max { ($0.tempC ?? 0) < ($1.tempC ?? 0) }
+    }
+
+    /// The gauge fill, clamped to the L2 contract's 0...90 °C range.
+    var hottestGaugeValue: Double? {
+        hottestNode?.tempC.map { min(max($0, 0), 90) }
+    }
+
+    /// `accessoryInline`: "4/4 up · N tok/s".
+    var inlineL2: String {
+        guard up != nil, total != nil else { return failed ? "Offline" : "No data" }
+        return "\(tally) up · \(tokText)"
+    }
+
+    /// `accessoryRectangular`: "CLUSTER · N TOK/S".
+    var rectangularHeadline: String {
+        "CLUSTER · " + (tokPerSec.map { "\(Int($0.rounded())) TOK/S" } ?? "— TOK/S")
+    }
+
+    /// The four node temperatures the rectangular row draws, in route order.
+    var rectangularTemps: [String] {
+        nodes.prefix(4).map { node in
+            node.tempC.map { "\(Int($0.rounded()))°" } ?? "—"
+        }
+    }
+
     /// The footer's model line: `name ×N` per model, in route order.
     var modelLine: String {
         var order: [String] = []

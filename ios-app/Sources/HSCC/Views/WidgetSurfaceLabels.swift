@@ -16,6 +16,19 @@ extension WidgetSurfaceKind {
     // WidgetSurfaceLabels.generated.swift. This file keeps only the shared
     // section-label vocabulary, which is not per-widget registration.
 
+    /// The Lock Screen families this surface ships (L2 Gauges, 2026-11-20).
+    /// Live Activities have no widget families, so their row omits the line.
+    var lockScreenFamilies: String? {
+        switch self {
+        case .widgetCluster, .widgetKanbanMonitor, .widgetCardsRunning,
+             .widgetNeedsMe, .widgetMergeQueue:
+            return "Lock Screen: circular · rectangular · inline"
+        case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
+             .liveActivityCards, .liveActivityBoardProgress:
+            return nil
+        }
+    }
+
     /// Human label for a canonical section identifier (\"nodes\" → \"Node metrics\").
     static func displaySectionLabel(_ id: String) -> String {
         switch id {

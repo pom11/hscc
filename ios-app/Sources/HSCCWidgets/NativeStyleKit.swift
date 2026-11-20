@@ -1,4 +1,5 @@
 import SwiftUI
+import WidgetKit
 
 // ---------------------------------------------------------------------------
 // Native style kit — the shared look for the apps 1.4 widgets.
@@ -107,6 +108,42 @@ struct Tile<Content: View>: View {
         content
             .padding(10)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+/// The L2 Lock Screen gauge: one system `accessoryCircular` ring with a big
+/// value and a short caption inside it. `tint` is state-only; the value and
+/// caption carry the reading unchanged when iOS renders the accessory vibrant
+/// or monochrome, where colour is not available to tell the story.
+struct L2Gauge: View {
+    let value: Double
+    let range: ClosedRange<Double>
+    var tint: Color = NativeStyle.accent
+    let valueText: String
+    let caption: String
+    let label: String
+
+    var body: some View {
+        Gauge(value: value, in: range) {
+            Text(label)
+        } currentValueLabel: {
+            VStack(spacing: 0) {
+                Text(valueText)
+                    .font(NativeStyle.number(17, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
+                Text(caption)
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            }
+        }
+        .gaugeStyle(.accessoryCircular)
+        .tint(tint)
+        .widgetAccentable()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label), \(valueText) \(caption)")
     }
 }
 

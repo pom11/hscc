@@ -390,6 +390,25 @@ names the reason and age; a failed read names the reason. The macOS menu bar
 dropdown draws the same rows in a "Merge queue" section, hidden when the queue
 is empty (a failed read still says why).
 
+## 5f. Lock Screen families (L2 Gauges, 2026-11-20)
+
+Every widget ships the three accessory families on iOS. They use the shared
+`L2Gauge` (`NativeStyleKit.swift`) — a SwiftUI `Gauge` with the system
+`.accessoryCircular` style — and `.widgetAccentable()` on the values that
+should follow the system accent. The value and caption always carry the
+reading, so the same body reads in vibrant and monochrome rendering.
+
+| Widget | accessoryCircular | accessoryRectangular | accessoryInline |
+|---|---|---|---|
+| Cluster | hottest node temperature, `0...90 °C`, node label | `CLUSTER · N TOK/S` + four node temperatures | `4/4 up · N tok/s` |
+| Boards | running / server worker-slot cap (`2/6 slots`; `2 running` with no cap) | `BOARDS · N RUNNING` + done/blocked | `2 running · 38 blocked` |
+| Running | longest elapsed clock | `32m · title` + heartbeat | `32m · title` |
+| Needs Me | count, green check at zero (only after a successful fetch) | `N need you` + top item | `N need you` / `nothing needs you` |
+| Merge Queue | queued count | head PR + stage + waiting | `⇢ #485 gates · 2 waiting` |
+
+The Settings rows name the three families under every widget; Live Activity
+rows omit the line because they have no widget families.
+
 ## 6. Shipped feature checklist
 
 | Feature | PR | Merge commit on `main` | Evidence |
