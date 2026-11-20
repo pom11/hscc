@@ -518,11 +518,14 @@ def project_config(project, registry_path=None):
 # ── read-only rows (CLI monitor + GET /v1/merge-queue) ─────────────────────
 
 #: States a row can carry. ``queued``/``merged``/``resolve``/``failed`` are
-#: ledger outcomes; ``rebasing``/``gating``/``merging`` are the live stages the
-#: daemon stamps on its in-flight claim as it moves through the queue.
+#: ledger outcomes; ``rebasing``/``gating``/``merging``/``timeout`` are the live
+#: stages the daemon stamps on its in-flight claim as it moves through the
+#: queue. ``timeout`` is a stage, never an outcome state: a gate that ran out of
+#: budget re-enters the wait list, so its row renders ``waiting`` (see
+#: ``_OUTCOME_STATES``), and nothing that timed out may render ``resolve``.
 MERGE_QUEUE_STATES = (
     "queued", "waiting", "rebasing", "gating", "merging", "resolve", "merged",
-    "failed",
+    "failed", "timeout",
 )
 
 _OUTCOME_STATES = {
@@ -532,6 +535,10 @@ _OUTCOME_STATES = {
     "red-gate": "resolve",
     "refused": "failed",
     "error": "failed",
+    # Budget exhaustion is not a verdict about the code, so it must not render
+    # as a failure the author is sent to fix: the entry is back in the wait
+    # list, and the read model says so.
+    "gate-timeout": "waiting",
 }
 
 
@@ -1068,7 +1075,17 @@ class _GateLiveness:
 
 
 def _run_gate(command, worktree, timeout_s):
-    """Run one shell gate; returns (ok, output)."""
+    """Run one shell gate; returns ``(verdict, output)``.
+
+    ``verdict`` is one of ``"pass"``, ``"fail"`` or ``"timeout"``.  The third
+    one is the whole point: running out of the budget is NOT a verdict about
+    the code — the gate never got to answer.  Flattening it into ``fail`` made
+    a slow queue look like a broken PR, dropped the PR from the queue and told
+    the author to go fix code that was never shown to be broken.
+
+    Internal contract only (``process_entry`` is the sole caller plus injected
+    test runners); nothing outside this module parses this tuple.
+    """
     try:
         proc = subprocess.run(command, shell=True, cwd=worktree,
                               capture_output=True, text=True,
@@ -1076,9 +1093,9 @@ def _run_gate(command, worktree, timeout_s):
     except subprocess.TimeoutExpired as exc:
         out = ((exc.stdout or "") if isinstance(exc.stdout, str) else "")
         err = ((exc.stderr or "") if isinstance(exc.stderr, str) else "")
-        return False, _tail(f"{out}\n{err}\ntimeout after {timeout_s}s")
+        return "timeout", _tail(f"{out}\n{err}\ntimeout after {timeout_s}s")
     output = ((proc.stdout or "") + (proc.stderr or ""))
-    return proc.returncode == 0, _tail(output)
+    return ("pass" if proc.returncode == 0 else "fail"), _tail(output)
 
 
 def _push_branch(worktree, info, git_runner):
@@ -1526,10 +1543,46 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         # One gate leg can hold the entire DEFAULT_GATE_TIMEOUT_S budget, so the
         # stream is heartbeated from around the call, not after it: the wrapper
         # starts the heartbeat immediately before the leg and stops it in a
-        # finally immediately after (see _GateLiveness).
+        # finally immediately after (see _GateLiveness).  The `with` closes
+        # BEFORE the verdict branch below, so a heartbeat can never outlive the
+        # leg it reports on — including the timeout path that requeues.
         with _GateLiveness(project, entry["pr"], command):
-            passed, output = _run_gate(command, worktree, timeout_s)
-        if not passed:
+            verdict, output = _run_gate(command, worktree, timeout_s)
+        if verdict == "timeout":
+            # Out of budget is NOT out of green.  The gate never answered, so
+            # nothing here is a verdict about the PR's code: the entry goes
+            # back to the wait list (non-terminal) instead of being dropped,
+            # and the handback must not send the author off to fix code.
+            #
+            # ORDER MATTERS: `_requeue_waiting` only re-appends while this PR
+            # still holds the claim, and `_finish` clears `in_flight` — running
+            # `_finish` first is precisely how a timeout used to drop the PR.
+            _update_flight(state_path, project, entry["pr"], stage="timeout")
+            _requeue_waiting(state_path, project, entry)
+            # `last` is written after the requeue, so the entry is safely back
+            # in the wait list before anything records an outcome.  The row
+            # renders `waiting` (see _OUTCOME_STATES), never `resolve`.
+            _finish(doc, project, state_path, ps, "gate-timeout", entry,
+                    gate=command, timeout_s=timeout_s)
+            body = (
+                f"Merge queue: the gate ran out of its time budget.\n\n"
+                f"Gate: {command}\n"
+                f"Budget: {timeout_s}s (exceeded)\n\n"
+                "This is NOT a test failure. Nothing in this PR was shown to "
+                "be broken — the queue simply did not get an answer from the "
+                "gate before its budget was spent, and a gate that never "
+                "finished cannot say whether the code is good.\n\n"
+                f"The PR stays in the merge queue (back in the wait list) and "
+                "the queue will look again on a later tick. No action is "
+                "needed from you; do not rebase or 'fix the gate' because of "
+                "this comment.\n"
+                f"{output}")
+            _handback(entry, cfg, body, handback, gh_runner)
+            log(f"merge-queue {project}: PR #{entry['pr']} gate timed out "
+                f"after {timeout_s}s: {command} (not a test failure)", "WARN")
+            return {"pr": entry["pr"], "result": "gate-timeout",
+                    "gate": command, "timeout_s": timeout_s}
+        if verdict != "pass":
             body = (f"Merge queue: gate failed after rebasing onto "
                     f"origin/{base}.\n\n"
                     f"Gate: {command}\n\n"

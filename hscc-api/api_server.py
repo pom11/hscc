@@ -682,6 +682,19 @@ class _ApiServer(http.server.ThreadingHTTPServer):
     # thread and never a half-read request.
     max_connections = 128
 
+    # The kernel's accept queue has to be at least as deep as the admission
+    # limit above, or that 503 is unreachable: socketserver's default is
+    # ``listen(5)``, so on the 6th simultaneous connection XNU finishes the
+    # handshake, finds the queue full, and RESETS the socket (ECONNRESET 54)
+    # before ``process_request`` ever sees it. The client gets a dead socket
+    # instead of a retryable 503. This is exactly the shape of a widget
+    # reload burst — the macOS menu bar plus a few dashboard panels hitting
+    # /v1/cluster/monitor at the same instant is already six — and it is why
+    # test_cluster_monitor_cache_is_single_flight failed ~30% of bursts under
+    # load (t_5d6ea1c4). Queue depth costs nothing an FD does: an unaccepted
+    # connection is not yet a handler thread and not yet an FD here.
+    request_queue_size = max_connections
+
     def __init__(self, server_address, handler_cls, context: ApiContext):
         # ThreadingHTTPServer defaults to AF_INET; an explicit IPv6 bind (::1)
         # must use the matching family or it fails with EAFNOSUPPORT.
