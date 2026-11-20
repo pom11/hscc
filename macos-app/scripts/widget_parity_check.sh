@@ -116,7 +116,7 @@ if [ "$guarded" -eq 0 ]; then
 else
   bad "$guarded system* dispatch arm(s) sit inside an #if os(iOS) region"
 fi
-if grep -q 'containerBackground(.fill.tertiary, for: .widget)' "$CLUSTER"; then
+if grep -q 'containerBackground(NativeStyle.surface, for: .widget)' "$CLUSTER"; then
   ok "the desktop tile uses the Native system container background"
 else
   bad "the desktop tile does not use the Native system container background"

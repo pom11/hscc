@@ -559,7 +559,7 @@ struct KanbanMonitorWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: KanbanMonitorTimelineProvider()) { entry in
             KanbanMonitorWidgetView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(NativeStyle.surface, for: .widget)
         }
         .configurationDisplayName("Boards")
         .description("Open cards by board: running, todo and blocked, plus the worker slots. Read-only.")

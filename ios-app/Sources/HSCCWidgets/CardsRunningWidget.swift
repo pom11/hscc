@@ -222,7 +222,7 @@ struct CardsRunningWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: CardsRunningTimelineProvider()) { entry in
             CardsRunningWidgetView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(NativeStyle.surface, for: .widget)
         }
         .configurationDisplayName("Running")
         .description("The longest-running card with its elapsed time and worker heartbeat. Read-only.")

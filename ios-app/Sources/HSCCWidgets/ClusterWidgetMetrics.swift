@@ -81,7 +81,11 @@ enum ClusterMetricHeat: Equatable {
 /// numbers C1 prints beside it. Every field is a route field (or the serving
 /// row that names the node's backend); no view derives a number of its own.
 struct ClusterC1Node: Equatable, Identifiable {
+    /// The approved C1 short name, `S1`…`Sn` in route order. Hostnames such as
+    /// `gx10-cad0` do not fit the medium node column or a Lock Screen ring.
     let label: String
+    /// The node's own hostname, for accessibility and the large table's tooltip.
+    let hostname: String
     let model: String?
     let isUp: Bool
     let isOrchestrator: Bool
@@ -92,15 +96,18 @@ struct ClusterC1Node: Equatable, Identifiable {
 
     var id: String { label }
 
-    init(_ node: FleetNodeLine) {
-        self.label = node.label
+    init(_ node: FleetNodeLine, index: Int) {
+        self.label = "S\(index + 1)"
+        self.hostname = node.label
         self.model = node.model
         self.isUp = node.isUp
         self.isOrchestrator = node.isOrchestrator
         self.gpuPct = node.gpuPct
         self.tempC = node.gpuTempC ?? node.cpuTempC
         self.powerW = node.gpuPowerW
-        self.genTps = node.genTps
+        // An engine that answers with nothing running reports no rate; that is
+        // an idle 0 tok/s, not an unknown.
+        self.genTps = node.genTps ?? ((node.model != nil && node.running == 0) ? 0 : nil)
     }
 }
 
@@ -231,8 +238,15 @@ struct ClusterC1: Equatable {
     init(_ entry: ClusterEntry) {
         self.up = entry.fleet?.tally.nodesUp
         self.total = entry.fleet?.tally.nodesTotal
-        self.tokPerSec = entry.fleet?.serving.genTps
-        self.nodes = entry.fleet?.nodes.map(ClusterC1Node.init) ?? []
+        // No rate with live backends and nothing running is an idle fleet:
+        // 0 tok/s. No backend at all stays unknown.
+        if let serving = entry.fleet?.serving {
+            self.tokPerSec = serving.genTps
+                ?? ((serving.backends > 0 && serving.running == 0) ? 0 : nil)
+        } else {
+            self.tokPerSec = nil
+        }
+        self.nodes = entry.fleet?.nodes.enumerated().map { ClusterC1Node($1, index: $0) } ?? []
         self.hottestC = nodes.compactMap(\.tempC).max()
         self.modelNames = entry.fleet?.serving.modelNames ?? []
         self.daemonRunning = entry.daemonHost?.daemon_running

@@ -266,7 +266,7 @@ struct MergeQueueWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: MergeQueueTimelineProvider()) { entry in
             MergeQueueWidgetView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(NativeStyle.surface, for: .widget)
         }
         .configurationDisplayName("Merge Queue")
         .description("The PR at the front of the merge queue, its stage, and the results behind it. Read-only.")
@@ -557,7 +557,7 @@ struct SmallMergeQueue: View {
                             .lineLimit(1)
                     }
                     Text(head.prLabel)
-                        .font(NativeStyle.hero(26))
+                        .font(NativeStyle.number(22, weight: .bold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     PipelineTrack(progress: entry.stageProgress)

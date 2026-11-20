@@ -1,5 +1,10 @@
 import SwiftUI
 import WidgetKit
+#if canImport(UIKit)
+import UIKit
+#else
+import AppKit
+#endif
 
 // ---------------------------------------------------------------------------
 // Native style kit — the shared look for the apps 1.4 widgets.
@@ -8,9 +13,11 @@ import WidgetKit
 // colours, SF Pro Rounded for numbers and headlines, colour only for state.
 // This file is the one place those tokens and the four shared components live,
 // so a later widget card composes the kit instead of re-typing a font or a
-// threshold. It intentionally paints no background: every widget root uses
-// `containerBackground(.fill.tertiary, for: .widget)`, which is the system
-// default for both platforms.
+// threshold. Every widget root uses `containerBackground(NativeStyle.surface,
+// for: .widget)`: the approved mock's solid card, white in light mode and
+// #1C1C1E in dark (iOS and macOS alike). The translucent `.fill.tertiary` it
+// replaced read as a washed-out grey over the wallpaper. iOS 26 still drops the
+// container background on its own in the tinted and clear Home Screen modes.
 //
 // State bands are the contract's, not a hardware spec:
 //   temperature < 70 ok (green), 70-74 warn (orange), >= 75 bad (red).
@@ -31,6 +38,21 @@ enum NativeStyle {
     static func number(_ size: CGFloat = smallSize, weight: Font.Weight = .semibold) -> Font {
         .system(size: size, weight: weight).monospacedDigit()
     }
+
+    /// The widget card: white in light mode, #1C1C1E in dark.
+    #if canImport(UIKit)
+    static let surface = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, alpha: 1)
+            : .white
+    })
+    #else
+    static let surface = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, alpha: 1)
+            : .white
+    })
+    #endif
 
     static let accent = Color.blue
     static let ok = Color.green

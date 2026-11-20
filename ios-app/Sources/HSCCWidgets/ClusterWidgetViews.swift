@@ -22,7 +22,7 @@ struct ClusterWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: ClusterTimelineProvider()) { entry in
             ClusterWidgetView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(NativeStyle.surface, for: .widget)
         }
         .configurationDisplayName("Cluster")
         .description("Nodes up, throughput, the hottest node and the 2 h trend.")
@@ -385,7 +385,7 @@ struct CircularClusterWidget: View {
                     tint: NativeStyle.temperature(celsius),
                     valueText: "\(Int(celsius.rounded()))°",
                     caption: node.label,
-                    label: "Hottest \(node.label)")
+                    label: "Hottest \(node.hostname)")
                 .stale(c1.stale)
         } else if let failure = entry.failure {
             Text(failure.shortLabel)

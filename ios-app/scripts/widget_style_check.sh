@@ -114,7 +114,7 @@ else
       if grep -q 'NativeStyle' "$native_file" \
          && grep -q 'AsOfStamp' "$native_file" \
          && grep -q 'StaleState' "$native_file" \
-         && grep -q 'containerBackground(.fill.tertiary' "$native_file"; then
+         && grep -q 'containerBackground(NativeStyle.surface' "$native_file"; then
         ok "surface $kind uses the shared NativeStyleKit (tokens, AsOfStamp, StaleState)"
       else
         bad "surface $kind does not use the shared NativeStyleKit"
@@ -190,7 +190,7 @@ for f in "${WIDGET_VIEWS[@]}"; do
   fi
   if [ "$(basename "$f")" = "KanbanMonitorWidget.swift" ]; then
     if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" \
-       && grep -q 'StaleState' "$f" && grep -q 'containerBackground(.fill.tertiary' "$f"; then
+       && grep -q 'StaleState' "$f" && grep -q 'containerBackground(NativeStyle.surface' "$f"; then
       ok "$(basename "$f"): native kit components are wired"
     else
       bad "$(basename "$f") does not use the native kit"
@@ -200,7 +200,7 @@ for f in "${WIDGET_VIEWS[@]}"; do
   case "$(basename "$f")" in
     CardsRunningWidget.swift|NeedsMeWidget.swift|MergeQueueWidget.swift)
       if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" \
-         && grep -q 'StaleState' "$f" && grep -q 'containerBackground(.fill.tertiary' "$f"; then
+         && grep -q 'StaleState' "$f" && grep -q 'containerBackground(NativeStyle.surface' "$f"; then
         ok "$(basename "$f"): native kit components are wired"
       else
         bad "$(basename "$f") does not use the native kit"
@@ -218,7 +218,7 @@ nbg=0
 bgok=1
 nadapt=0
 for f in Sources/HSCCWidgets/*.swift; do
-  if grep -q 'containerBackground(.fill.tertiary, for: .widget)' "$f"; then
+  if grep -q 'containerBackground(NativeStyle.surface, for: .widget)' "$f"; then
     ok "$(basename "$f") uses the system container background (Native redesign)"
     continue
   fi
