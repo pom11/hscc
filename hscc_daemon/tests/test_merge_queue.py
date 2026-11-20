@@ -9,6 +9,7 @@ import contextlib
 import json
 import sqlite3
 import subprocess
+import threading
 import time
 from types import SimpleNamespace
 
@@ -1534,3 +1535,275 @@ def test_github_remote_recognises_the_usual_url_forms(url):
 ])
 def test_github_remote_rejects_non_github_urls(url):
     assert not mq._github_remote(url)
+
+
+# ── liveness stamping while a gate runs (t_444c32c9) ───────────────────────
+#
+# ``check_merge_queue`` is a 60 s daemon stream and ``hscc verify`` calls
+# ``state/merge_queue.json`` stale after 600 s, while ONE gate leg may run for
+# the whole 1800 s ``DEFAULT_GATE_TIMEOUT_S``. That made a demonstrably live
+# runner read as dead on main (measured: stamp 31 min past the budget, the gate
+# a live child of the daemon pid). These tests pin the fix from the OUTSIDE:
+# what the stream FILE says while the work runs, and what stops saying it once
+# the work stops. None of them reach into verify — the fix is on the stamping
+# side, so the judging side stays exactly as strict.
+
+def _stream_file(tmp_path):
+    """``state/merge_queue.json`` under the redirected STATE_DIR."""
+    return tmp_path / "state" / f"{mq.STREAM_NAME}.json"
+
+
+def _read_stream(tmp_path):
+    """The current stream stamp, or None when nothing has been written."""
+    path = _stream_file(tmp_path)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def _require_stream(tmp_path):
+    """The stream stamp, failing the test when the stream is dark."""
+    stamp = _read_stream(tmp_path)
+    assert stamp is not None, f"{_stream_file(tmp_path)} was never written"
+    return stamp
+
+
+def _heartbeat_stamps(seen):
+    """Only the stamps the heartbeat wrote — a stage stamp carries gate=None."""
+    return [s for _ts, s in seen if (s.get("in_flight") or {}).get("gate")]
+
+
+def _live_heartbeats():
+    return [t for t in threading.enumerate()
+            if t.name.startswith(mq._LIVENESS_THREAD_PREFIX)]
+
+
+@pytest.fixture(autouse=True)
+def _redirect_stream_state_dir(tmp_path, monkeypatch):
+    """Keep EVERY stream write inside ``tmp_path`` for this whole module.
+
+    ``tick()`` now stamps the stream from INSIDE the run — the claim, each stage
+    transition, each gate heartbeat — and ``STATE_DIR`` is an import-time
+    constant in ``hscc_daemon.state``. Unredirected, the ~40 ticks in this file
+    would stamp the OPERATOR's live ``~/.hscc/state``, where a test's invented PR
+    number would read as a real in-flight merge.
+    """
+    from hscc_daemon import state as daemon_state
+    monkeypatch.setattr(daemon_state, "STATE_DIR", str(tmp_path / "state"))
+
+
+def _isolated_hscc_root(tmp_path, monkeypatch):
+    """Point the queue at a scratch state root with no registry to tick.
+
+    ``check_merge_queue()`` takes no arguments — it resolves the real ledger
+    path and the real registry itself — so an isolated run needs both pins.
+    """
+    monkeypatch.setenv("HSCC_HOME", str(tmp_path / "hscc-home"))
+    monkeypatch.setenv("FLIGHTDECK_REGISTRY",
+                       str(tmp_path / "no-registry.yaml"))
+
+
+def test_gate_heartbeat_advances_the_stream_while_the_gate_runs(tmp_path,
+                                                                monkeypatch):
+    """The stream stamp must advance DURING a gate leg, not only after it.
+
+    The fake leg blocks until the heartbeat has stamped twice (capped, so a
+    missing heartbeat FAILS rather than hangs) and samples the stream from
+    INSIDE the leg — so every stamp collected here was, by construction, read
+    while the gate was in flight. ``LIVENESS_STAMP_S`` is retuned to 0.5 s to
+    keep it fast; the shape is the measured one (a leg far longer than the
+    stream's allowed silence).
+    """
+    pair = _repo_pair(tmp_path)
+    gate_cmd = "bash scripts/run_tests.sh"
+    registry = _registry(tmp_path, pair["repo"], gates=[gate_cmd])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+
+    interval = 0.5
+    monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
+
+    seen = []          # (timestamp, stamp) per DISTINCT stamp read in-leg
+    leg = {}
+
+    def gate(command, worktree, timeout_s):
+        leg["start"] = time.monotonic()
+        deadline = leg["start"] + 10.0
+        while time.monotonic() < deadline:
+            stamp = _read_stream(tmp_path)
+            ts = stamp.get("timestamp") if stamp else None
+            if ts and (not seen or seen[-1][0] != ts):
+                seen.append((ts, stamp))
+            if len(_heartbeat_stamps(seen)) >= 2:
+                break
+            time.sleep(0.02)
+        leg["end"] = time.monotonic()
+        return True, ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    beats = _heartbeat_stamps(seen)
+    # (1) the stamp ADVANCED while the gate ran (verify reads this same
+    #     ``timestamp`` field, not the file mtime — verify.py's recency check).
+    assert len({s["timestamp"] for s in beats}) >= 2, (
+        f"stream dark through the whole leg; saw {[t for t, _ in seen]!r}")
+    # (2) and every heartbeat says WHICH gate is running, on which claim.
+    assert beats, "no heartbeat ever named the running gate"
+    for stamp in beats:
+        row = stamp["in_flight"]
+        assert row["gate"] == gate_cmd
+        assert row["stage"] == "gating"
+        assert row["project"] == "alpha" and row["pr"] == 7
+        assert row["elapsed_s"] >= 0
+        assert stamp["ok"] is True
+    # (3) the cadence is the configured interval, not "two stamps at once": the
+    #     leg could not end before the second beat existed, and a beat's own
+    #     elapsed_s is measured from the leg's start.
+    assert leg["end"] - leg["start"] >= interval * 0.9, leg
+    assert max(s["in_flight"]["elapsed_s"] for s in beats) >= interval * 0.9
+    # (4) nothing outlives the tick.
+    assert _live_heartbeats() == []
+
+
+def test_heartbeat_stops_the_moment_the_gate_leg_ends(tmp_path, monkeypatch):
+    """A beat that outlived its leg would report a DEAD tick as alive — the
+    exact inversion of the defect this fixes, so the stop is asserted and not
+    assumed. The thread is joined in __exit__, so the stamping stops with it.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 9, path=_state(tmp_path))
+
+    interval = 0.2
+    monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
+    monkeypatch.setattr(mq, "_run_gate", lambda c, w, t: (True, ""))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert result["processed"][0]["result"] == "merged", result
+
+    last = _read_stream(tmp_path)
+    assert last is not None
+    time.sleep(interval * 5)          # 5 full intervals of silence, if it stopped
+    assert _read_stream(tmp_path) == last, "heartbeat still stamping after tick()"
+    assert _live_heartbeats() == []
+
+
+def test_stream_mirrors_every_stage_transition_the_ledger_records(tmp_path,
+                                                                  monkeypatch):
+    """One writer, one truth: the stream's ``in_flight`` row follows the LEDGER's
+    ``stage`` at the same moment — from the claim through rebase, gate, merge.
+
+    Without this the stream advances only when ``tick()`` returns, minutes
+    behind the stage the queue is actually in.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({11: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 11, path=_state(tmp_path))
+
+    mirrored = []
+    real_stamp = mq._stream_stamp
+
+    def spy(**fields):
+        mirrored.append(fields)
+        return real_stamp(**fields)
+
+    monkeypatch.setattr(mq, "_stream_stamp", spy)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert result["processed"][0]["result"] == "merged", result
+
+    stages = [f["stage"] for f in mirrored]
+    # The heartbeat repeats "gating" once per interval, so collapse repeats.
+    sequence = [s for i, s in enumerate(stages)
+                if i == 0 or s != stages[i - 1]]
+    assert sequence == ["claimed", "rebasing", "gating", "merging"], sequence
+    assert all(f["project"] == "alpha" and f["pr"] == 11 for f in mirrored)
+    # The claim is stamped before any work, and names no gate.
+    assert mirrored[0]["stage"] == "claimed"
+    assert mirrored[0].get("gate") is None
+    assert mirrored[0].get("elapsed_s") is None
+    # Readers get a STABLE row: all five keys are always present, not only when
+    # a gate happens to be running.
+    row = _require_stream(tmp_path)["in_flight"]
+    assert set(row) == {"project", "pr", "stage", "gate", "elapsed_s"}
+    assert row["stage"] == "merging" and row["gate"] is None
+
+
+def test_check_merge_queue_stamps_the_stream_when_the_tick_does_no_work(
+        tmp_path, monkeypatch):
+    """Stream twin of test_tick_stamps_the_ledger_even_when_it_does_no_work.
+
+    A dark stream is indistinguishable from a dead daemon, so an idle tick still
+    stamps — and stamps WITHOUT an in_flight row, because nothing is in flight:
+    the tick's real verdict replaces the in-run mirrors when it returns.
+    """
+    _isolated_hscc_root(tmp_path, monkeypatch)
+
+    first = mq.check_merge_queue()
+    assert first["ok"] is True, first
+    stamp = _read_stream(tmp_path)
+    assert stamp is not None, "an idle tick left the stream dark"
+    assert stamp["stream"] == mq.STREAM_NAME
+    assert stamp["ok"] is True
+    assert "in_flight" not in stamp, "a finished tick must not leave a claim row"
+
+    time.sleep(0.01)
+    second = mq.check_merge_queue()
+    assert second["generated_at"] != first["generated_at"]
+    again = _read_stream(tmp_path)
+    assert again is not None
+    assert again["timestamp"] != stamp["timestamp"]
+
+
+def test_check_merge_queue_never_raises_when_write_state_fails(tmp_path,
+                                                               monkeypatch):
+    """A health-reporting write must never fail the health check itself."""
+    from hscc_daemon import state as daemon_state
+    _isolated_hscc_root(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(daemon_state, "write_state", boom)
+    result = mq.check_merge_queue()          # must not raise into the stream
+    assert result["ok"] is True, result
+    assert not _stream_file(tmp_path).exists()
+
+
+def test_a_failing_stream_write_never_breaks_the_gate_run(tmp_path, monkeypatch):
+    """The in-run mirrors carry the SAME contract as the final stamp.
+
+    A read-only filesystem or a full disk must not lose the merge: if the stage
+    mirror or the heartbeat let an OSError escape, ``process_entry`` aborts and
+    the entry is retried instead of merged — which is what this pins.
+    """
+    from hscc_daemon import state as daemon_state
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({13: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 13, path=_state(tmp_path))
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(daemon_state, "write_state", boom)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [13]
+    assert not _stream_file(tmp_path).exists()

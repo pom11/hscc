@@ -65,6 +65,17 @@ DEFAULT_PROCESS_TIMEOUT_S = 120
 MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
 
+#: How often a running gate re-stamps the health stream (see
+#: :class:`_GateLiveness`). 30 s is 1/20 of verify's 600 s staleness budget for
+#: this stream, so one lost heartbeat costs a stamp, never the verdict.
+#: Read at CALL time (not bound into a default argument), so a test or an
+#: operator can retune it by rebinding the module attribute.
+LIVENESS_STAMP_S = 30
+
+#: Every heartbeat thread is named with this prefix — the "no heartbeat
+#: outlives the gate" contract is asserted by looking for live threads by name.
+_LIVENESS_THREAD_PREFIX = "mq-gate-liveness"
+
 #: The PR URL shape workers leave in a card comment (same shape Hermes'
 #: respawn guard recognises). Owner/repo are captured too: auto-enqueue must
 #: only accept a URL from the project's OWN origin remote.
@@ -940,6 +951,122 @@ def _rebase_onto(worktree, base, git_runner):
     return False, conflicted, _tail(output, 20)
 
 
+# ── health-stream liveness ────────────────────────────────────────────────
+# ``check_merge_queue`` is a 60 s daemon stream (daemon_ops.PERIODIC_INTERVALS)
+# and ``hscc verify`` calls ``state/merge_queue.json`` stale after
+# ``max(600, 2*60+90)`` = 600 s.  A tick that holds a claim can spend the WHOLE
+# gate budget inside a single leg (:data:`DEFAULT_GATE_TIMEOUT_S` is 1800 s), so
+# a stamp written only once ``tick()`` returns goes RED on a runner that is
+# demonstrably alive — the "cries wolf on a healthy thing" anti-pattern
+# ``verify.py`` documents.  These writers stamp from INSIDE the work instead:
+# ``_stream_stamp`` at every stage transition, :class:`_GateLiveness` around
+# each gate leg.
+#
+# The fix is deliberately on the STAMPING side, never the judging side: verify's
+# budget is untouched and there is no verify-side in-flight exemption, so a
+# heartbeat can only ever tell the truth.  It proves "the daemon process is
+# alive AND a gate subprocess is running".  It cannot mask a dead process (a
+# daemon thread dies with its process) and cannot mask a tick deadlocked
+# OUTSIDE a gate (nothing heartbeats there), so both still go RED within the
+# same 600 s.
+
+def _stream_stamp(*, project, pr, stage, gate=None, elapsed_s=None):
+    """Mirror one in-flight queue moment onto the health stream. Never raises.
+
+    Two different files, two different jobs: the LEDGER
+    (``~/.hscc/merge-queue-state.json``) is the queue's durable truth across
+    restarts, the STREAM (``~/.hscc/state/merge_queue.json``) is what
+    ``hscc verify`` reads for daemon liveness.  This touches only the stream —
+    never queue state — and carries the same ``in_flight`` row the ledger
+    holds, so the health stamp and the queue can never disagree about what the
+    in-flight PR is doing.
+
+    ``ok=True`` is honest here: reaching a stage transition *is* a healthy
+    queue.  ``check_merge_queue`` still overwrites the file with the tick's
+    real verdict (ok=False included) the moment the tick returns, and a stamp
+    whose writer died stops advancing and goes stale like any other.
+    """
+    from .state import write_state
+    try:
+        return write_state(STREAM_NAME, {
+            "ok": True,
+            "in_flight": {
+                "project": project,
+                "pr": pr,
+                "stage": stage,
+                "gate": gate,
+                "elapsed_s": elapsed_s,
+            },
+        })
+    except Exception:
+        # check_merge_queue has always swallowed a failed stamp; a mirror
+        # written from inside the run must be at least as forgiving — a
+        # health-reporting write must never fail the work it reports on.
+        return None
+
+
+class _GateLiveness:
+    """Context manager: re-stamp the stream every ``LIVENESS_STAMP_S`` while
+    one gate leg runs.
+
+    Use it as ``with _GateLiveness(project, pr, command): _run_gate(...)`` —
+    started immediately before the leg and stopped in a ``finally`` immediately
+    after it, so a heartbeat can only ever be running while a gate subprocess
+    is live (see the rationale above :func:`_stream_stamp`).  The thread is a
+    daemon thread and the stop is a joined ``Event``, so nothing here can
+    outlive the tick or keep the interpreter alive.
+    """
+
+    def __init__(self, project, pr, gate, *, stage="gating", interval=None):
+        self.project = project
+        self.pr = pr
+        self.gate = gate
+        self.stage = stage
+        # Resolved here (call time), not in the signature, so rebinding the
+        # module constant still takes effect.
+        self.interval = LIVENESS_STAMP_S if interval is None else interval
+        self._stop = threading.Event()
+        self._thread = None
+        self._started = time.monotonic()
+
+    def _stamp(self):
+        _stream_stamp(project=self.project, pr=self.pr, stage=self.stage,
+                      gate=self.gate,
+                      elapsed_s=round(time.monotonic() - self._started, 1))
+
+    def _run(self):
+        # One stamp immediately: the span from the leg starting to the first
+        # interval boundary is exactly the dark window this class exists to
+        # close, and the caller's stage stamp may already be seconds old.
+        self._stamp()
+        # Event.wait, not sleep: stop() has to release the loop at once rather
+        # than after another whole interval.
+        while not self._stop.wait(self.interval):
+            self._stamp()
+
+    def __enter__(self):
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"{_LIVENESS_THREAD_PREFIX}-{self.pr}", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
+        return False
+
+    def stop(self):
+        self._stop.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None:
+            # The loop waits on the event, so set() releases it immediately and
+            # the join is cheap; it is also what makes "no heartbeat outlives
+            # the gate" a fact instead of a hope.  Bounded so a wedged stream
+            # write can never hang the tick that is only trying to finish.
+            thread.join(timeout=max(5.0, self.interval + 5.0))
+
+
 def _run_gate(command, worktree, timeout_s):
     """Run one shell gate; returns (ok, output)."""
     try:
@@ -1208,13 +1335,26 @@ def _update_flight(state_path, project, pr, **fields):
     The monitor reads ``stage`` so "rebasing" is not reported as "merging";
     the branch is recorded here too, since a manually enqueued PR has no
     branch until ``gh pr view`` answers.
+
+    A ``stage`` change is mirrored onto the HEALTH STREAM at the same moment it
+    reaches the LEDGER, from the same still-holds-the-claim condition — one
+    writer, one truth.  Without it the stream only advances when ``tick()``
+    returns, which is minutes (up to the whole gate budget) after the stage the
+    queue is actually in.
     """
+    stage = None
     with _file_lock():
         doc = load_state(state_path)
         flight = _project_state(doc, project).get("in_flight")
         if flight and int(flight.get("pr", 0)) == int(pr):
             flight.update(fields)
             save_state(doc, state_path)
+            if "stage" in fields:
+                stage = fields["stage"]
+    if stage is not None:
+        # Outside the file lock: the stream is a separate file and a health
+        # stamp must never extend how long the CLI waits on this lock.
+        _stream_stamp(project=project, pr=pr, stage=stage)
 
 
 def _handback(entry, cfg, body, handback, gh_runner):
@@ -1383,7 +1523,12 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                    stage="gating" if gates else "merging")
     timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
     for command in gates:
-        passed, output = _run_gate(command, worktree, timeout_s)
+        # One gate leg can hold the entire DEFAULT_GATE_TIMEOUT_S budget, so the
+        # stream is heartbeated from around the call, not after it: the wrapper
+        # starts the heartbeat immediately before the leg and stops it in a
+        # finally immediately after (see _GateLiveness).
+        with _GateLiveness(project, entry["pr"], command):
+            passed, output = _run_gate(command, worktree, timeout_s)
         if not passed:
             body = (f"Merge queue: gate failed after rebasing onto "
                     f"origin/{base}.\n\n"
@@ -1680,6 +1825,12 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 ps["in_flight"] = entry
                 save_state(doc, state_path)
 
+            # The claim itself is a stage worth stamping: from this instant the
+            # tick may spend the whole gate budget before it returns, and the
+            # stream must not sit dark across it.  "claimed" until process_entry
+            # reports a real stage of its own.
+            _stream_stamp(project=claim_name, pr=entry["pr"], stage="claimed")
+
             cfg = cfgs[claim_name]
             # One lock per repo path: two project names on the same checkout
             # can never run a rebase/gate/push concurrently.
@@ -1735,6 +1886,12 @@ def check_merge_queue():
 
     Never raises. With no project enabled this is a cheap no-op that still
     stamps, so ``hscc verify`` never reports the stream dark.
+
+    The stamp is NOT only this final write: ``tick()`` mirrors its claim and
+    every stage transition onto the same file, and :class:`_GateLiveness`
+    heartbeats it around each gate leg.  That is the whole point — a tick
+    holding a claim can run for the full gate budget, and a stamp written only
+    here would be hours late on a runner that is alive.
     """
     from .state import write_state
     try:
