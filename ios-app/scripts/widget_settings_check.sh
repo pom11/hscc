@@ -791,6 +791,12 @@ cok "the shared editor offers the refresh cadence picker" 'Picker("Refresh", sel
 # its writes go through the shared store (not a second App Group key).
 cok "the settings screen links to the appearance editor" "WidgetAppearanceView()"
 cok "the settings screen has an Appearance section" 'Text("Appearance")'
+# L2 Lock Screen (2026-11-20): each widget row names the accessory families it
+# ships; a Live Activity row has none and therefore omits the line.
+cok "the surface rows name their Lock Screen families" "kind.lockScreenFamilies"
+grep -q "var lockScreenFamilies: String?" Sources/HSCC/Views/WidgetSurfaceLabels.swift \
+  && echo "  ok: the shared surface metadata owns the Lock Screen family line" \
+  || gfail "the shared surface metadata has no Lock Screen family line"
 
 APPEARANCE="Sources/HSCC/Views/WidgetAppearanceView.swift"
 [ -f "$APPEARANCE" ] || { echo "appearance editor missing: $APPEARANCE" >&2; exit 1; }

@@ -852,6 +852,13 @@ struct ConfigView: View {
                             Text(scopeLine(kind))
                                 .font(.caption)
                                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            // The Lock Screen families this surface ships
+                            // (L2 Gauges). Live Activities omit the line.
+                            if let lockScreen = kind.lockScreenFamilies {
+                                Text(lockScreen)
+                                    .font(.caption)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            }
                         }
                         Spacer(minLength: 0)
                     }

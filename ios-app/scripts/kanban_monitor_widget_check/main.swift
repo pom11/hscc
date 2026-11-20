@@ -105,6 +105,18 @@ check("the inline accessory says running + blocked",
       live.inlineLine == "3 running · 19 blocked", live.inlineLine)
 check("the rectangular accessory says done + blocked",
       live.rectangularLine == "79 done today · 19 blocked", live.rectangularLine)
+check("the circular L2 gauge is running / the server's worker-slot cap",
+      live.slotValueText == "3/6" && live.slotCaption == "slots"
+      && live.slotGaugeRange == 0...6 && live.slotGaugeValue == 3,
+      "\(live.slotValueText) \(live.slotCaption)")
+let noCap = KanbanMonitorEntry(date: .now, configured: true, rows: rows,
+                               boardCount: rows.count, unreadableBoards: nil,
+                               failure: nil, partialReason: nil, ageMinutes: nil,
+                               refreshMinutes: 15, paused: false)
+check("no cap on the wire says N running, never an invented of-6",
+      noCap.slotValueText == "3" && noCap.slotCaption == "running"
+      && noCap.slotGaugeRange == 0...3,
+      "\(noCap.slotValueText) \(noCap.slotCaption)")
 check("family depths: small 4, medium 4, large 10",
       KanbanMonitorEntry.rowLimit(for: .systemSmall) == 4
       && KanbanMonitorEntry.rowLimit(for: .systemMedium) == 4

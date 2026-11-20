@@ -14,9 +14,9 @@
     "declared-and-renders (`CardsRunningSmallView`)",
     "declared-and-renders (`CardsRunningMediumView`)",
     "declared-and-renders (`CardsRunningLargeView`)",
-    "declared-and-renders (`Text(entry.inlineLine)`)",
-    "declared-and-renders (`CardsRunningCircularView`)",
-    "declared-and-renders (`CardsRunningRectangularView`)"
+    "declared-and-renders (`Text(entry.inlineLine)` — `32m · title`)",
+    "declared-and-renders (`CardsRunningCircularView` — elapsed clock)",
+    "declared-and-renders (`CardsRunningRectangularView` — `32m · title` + heartbeat)"
   ],
   "coverage_macos": [
     "declared-and-renders (`CardsRunningSmallView`)",

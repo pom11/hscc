@@ -14,9 +14,9 @@
     "declared-and-renders (`SmallKanbanMonitor`)",
     "declared-and-renders (`MediumKanbanMonitor`)",
     "declared-and-renders (`LargeKanbanMonitor`)",
-    "declared-and-renders (`Text(entry.inlineLine)`)",
-    "declared-and-renders (`KanbanMonitorCircular`)",
-    "declared-and-renders (`KanbanMonitorRectangular`)"
+    "declared-and-renders (`Text(entry.inlineLine)` — `2 running · 38 blocked`)",
+    "declared-and-renders (`KanbanMonitorCircular` — L2 running/slots gauge)",
+    "declared-and-renders (`KanbanMonitorRectangular` — running + done/blocked)"
   ],
   "coverage_macos": [
     "declared-and-renders (`SmallKanbanMonitor`)",

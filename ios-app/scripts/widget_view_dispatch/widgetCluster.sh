@@ -75,13 +75,23 @@ else
   wok "the C1 bodies draw no removed table view"
 fi
 
-# (5) The three accessory bodies are intentionally untouched by this card but
-# must keep routing through the gated text model.
-n=$(grep -cE 'entry\.text\(for: \.(inline|circular|rectangular)\)' "$V")
-if [ "$n" -ge 2 ]; then
-  wok "accessory families still route through the entry's gated text ($n sites)"
+# (5) The three accessory bodies are the L2 Gauges pick (2026-11-20): a
+# hottest-node ring, a CLUSTER · TOK/S + four-temp row, and a tally + tok/s
+# inline. They read the C1 projection, never the retired four-number copy.
+for needle in 'L2Gauge(value: fill, range: 0...90' \
+              'Text(c1.rectangularHeadline)' \
+              'Text(c1.inlineL2)' \
+              '.widgetAccentable()'; do
+  if grep -qF -- "$needle" "$V"; then
+    wok "L2 Lock Screen family uses '$needle'"
+  else
+    wbad "L2 Lock Screen family is missing '$needle'"
+  fi
+done
+if grep -q 'lockScreenGaugeValue\|entry.text(for: .circular)' "$V"; then
+  wbad "a Lock Screen body still reads the retired four-number accessory copy"
 else
-  wbad "only $n accessory sites route through the gate (want >= 2)"
+  wok "Lock Screen bodies read the C1 projection, not the retired copy"
 fi
 
 wvd_finish

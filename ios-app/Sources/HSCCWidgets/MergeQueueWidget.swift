@@ -501,11 +501,13 @@ struct MergeQueueRectangular: View {
                     .font(NativeStyle.sub())
                     .foregroundStyle(.primary)
                     .lineLimit(2)
+                    .widgetAccentable()
                 Text(head.headline(max: 30))
                     .font(NativeStyle.small())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            .stale(entry.staleState)
         } else {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Merge queue empty")

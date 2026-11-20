@@ -371,6 +371,7 @@ struct CardsRunningCircularView: View {
                     .font(NativeStyle.small())
                     .foregroundStyle(.secondary)
             }
+            .stale(entry.staleState)
         } else {
             Image(systemName: "checkmark.circle")
                 .font(.body)
@@ -403,10 +404,12 @@ struct CardsRunningRectangularView: View {
                     .font(NativeStyle.sub())
                     .foregroundStyle(.primary)
                     .lineLimit(2)
+                    .widgetAccentable()
                 Text(row.heartbeatText)
                     .font(NativeStyle.small())
                     .foregroundStyle(.secondary)
             }
+            .stale(entry.staleState)
         } else {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Nothing running")

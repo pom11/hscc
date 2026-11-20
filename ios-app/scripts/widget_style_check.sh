@@ -160,6 +160,26 @@ for f in "${WIDGET_VIEWS[@]}"; do
   done
 done
 
+# 4b. The L2 Lock Screen pick (2026-11-20): the three circular gauges use the
+#     shared SwiftUI Gauge with the system accessoryCircular style. A custom
+#     ring or a per-widget style is the regression this refuses.
+l2_gauges=$(grep -h 'L2Gauge(' Sources/HSCCWidgets/ClusterWidgetViews.swift \
+                       Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+                       Sources/HSCCWidgets/NeedsMeWidget.swift | wc -l | tr -d ' ')
+if [ "$l2_gauges" -ge 3 ]; then
+  ok "the Cluster, Boards and Needs Me rings use the shared L2Gauge"
+else
+  bad "only $l2_gauges L2 gauges (want Cluster, Boards and Needs Me)"
+fi
+for f in ClusterWidgetViews.swift KanbanMonitorWidget.swift NeedsMeWidget.swift; do
+  grep -q '\.widgetAccentable()' "Sources/HSCCWidgets/$f" \
+    && ok "$f marks its Lock Screen values accentable" \
+    || bad "$f does not mark a Lock Screen value accentable"
+done
+grep -q 'gaugeStyle(.accessoryCircular)' Sources/HSCCWidgets/NativeStyleKit.swift \
+  && ok "L2Gauge uses the system accessoryCircular style" \
+  || bad "L2Gauge does not use the system accessoryCircular style"
+
 # 5. Every view file reads the environment and wires both toggles; the roots
 #    also set the resolved background. This catches a new family copied from an
 #    old one without the style plumbing.

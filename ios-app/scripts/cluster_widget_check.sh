@@ -99,6 +99,14 @@ fail_when_absent "large draws the 2 h chart" "$VIEWS" 'ClusterThroughputChart(po
 fail_when_absent "large draws the node table" "$VIEWS" 'Grid(alignment: .leading'
 fail_when_absent "large footer names the models" "$VIEWS" 'Text(c1.modelLine)'
 fail_when_absent "large footer names the daemon state" "$VIEWS" 'Text(c1.daemonText)'
+fail_when_absent "accessoryCircular is the L2 hottest-node gauge" "$VIEWS" \
+  'L2Gauge(value: fill, range: 0...90'
+fail_when_absent "accessoryRectangular is the L2 CLUSTER · TOK/S row" "$VIEWS" \
+  'Text(c1.rectangularHeadline)'
+fail_when_absent "accessoryInline is the L2 tally + tok/s line" "$VIEWS" \
+  'Text(c1.inlineL2)'
+fail_when_absent "Lock Screen values are accentable in vibrant rendering" "$VIEWS" \
+  '.widgetAccentable()'
 fail_when_absent "every Home Screen family takes the unconfigured/paused gate" "$VIEWS" \
   'if !entry.configured || entry.paused'
 fail_when_absent "the shared kit owns AsOfStamp" "$KIT" 'struct AsOfStamp'
