@@ -6,6 +6,16 @@
     <description>HSCC Widgets releases for the in-app Sparkle 2 updater.</description>
     <language>en</language>
     <item>
+      <title>HSCC Widgets 1.4.3</title>
+      <pubDate>Fri, 20 Nov 2026 20:25:22 GMT</pubDate>
+      <description>Release notes: https://pom11.github.io/hscc/macos/notes/1.4.3.html</description>
+      <link>https://pom11.github.io/hscc/macos/notes/1.4.3.html</link>
+      <sparkle:version>8</sparkle:version>
+      <sparkle:shortVersionString>1.4.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/pom11/hscc/releases/download/apps-v1.4.3/HSCC-Widgets-1.4.3.zip" length="2991423" type="application/octet-stream" sparkle:edSignature="w4y/Ft7FLKJM8M19ejPyampAKLBwxOE0Lg/lx/2zGu8czPdTavmdtcGiB5XPMDWuZDGGyouq1tnqyhlT5LtFDg==" />
+    </item>
+    <item>
       <title>HSCC Widgets 1.4.2</title>
       <pubDate>Fri, 20 Nov 2026 18:55:26 GMT</pubDate>
       <description>Release notes: https://pom11.github.io/hscc/macos/notes/1.4.2.html</description>
