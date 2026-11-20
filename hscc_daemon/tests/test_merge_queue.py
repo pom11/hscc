@@ -25,14 +25,14 @@ def _git(cwd, *args):
     return proc.stdout.strip()
 
 
-def _repo_pair(tmp_path, *, shared=False):
-    """Bare origin + a clone with ``main`` and one PR branch pushed."""
+def _repo_pair(tmp_path, *, shared=False, base="main"):
+    """Bare origin + a clone with ``base`` and one PR branch pushed."""
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", str(origin)], check=True,
                    capture_output=True, text=True)
 
     seed = tmp_path / "seed"
-    subprocess.run(["git", "init", "-b", "main", str(seed)], check=True,
+    subprocess.run(["git", "init", "-b", base, str(seed)], check=True,
                    capture_output=True, text=True)
     _git(seed, "config", "user.email", "test@example.invalid")
     _git(seed, "config", "user.name", "Test")
@@ -41,8 +41,8 @@ def _repo_pair(tmp_path, *, shared=False):
     _git(seed, "add", ".")
     _git(seed, "commit", "-m", "base")
     _git(seed, "remote", "add", "origin", str(origin))
-    _git(seed, "push", "-u", "origin", "main")
-    _git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    _git(seed, "push", "-u", "origin", base)
+    _git(origin, "symbolic-ref", "HEAD", f"refs/heads/{base}")
 
     clone = tmp_path / "project"
     subprocess.run(["git", "clone", str(origin), str(clone)], check=True,
@@ -61,24 +61,28 @@ def _repo_pair(tmp_path, *, shared=False):
     _git(clone, "push", "-u", "origin", branch)
     head = _git(clone, "rev-parse", "HEAD")
 
-    # Advance main so the PR must actually rebase.
-    _git(clone, "checkout", "main")
+    # Advance the base so the PR must actually rebase.
+    _git(clone, "checkout", base)
     if shared:
         (clone / "shared.txt").write_text("one\nmain\nthree\n")
     else:
         (clone / "main-only.txt").write_text("main moved\n")
     _git(clone, "add", ".")
     _git(clone, "commit", "-m", "main moves")
-    _git(clone, "push", "origin", "main")
+    _git(clone, "push", "origin", base)
     _git(clone, "checkout", branch)
-    return {"origin": origin, "repo": clone, "branch": branch, "head": head}
+    return {"origin": origin, "repo": clone, "branch": branch, "head": head,
+            "base": base}
 
 
-def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None):
+def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
+              base_branch=None):
     path = tmp_path / "registry.yaml"
     mq_cfg = {"enabled": enabled}
     if gates is not None:
         mq_cfg["gates"] = gates
+    if base_branch is not None:
+        mq_cfg["base_branch"] = base_branch
     body = {
         "projects": [{
             "name": name,
@@ -99,6 +103,30 @@ def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None):
     return str(path)
 
 
+def _registry_multi(tmp_path, rows):
+    """Registry with several project rows (e.g. two names on one repo)."""
+    path = tmp_path / "registry-multi.yaml"
+    body = {"projects": [
+        {"name": name, "repo": str(repo),
+         "merge_queue": {"enabled": True, "gates": ["true"]}}
+        for name, repo in rows]}
+    import yaml
+    path.write_text(yaml.safe_dump(body, sort_keys=False))
+    return str(path)
+
+
+def _new_branch(repo, name, base="main"):
+    """A second PR branch off ``base``, pushed to origin; returns its head."""
+    _git(repo, "checkout", base)
+    _git(repo, "checkout", "-b", name)
+    (repo / f"{name.replace('/', '_')}.txt").write_text(f"{name}\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", name)
+    _git(repo, "push", "-u", "origin", name)
+    head = _git(repo, "rev-parse", "HEAD")
+    return head
+
+
 class FakeGh:
     """Injectable ``gh`` runner: per-PR view + merge/comment capture."""
 
@@ -110,12 +138,13 @@ class FakeGh:
 
     def _view(self, pr):
         info = dict(self.heads[pr])
+        info.setdefault("baseRefName", "main")
+        info.setdefault("isCrossRepository", False)
         info.update({
             "number": pr,
             "state": "MERGED" if pr in self.merged else "OPEN",
             "isDraft": False,
             "mergeable": "MERGEABLE",
-            "baseRefName": "main",
             "url": f"https://github.com/example/repo/pull/{pr}",
             "statusCheckRollup": [
                 {"__typename": "CheckRun", "status": "COMPLETED",
@@ -553,6 +582,237 @@ def test_auto_enqueue_accepts_a_pr_url_from_the_projects_origin(tmp_path,
 
     assert ready == [{"pr": 42, "card": "t_own", "assignee": "worker",
                       "branch": "wt/t_own"}]
+
+
+# ── fresh base before every entry (F3) ─────────────────────────────────────
+
+def test_every_entry_fetches_current_base_before_rebasing(tmp_path):
+    """A PR merged between two entries must be in the second entry's base."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    assert mq.tick(state_path=_state(tmp_path),
+                   root=str(tmp_path / "queue"), registry_path=registry,
+                   gh_runner=gh, git_runner=subprocess.run
+                   )["processed"][0]["result"] == "merged"
+
+    # Someone lands another PR on the base while the queue worktree exists,
+    # from a SECOND clone: a push from this clone would refresh its own
+    # remote-tracking ref and hide the staleness.
+    repo = pair["repo"]
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", str(pair["origin"]), str(other)],
+                   check=True, capture_output=True, text=True)
+    _git(other, "config", "user.email", "test@example.invalid")
+    _git(other, "config", "user.name", "Test")
+    (other / "landed-between-entries.txt").write_text("new base\n")
+    _git(other, "add", ".")
+    _git(other, "commit", "-m", "landed between entries")
+    _git(other, "push", "origin", "main")
+    new_main = _git(other, "rev-parse", "HEAD")
+
+    # The existing queue worktree must fetch on every entry, not only when it
+    # is first created.
+    worktree = tmp_path / "queue" / "alpha"
+    assert _git(worktree, "rev-parse", "origin/main") != new_main
+    mq.ensure_worktree({"name": "alpha", "repo": str(repo)},
+                       root=str(tmp_path / "queue"),
+                       git_runner=subprocess.run)
+    assert _git(worktree, "rev-parse", "origin/main") == new_main
+
+    _git(repo, "checkout", "main")
+    _git(repo, "merge", "--ff-only", "origin/main")
+    second_head = _new_branch(repo, "wt/t_second")
+    gh2 = FakeGh({8: {"headRefName": "wt/t_second",
+                      "headRefOid": second_head}})
+    mq.add_to_queue("alpha", 8, path=_state(tmp_path))
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh2, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    # The pushed branch is based on the CURRENT origin/main, not the commit
+    # the queue worktree was created from.
+    assert _git(pair["origin"], "merge-base", "--is-ancestor", new_main,
+                "refs/heads/wt/t_second") == ""
+    assert _git(worktree, "rev-parse", "origin/main") == new_main
+
+
+# ── default branch detection, not hard-coded origin/main (F8) ──────────────
+
+def test_master_default_branch_is_detected_and_used(tmp_path):
+    pair = _repo_pair(tmp_path, base="master")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"],
+                     "baseRefName": "master"}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [7]
+    assert _git(pair["origin"], "rev-list", "--count",
+                f"master..refs/heads/{pair['branch']}") == "1"
+
+
+# ── baseRefName is enforced, or configured explicitly (F6) ─────────────────
+
+def test_non_default_base_pr_is_refused_once_and_not_re_enqueued(
+        tmp_path, monkeypatch):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"],
+                     "baseRefName": "release"}})
+    mq.add_to_queue("alpha", 9, card="t_wrong_base", path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "refused", result
+    assert gh.merged == []
+    assert gh.comments and "release" in " ".join(gh.comments[0])
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["in_flight"] is None
+    assert ps["last"]["result"] == "refused"
+    assert "release" in ps["last"]["error"]
+
+    # Auto-enqueue skips it too, so the tick cannot re-add it every pass.
+    repo = tmp_path / "repo-foreign-origin"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_wrong_base",
+                    "https://github.com/pom11/alpha/pull/9")]))
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha",
+           "base_branch": "main"}
+    assert mq._discover_ready_cards(cfg, gh_runner=gh) == []
+
+
+def test_configured_base_branch_is_rebased_onto(tmp_path):
+    pair = _repo_pair(tmp_path)
+    repo = pair["repo"]
+    _git(repo, "checkout", "main")
+    release_tip = _git(repo, "rev-parse", "main")
+    _git(repo, "checkout", "-b", "release")
+    _git(repo, "push", "-u", "origin", "release")
+
+    _git(repo, "checkout", "main")
+    (repo / "main-after-release.txt").write_text("main moved again\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "main after release")
+    _git(repo, "push", "origin", "main")
+    main_tip = _git(repo, "rev-parse", "main")
+
+    _git(repo, "checkout", "-b", "wt/t_release", "release")
+    (repo / "release-topic.txt").write_text("release topic\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "release topic")
+    _git(repo, "push", "-u", "origin", "wt/t_release")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "fetch", "origin")
+
+    registry = _registry(tmp_path, repo, gates=["true"],
+                         base_branch="release")
+    gh = FakeGh({5: {"headRefName": "wt/t_release", "headRefOid": head,
+                     "baseRefName": "release"}})
+    mq.add_to_queue("alpha", 5, path=_state(tmp_path))
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    branch_ref = "refs/heads/wt/t_release"
+    assert _git(pair["origin"], "merge-base", "--is-ancestor", release_tip,
+                branch_ref) == ""
+    # Before the fix the PR was rebased onto main, making main its base.
+    proc = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", main_tip, branch_ref],
+        cwd=str(pair["origin"]), capture_output=True, text=True)
+    assert proc.returncode != 0, "PR was rebased onto main, not release"
+
+
+# ── fork PRs are refused, not retried (F15) ────────────────────────────────
+
+def test_fork_pr_is_refused_with_clear_reason_and_not_retried(
+        tmp_path, monkeypatch):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({12: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"],
+                      "isCrossRepository": True}})
+    mq.add_to_queue("alpha", 12, card="t_fork", path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "refused", result
+    assert gh.merged == []
+    assert gh.comments and "fork" in " ".join(gh.comments[0])
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["in_flight"] is None
+    assert ps["last"]["result"] == "refused"
+
+    # Discovery skips it too: no retry loop through auto-enqueue.
+    repo = tmp_path / "repo-fork"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_fork", "https://github.com/pom11/alpha/pull/12")]))
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+    assert mq._discover_ready_cards(cfg, gh_runner=gh) == []
+
+
+# ── projects sharing one repo path share one queue/lock (F3) ───────────────
+
+def test_projects_sharing_a_repo_process_one_pr_per_repo_per_tick(tmp_path):
+    pair = _repo_pair(tmp_path)
+    second_head = _new_branch(pair["repo"], "wt/t_second")
+    registry = _registry_multi(
+        tmp_path, [("alpha", pair["repo"]), ("beta", pair["repo"])])
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        8: {"headRefName": "wt/t_second", "headRefOid": second_head},
+    })
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    mq.add_to_queue("beta", 8, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    # ONE FIFO per repo: the beta entry waits even though it is another project.
+    assert [p["project"] for p in result["processed"]] == ["alpha"], result
+    assert gh.merged == [7]
+    doc = mq.load_state(_state(tmp_path))
+    assert doc["projects"]["alpha"]["queue"] == []
+    assert [e["pr"] for e in doc["projects"]["beta"]["queue"]] == [8]
+
+    # Same repo path -> same lock file; a different repo -> a different one.
+    lock_a = mq.repo_lock_path(str(pair["repo"]), root=str(tmp_path))
+    lock_b = mq.repo_lock_path(str(pair["repo"] / "."), root=str(tmp_path))
+    other = mq.repo_lock_path(str(tmp_path / "other"), root=str(tmp_path))
+    assert lock_a == lock_b
+    assert lock_a != other
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert [p["pr"] for p in result["processed"]] == [8], result
+    assert gh.merged == [7, 8]
 
 
 # ── sandbox isolation (HSCC_HOME / HSCC_DIR) ───────────────────────────────

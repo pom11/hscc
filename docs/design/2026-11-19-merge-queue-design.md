@@ -17,22 +17,34 @@ became a new card and the orchestrator became the bottleneck.
 
 A local merge queue runs in the `hscc` daemon on the gateway Mac.
 
-* **Per project repo: a FIFO of green PRs.** One PR at a time per repo.
+* **Per repo: a FIFO of green PRs.** One PR at a time per repo. Registry
+  projects that share one repo path (for example two product names on the same
+  checkout) share that FIFO and a single per-repo processing lock.
 * **Queue worktree:** `~/.hscc/merge-queue/<project>/` — a git worktree of the
   project repo, never the operator's checkout. The queue state ledger is
   `~/.hscc/merge-queue-state.json`, written atomically (temp + fsync +
   `os.replace`) and reloaded on daemon start, so a restart resumes instead of
   forgetting.
-* **Steps per PR:** fetch, rebase the PR head onto `origin/main` (a real
-  `git rebase`; no automatic conflict resolution), run the project's gates,
+* **Steps per PR:** fetch `origin` on every entry (not only when the worktree
+  is created), rebase the PR head onto `origin/<base>` (a real `git rebase`;
+  no automatic conflict resolution), run the project's gates,
   `git push --force-with-lease` to the PR branch, then
   `gh pr merge --squash --delete-branch`. Record the pushed and merged SHAs.
+  `<base>` is the repo's default branch, detected from `origin/HEAD` (so
+  `master` projects work too), unless the registry declares
+  `merge_queue.base_branch`.
+* **Refusals, not retries:** a PR whose `baseRefName` is not the queue's
+  `<base>` is refused once with a clear comment; `merge_queue.base_branch`
+  opts a project into a different target. A cross-repository (fork) PR is
+  refused the same way, because the queue only pushes branches in the
+  project's own `origin`. Auto-enqueue skips both, so neither is re-added
+  every tick.
 * **Conflict or red gate:** abort the rebase cleanly, comment on the PR with
   the conflicted files or the failing gate's tail, hand the card back to its
   worker as a *resolve* step (comment + reassign/unblock via the `hermes
   kanban` CLI), and drop the PR from the queue.
-* **Auto-enqueue:** a card whose PR is open, not draft, mergeable, and whose
-  `gh` checks are green.
+* **Auto-enqueue:** a card whose PR is open, not draft, mergeable, on the
+  queue's base, not a fork, and whose `gh` checks are green.
 * **Manual:** `hscc merge-queue add <project> <pr>`.
 
 ## Ownership
@@ -45,6 +57,9 @@ merge_queue:
   enabled: false
   gates: ["pytest -q"]
   timeout_s: 1800
+  # Optional: expect PRs against this base instead of the repo default
+  # (e.g. release). PRs to any other base are refused.
+  # base_branch: release
 ```
 
 `hscc`'s own defaults are the address guard plus the pytest legs, with

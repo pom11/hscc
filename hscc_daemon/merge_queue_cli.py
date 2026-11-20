@@ -1,6 +1,6 @@
 """``hscc merge-queue`` — inspect and steer the local merge queue (MQ1).
 
-The daemon does the work (one PR per project per tick); this group is the
+The daemon does the work (one PR per repo per tick); this group is the
 operator's read/steer surface:
 
     hscc merge-queue status [--json]
@@ -27,13 +27,15 @@ from . import merge_queue as mq
 from . import cli_theme as theme
 
 HELP_TEXT = """\
-HSCC local merge queue — FIFO of green PRs, one at a time per project.
+HSCC local merge queue — FIFO of green PRs, one at a time per repo.
 
-The daemon rebases each PR onto origin/main in its own worktree
-(~/.hscc/merge-queue/<project>/), runs the project's gates, pushes
+The daemon fetches origin, rebases each PR onto origin/<base> in its own
+worktree (~/.hscc/merge-queue/<project>/), runs the project's gates, pushes
 --force-with-lease and runs `gh pr merge --squash --delete-branch`.
-A conflict or red gate comments on the PR and hands the card back as a
-resolve step.
+<base> is the repo's default branch (main or master) unless the registry
+declares merge_queue.base_branch. A conflict or red gate comments on the PR
+and hands the card back as a resolve step; a fork PR or a PR targeting
+another base is refused once with the reason.
 
 Usage: hscc merge-queue <subcommand> [args]
 
