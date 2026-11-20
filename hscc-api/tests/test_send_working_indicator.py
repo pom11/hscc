@@ -22,6 +22,7 @@ or hermes serve (the same seam test_ws_relay_not_noop.py establishes).
 """
 
 import json
+import sys
 import time
 import types
 
@@ -194,12 +195,32 @@ def test_send_still_relays_when_detector_is_fail_safe(monkeypatch):
 def test_detector_matches_only_live_cli_surface(monkeypatch, tmp_path):
     """Only an entry on the project's OWN session with surface==cli (lowercased)
     is reported as an owner; other surfaces / sessions are None."""
-    # Hermetic: never consult the operator's real hermes profiles. The detector
-    # gates on profile_exists('hscc-orch') before reading the registry, so a
-    # machine without that profile would otherwise return None here.
+    # Hermetic on EVERY interpreter (t_c51c87d7). The detector gates on
+    # ``profile_exists('hscc-orch')`` before reading the registry, so a machine
+    # without that profile would otherwise return None here — t_91e7b6ef (#504)
+    # made the case hermetic for that by importing the REAL ``hermes_cli.profiles``
+    # and monkeypatching ``profile_exists``. But the thin CI sibling has no
+    # ``hermes_cli`` at all (the same reason ``require_hermes_profile_library``
+    # skips 6 neighbours), so that bare ``from hermes_cli import profiles`` went
+    # RED — a hard import outside any gate. Handing ``detect_active_cli_owner`` a
+    # synthetic ``hermes_cli.profiles`` (the leg's existing ``fake_hermes`` seam
+    # idiom, test_profile_root.py) keeps the surface-matching assertion RUNNING on
+    # the canonical AND the thin interpreter instead of gating it away, and the
+    # fake carries no operator profile either way. ``_active_session_cli_owner`` —
+    # the only collaborator that reaches ``hermes_cli.active_sessions`` /
+    # ``get_profile_dir`` — is stubbed below, so the fake only has to satisfy
+    # ``detect_active_cli_owner``'s own two calls (``normalize_profile_name`` +
+    # ``profile_exists``); an incomplete fake would return None and trip the
+    # ``assert owner is not None`` below, never a silent skip.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    from hermes_cli import profiles as profiles_mod
-    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    fake_profiles = types.ModuleType("hermes_cli.profiles")
+    fake_profiles.normalize_profile_name = lambda name: name
+    fake_profiles.profile_exists = lambda name: True
+    fake_cli = types.ModuleType("hermes_cli")
+    fake_cli.__path__ = []
+    fake_cli.profiles = fake_profiles
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", fake_profiles)
 
     def _fake_resolve(project, registry_path=None):
         return ("hscc-orch", "hscc", "sess-1")
