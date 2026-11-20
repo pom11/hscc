@@ -139,6 +139,7 @@ struct ConfigView: View {
     @EnvironmentObject private var router: DeepLinkRouter
     /// In-app update feed (t_2a1e5913). Injected by HSCCApp; about/banner only.
     @EnvironmentObject private var updates: UpdateChecker
+    @Environment(\.openURL) private var openURL
 
     // Local editing state seeded from the store.
     @State private var hostField: String = ""
@@ -419,6 +420,18 @@ struct ConfigView: View {
                         }
                     }
                     .disabled(updates.isChecking)
+
+                    // Opens the install page in Safari (the Ad Hoc install
+                    // page hosts the itms-services manifest).
+                    Button {
+                        openURL(updates.installURL)
+                    } label: {
+                        if let update = updates.available {
+                            Label("Install \(update.version)", systemImage: "arrow.down.circle.fill")
+                        } else {
+                            Label("Open install page", systemImage: "safari")
+                        }
+                    }
 
                     if let lastResult = updates.lastResult {
                         Label {

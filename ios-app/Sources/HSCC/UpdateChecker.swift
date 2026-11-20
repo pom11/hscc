@@ -18,6 +18,13 @@ import SwiftUI
 @MainActor
 final class UpdateChecker: ObservableObject {
     static let feedURL = URL(string: "https://pom11.github.io/hscc/ios/version.json")!
+    /// The public install page the feed sits beside. Used when no newer
+    /// release has been found yet, so the Settings button always works.
+    static let installPageURL = URL(string: "https://pom11.github.io/hscc/ios/")!
+
+    /// Where Settings → About's install button goes: the found release's own
+    /// install URL, else the public install page.
+    var installURL: URL { available?.installURL ?? Self.installPageURL }
     private static let requestTimeout: TimeInterval = 8
     private static let maximumFeedBytes = 256 * 1024
 
