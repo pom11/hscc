@@ -611,9 +611,14 @@ ROUTES = []
 def handle_ping(server, ctx, query, body):
     """GET /v1/ping — the API's OWN liveness (NOT the fleet health check).
 
-    The design reserves ``GET /v1/health`` for the fleet check backed by
-    ``verify.run_all()`` (A2), so the API's own liveness lives at ``/v1/ping``
-    to avoid the collision. Returns a small JSON object confirming the API is up.
+    The design reserves ``GET /v1/health`` for the fleet check, so the API's
+    own liveness lives at ``/v1/ping`` to avoid the collision. Since
+    t_7babf634 the split inside ``/v1/health`` is: ``GET /v1/health`` = the
+    last cached verify snapshot (cheap, pollable — served by
+    ``health_cache``, never runs a verify on the request thread), and
+    ``GET /v1/verify`` = run the fleet check now. ``/v1/ping`` answers neither
+    question; it only confirms the API process is up. Returns a small JSON
+    object.
     """
     return 200, {
         "ok": True,

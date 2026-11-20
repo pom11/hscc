@@ -270,6 +270,13 @@ def test_health_ok_shape(running, token, stub_fleet):
     assert payload["ok"] is True
     assert len(payload["checks"]) == 5
     assert payload["speak"] == "All checks passed."
+    assert isinstance(payload["speak"], str) and payload["speak"]
+    # t_7babf634: this test's tmp dir has never held a snapshot and the
+    # in-process cache is reset per test, so the stubbed verify must be the
+    # FIRST (and only) one — the inline path. Every later poll in the same
+    # process would be answered from the cache instead; test_health_cache.py
+    # pins that half.
+    assert payload["source"] == "inline"
 
 
 def test_health_partial_shape(running, token, stub_fleet):

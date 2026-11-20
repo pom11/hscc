@@ -15,7 +15,8 @@ reads, routes_actions.py A4 for mutations):
     error (never claim success for a change that didn't land).
 
 Backing (libraries, never CLI text-parsing):
-  * ``GET  /v1/verify``       -> ``hscc_daemon.verify.run_all()``
+  * ``GET  /v1/verify``       -> ``hscc_daemon.verify.run_all()`` (always inline;
+    the verdict is also recorded into the health snapshot /v1/health serves)
   * ``GET  /v1/daemon/status``-> ``daemon_ops.get_pid()`` + ``state.read_all_states()``
   * ``GET  /v1/daemon/host``  -> local platform/psutil host metrics (daemon host's OWN machine)
   * ``GET  /v1/triggers``     -> ``trigger.load_triggers()`` + ``state.read_state('triggers')`` + recent events
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import re
 
+import health_cache
 from api_server import ApiError, ROUTES
 from routes_cluster import _load_cluster_engine, _is_error_dict
 
@@ -392,13 +394,23 @@ def _speak_fleet_down(data: dict) -> str:
 # --------------------------------------------------------------------------- #
 
 def handle_verify(server, ctx, query, body):
-    """GET /v1/verify — full `hscc verify` result, per-check pass/fail."""
+    """GET /v1/verify — full `hscc verify` result, per-check pass/fail.
+
+    Inline semantics are deliberate (t_7babf634): this route IS the explicit
+    "run the fleet check now" trigger, so it always runs a real verify and
+    answers with its own result — it never serves the cache. What it adds is
+    that the verdict is also recorded into the shared health snapshot, so a
+    manual verify refreshes the health screen and the two routes cannot drift.
+    """
     try:
         data = _backing_verify()
     except Exception:
         return 200, {"speak": "Health check unavailable."}
     if not isinstance(data, dict):
         return 200, {"speak": "Health check unavailable."}
+    # Record only a verdict-shaped result; a non-verdict must not overwrite the
+    # last good snapshot (health_cache.record returns None for it).
+    health_cache.record(data)
     return 200, {
         "ok": data.get("ok", False),
         "checks": data.get("checks", []),

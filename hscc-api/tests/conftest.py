@@ -189,3 +189,22 @@ def _isolate_hscc(tmp_path, monkeypatch):
     from hscc_daemon import state
     monkeypatch.setattr(state, "STATE_DIR",
                         os.path.join(base, "state"), raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_health_cache():
+    """Start every test with an empty in-process health snapshot (t_7babf634).
+
+    ``health_cache`` keeps the verify snapshot in a module global so the
+    ``/v1/health`` hot path never reads the disk. That is exactly what makes it
+    test-polluting: a verdict recorded by one test would answer the next
+    test's ``GET /v1/health``, so an assertion about "the verify I just stubbed"
+    could silently pass on a neighbour's cache. The on-disk file needs no
+    handling here — the autouse ``_isolate_hscc`` fixture already redirects
+    ``~/.hscc`` into this test's own tmp dir.
+    """
+    import health_cache
+
+    health_cache.reset_state()
+    yield
+    health_cache.reset_state()
