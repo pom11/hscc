@@ -373,9 +373,10 @@ def test_cluster_monitor_cache_is_single_flight(running, token, monkeypatch):
     threads = [threading.Thread(target=one) for _ in range(clients)]
     for thread in threads:
         thread.start()
+    reached = False
     try:
         gate.wait(timeout=10)
-        assert entered.wait(timeout=10), "the burst never reached the build"
+        reached = entered.wait(timeout=10)
     finally:
         release.set()                 # the build is never left blocked
 
@@ -383,8 +384,12 @@ def test_cluster_monitor_cache_is_single_flight(running, token, monkeypatch):
         thread.join(timeout=10)
     alive = [t for t in threads if t.is_alive()]
 
-    assert not errors
+    # Connection errors first: with an accept queue too shallow for the burst
+    # this is what actually goes wrong, and it is the failure an operator needs
+    # to see. Everything after it is the cache contract.
+    assert not errors, f"a connection died underneath the burst: {errors}"
     assert not alive, f"clients never finished: {alive}"
+    assert reached, "the burst never reached the build"
     assert len(results) == clients
     assert all(status == 200 for status, _payload in results)
     assert len(calls) == 1, "the burst did not share one build"
