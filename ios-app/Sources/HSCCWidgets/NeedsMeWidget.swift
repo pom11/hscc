@@ -2,32 +2,17 @@ import SwiftUI
 import WidgetKit
 
 // ---------------------------------------------------------------------------
-// NeedsMeWidget.swift — the main orchestrator's alert feed on the Home Screen
-// and Lock Screen. READ-ONLY: one GET through `WidgetDataClient`, no ack, no
-// notification, and only the `NeedsMeItem` projection is persisted.
+// NeedsMeWidget.swift — "Needs Me" (N3 Calm when clear), the Native redesign.
 //
-// WHAT IT SHOWS, AND WHERE EACH VALUE COMES FROM
+// The surface is quiet until something needs the operator. Empty is only
+// allowed to say "All clear" after a SUCCESSFUL fetch: a failed or stale read
+// draws the offline state instead, because a blind read must never look like a
+// calm queue. Open items lead with the count and the newest alert's title; the
+// large family lists each alert with a severity bar, its level and its age.
 //
-// `GET /v1/alerts` is the same feed `hscc notify` writes and `hscc notify list`
-// reads. `NeedsMeFeed.from` is the one projection (Sources/Shared/
-// NeedsMeReading.swift): newest first like the CLI, unacknowledged rows only,
-// body reduced to its first line. So:
-//
-//   count        <- NeedsMeFeed.count (unacknowledged rows)
-//   newest title <- items[0].title
-//   age          <- items[].ts through NeedsMeReading.ageLabel (2m / 3h / 4d)
-//   level        <- items[].level, normalized info|action|critical
-//   body line    <- items[].bodyFirstLine (the large family)
-//
-// COLOUR. Critical and action rows use the operator's accent (#FF5722 in the
-// default style); info rows use the secondary text role. Lock Screen families
-// are system-tinted, so they carry the same hierarchy as primary/secondary.
-//
-// FAILURE RULE. `WidgetData.read` owns live/stale/failed. A stale tile keeps
-// its real rows and names the reason and its age; a failed tile names the
-// reason instead of drawing a fabricated zero. Empty is its own honest state:
-// "Nothing needs you" with the update age. Paused is decided before the client
-// exists, so a paused surface sends zero requests.
+// READ-ONLY. One GET /v1/alerts through WidgetDataClient; no ack, no
+// notification. The projection (`NeedsMeReading.swift`) keeps unacknowledged
+// rows newest first, as `hscc notify list` does.
 // ---------------------------------------------------------------------------
 
 // MARK: - Entry
@@ -69,45 +54,53 @@ struct NeedsMeEntry: TimelineEntry {
         return "Paused"
     }
 
-    // MARK: Text the families draw
+    // MARK: The data's own clock
+
+    var dataAt: Date? {
+        if let ageMinutes {
+            return Date().addingTimeInterval(-Double(ageMinutes) * 60)
+        }
+        if failure != nil { return nil }
+        return date
+    }
+
+    /// A failed or stale read, whether or not cached rows are drawn. Nil here
+    /// is the ONLY state in which "All clear" is true.
+    var isOffline: Bool { failure != nil || partialReason != nil }
+
+    var staleState: StaleState? {
+        guard configured, !paused else { return nil }
+        return StaleState(dataAt: dataAt, fetchedAt: Date(),
+                          refreshMinutes: refreshMinutes,
+                          failed: isOffline || ageMinutes != nil)
+    }
+
+    // MARK: The values the families draw
 
     var items: [NeedsMeItem] { feed.items }
     var count: Int { feed.count }
     var newest: NeedsMeItem? { feed.newest }
-    var isEmpty: Bool { failure == nil && feed.items.isEmpty }
+
+    /// The N3 contract: empty is a claim only a successful fetch may make.
+    var isAllClear: Bool {
+        failure == nil && partialReason == nil && feed.items.isEmpty
+    }
 
     var inlineLine: String {
         if !configured || paused { return shortGateLabel }
-        if let failure { return failure.shortLabel }
+        if isOffline { return failure?.shortLabel ?? "offline" }
         return NeedsMeReading.inlineLine(count: count)
     }
 
-    /// The freshness line every family can afford. Empty is still a real state:
-    /// it says when the answer was last read.
+    /// The freshness/offline line every family can afford.
     var updatedLine: String {
         if !configured { return "Set up the app to see what needs you" }
         if paused { return "No data while paused" }
-        if let ageMinutes {
-            let reason = partialReason?.shortLabel ?? "kept last known"
-            return "updated \(ageMinutes)m ago · \(reason)"
+        if isOffline || ageMinutes != nil {
+            return "offline · \(NativeStyle.hhmm(dataAt))"
         }
-        if let failure { return failure.operatorLine }
-        if feed.items.isEmpty {
-            return "updated just now · \(NeedsMeReading.nothingNeedsYou.lowercased())"
-        }
-        return "updated just now"
-    }
-
-    var partialLine: String? {
-        partialReason.map { "stale · \($0.shortLabel)" }
-    }
-
-    static func rowLimit(for family: WidgetFamily) -> Int {
-        switch family {
-        case .systemLarge, .systemExtraLarge: return NeedsMeReading.largeRowLimit
-        case .systemMedium: return NeedsMeReading.mediumRowLimit
-        default: return 1
-        }
+        return isAllClear ? "Nothing waiting since \(NativeStyle.hhmm(dataAt))"
+                          : "as of \(NativeStyle.hhmm(dataAt))"
     }
 
     static var placeholder: NeedsMeEntry {
@@ -132,7 +125,7 @@ struct NeedsMeEntry: TimelineEntry {
 // MARK: - Timeline provider
 
 struct NeedsMeTimelineProvider: TimelineProvider {
-    static let defaultRefreshMinutes = 5
+    static let defaultRefreshMinutes = 15
 
     // GATE-SLICE-BEGIN: needs_me_cadence
     static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {
@@ -221,16 +214,12 @@ struct NeedsMeWidget: Widget {
     let kind = "NeedsMeWidget"
 
     var body: some WidgetConfiguration {
-        let style = WidgetStyle.resolved(for: .widgetNeedsMe)
-        return StaticConfiguration(kind: kind, provider: NeedsMeTimelineProvider()) { entry in
+        StaticConfiguration(kind: kind, provider: NeedsMeTimelineProvider()) { entry in
             NeedsMeWidgetView(entry: entry)
-                .containerBackground(for: .widget) {
-                    WidgetSurfaceBackground(style: style)
-                }
-                .widgetRenderingAdaptation(style: style)
+                .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Needs Me")
-        .description("Alerts from the main orchestrator that still need you. Read-only.")
+        .description("Alerts from the main orchestrator that still need you, and a calm all-clear when none do. Read-only.")
         #if os(iOS)
         .supportedFamilies([.accessoryInline, .accessoryCircular, .accessoryRectangular,
                             .systemSmall, .systemMedium, .systemLarge])
@@ -250,8 +239,10 @@ struct NeedsMeWidgetView: View {
         case .accessoryInline:
             if !entry.configured || entry.paused {
                 Text(entry.shortGateLabel)
+                    .font(NativeStyle.small())
             } else {
                 Text(entry.inlineLine)
+                    .font(NativeStyle.small())
             }
         case .accessoryCircular:
             NeedsMeCircular(entry: entry)
@@ -271,164 +262,158 @@ struct NeedsMeWidgetView: View {
 // MARK: - Shared panes
 
 private struct NeedsMeGateView: View {
-    @Environment(\.widgetStyle) private var style
     let entry: NeedsMeEntry
-    var systemTinted = false
-
-    private var primaryText: Color { systemTinted ? .primary : style.primaryTextColor }
-    private var secondaryText: Color { systemTinted ? .secondary : style.secondaryTextColor }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
-                .font(style.font(.subheadline))
-                .foregroundColor(secondaryText)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Needs Me")
+                .font(NativeStyle.label())
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(entry.shortGateLabel)
+                .font(NativeStyle.hero(24))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
             Text(entry.gateLine)
-                .font(style.font(.caption2, weight: .semibold))
-                .foregroundColor(primaryText)
-            Text(entry.paused
-                 ? "Turn it back on under Widgets & Live Activities in the HSCC app."
-                 : WidgetDataFailure.notConfigured.operatorLine)
-                .font(style.font(.caption2))
-                .foregroundColor(secondaryText)
-                .lineLimit(3)
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            AsOfStamp(date: nil)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
-private struct NeedsMeErrorPane: View {
-    @Environment(\.widgetStyle) private var style
-    let failure: WidgetDataFailure
+private struct NeedsMeOfflineView: View {
+    let entry: NeedsMeEntry
     var detailed = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            HStack(spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
-                    .font(style.font(.subheadline))
-                    .foregroundColor(style.badColor)
-                Text("alert feed failed")
-                    .font(style.font(.caption, weight: .semibold))
-                    .foregroundColor(style.primaryTextColor)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(NativeStyle.bad)
+                Text(entry.failure?.shortLabel ?? "Offline")
+                    .font(NativeStyle.label())
+                    .foregroundStyle(.primary)
             }
-            Text(detailed ? failure.operatorLine : failure.shortLabel)
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
-                .lineLimit(detailed ? 4 : 2)
+            Text(entry.failure?.operatorLine ?? "The alert feed did not answer.")
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
+                .lineLimit(detailed ? 3 : 2)
             Text("needs-you state unknown")
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
-        }
-    }
-}
-
-private struct NeedsMeHeader: View {
-    @Environment(\.widgetStyle) private var style
-    let entry: NeedsMeEntry
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            if style.showIcons {
-                Image(systemName: "bell.badge").widgetIcon(style)
-                    .font(style.font(size: 10))
-                    .foregroundColor(style.accentColor)
-            }
-            Text("Needs me")
-                .font(style.font(.caption, weight: .semibold))
-                .foregroundColor(style.primaryTextColor)
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
             Spacer(minLength: 0)
-            Text(entry.updatedLine)
-                .font(style.font(size: 8))
-                .foregroundColor(entry.ageMinutes == nil ? style.secondaryTextColor : style.warnColor)
-                .lineLimit(1)
+            AsOfStamp(date: entry.dataAt)
         }
-        .widgetHeader(style)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
-private struct NeedsMeEmptyView: View {
-    @Environment(\.widgetStyle) private var style
+private struct NeedsMeAllClearView: View {
     let entry: NeedsMeEntry
+    var compact = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            Text(NeedsMeReading.nothingNeedsYou)
-                .font(style.font(.caption, weight: .semibold))
-                .foregroundColor(style.primaryTextColor)
-            Text(entry.updatedLine)
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Needs you")
+                .font(NativeStyle.label())
+                .foregroundStyle(.secondary)
+            Text("All clear")
+                .font(NativeStyle.hero(compact ? 26 : 34))
+                .foregroundStyle(NativeStyle.ok)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text("Nothing waiting since \(NativeStyle.hhmm(entry.dataAt))")
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
                 .lineLimit(2)
+            Spacer(minLength: 0)
+            AsOfStamp(date: entry.dataAt)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
-/// One alert row. The level is carried by its own label colour; the title stays
-/// primary so a long title is readable even when the level is `info`.
 private struct NeedsMeRowView: View {
-    @Environment(\.widgetStyle) private var style
     let entry: NeedsMeEntry
     let item: NeedsMeItem
     var showBody = false
 
-    private var levelColor: Color {
-        item.level.isUrgent ? style.accentColor : style.secondaryTextColor
-    }
-
     var body: some View {
-        HStack(alignment: .top, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
-                    Text(item.level.label.uppercased())
-                        .font(style.font(size: 8, weight: .semibold))
-                        .foregroundColor(levelColor)
-                    Text(item.title)
-                        .font(style.font(.caption2, weight: .medium))
-                        .foregroundColor(style.primaryTextColor)
-                        .lineLimit(1)
-                }
+        HStack(alignment: .top, spacing: 8) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Self.color(item.level))
+                .frame(width: 3)
+                .frame(maxHeight: .infinity)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(NativeStyle.small())
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
                 if showBody, !item.bodyFirstLine.isEmpty {
                     Text(item.bodyFirstLine)
-                        .font(style.font(.caption2))
-                        .foregroundColor(style.secondaryTextColor)
+                        .font(NativeStyle.small())
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
+                Text("\(item.ageLabel(now: entry.date)) ago · \(item.level.label.lowercased())")
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: 0)
-            Text(item.ageLabel(now: entry.date))
-                .font(style.font(size: 8))
-                .foregroundColor(levelColor)
-                .lineLimit(1)
         }
+        .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(item.level.label) \(item.title), \(item.ageLabel(now: entry.date))")
+        .accessibilityLabel("\(item.level.label) \(item.title), \(item.ageLabel(now: entry.date)) old")
+    }
+
+    static func color(_ level: NeedsMeLevel) -> Color {
+        switch level {
+        case .critical: return NativeStyle.bad
+        case .action: return NativeStyle.warn
+        case .info: return .secondary
+        }
     }
 }
 
 // MARK: - Accessory families
 
 struct NeedsMeCircular: View {
-    @Environment(\.widgetStyle) private var style
     let entry: NeedsMeEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
             Text(entry.shortGateLabel)
-                .font(style.font(size: 9, weight: .semibold))
+                .font(NativeStyle.small())
                 .foregroundStyle(.secondary)
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
-        } else if let failure = entry.failure {
-            Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
-            Text(failure.shortLabel)
+        } else if entry.isOffline && entry.items.isEmpty {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.body)
+                .foregroundStyle(.primary)
+        } else if entry.count == 0 {
+            VStack(spacing: 0) {
+                Image(systemName: "checkmark")
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                Text("all clear")
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.secondary)
+            }
         } else {
             VStack(spacing: 0) {
                 Text("\(entry.count)")
-                    .font(style.font(.body))
-                    .fontWeight(.semibold)
+                    .font(NativeStyle.hero(22))
                     .foregroundStyle(.primary)
                 Text("need you")
-                    .font(style.font(size: 8))
+                    .font(NativeStyle.small())
                     .foregroundStyle(.secondary)
             }
         }
@@ -436,48 +421,42 @@ struct NeedsMeCircular: View {
 }
 
 struct NeedsMeRectangular: View {
-    @Environment(\.widgetStyle) private var style
     let entry: NeedsMeEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
             Text(entry.shortGateLabel)
-                .font(style.font(.caption2, weight: .semibold))
+                .font(NativeStyle.small())
                 .foregroundStyle(.secondary)
-        } else if let failure = entry.failure {
+        } else if entry.isOffline && entry.items.isEmpty {
             VStack(alignment: .leading, spacing: 1) {
-                Text("alert feed failed")
-                    .font(style.font(.caption2, weight: .semibold))
-                Text(failure.shortLabel)
-                    .font(style.font(.caption2))
-                Text(entry.updatedLine)
-                    .font(style.font(.caption2))
-                    .lineLimit(1)
-            }
-        } else if let newest = entry.newest {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(newest.level.isUrgent ? "Needs you now" : "Needs you")
-                    .font(style.font(.caption2, weight: .semibold))
+                Text("Offline")
+                    .font(NativeStyle.sub())
                     .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(newest.title)
-                    .font(style.font(.caption2))
+                Text("needs-you state unknown")
+                    .font(NativeStyle.small())
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Text("\(newest.ageLabel(now: entry.date)) · \(NeedsMeReading.inlineLine(count: entry.count))")
-                    .font(style.font(size: 8))
+            }
+        } else if entry.count == 0 {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("All clear")
+                    .font(NativeStyle.sub())
+                    .foregroundStyle(.primary)
+                Text("nothing needs you")
+                    .font(NativeStyle.small())
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
             }
         } else {
             VStack(alignment: .leading, spacing: 1) {
-                Text(NeedsMeReading.nothingNeedsYou)
-                    .font(style.font(.caption2, weight: .semibold))
+                Text(entry.count == 1 ? "1 needs you" : "\(entry.count) need you")
+                    .font(NativeStyle.sub())
                     .foregroundStyle(.primary)
-                Text(entry.updatedLine)
-                    .font(style.font(.caption2))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if let newest = entry.newest {
+                    Text(newest.title)
+                        .font(NativeStyle.small())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
         }
     }
@@ -486,118 +465,123 @@ struct NeedsMeRectangular: View {
 // MARK: - Home Screen families
 
 struct SmallNeedsMe: View {
-    @Environment(\.widgetStyle) private var style
     let entry: NeedsMeEntry
 
     var body: some View {
         Group {
             if !entry.configured || entry.paused {
                 NeedsMeGateView(entry: entry)
-            } else if let failure = entry.failure {
-                NeedsMeErrorPane(failure: failure)
-            } else {
-                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                    NeedsMeHeader(entry: entry)
-                    if let newest = entry.newest {
-                        HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                            Text("\(entry.count)")
-                                .font(style.font(.largeTitle, weight: .bold))
-                                .foregroundColor(style.accentColor)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.6)
-                            Text("need you")
-                                .font(style.font(.caption, weight: .semibold))
-                                .foregroundColor(style.secondaryTextColor)
-                        }
-                        Text(newest.title)
-                            .font(style.font(.caption2, weight: .medium))
-                            .foregroundColor(newest.level.isUrgent
-                                             ? style.accentColor : style.secondaryTextColor)
-                            .lineLimit(2)
-                        Text(newest.ageLabel(now: entry.date))
-                            .font(style.font(.caption2))
-                            .foregroundColor(style.secondaryTextColor)
-                        Spacer(minLength: 0)
-                        if let partial = entry.partialLine {
-                            Text(partial)
-                                .font(style.font(size: 8))
-                                .foregroundColor(style.warnColor)
-                                .lineLimit(1)
-                        }
-                    } else {
-                        NeedsMeEmptyView(entry: entry)
-                        Spacer(minLength: 0)
-                    }
+            } else if entry.isOffline && entry.items.isEmpty {
+                NeedsMeOfflineView(entry: entry)
+            } else if entry.isAllClear {
+                NeedsMeAllClearView(entry: entry, compact: true)
+            } else if let newest = entry.newest {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Needs you")
+                        .font(NativeStyle.label())
+                        .foregroundStyle(.secondary)
+                    Text("\(entry.count)")
+                        .font(NativeStyle.hero())
+                        .foregroundStyle(NativeStyle.bad)
+                        .lineLimit(1)
+                    Text(newest.title)
+                        .font(NativeStyle.small())
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                    Text("\(newest.ageLabel(now: entry.date)) ago")
+                        .font(NativeStyle.small())
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    AsOfStamp(date: entry.dataAt)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .stale(entry.staleState)
             }
         }
     }
 }
 
 struct MediumNeedsMe: View {
-    @Environment(\.widgetStyle) private var style
     let entry: NeedsMeEntry
 
     var body: some View {
         Group {
             if !entry.configured || entry.paused {
                 NeedsMeGateView(entry: entry)
-            } else if let failure = entry.failure {
-                NeedsMeErrorPane(failure: failure)
-            } else {
-                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
-                    NeedsMeHeader(entry: entry)
-                    if entry.items.isEmpty {
-                        NeedsMeEmptyView(entry: entry)
-                    } else {
-                        ForEach(entry.items.prefix(NeedsMeReading.mediumRowLimit)) { item in
-                            NeedsMeRowView(entry: entry, item: item)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    if let partial = entry.partialLine {
-                        Text(partial)
-                            .font(style.font(size: 8))
-                            .foregroundColor(style.warnColor)
+            } else if entry.isOffline && entry.items.isEmpty {
+                NeedsMeOfflineView(entry: entry)
+            } else if entry.isAllClear {
+                NeedsMeAllClearView(entry: entry)
+            } else if let newest = entry.newest {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Needs you now")
+                            .font(NativeStyle.label())
+                            .foregroundStyle(NativeStyle.bad)
+                        Text(newest.title)
+                            .font(NativeStyle.sub())
+                            .foregroundStyle(.primary)
+                            .lineLimit(3)
+                        Spacer(minLength: 0)
+                        Text("\(newest.ageLabel(now: entry.date)) ago · \(newest.level.label.lowercased())")
+                            .font(NativeStyle.small())
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(NativeStyle.bad.opacity(0.14),
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    VStack(spacing: 2) {
+                        Text("\(entry.count)")
+                            .font(NativeStyle.hero(34))
+                            .foregroundStyle(NativeStyle.bad)
+                            .lineLimit(1)
+                        Text("open")
+                            .font(NativeStyle.label())
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: 74)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .stale(entry.staleState)
             }
         }
     }
 }
 
 struct LargeNeedsMe: View {
-    @Environment(\.widgetStyle) private var style
     let entry: NeedsMeEntry
 
     var body: some View {
         Group {
             if !entry.configured || entry.paused {
                 NeedsMeGateView(entry: entry)
-            } else if let failure = entry.failure {
-                NeedsMeErrorPane(failure: failure, detailed: true)
+            } else if entry.isOffline && entry.items.isEmpty {
+                NeedsMeOfflineView(entry: entry, detailed: true)
+            } else if entry.isAllClear {
+                NeedsMeAllClearView(entry: entry)
             } else {
-                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                    NeedsMeHeader(entry: entry)
-                    Text("\(entry.count) need you")
-                        .font(style.font(.caption, weight: .semibold))
-                        .foregroundColor(entry.count > 0 ? style.accentColor : style.secondaryTextColor)
-                    if entry.items.isEmpty {
-                        NeedsMeEmptyView(entry: entry)
-                    } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(entry.count == 1 ? "Needs you · 1" : "Needs you · \(entry.count)")
+                            .font(NativeStyle.label())
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        AsOfStamp(date: entry.dataAt)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(entry.items.prefix(NeedsMeReading.largeRowLimit)) { item in
                             NeedsMeRowView(entry: entry, item: item, showBody: true)
                         }
                     }
                     Spacer(minLength: 0)
-                    if let partial = entry.partialLine {
-                        Text(partial)
-                            .font(style.font(size: 8))
-                            .foregroundColor(style.warnColor)
-                            .lineLimit(1)
-                    }
+                    AsOfStamp(date: entry.dataAt, prefix: "as of")
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .stale(entry.staleState)
             }
         }
     }

@@ -75,6 +75,32 @@ func checkMergeQueueWidget(_ c: DecodeCheck) {
                  feed.lastMerged?.pr == 99 && feed.lastMerged?.ageLabel == "2h00m",
                  "lastMerged=\(String(describing: feed.lastMerged?.pr)) age=\(String(describing: feed.lastMerged?.ageLabel))")
 
+        // M1's pipeline: the stage vocabulary and an off queue are read off
+        // the route, not guessed. `gamma` is disabled in the fixture, but the
+        // fleet is mixed, so the live rows still draw.
+        c.expect("v1_merge_queue.json",
+                 "project enabled flags decode; a mixed fleet is not 'off'",
+                 payload.projects?["alpha"]?.enabled == true
+                    && payload.projects?["gamma"]?.enabled == false
+                    && feed.offProject == nil,
+                 "alpha=\(String(describing: payload.projects?["alpha"]?.enabled)) gamma=\(String(describing: payload.projects?["gamma"]?.enabled)) off=\(String(describing: feed.offProject))")
+        c.expect("v1_merge_queue.json", "gating maps to the gates stage; merged completes the track",
+                 MergeQueueReading.stageName("gating") == "gates"
+                    && MergeQueueReading.stageProgress("gating") == 1
+                    && MergeQueueReading.stageProgress("merged") == 4
+                    && MergeQueueReading.stageLabels == ["rebase", "gates", "push", "merge"],
+                 "names=\(MergeQueueReading.stageLabels)")
+        let offFeed = MergeQueueFeed(rows: [], count: 0, queued: 0,
+                                     generatedAt: nil, offProject: "gamma")
+        c.expect("v1_merge_queue.json",
+                 "an all-disabled fleet says off for the project, not an empty queue",
+                 offFeed.isOff && offFeed.offProject == "gamma"
+                    && !MergeQueueFeed.empty.isOff,
+                 "off=\(offFeed.isOff) project=\(String(describing: offFeed.offProject))")
+        c.expect("v1_merge_queue.json", "M1's waiting count is the queued rows behind the head",
+                 feed.waitingCount == 3,
+                 "waiting=\(feed.waitingCount) queued=\(feed.queued) current=\(String(describing: feed.current?.pr))")
+
         c.expect("v1_merge_queue.json",
                  "small/medium/large clips are 3 and 8, and hidden rows are counted",
                  MergeQueueTableReading.visibleRows(feed.rows, limit: 3).count == 3

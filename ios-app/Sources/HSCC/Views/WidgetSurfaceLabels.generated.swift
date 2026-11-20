@@ -9,10 +9,10 @@ extension WidgetSurfaceKind {
     var displayName: String {
         switch self {
         case .widgetCluster: return "Cluster Widget"
-        case .widgetCardsRunning: return "Running Cards Widget"
+        case .widgetCardsRunning: return "Running"
         case .widgetKanbanMonitor: return "Boards"
-        case .widgetNeedsMe: return "Needs Me Widget"
-        case .widgetMergeQueue: return "Merge Queue Widget"
+        case .widgetNeedsMe: return "Needs Me"
+        case .widgetMergeQueue: return "Merge Queue"
         case .liveActivityWake: return "Wake Live Activity"
         case .liveActivityMonitor: return "Monitor Live Activity"
         case .liveActivityClusterHealth: return "Cluster Health Live Activity"

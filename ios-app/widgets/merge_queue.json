@@ -4,7 +4,7 @@
   "kind": "widget",
   "surface_case": "widgetMergeQueue",
   "surface_raw": "widget.mergeQueue",
-  "display_name": "Merge Queue Widget",
+  "display_name": "Merge Queue",
   "icon": "arrow.triangle.merge",
   "widget_type": "MergeQueueWidget",
   "sources": [

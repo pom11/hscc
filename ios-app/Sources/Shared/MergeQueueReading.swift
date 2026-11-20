@@ -49,19 +49,31 @@ struct MergeQueueRowLite: Decodable, Equatable, Sendable {
     }
 }
 
-/// The route's envelope. `projects` is deliberately NOT decoded: every drawn
-/// value lives on the flattened `rows` array, and a second representation of
-/// the same rows is a second thing that can drift.
+/// One project's queue state from the route's `projects` map. Only the two
+/// flags an off/disabled surface needs are decoded: the rows themselves stay
+/// on the flattened array, so there is still one representation of a row.
+struct MergeQueueProjectLite: Decodable, Equatable, Sendable {
+    let enabled: Bool?
+    let paused: Bool?
+    let queue_len: Int?
+    let repo: String?
+}
+
+/// The route's envelope. `projects` carries the per-project opt-in, which is
+/// the one fact the flattened `rows` array cannot express: a queue that is off
+/// has no rows, and M1 must say "Merge queue off for <project>" rather than
+/// draw that as an empty queue. Rows still come only from `rows`.
 struct MergeQueueLite: Decodable, Equatable, Sendable {
     let ok: Bool?
     let generatedAt: String?
     let rows: [MergeQueueRowLite]
     let count: Int?
     let queued: Int?
+    let projects: [String: MergeQueueProjectLite]?
     let speak: String?
 
     enum CodingKeys: String, CodingKey {
-        case ok, rows, count, queued, speak
+        case ok, rows, count, queued, projects, speak
         case generatedAt = "generated_at"
     }
 }
@@ -116,6 +128,15 @@ struct MergeQueueRow: Codable, Equatable, Identifiable, Sendable {
 
     /// `#103`, or `-` when the route carried no PR.
     var prLabel: String { pr.map { "#\($0)" } ?? "-" }
+
+    /// The row's title stand-in: the card id the route sends. The queue row
+    /// carries no PR title (its CLI columns are Pos/PR/Card/Branch/State/Age),
+    /// so the card id is the honest line rather than an invented title.
+    func headline(max limit: Int) -> String {
+        let raw = card ?? prLabel
+        guard limit > 1, raw.count > limit else { return raw }
+        return String(raw.prefix(limit - 1)) + "…"
+    }
 }
 
 /// The queue as one surface draws it: the CLI's rows in the CLI's order, plus
@@ -125,11 +146,45 @@ struct MergeQueueFeed: Codable, Equatable, Sendable {
     let count: Int
     let queued: Int
     let generatedAt: String?
+    /// The project named in an off state. Non-nil ONLY when every project the
+    /// route knows has `enabled: false`; a mixed fleet still draws its live
+    /// queues. Optional so a snapshot written before this field decodes.
+    let offProject: String?
+
+    init(rows: [MergeQueueRow], count: Int, queued: Int,
+         generatedAt: String?, offProject: String? = nil) {
+        self.rows = rows
+        self.count = count
+        self.queued = queued
+        self.generatedAt = generatedAt
+        self.offProject = offProject
+    }
 
     static let empty = MergeQueueFeed(rows: [], count: 0, queued: 0,
                                       generatedAt: nil)
 
     var isEmpty: Bool { rows.isEmpty }
+
+    /// True when the route told us every project's queue is disabled.
+    var isOff: Bool { offProject != nil }
+
+    /// The row M1 leads with: the in-flight claim, else the next FIFO row,
+    /// else the first historical row.
+    var headRow: MergeQueueRow? { current ?? nextQueued ?? rows.first }
+
+    /// Rows behind the head (the "+N waiting" figure).
+    var waitingCount: Int { max(0, queued - (current == nil ? 1 : 0)) }
+
+    /// The last terminal row, or nil when nothing has ever run.
+    var lastTerminal: MergeQueueRow? {
+        lastMerged ?? rows.last(where: \.isLast)
+    }
+
+    /// The last five terminal rows (one per project at most, since the route
+    /// folds each project's last outcome into one `is_last` row).
+    var recentResults: [MergeQueueRow] {
+        Array(rows.filter(\.isLast).suffix(5).reversed())
+    }
 
     /// The row the daemon is working right now, if any. `view()` puts the
     /// in-flight claim after the queued rows, so this is not necessarily first.
@@ -165,8 +220,15 @@ struct MergeQueueFeed: Codable, Equatable, Sendable {
         let queued = payload.queued
             ?? rows.filter { $0.state == "queued" }.count
         let count = payload.count ?? rows.count
+        let projects = payload.projects ?? [:]
+        let disabled = projects
+            .filter { $0.value.enabled == false }
+            .keys.sorted()
+        let offProject = (!projects.isEmpty && disabled.count == projects.count)
+            ? disabled.first : nil
         return MergeQueueFeed(rows: rows, count: count, queued: queued,
-                              generatedAt: payload.generatedAt)
+                              generatedAt: payload.generatedAt,
+                              offProject: offProject)
     }
 
     /// One-line Lock Screen copy. Empty is its own honest state, never a
@@ -253,6 +315,41 @@ enum MergeQueueTableReading {
 enum MergeQueueReading {
     static let mediumRowLimit = 3
     static let largeRowLimit = 8
+
+    /// M1's four stages, in pipeline order.
+    static let stageLabels = ["rebase", "gates", "push", "merge"]
+
+    /// The stage a row is in, in M1's vocabulary. A queued row has not started
+    /// rebasing yet, so it draws rebase as the current stage.
+    static func stageName(_ state: String) -> String {
+        switch state {
+        case "gating": return "gates"
+        case "merging": return "push"
+        case "merged": return "merge"
+        default: return "rebase"
+        }
+    }
+
+    /// How many stage bars are complete. `merged` completes all four, so the
+    /// track ends entirely green rather than leaving merge "current".
+    static func stageProgress(_ state: String) -> Int {
+        switch state {
+        case "rebasing", "queued": return 0
+        case "gating": return 1
+        case "merging": return 2
+        case "merged": return 4
+        default: return 0
+        }
+    }
+
+    /// `#484 ✓` / `#484 ✗`, the compact last-result copy.
+    static func resultMark(_ state: String) -> String {
+        switch state {
+        case "merged": return "✓"
+        case "resolve", "failed": return "✗"
+        default: return "·"
+        }
+    }
 
     static func nonEmpty(_ value: String?) -> String? {
         guard let value, !value.isEmpty else { return nil }

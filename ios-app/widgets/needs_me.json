@@ -4,7 +4,7 @@
   "kind": "widget",
   "surface_case": "widgetNeedsMe",
   "surface_raw": "widget.needsMe",
-  "display_name": "Needs Me Widget",
+  "display_name": "Needs Me",
   "icon": "bell.badge",
   "widget_type": "NeedsMeWidget",
   "sources": [

@@ -105,6 +105,27 @@ else
       fi
       continue
     fi
+    case "$kind" in
+      widgetCardsRunning) native_file=Sources/HSCCWidgets/CardsRunningWidget.swift ;;
+      widgetNeedsMe) native_file=Sources/HSCCWidgets/NeedsMeWidget.swift ;;
+      widgetMergeQueue) native_file=Sources/HSCCWidgets/MergeQueueWidget.swift ;;
+      *) native_file="" ;;
+    esac
+    if [ -n "$native_file" ]; then
+      # R3 running, N3 needs-me and M1 merge queue are Native redesign
+      # surfaces: they take tokens, the data clock and the stale rule from the
+      # one kit instead of resolving a per-surface WidgetStyle.
+      if grep -q 'NativeStyle' "$native_file" \
+         && grep -q 'AsOfStamp' "$native_file" \
+         && grep -q 'StaleState' "$native_file" \
+         && grep -q 'containerBackground(.fill.tertiary' "$native_file"; then
+        ok "surface $kind uses the shared NativeStyleKit (tokens, AsOfStamp, StaleState)"
+      else
+        bad "surface $kind does not use the shared NativeStyleKit"
+        missing=$((missing + 1))
+      fi
+      continue
+    fi
     n=$(grep -rhoF "WidgetStyle.resolved(for: .$kind)" "${WIDGET_VIEWS[@]}" | wc -l | tr -d ' ')
     if [ "$n" -eq 1 ]; then
       ok "surface $kind resolves WidgetStyle.resolved(for: .$kind)"
@@ -160,6 +181,16 @@ for f in "${WIDGET_VIEWS[@]}"; do
     fi
     continue
   fi
+  case "$(basename "$f")" in
+    CardsRunningWidget.swift|NeedsMeWidget.swift|MergeQueueWidget.swift)
+      if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" \
+         && grep -q 'StaleState' "$f" && grep -q 'containerBackground(.fill.tertiary' "$f"; then
+        ok "$(basename "$f"): native kit components are wired"
+      else
+        bad "$(basename "$f") does not use the native kit"
+      fi
+      continue ;;
+  esac
   file_ok=1
   grep -q '@Environment(\\.widgetStyle)' "$f" || { bad "$(basename "$f") has no widgetStyle environment"; file_ok=0; }
   grep -q 'widgetHeader(style)' "$f" || { bad "$(basename "$f") has no header toggle"; file_ok=0; }
