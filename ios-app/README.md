@@ -510,6 +510,7 @@ scripts/merge_base_check.sh     # branch base not too far behind origin/main —
 scripts/build_check.sh          # full per-target compile
 scripts/model_decode_check.sh   # real models vs the committed live fixtures
 scripts/probes_check.sh         # every *_probe.sh — the gates' own negative proofs
+scripts/plist_drift_check.sh    # tracked Info.plists == what project.yml generates
 ```
 
 `merge_base_check.sh` gates the **branch**, not the app: it needs no Xcode and no
@@ -533,6 +534,21 @@ that ran nothing; and a probe keeps the `*_probe.sh` leaf rather than the `*_che
 gate convention — the runner refuses if `build_check.sh` ever starts naming a probe and
 flags a `*_check.sh` file that carries a probe's marker-file signature, so neither
 decision survives only as a comment.
+
+`plist_drift_check.sh` gates the **tracked files a generator owns** (t_4e22c58c).
+Every target's `info:` block in `project.yml` names a committed
+`Sources/**/Info.plist` and rewrites it wholesale, and `scripts/release_adhoc.sh`
+runs that generate at release time without ever committing the result — so the
+plists in the tree can disagree with the spec, and with every archive you shipped,
+in silence. The gate copies `ios-app/` into a scratch directory, deletes the copied
+plists so `project.yml` has to write them back, regenerates them there with
+`xcodegen`, and compares each against the tracked copy — nothing is ever generated
+into the real tree. Drift prints a `diff -u` per plist plus the one-line
+`scripts/generate.sh` fix. The set it audits is derived from `git ls-files` and
+printed by the run, so a new target's plist is compared the day it lands; keep any
+tally out of this file and read the run instead. It needs `xcodegen`
+(`brew install xcodegen`) and fails closed when that is missing, because an
+announced skip is exactly how this drift survived four releases.
 
 ## Sideloading onto your own device
 
