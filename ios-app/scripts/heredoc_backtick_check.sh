@@ -77,16 +77,28 @@
 # quoted-openers-at are WHERE the heredoc openers sit — line numbers, with the
 # delimiter appended for the unquoted ones — and are NOT counts, however much the
 # shorter label they replaced read like one. here-strings and operator-mentions ARE
-# counts. The only true byte count this gate prints is the one for a .golden it skips,
-# and that one is measured with tr over the file, not derived from records.
+# counts. The grouped per-file line below prints a COUNT OF LINES too — n_inert inert
+# records, one record per line — and is therefore labelled "line(s) carrying the byte",
+# because until t_1992ef35 it said "byte(s)" there while printing that line count (on
+# board_status_widget_check.sh it read "24 byte(s)" where tr counts 66 bytes and grep -c
+# counts 24 lines). The word byte now sits only next to a number measured with tr over a
+# file — the .golden skip count and this gate's own self-bytes below — and nowhere else,
+# so a reader who sees it can reproduce it with tr.
 #
 # NON-DESTRUCTIVE: reads only, writes nothing into the tree, never executes a
 # script it scans. Run the mutated copies through it from a private tree; the
 # probe heredoc_backtick_check_probe.sh is that harness and its evidence.
 #
-# This file contains NO backtick byte of its own — the byte is obtained with
-# printf octal. Deliberate: a scanner carrying the byte it bans is disqualified
-# by its own rule (and R2 would refuse it the moment it grew a heredoc).
+# THE CLAIM ABOUT ITSELF, MEASURED (t_1992ef35). This gate carries NO byte of its own;
+# the byte is obtained with printf octal. That used to be prose in this header, and the
+# prose was FALSE: one comment line below carried two bytes of it, printed by this gate
+# itself as measured-inert while its own header swore none. Prose cannot be checked, so
+# the claim is now a measurement — this file's byte count, taken with tr over its own
+# path, printed every run as self-bytes=N — and a nonzero N refuses the run before any
+# scanning. Deliberate: a scanner carrying the byte it bans is disqualified by its own
+# rule (and R2 would refuse it the moment it grew an unquoted heredoc). The probe's
+# self-claim leg plants a byte in a COPY of this file and requires the printed N to move
+# AND the run to refuse, so neither the zero nor the refusal can be a constant.
 #
 # Usage: ios-app/scripts/heredoc_backtick_check.sh [ios-app-dir]
 #   default ios-app-dir = the parent of this script's directory
@@ -95,9 +107,18 @@
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This gate's OWN file, for the self-bytes measurement below. Resolved HERE, before any
+# cd (a gate cannot locate itself once it has moved — the recorded trap), and from
+# BASH_SOURCE rather than a hard-coded leaf, so a COPY of this gate measures the copy it
+# is actually running and not the file it was copied out of. That is what lets the
+# probe's self-claim leg plant a byte in a copy and watch the printed number move.
+SELF_PATH="${SELF_DIR}/$(basename "${BASH_SOURCE[0]}")"
 # An EXPLICITLY passed empty argument is a caller bug, not a request for the default.
-# Falling back here would make `gate ""` scan this very repo and report green — measured,
-# not theoretical: the probe's scan() reached exactly that when a leg lost its tree.
+# Falling back here would let a gate invoked with an EMPTY path scan this very repo and
+# report green — measured, not theoretical: the probe's scan() reached exactly that when a
+# leg lost its tree. (t_1992ef35: this sentence used to quote that invocation inside a pair
+# of the byte this gate bans, which is what made its own header's no-bytes claim false. The
+# example is unchanged, spelled without the byte.)
 # Two independent guards (here and in scan) because the failure is a silent green.
 if [ "$#" -gt 0 ] && [ -z "$1" ]; then
   echo "HEREDOC BACKTICK CHECK FAILED — empty ios-app-dir argument: pass nothing for the default, or a real path" >&2
@@ -280,7 +301,31 @@ measured() { echo "  measured $1"; measured_total=$((measured_total + ${2:-1}));
 echo "heredoc backtick meta-check (t_4558fd32)"
 echo "  tree:    $IOSAPP"
 echo "  scanning: every *.sh under scripts/, recursively (whole file, from outside)"
-echo "  the byte: obtained with printf octal — this gate carries none"
+# THE HEADER'S NO-BYTES CLAIM, MEASURED ON THIS RUN (t_1992ef35). The prose said this
+# file carried none of the byte it bans while one of its comment lines carried two, and
+# nothing could see the contradiction: the claim was a sentence, the evidence was a
+# number, and no leg read either. So the sentence became the number — tr over this gate's
+# own path, printed here on every run, and refused below before a single file is opened.
+# A claim a program cannot check is a claim that rots; this one is now both printed and
+# load-bearing.
+if [ ! -r "$SELF_PATH" ]; then
+  echo "HEREDOC BACKTICK CHECK FAILED — cannot read this gate's own file ($SELF_PATH), so its" \
+       "self-claim cannot be measured. An unmeasurable claim is not a satisfied one." >&2
+  exit 1
+fi
+SELF_BYTES=$(tr -dc "$BT" < "$SELF_PATH" | wc -c | tr -d ' ')
+SELF_BYTES="${SELF_BYTES:-unreadable}"
+echo "  the byte:  obtained with printf octal. Self-measured with tr over this gate's own"
+echo "             file: self-bytes=$SELF_BYTES  ($SELF_PATH)"
+if [ "$SELF_BYTES" != "0" ]; then
+  echo "HEREDOC BACKTICK CHECK FAILED — this gate carries $SELF_BYTES byte(s) of the byte it" \
+       "bans (the self-bytes figure above, tr-measured over $SELF_PATH). A scanner carrying the" \
+       "byte it bans is disqualified by its own rule: reword the comment that carries it or" \
+       "quote the word out. This is the gate's OWN self-claim, refused before any file is" \
+       "opened — it is not an R1/R2/R3 verdict on a scanned file and does not move the" \
+       "finding counts." >&2
+  exit 1
+fi
 echo
 
 # Collect the population first, so the skip list and the scanned list are both
@@ -384,13 +429,19 @@ for f in "${shfiles[@]}"; do
       finding "$base:$l  backtick in shell position (R1) — nothing on this line comments it out; the byte is expanded, which means the shell between a balanced pair RUNS when this script runs" 1
     fi
   done
+  # n_inert counts inert RECORDS, and the inert list is built as one WORD per record, so
+  # what it counts is LINES carrying the byte — not bytes of it (the file this was found
+  # on prints 24 such lines and carries 66 bytes, t_e89edf70's own measure). Both messages
+  # below therefore say "line(s) carrying the byte": the word byte belongs only to a
+  # tr-measured number, and this is not one. Which lines are counted, the region tags and
+  # the R2-vs-R3 message families are untouched — this was the label, not the arithmetic.
   n_inert=$(nwords "$inert")
   if [ "$capable" = "1" ]; then
     [ "$n_inert" -gt 0 ] && finding \
-      "$base: $n_inert byte(s) that do NOT expand — $inert (line@region why). R2 still refuses them: this script writes a file with an interpolating heredoc, so 'it is only a comment' and 'it is only quoted' are not accepted here" "$n_inert"
+      "$base: $n_inert line(s) carrying the byte that do NOT expand — $inert (line@region why). R2 still refuses them: this script writes a file with an interpolating heredoc, so 'it is only a comment' and 'it is only quoted' are not accepted here" "$n_inert"
   else
     [ "$n_inert" -gt 0 ] && measured \
-      "$base: $n_inert byte(s) that do NOT expand — $inert (line@region why). A '#' comment never expands and a quoted delimiter cannot expand; this file has no unquoted heredoc, so R3 prints them instead of refusing (R3)" "$n_inert"
+      "$base: $n_inert line(s) carrying the byte that do NOT expand — $inert (line@region why). A '#' comment never expands and a quoted delimiter cannot expand; this file has no unquoted heredoc, so R3 prints them instead of refusing (R3)" "$n_inert"
   fi
 done
 
