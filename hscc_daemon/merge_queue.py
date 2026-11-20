@@ -49,6 +49,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 
 STREAM_NAME = "merge_queue"
 STATE_VERSION = 1
@@ -82,7 +83,7 @@ APP_BUILD_GATES = {
 
 _PR_JSON_FIELDS = (
     "number,state,isDraft,mergeable,headRefName,headRefOid,baseRefName,"
-    "isCrossRepository,url,statusCheckRollup,mergeCommit"
+    "isCrossRepository,url,statusCheckRollup,mergeCommit,reviewDecision"
 )
 
 _lock = threading.RLock()
@@ -651,10 +652,16 @@ def _truthy_check(entry):
     return None
 
 
-def _checks_green(rollup):
-    """True when every reported check is green (an empty rollup counts green)."""
+def _checks_green(rollup, *, required_checks=False):
+    """True when every reported check is green.
+
+    An empty rollup is only green when the repo has NO required checks
+    configured (``required_checks is False``). ``None`` means "could not
+    determine", which is not positive evidence, so an empty rollup stays not
+    green — GitHub may still be waiting for checks the queue never saw.
+    """
     if not rollup:
-        return True
+        return required_checks is False
     if not isinstance(rollup, list):
         return False
     for entry in rollup:
@@ -664,15 +671,18 @@ def _checks_green(rollup):
     return True
 
 
-def _pr_ready(info):
-    """Open, non-draft, mergeable, checks green."""
+def _pr_ready(info, *, required_checks=False):
+    """Open, non-draft, mergeable, not changes-requested, checks green."""
     if not isinstance(info, dict):
         return False
     return (
         str(info.get("state", "")).upper() == "OPEN"
         and not bool(info.get("isDraft"))
         and str(info.get("mergeable", "")).upper() == "MERGEABLE"
-        and _checks_green(info.get("statusCheckRollup"))
+        and str(info.get("reviewDecision") or "").upper()
+        != "CHANGES_REQUESTED"
+        and _checks_green(info.get("statusCheckRollup"),
+                          required_checks=required_checks)
     )
 
 
@@ -885,6 +895,50 @@ def _origin_slug(repo, git_runner=None):
     return f"{match.group('owner')}/{match.group('repo')}".lower()
 
 
+def _required_checks(cfg, base, git_runner=None, gh_runner=None, info=None):
+    """Does the PR's base branch require status checks?
+
+    ``True``/``False`` when GitHub answers, ``None`` when it cannot be
+    determined. Only a positive ``False`` (the required-status-checks endpoint
+    is absent, HTTP 404) makes an empty rollup green; a permission error or an
+    unparseable answer stays unknown and therefore not green.
+    """
+    link = _pr_url((info or {}).get("url") or "")
+    slug = (f"{link[0]}/{link[1]}".lower() if link
+            else _origin_slug((cfg or {}).get("repo"), git_runner))
+    if not slug or not base:
+        return None
+    gh_runner = gh_runner or _default_runner
+    quoted = urllib.parse.quote(str(base), safe="")
+    try:
+        proc = _gh([
+            "api", f"repos/{slug}/branches/{quoted}/protection/"
+                   "required_status_checks"], cfg["repo"], gh_runner)
+    except Exception:
+        return None
+    if proc is None:
+        return None
+    if proc.returncode != 0:
+        err = getattr(proc, "stderr", "") or ""
+        if "404" in err or "Not Found" in err:
+            return False
+        return None
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return bool(data.get("contexts") or data.get("checks"))
+
+
+def _required_for_info(cfg, base, info, git_runner=None, gh_runner=None):
+    """Required-check answer, but only asked when the rollup is empty."""
+    if isinstance(info, dict) and info.get("statusCheckRollup"):
+        return False
+    return _required_checks(cfg, base, git_runner, gh_runner, info=info)
+
+
 def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None, git_runner=None):
     """Cards on the project board whose latest PR URL is ready to merge.
 
@@ -899,7 +953,7 @@ def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None, git_runner=None):
     board = cfg.get("board")
     if not board:
         return []
-    want_repo = _origin_slug(cfg["repo"])
+    want_repo = _origin_slug(cfg["repo"], git_runner)
     if want_repo is None:
         return []
     # Local refs only: discovery must stay free of extra network probes.
@@ -914,9 +968,12 @@ def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None, git_runner=None):
         if label not in [b if b else "default" for b in boards]:
             return []
         with board_pin.open_board_ro(kb, label, multi=multi) as conn:
+            # Only cards that are actively in flight: a blocked/scheduled/todo
+            # card (or one already done/archived) is not mergeable just because
+            # its PR looks green.
             rows = conn.execute(
                 "SELECT id, assignee, body FROM tasks "
-                "WHERE status NOT IN ('done', 'archived')").fetchall()
+                "WHERE status IN ('running', 'ready', 'review')").fetchall()
             found = []
             for row in rows:
                 comments = conn.execute(
@@ -943,7 +1000,9 @@ def _discover_ready_cards(cfg, gh_runner=None, kanban_db=None, git_runner=None):
         if pr in seen:
             continue
         info = pr_view(cfg["repo"], pr, runner=gh_runner)
-        if _pr_ready(info) and refusal_reason(info, base) is None:
+        required = _required_for_info(cfg, base, info, git_runner, gh_runner)
+        if (_pr_ready(info, required_checks=required)
+                and refusal_reason(info, base) is None):
             seen.add(pr)
             ready.append({"pr": pr, "card": card, "assignee": assignee,
                           "branch": info.get("headRefName")})
@@ -1010,6 +1069,53 @@ def _refuse_entry(doc, state_path, project, entry, reason, cfg, gh_runner):
     return {"pr": entry["pr"], "result": "refused", "error": reason}
 
 
+def _cancel_reason(state_path, project, entry, cfg):
+    """Why this claim must stop now, or None when it may proceed.
+
+    A ``remove`` clears the claim; ``pause``/``disable`` leave it but change the
+    project. All three can land while a rebase or a gate is running, so this is
+    a FRESH read under the file lock — never the tick's older snapshot.
+    """
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        if not (flight
+                and int(flight.get("pr", 0)) == int(entry.get("pr", 0))):
+            return "removed"
+        if ps.get("paused"):
+            return "paused"
+        if cfg is not None and not _enabled(cfg, ps):
+            return "disabled"
+        return None
+
+
+def _stop_cancelled(state_path, project, entry, reason):
+    """Stop a cancelled claim: drop on remove, keep the entry on pause/disable."""
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        if (flight
+                and int(flight.get("pr", 0)) == int(entry.get("pr", 0))):
+            ps["in_flight"] = None
+            if (reason != "removed"
+                    and _find_entry(ps["queue"], entry.get("pr")) is None):
+                ps["queue"].insert(0, entry)
+        save_state(doc, state_path)
+    return {"pr": entry.get("pr"), "result": reason}
+
+
+def _post_push_ready(cfg, base, after, head_sha, git_runner, gh_runner):
+    """True only when the pushed head itself is green and still the PR head."""
+    if not isinstance(after, dict):
+        return False
+    if str(after.get("headRefOid") or "") != head_sha:
+        return False
+    required = _required_for_info(cfg, base, after, git_runner, gh_runner)
+    return _pr_ready(after, required_checks=required)
+
+
 def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                   root=None, git_runner=None, gh_runner=None,
                   handback=None, log=None):
@@ -1040,10 +1146,15 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             "WARN")
         return _refuse_entry(doc, state_path, project, entry, reason, cfg,
                              gh_runner)
-    if not _pr_ready(info):
+    required = _required_for_info(cfg, base, info, git_runner, gh_runner)
+    if not _pr_ready(info, required_checks=required):
         # Not green yet: leave it at the head of the queue, no handback.
         _requeue_waiting(state_path, project, entry)
         return {"pr": entry["pr"], "result": "waiting"}
+
+    cancel = _cancel_reason(state_path, project, entry, cfg)
+    if cancel:
+        return _stop_cancelled(state_path, project, entry, cancel)
 
     _update_flight(state_path, project, entry["pr"], stage="rebasing",
                    branch=entry.get("branch"))
@@ -1072,6 +1183,10 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         return {"pr": entry["pr"], "result": "conflict",
                 "conflicted": conflicted}
 
+    cancel = _cancel_reason(state_path, project, entry, cfg)
+    if cancel:
+        return _stop_cancelled(state_path, project, entry, cancel)
+
     gates = _resolve_gates(cfg, worktree, git_runner, base=base)
     _update_flight(state_path, project, entry["pr"],
                    stage="gating" if gates else "merging")
@@ -1092,6 +1207,13 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             return {"pr": entry["pr"], "result": "red-gate",
                     "gate": command}
 
+    # A remove/pause/disable that landed while the gates ran wins before the
+    # force-push. The claim is re-read under the file lock, never from our
+    # tick-start snapshot.
+    cancel = _cancel_reason(state_path, project, entry, cfg)
+    if cancel:
+        return _stop_cancelled(state_path, project, entry, cancel)
+
     _update_flight(state_path, project, entry["pr"], stage="merging")
     err = _push_branch(worktree, info, git_runner)
     if err:
@@ -1099,17 +1221,40 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
 
     sha = _git(["rev-parse", "HEAD"], worktree, git_runner)
     head_sha = (sha.stdout or "").strip() if sha is not None else ""
+    if not head_sha:
+        return _retry_or_drop(doc, state_path, project, entry,
+                              "could not read the pushed head SHA")
+
+    # The force-push moved the head, so the pre-push readiness answer is stale:
+    # re-read the PR itself and merge only this exact SHA while it is green.
+    after = pr_view(cfg["repo"], entry["pr"], runner=gh_runner)
+    cancel = _cancel_reason(state_path, project, entry, cfg)
+    if cancel:
+        return _stop_cancelled(state_path, project, entry, cancel)
+    if not _post_push_ready(cfg, base, after, head_sha, git_runner, gh_runner):
+        _requeue_waiting(state_path, project, entry)
+        log(f"merge-queue {project}: PR #{entry['pr']} not green on the "
+            "pushed head; will re-check next tick", "WARN")
+        return {"pr": entry["pr"], "result": "waiting"}
+
+    # Last check under the lock: never merge a PR the operator removed while
+    # the post-push probe was in flight.
+    cancel = _cancel_reason(state_path, project, entry, cfg)
+    if cancel:
+        return _stop_cancelled(state_path, project, entry, cancel)
+
     merge = _gh(["pr", "merge", str(entry["pr"]), "--squash",
-                 "--delete-branch"], worktree, gh_runner)
+                 "--delete-branch", "--match-head-commit", head_sha],
+                worktree, gh_runner)
     if merge is None or merge.returncode != 0:
         return _retry_or_drop(
             doc, state_path, project, entry,
             f"gh pr merge failed: {_tail(merge.stderr if merge else '', 10)}")
 
     merged_sha = head_sha
-    after = pr_view(cfg["repo"], entry["pr"], runner=gh_runner)
-    if isinstance(after, dict) and isinstance(after.get("mergeCommit"), dict):
-        merged_sha = after["mergeCommit"].get("oid") or merged_sha
+    merged = pr_view(cfg["repo"], entry["pr"], runner=gh_runner)
+    if isinstance(merged, dict) and isinstance(merged.get("mergeCommit"), dict):
+        merged_sha = merged["mergeCommit"].get("oid") or merged_sha
     _finish(doc, project, state_path, ps, "merged", entry, sha=merged_sha,
             pushed_sha=head_sha)
     log(f"merge-queue {project}: merged PR #{entry['pr']} as {merged_sha}")

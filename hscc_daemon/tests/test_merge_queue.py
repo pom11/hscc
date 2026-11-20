@@ -128,15 +128,24 @@ def _new_branch(repo, name, base="main"):
 
 
 class FakeGh:
-    """Injectable ``gh`` runner: per-PR view + merge/comment capture."""
+    """Injectable ``gh`` runner: per-PR view + merge/comment capture.
 
-    def __init__(self, heads):
+    ``views`` optionally supplies per-PR view overrides consumed in order, so a
+    test can change the answer after the queue's force-push.
+    ``required_checks`` is the answer to the branch-protection probe: a list
+    means required checks exist, ``None`` means the endpoint 404s (no checks).
+    """
+
+    def __init__(self, heads, *, views=None, required_checks=None):
         self.heads = heads          # pr -> {headRefName, headRefOid}
+        self.views = {pr: list(seq) for pr, seq in (views or {}).items()}
+        self.required_checks = required_checks
         self.calls = []
         self.merged = []
+        self.merge_calls = []
         self.comments = []
 
-    def _view(self, pr):
+    def _view(self, pr, cwd=None):
         info = dict(self.heads[pr])
         info.setdefault("baseRefName", "main")
         info.setdefault("isCrossRepository", False)
@@ -153,6 +162,18 @@ class FakeGh:
             "mergeCommit": ({"oid": f"squash-{pr}"}
                             if pr in self.merged else None),
         })
+        # A real `gh pr view` sees the remote branch, so mirror a successful
+        # queue push from the clone's remote-tracking ref (this is what makes
+        # the post-push head check meaningful in these fixtures).
+        if cwd and info.get("headRefName"):
+            proc = subprocess.run(
+                ["git", "-C", str(cwd), "rev-parse", "--verify", "--quiet",
+                 f"refs/remotes/origin/{info['headRefName']}"],
+                capture_output=True, text=True)
+            if proc.returncode == 0 and proc.stdout.strip():
+                info["headRefOid"] = proc.stdout.strip()
+        if self.views.get(pr):
+            info.update(self.views[pr].pop(0))
         return info
 
     def __call__(self, argv, cwd=None, **kwargs):
@@ -161,13 +182,22 @@ class FakeGh:
         if argv[:3] == ["gh", "pr", "view"]:
             pr = int(argv[3])
             return SimpleNamespace(returncode=0, stdout=json.dumps(
-                self._view(pr)), stderr="")
+                self._view(pr, cwd=cwd)), stderr="")
         if argv[:3] == ["gh", "pr", "merge"]:
             self.merged.append(int(argv[3]))
+            self.merge_calls.append(argv)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if argv[:3] == ["gh", "pr", "comment"]:
             self.comments.append(argv)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[:2] == ["gh", "api"] and "required_status_checks" in argv[2]:
+            if self.required_checks is None:
+                return SimpleNamespace(
+                    returncode=1, stdout="",
+                    stderr="gh: Not Found (HTTP 404)")
+            body = {"contexts": list(self.required_checks), "checks": []}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(body),
+                                   stderr="")
         raise AssertionError(f"unexpected gh call: {argv}")
 
 
@@ -210,6 +240,99 @@ def test_clean_rebase_gates_push_and_squash_merge(tmp_path):
     assert ps["last"]["sha"] == "squash-7"
     # The worktree is the queue's own, under ~/.hscc-style root.
     assert (tmp_path / "queue" / "alpha" / ".git").exists()
+
+
+def test_merge_passes_the_pushed_head_to_match_head_commit(tmp_path):
+    """F5: the merge must be pinned to the SHA the queue just pushed."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    pushed = mq.load_state(_state(tmp_path))["projects"]["alpha"]["last"][
+        "pushed_sha"]
+    merge_call = gh.merge_calls[0]
+    assert "--match-head-commit" in merge_call
+    assert merge_call[merge_call.index("--match-head-commit") + 1] == pushed
+    assert len(pushed) == 40
+
+
+def test_post_push_re_read_does_not_merge_a_non_green_head(tmp_path):
+    """F5: checks reset by the force-push must stop the merge, not be ignored."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {3: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={3: [{}, {
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "status": "IN_PROGRESS",
+                 "conclusion": None}],
+        }]})
+    mq.add_to_queue("alpha", 3, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "waiting", result
+    assert gh.merged == []
+    doc = mq.load_state(_state(tmp_path))
+    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == [3]
+    # The push did happen; only the merge was withheld.
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") != pair["head"]
+
+
+def test_post_push_re_read_does_not_merge_a_changed_head(tmp_path):
+    """F5: merge only the exact head the queue pushed and re-read."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {4: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={4: [{}, {"headRefOid": "c" * 40}]})
+    mq.add_to_queue("alpha", 4, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "waiting", result
+    assert gh.merged == []
+    doc = mq.load_state(_state(tmp_path))
+    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == [4]
+
+
+@pytest.mark.parametrize("required,expected_merge", [
+    (["ci"], False),
+    (None, True),
+])
+def test_empty_rollup_after_push_follows_the_required_checks_answer(
+        tmp_path, required, expected_merge):
+    """F5: empty after a push is green only when the repo requires no checks."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {5: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={5: [{}, {"statusCheckRollup": []}]},
+        required_checks=required)
+    mq.add_to_queue("alpha", 5, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    if expected_merge:
+        assert result["processed"][0]["result"] == "merged", result
+        assert gh.merged == [5]
+    else:
+        assert result["processed"][0]["result"] == "waiting", result
+        assert gh.merged == []
 
 
 def test_one_pr_per_project_per_tick_is_fifo(tmp_path):
@@ -366,6 +489,72 @@ def test_pause_leaves_the_queue_untouched(tmp_path):
     assert not (tmp_path / "queue" / "alpha").exists()
 
 
+# ── remove/pause/disable during a run (F4) ─────────────────────────────────
+
+def test_remove_during_gate_cancels_before_push_and_never_merges(
+        tmp_path, monkeypatch):
+    """F4: a removed PR must not be force-pushed or merged."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, card="t_removed", path=_state(tmp_path))
+
+    def gate(command, worktree, timeout_s):
+        mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
+        return True, ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "removed", result
+    assert gh.merged == []
+    # Nothing was pushed: origin still has the original PR head.
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") == pair["head"]
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["in_flight"] is None
+
+
+@pytest.mark.parametrize("action,expected", [
+    ("pause", "paused"),
+    ("disable", "disabled"),
+])
+def test_pause_or_disable_during_gate_stops_before_push_and_keeps_entry(
+        tmp_path, monkeypatch, action, expected):
+    """F4: pause/disable stop the run; the queue entry survives."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({8: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 8, card="t_hold", path=_state(tmp_path))
+
+    def gate(command, worktree, timeout_s):
+        if action == "pause":
+            mq.set_paused("alpha", True, path=_state(tmp_path))
+        else:
+            mq.set_enabled("alpha", False, path=_state(tmp_path))
+        return True, ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == expected, result
+    assert gh.merged == []
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") == pair["head"]
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert [e["pr"] for e in ps["queue"]] == [8]
+    assert ps["paused"] is (action == "pause")
+
+
 # ── readiness gate ─────────────────────────────────────────────────────────
 
 def test_auto_enqueue_picks_a_ready_card_when_the_queue_is_empty(tmp_path):
@@ -399,6 +588,19 @@ def test_pr_ready_requires_open_non_draft_mergeable_green():
          "conclusion": None}]})
     assert not mq._pr_ready({**base, "statusCheckRollup": [
         {"state": "FAILURE"}]})
+    assert not mq._pr_ready({**base, "reviewDecision": "CHANGES_REQUESTED"})
+
+
+def test_empty_rollup_is_green_only_when_no_required_checks():
+    """F5: an empty rollup is not green merely because nothing was reported."""
+    empty = {"state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
+             "statusCheckRollup": []}
+    assert mq._pr_ready(empty, required_checks=False)
+    assert not mq._pr_ready(empty, required_checks=True)
+    # Unknown (could not ask GitHub) is not positive evidence of "no checks".
+    assert not mq._pr_ready(empty, required_checks=None)
+    assert mq._checks_green([], required_checks=False)
+    assert not mq._checks_green([], required_checks=True)
 
 
 def test_default_hscc_gates_add_build_check_for_app_changes(tmp_path):
@@ -517,7 +719,11 @@ def test_default_runner_drives_real_git_in_a_temp_repo(tmp_path):
 # ── auto-enqueue repo identity ─────────────────────────────────────────────
 
 def _board_with_cards(tmp_path, cards):
-    """A minimal kanban DB behind the read-only board seam."""
+    """A minimal kanban DB behind the read-only board seam.
+
+    A card is ``(id, body)`` or ``(id, body, status)``; the default status is
+    ``ready``.
+    """
     path = tmp_path / "kanban.db"
     conn = sqlite3.connect(path)
     conn.execute(
@@ -526,9 +732,12 @@ def _board_with_cards(tmp_path, cards):
     conn.execute(
         "CREATE TABLE task_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "task_id TEXT, body TEXT)")
-    for card, body in cards:
+    for card in cards:
+        card_id, body = card[0], card[1]
+        status = card[2] if len(card) > 2 else "ready"
         conn.execute(
-            "INSERT INTO tasks VALUES (?, 'worker', ?, 'ready')", (card, body))
+            "INSERT INTO tasks VALUES (?, 'worker', ?, ?)",
+            (card_id, body, status))
     conn.commit()
     conn.close()
 
@@ -582,6 +791,58 @@ def test_auto_enqueue_accepts_a_pr_url_from_the_projects_origin(tmp_path,
 
     assert ready == [{"pr": 42, "card": "t_own", "assignee": "worker",
                       "branch": "wt/t_own"}]
+
+
+def test_auto_enqueue_only_accepts_running_ready_or_review_cards(
+        tmp_path, monkeypatch):
+    """F10: blocked/scheduled/todo cards are not mergeable work."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    cards = []
+    heads = {}
+    for pr, (card, status) in enumerate([
+            ("t_blocked", "blocked"), ("t_scheduled", "scheduled"),
+            ("t_todo", "todo"), ("t_running", "running"),
+            ("t_ready", "ready"), ("t_review", "review")], start=61):
+        cards.append(
+            (card, f"https://github.com/pom11/alpha/pull/{pr}", status))
+        heads[pr] = {"headRefName": f"wt/{card}", "headRefOid": "d" * 40}
+    _board_seam(monkeypatch, _board_with_cards(tmp_path, cards))
+    gh = FakeGh(heads)
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+
+    ready = mq._discover_ready_cards(cfg, gh_runner=gh)
+
+    assert {row["card"] for row in ready} == {
+        "t_running", "t_ready", "t_review"}
+
+
+def test_auto_enqueue_respects_changes_requested_review(tmp_path, monkeypatch):
+    """F10: a PR whose review was rejected is not auto-enqueued."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(tmp_path, [
+        ("t_changes", "https://github.com/pom11/alpha/pull/71", "review"),
+        ("t_approved", "https://github.com/pom11/alpha/pull/72", "review"),
+    ]))
+    gh = FakeGh({
+        71: {"headRefName": "wt/t_changes", "headRefOid": "e" * 40,
+             "reviewDecision": "CHANGES_REQUESTED"},
+        72: {"headRefName": "wt/t_approved", "headRefOid": "f" * 40,
+             "reviewDecision": "APPROVED"},
+    })
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+
+    ready = mq._discover_ready_cards(cfg, gh_runner=gh)
+
+    assert [row["pr"] for row in ready] == [72]
+    assert "reviewDecision" in mq._PR_JSON_FIELDS
 
 
 # ── fresh base before every entry (F3) ─────────────────────────────────────
