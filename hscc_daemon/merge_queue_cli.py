@@ -12,10 +12,15 @@ operator's read/steer surface:
     hscc merge-queue enable <project> [--json]
     hscc merge-queue disable <project> [--json]
 
-Enabled is opt-in: the registry's ``merge_queue.enabled`` is the default and
-``enable``/``disable`` write an explicit per-project override to the queue
-ledger under ``~/.hscc``. Nothing here ever touches a repository: only the
-daemon tick runs git/gh, in the queue's own worktree.
+Enabled follows a default-on rule: a project with a git checkout at its
+registry repo, a github.com origin remote, and gates (the registry's
+``merge_queue.gates`` or hscc's built-in gates) is enabled without any flag.
+A project missing one stays off and ``status`` prints why
+(``no repo`` / ``no GitHub remote`` / ``no gates``). ``enable``/``disable``
+write an explicit per-project override to the queue ledger under ``~/.hscc``
+that always wins over the default (a ``disable`` persists across restarts).
+Nothing here ever touches a repository: only the daemon tick runs git/gh, in
+the queue's own worktree.
 """
 
 from __future__ import annotations
@@ -37,11 +42,19 @@ declares merge_queue.base_branch. A conflict or red gate comments on the PR
 and hands the card back as a resolve step; a fork PR or a PR targeting
 another base is refused once with the reason.
 
+The queue is ON BY DEFAULT for a project that has a git checkout at its
+registry repo, a github.com origin remote, and gates (merge_queue.gates, or
+hscc's built-in gates). A project missing one stays off and `status` prints
+why: "no repo", "no GitHub remote" or "no gates". `enable`/`disable` write an
+explicit per-project override that always wins over the default; a `disable`
+persists across daemon restarts.
+
 Usage: hscc merge-queue <subcommand> [args]
 
   hscc merge-queue status [--json]
-                              Every known project: enabled, paused, queue
-                              depth, in-flight PR and last outcome.
+                              Every known project: enabled (and why not),
+                              paused, queue depth, in-flight PR and last
+                              outcome.
   hscc merge-queue list [<project>] [--json]
                               Queue entries (optionally just one project).
   hscc merge-queue add <project> <pr> [--card <id>] [--assignee <name>]
@@ -55,14 +68,16 @@ Usage: hscc merge-queue <subcommand> [args]
                               entries survive a pause.
   hscc merge-queue enable <project> [--json]
   hscc merge-queue disable <project> [--json]
-                              Explicit per-project override of the registry
-                              opt-in; disable leaves the queue intact.
+                              Explicit per-project override of the default-on
+                              rule and the registry setting; disable leaves
+                              the queue intact and persists.
   hscc merge-queue --help     This help
 """
 
 SUBCOMMAND_HELP = {
     "status": "hscc merge-queue status [--json]\n\n"
-              "Every known project: enabled, paused, queue depth, in-flight\n"
+              "Every known project: enabled (or why it is off: no repo /\n"
+              "no GitHub remote / no gates), paused, queue depth, in-flight\n"
               "PR and last outcome.",
     "list": "hscc merge-queue list [<project>] [--json]\n\n"
             "Queue entries, oldest first (FIFO).",
@@ -76,9 +91,11 @@ SUBCOMMAND_HELP = {
     "resume": "hscc merge-queue resume <project> [--json]\n\n"
               "Resume processing this project's queue.",
     "enable": "hscc merge-queue enable <project> [--json]\n\n"
-              "Opt this project in (overrides the registry default).",
+              "Force this project on (overrides the default-on rule and the\n"
+              "registry setting).",
     "disable": "hscc merge-queue disable <project> [--json]\n\n"
-               "Opt this project out; queued entries are kept but not run.",
+               "Force this project off; the override persists and queued\n"
+               "entries are kept but not run.",
 }
 
 
@@ -106,12 +123,11 @@ def _status_doc(registry_path=None, state_path=None):
     for name in dict.fromkeys(projects):
         ps = mq._project_state(doc, name)
         cfg = mq.project_config(name, registry_path)
-        enabled = (bool(cfg.get("enabled", False))
-                   if ps.get("enabled") is None and cfg else
-                   bool(ps.get("enabled")) if ps.get("enabled") is not None
-                   else False)
         out["projects"][name] = {
-            "enabled": enabled,
+            "enabled": mq.effective_enabled(cfg, ps),
+            "enabled_source": mq.enabled_source(cfg, ps),
+            "default_enabled": bool((cfg or {}).get("default_enabled")),
+            "default_reason": (cfg or {}).get("default_reason"),
             "paused": bool(ps.get("paused")),
             "queue_len": len(ps.get("queue") or []),
             "queue": list(ps.get("queue") or []),
@@ -149,8 +165,21 @@ def cmd_merge_queue(argv):
             console.print("merge queue: no projects configured")
             return 0
         for name, row in data["projects"].items():
-            state = "paused" if row["paused"] else (
-                "enabled" if row["enabled"] else "disabled")
+            if row["paused"]:
+                state = "paused"
+            elif row["enabled"]:
+                state = ("enabled (default)"
+                         if row["enabled_source"] == "default" else "enabled")
+            elif row["enabled_source"] == "default" and row["default_reason"]:
+                # Why the default-on rule did not apply: no repo /
+                # no GitHub remote / no gates.
+                state = f"disabled ({row['default_reason']})"
+            elif row["enabled_source"] == "registry":
+                state = "disabled (registry)"
+            elif row["enabled_source"] == "cli":
+                state = "disabled (override)"
+            else:
+                state = "disabled"
             console.print(
                 f"{name}: {state}, queued={row['queue_len']}, "
                 f"waiting={row['waiting_len']}, "

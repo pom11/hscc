@@ -194,11 +194,12 @@ def _parse_depends_on(raw) -> list[str]:
 def _parse_merge_queue(raw) -> dict | None:
     """Validate the optional ``merge_queue`` mapping.
 
-    ``None``/absent -> None (opt-in remains off; the daemon treats the project
-    as not queued). A mapping may carry ``enabled`` (bool), ``gates`` (list of
-    command strings) and ``timeout_s`` (positive int). Anything malformed
-    raises instead of being silently dropped — a typo in a gate list must not
-    turn into an empty gate set.
+    ``None``/absent -> None; the daemon then applies its default-on rule
+    (git checkout + github.com origin + gates). A mapping may carry ``enabled``
+    (bool explicit override), ``gates`` (list of command strings) and
+    ``timeout_s`` (positive int). Anything malformed raises instead of being
+    silently dropped — a typo in a gate list must not turn into an empty gate
+    set.
     """
     if raw is None:
         return None

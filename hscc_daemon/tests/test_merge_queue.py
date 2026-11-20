@@ -79,7 +79,9 @@ def _repo_pair(tmp_path, *, shared=False, base="main"):
 def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
               base_branch=None):
     path = tmp_path / "registry.yaml"
-    mq_cfg = {"enabled": enabled}
+    mq_cfg = {}
+    if enabled is not None:
+        mq_cfg["enabled"] = enabled
     if gates is not None:
         mq_cfg["gates"] = gates
     if base_branch is not None:
@@ -88,19 +90,21 @@ def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
         "projects": [{
             "name": name,
             "repo": str(repo),
-            "merge_queue": mq_cfg,
+            **({"merge_queue": mq_cfg} if mq_cfg else {}),
         }]
     }
     try:
         import yaml
         path.write_text(yaml.safe_dump(body, sort_keys=False))
     except ImportError:  # pragma: no cover - the daemon's deps carry yaml
-        path.write_text(
-            "projects:\n"
-            f"- name: {name}\n"
-            f"  repo: {repo}\n"
-            "  merge_queue:\n"
-            f"    enabled: {'true' if enabled else 'false'}\n")
+        lines = ["projects:", f"- name: {name}", f"  repo: {repo}",
+                 "  merge_queue:"]
+        if enabled is not None:
+            lines.append(f"    enabled: {'true' if enabled else 'false'}")
+        if gates is not None:
+            lines.append("    gates: [" + ", ".join(
+                f'"{g}"' for g in gates) + "]")
+        path.write_text("\n".join(lines) + "\n")
     return str(path)
 
 
@@ -1287,3 +1291,246 @@ def test_tick_stamps_the_ledger_even_when_it_does_no_work(tmp_path):
     assert second["processed"] == []
     assert second["generated_at"] != stamp
     assert mq.load_state(state)["generated_at"] == second["generated_at"]
+
+
+# ── default-on eligibility (t_0546ef10) ────────────────────────────────────
+
+def _github_mirror(pair):
+    """Make ``origin`` look like github.com while git still resolves locally.
+
+    Eligibility reads the RAW configured URL (``git config --get``); git's
+    ``url.*.insteadOf`` rewrite keeps fetch/push inside ``tmp_path`` so no test
+    touches the network.
+    """
+    local = str(pair["origin"])
+    url = "https://github.com/example/project.git"
+    _git(pair["repo"], "config", f"url.{local}.insteadOf", url)
+    _git(pair["repo"], "remote", "set-url", "origin", url)
+
+
+def _status(tmp_path, registry, name="alpha"):
+    from hscc_daemon.merge_queue_cli import _status_doc
+    return _status_doc(registry_path=registry,
+                       state_path=_state(tmp_path))["projects"][name]
+
+
+def test_default_on_for_a_github_checkout_with_declared_gates(tmp_path):
+    """The default is on with only repo + github origin + gates declared."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is True
+    assert row["enabled_source"] == "default"
+    assert row["default_enabled"] is True
+    assert row["default_reason"] is None
+    assert mq.view(state_path=_state(tmp_path),
+                   registry_path=registry)["projects"]["alpha"][
+                       "enabled"] is True
+
+
+def test_hscc_builtin_gates_make_it_eligible(tmp_path):
+    """hscc needs no registry gates: its built-in gates count."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], name="hscc", enabled=None)
+
+    row = _status(tmp_path, registry, "hscc")
+
+    assert row["enabled"] is True
+    assert row["default_reason"] is None
+
+
+def test_hscc_explicit_empty_gates_disables_the_builtins(tmp_path):
+    """`gates: []` is an explicit no-gates choice, even for hscc."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], name="hscc", enabled=None,
+                         gates=[])
+
+    row = _status(tmp_path, registry, "hscc")
+
+    assert row["enabled"] is False
+    assert row["default_reason"] == "no gates"
+
+
+def test_default_off_without_a_repo(tmp_path):
+    """A registry path that does not exist is 'no repo'."""
+    registry = _registry(tmp_path, tmp_path / "missing", enabled=None,
+                         gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["enabled_source"] == "default"
+    assert row["default_reason"] == "no repo"
+
+
+def test_default_off_when_the_path_is_not_a_git_checkout(tmp_path):
+    """A directory that is not a work-tree root is 'no repo'."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    registry = _registry(tmp_path, plain, enabled=None, gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["default_reason"] == "no repo"
+
+
+@pytest.mark.parametrize("remote", ["local-path", "none"])
+def test_default_off_without_a_github_remote(tmp_path, remote):
+    """A git checkout whose origin is not github.com is 'no GitHub remote'."""
+    pair = _repo_pair(tmp_path)
+    if remote == "none":
+        _git(pair["repo"], "remote", "remove", "origin")
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["enabled_source"] == "default"
+    assert row["default_reason"] == "no GitHub remote"
+
+
+@pytest.mark.parametrize("gates", [None, []])
+def test_default_off_without_gates(tmp_path, gates):
+    """A github checkout with no (or empty) gates stays off."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=gates)
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["default_reason"] == "no gates"
+
+
+def test_explicit_disable_beats_default_on_and_persists(tmp_path):
+    """A CLI disable wins over the default and survives a fresh ledger read."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=["true"])
+    state = _state(tmp_path)
+    assert _status(tmp_path, registry)["enabled"] is True
+
+    mq.set_enabled("alpha", False, path=state)
+
+    row = _status(tmp_path, registry)
+    assert row["enabled"] is False
+    assert row["enabled_source"] == "cli"
+    assert row["default_enabled"] is True   # the default still applies...
+    assert mq.load_state(state)["projects"]["alpha"]["enabled"] is False
+    assert mq.view(state_path=state, registry_path=registry)[
+        "projects"]["alpha"]["enabled"] is False
+
+
+def test_explicit_enable_beats_missing_gates(tmp_path):
+    """The operator can still opt in a project the default declines."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=None)
+    state = _state(tmp_path)
+    assert _status(tmp_path, registry)["default_reason"] == "no gates"
+
+    mq.set_enabled("alpha", True, path=state)
+
+    row = _status(tmp_path, registry)
+    assert row["enabled"] is True
+    assert row["enabled_source"] == "cli"
+
+
+def test_registry_enabled_false_still_forces_off(tmp_path):
+    """An explicit registry ``enabled: false`` is not overridden by the default."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=False, gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["enabled_source"] == "registry"
+
+
+def test_registry_enabled_true_still_forces_on_without_gates(tmp_path):
+    """The old explicit opt-in keeps working for a project with no gates."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=True, gates=None)
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is True
+    assert row["enabled_source"] == "registry"
+
+
+def test_status_prints_why_a_default_project_stays_off(tmp_path, monkeypatch,
+                                                      capsys):
+    """`hscc merge-queue status` names the failed condition in its line."""
+    from hscc_daemon import merge_queue_cli
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=None)
+    monkeypatch.setenv("FLIGHTDECK_REGISTRY", registry)
+    monkeypatch.setenv("HSCC_HOME", str(tmp_path / "hscc"))
+
+    assert merge_queue_cli.cmd_merge_queue(["status"]) == 0
+
+    out = capsys.readouterr().out
+    assert "alpha: disabled (no gates)" in out
+
+
+def test_help_documents_default_on_and_the_three_reasons(capsys):
+    """The --help text is the operator contract for the default."""
+    from hscc_daemon import merge_queue_cli
+
+    assert merge_queue_cli.cmd_merge_queue(["--help"]) == 0
+
+    out = capsys.readouterr().out
+    assert "ON BY DEFAULT" in out
+    assert "no repo" in out and "no GitHub remote" in out
+    assert "no gates" in out
+
+
+def test_tick_processes_a_project_enabled_by_the_default(tmp_path):
+    """No registry ``enabled`` flag: eligibility alone drives a real tick."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=["true"])
+    gh = FakeGh({11: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 11, card="t_default", path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [11]
+    assert result["projects"]["alpha"]["enabled"] is True
+    assert result["projects"]["alpha"]["enabled_source"] == "default"
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/owner/repo.git",
+    "http://github.com/owner/repo",
+    "git@github.com:owner/repo.git",
+    "ssh://git@github.com/owner/repo.git",
+    "git://github.com/owner/repo.git",
+    "https://GitHub.com/owner/repo.git",
+])
+def test_github_remote_recognises_the_usual_url_forms(url):
+    assert mq._github_remote(url)
+
+
+@pytest.mark.parametrize("url", [
+    "",
+    None,
+    "/tmp/origin.git",
+    "https://gitlab.com/owner/repo.git",
+    "git@bitbucket.org:owner/repo.git",
+])
+def test_github_remote_rejects_non_github_urls(url):
+    assert not mq._github_remote(url)

@@ -50,11 +50,22 @@ A local merge queue runs in the `hscc` daemon on the gateway Mac.
 ## Ownership
 
 Orchestrators plan and review. They never rebase or merge; the queue does.
-Opt-in is per project; registry entries declare their gate commands:
+A project is **enabled by default** when all three are true:
+
+1. its registry `repo` is the root of a git work tree;
+2. `origin` is a `github.com` remote;
+3. it declares gates (`merge_queue.gates`) or it is `hscc`, whose built-in
+   gates apply.
+
+A project missing any one stays off, and `hscc merge-queue status` says which
+condition failed (`no repo`, `no GitHub remote`, `no gates`). The default is a
+property of the checkout, not a flag someone has to remember:
 
 ```yaml
 merge_queue:
-  enabled: false
+  # Optional explicit override of the default-on rule. Omit both `enabled`
+  # and the CLI override to follow the rule above.
+  # enabled: false
   gates: ["pytest -q"]
   timeout_s: 1800
   # Optional: expect PRs against this base instead of the repo default
@@ -65,10 +76,18 @@ merge_queue:
 `hscc`'s own defaults are the address guard plus the pytest legs, with
 `build_check.sh` added when the PR touched `ios-app/` or `macos-app/`.
 
+Precedence, highest first: the ledger's explicit CLI override
+(`hscc merge-queue enable|disable`), the registry's `merge_queue.enabled`, then
+the default-on rule. A `disable` is persisted in the ledger and therefore
+survives a daemon restart, a registry rewrite and a project that later becomes
+eligible.
+
 ## CLI
 
 `hscc merge-queue status|list|add|remove|pause|resume|enable|disable
 <project> [--json]`.
 
-Pause keeps the queue. Disable keeps the queue but stops processing. Enable
-and disable are explicit per-project overrides of the registry opt-in.
+`status` prints the effective state and, when the default-on rule declined a
+project, the reason. Pause keeps the queue. Disable keeps the queue but stops
+processing. Enable and disable are explicit per-project overrides of the
+default and the registry setting; the CLI override wins and persists.

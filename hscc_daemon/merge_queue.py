@@ -21,16 +21,22 @@ Everything the queue needs to survive a daemon restart is persisted in
 ``~/.hscc/merge-queue-state.json`` (atomic replace + fsync); a run that dies
 mid-flight is recovered to the head of its project's queue on the next tick.
 
-Opt-in is per project through the flightdeck registry::
+The queue is **on by default** for a project that has all three of: a git
+checkout at its registry ``repo``, a ``github.com`` ``origin`` remote, and
+declared gates (``merge_queue.gates``) or hscc's built-in gates::
 
     merge_queue:
-      enabled: false
+      # Optional explicit override; omit to follow the default-on rule.
+      # enabled: false
       gates: ["python3 scripts/address_guard.py --tracked", "bash scripts/run_tests.sh"]
       timeout_s: 1800
 
-The ``hscc`` project gets its own defaults (address guard + pytest legs, plus
+A project missing one of the three stays off and ``hscc merge-queue status``
+prints why (``no repo`` / ``no GitHub remote`` / ``no gates``). The ``hscc``
+project gets its own defaults (address guard + pytest legs, plus
 ``build_check.sh`` for whichever app tree the PR touched) when the registry
-entry does not declare gates.
+entry does not declare gates. An explicit ``enable``/``disable`` from the CLI
+is stored in the ledger and always wins over the default.
 
 This module is deliberately a plain git + gh implementation: no GitHub org,
 no GitHub merge queue. Tests inject the ``git``/``gh`` runners and use a
@@ -69,6 +75,11 @@ PR_URL_RE = re.compile(
 #: A project's ``origin`` remote, as github.com/<owner>/<repo> (https or ssh).
 _REMOTE_SLUG_RE = re.compile(
     r"github\.com[/:](?P<owner>[^/\s]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$")
+
+#: A github.com remote URL: https(s), ssh, git, or scp-like (``git@github.com:``).
+_GITHUB_REMOTE_RE = re.compile(
+    r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/\s]+@)?github\.com[/:]",
+    re.IGNORECASE)
 
 #: hscc's own default gates. The app build legs are appended only when the PR
 #: actually touched that tree (see :func:`_resolve_gates`).
@@ -238,7 +249,7 @@ def _file_lock(path=None):
 
 def _project_state(doc, project):
     ps = doc.setdefault("projects", {}).setdefault(str(project), {})
-    ps.setdefault("enabled", None)       # None = follow the registry opt-in
+    ps.setdefault("enabled", None)       # None = registry/default-on decides
     ps.setdefault("paused", False)
     ps.setdefault("queue", [])
     # A non-green head moves here so it cannot block the FIFO behind it. It is
@@ -349,14 +360,140 @@ def load_projects(registry_path=None):
 
 
 def _config_from_row(row):
-    """The effective queue config from one ``load_projects`` row."""
+    """The effective queue config from one ``load_projects`` row.
+
+    ``enabled_declared`` records whether the registry itself set ``enabled``;
+    only then is that an explicit override. Without it the project follows the
+    default-on eligibility rule (:func:`default_reason`).
+    """
     raw = row.get("merge_queue")
     cfg = dict(raw) if isinstance(raw, dict) else {}
     cfg["name"] = row["name"]
     cfg["repo"] = row["repo"]
     cfg["board"] = row.get("board")
+    cfg["enabled_declared"] = "enabled" in cfg
     cfg["enabled"] = bool(cfg.get("enabled", False))
+    cfg["default_reason"] = default_reason(cfg)
+    cfg["default_enabled"] = cfg["default_reason"] is None
     return cfg
+
+
+def _git_checkout(repo):
+    """The expanded ``repo`` path when it is a git work-tree root, else None.
+
+    Pure filesystem check (``.git`` is a directory in a clone and a file in a
+    linked worktree/submodule), so a non-repo project costs no subprocess.
+    """
+    path = os.path.expanduser(str(repo or "").strip())
+    if not path or not os.path.isdir(path):
+        return None
+    if not os.path.exists(os.path.join(path, ".git")):
+        return None
+    return path
+
+
+def _repo_origin(repo, git_runner=None):
+    """``(is_git_root, origin_url)`` for ``repo``; reads local config only.
+
+    ``is_git_root`` is false when the path is missing or is not the root of a
+    git work tree (a subdirectory of some other checkout is not this project's
+    repo). The origin URL is the raw configured value, so a ``url.*.insteadOf``
+    mirror does not hide a GitHub origin.
+    """
+    path = _git_checkout(repo)
+    if path is None:
+        return False, None
+    runner = git_runner or _default_runner
+    try:
+        top = _git(["rev-parse", "--show-toplevel"], path, runner)
+        if top is None or top.returncode != 0:
+            return False, None
+        root = (top.stdout or "").strip()
+        if not root or os.path.realpath(root) != os.path.realpath(path):
+            return False, None
+        proc = _git(["config", "--get", "remote.origin.url"], path, runner)
+    except Exception:
+        return False, None
+    if proc is None or proc.returncode != 0:
+        return True, None
+    return True, ((proc.stdout or "").strip() or None)
+
+
+def _github_remote(url):
+    """True when ``url`` is a github.com remote (https, ssh, git, git@)."""
+    return bool(_GITHUB_REMOTE_RE.match(str(url or "").strip()))
+
+
+def _project_has_gates(cfg):
+    """Declared gates, or hscc's built-in gates, make a project runnable.
+
+    An explicit ``gates: []`` means no gates for every project (including
+    hscc): the built-in list applies only when the key is absent, matching
+    :func:`_resolve_gates`.
+    """
+    if not isinstance(cfg, dict):
+        return False
+    gates = cfg.get("gates")
+    if gates is not None:
+        return isinstance(gates, (list, tuple)) and any(
+            str(g).strip() for g in gates)
+    return str(cfg.get("name") or "") == "hscc"
+
+
+def default_reason(cfg, *, git_runner=None):
+    """Why default-on does not apply, or None when the project is eligible.
+
+    Default-on requires a git checkout at the registry ``repo``, a
+    ``github.com`` ``origin`` remote, and gates (``merge_queue.gates`` or
+    hscc's built-in gates). The three reason strings are printed by
+    ``hscc merge-queue status``.
+    """
+    if not isinstance(cfg, dict):
+        return "no repo"
+    repo = str(cfg.get("repo") or "").strip()
+    if _git_checkout(repo) is None:
+        return "no repo"
+    if not _project_has_gates(cfg):
+        return "no gates"
+    is_repo, origin = _repo_origin(repo, git_runner)
+    if not is_repo:
+        return "no repo"
+    if not _github_remote(origin):
+        return "no GitHub remote"
+    return None
+
+
+def default_enabled(cfg, *, git_runner=None):
+    """True when the project meets the default-on conditions."""
+    return default_reason(cfg, git_runner=git_runner) is None
+
+
+def enabled_source(cfg, ps):
+    """Where the on/off decision came from: ``cli``, ``registry`` or ``default``."""
+    if (ps or {}).get("enabled") is not None:
+        return "cli"
+    if (cfg or {}).get("enabled_declared"):
+        return "registry"
+    return "default"
+
+
+def effective_enabled(cfg, ps):
+    """The project's on/off state.
+
+    An explicit CLI override in the ledger wins over everything (including a
+    ``disable`` that must survive restarts); a registry ``enabled`` is the next
+    explicit answer; otherwise the default-on eligibility rule decides.
+    """
+    if not cfg:
+        return False
+    override = (ps or {}).get("enabled")
+    if override is not None:
+        return bool(override)
+    if cfg.get("enabled_declared"):
+        return bool(cfg.get("enabled"))
+    if "default_enabled" in cfg:
+        return bool(cfg["default_enabled"])
+    return default_enabled(cfg)
 
 
 def project_config(project, registry_path=None):
@@ -469,8 +606,7 @@ def view(*, registry_path=None, state_path=None, board=None, now=None):
         cfg = configs.get(name)
         if board is not None and (cfg or {}).get("board") != board:
             continue
-        enabled = (bool((cfg or {}).get("enabled", False))
-                   if ps.get("enabled") is None else bool(ps.get("enabled")))
+        enabled = effective_enabled(cfg, ps)
         last = ps.get("last") if isinstance(ps.get("last"), dict) else None
         rows = []
         shown = set()
@@ -507,6 +643,9 @@ def view(*, registry_path=None, state_path=None, board=None, now=None):
                     last=last, now_s=now_s))
         out[name] = {
             "enabled": enabled,
+            "enabled_source": enabled_source(cfg, ps),
+            "default_enabled": bool((cfg or {}).get("default_enabled")),
+            "default_reason": (cfg or {}).get("default_reason"),
             "paused": bool(ps.get("paused")),
             "repo": (cfg or {}).get("repo"),
             "queue_len": len(queue),
@@ -1137,7 +1276,7 @@ def _cancel_reason(state_path, project, entry, cfg):
             return "removed"
         if ps.get("paused"):
             return "paused"
-        if cfg is not None and not _enabled(cfg, ps):
+        if cfg is not None and not effective_enabled(cfg, ps):
             return "disabled"
         return None
 
@@ -1365,11 +1504,6 @@ def _retry_or_drop(doc, state_path, project, entry, error):
 
 # ── tick ────────────────────────────────────────────────────────────────────
 
-def _enabled(cfg, ps):
-    override = ps.get("enabled")
-    return bool(cfg.get("enabled", False) if override is None else override)
-
-
 def _repo_groups(projects, names):
     """Group project names by canonical repo path (registry order first).
 
@@ -1434,7 +1568,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
             cfg = config_loader(name, registry_path)
             cfgs[name] = cfg
             ps = _project_state(doc, name)
-            enabled[name] = _enabled(cfg, ps) if cfg is not None else False
+            enabled[name] = effective_enabled(cfg, ps) if cfg is not None else False
             # No registry entry: nothing to run (state is just history).
             result["projects"][name] = _project_view(
                 ps, cfg, enabled[name])
@@ -1515,7 +1649,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 for idx, name in enumerate(members):
                     cfg = cfgs.get(name)
                     ps = _project_state(doc, name)
-                    if (cfg is None or not _enabled(cfg, ps)
+                    if (cfg is None or not effective_enabled(cfg, ps)
                             or ps.get("paused")):
                         continue
                     for pos, entry in enumerate(ps.get("queue") or []):
@@ -1530,7 +1664,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
                     for idx, name in enumerate(members):
                         cfg = cfgs.get(name)
                         ps = _project_state(doc, name)
-                        if (cfg is None or not _enabled(cfg, ps)
+                        if (cfg is None or not effective_enabled(cfg, ps)
                                 or ps.get("paused")):
                             continue
                         for pos, entry in enumerate(ps.get("waiting") or []):
@@ -1567,7 +1701,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 member_cfg = cfgs.get(name)
                 result["projects"][name] = _project_view(
                     ps, member_cfg,
-                    _enabled(member_cfg, ps) if member_cfg else False)
+                    effective_enabled(member_cfg, ps) if member_cfg else False)
 
         result["recovered"] = recovered
         # A tick that does no work is still a tick: stamp the ledger so the
@@ -1581,7 +1715,11 @@ def tick(*, state_path=None, root=None, registry_path=None,
 
 def _project_view(ps, cfg, enabled=None):
     return {
-        "enabled": bool(cfg.get("enabled", False)) if enabled is None else enabled,
+        "enabled": (effective_enabled(cfg, ps) if enabled is None
+                    else enabled),
+        "enabled_source": enabled_source(cfg, ps),
+        "default_enabled": bool((cfg or {}).get("default_enabled")),
+        "default_reason": (cfg or {}).get("default_reason"),
         "paused": bool(ps.get("paused")),
         "queue": list(ps.get("queue") or []),
         "waiting": list(ps.get("waiting") or []),
@@ -1595,7 +1733,7 @@ def _project_view(ps, cfg, enabled=None):
 def check_merge_queue():
     """Daemon stream entry: run one tick and stamp ``state/merge_queue.json``.
 
-    Never raises. With no project opted in this is a cheap no-op that still
+    Never raises. With no project enabled this is a cheap no-op that still
     stamps, so ``hscc verify`` never reports the stream dark.
     """
     from .state import write_state
