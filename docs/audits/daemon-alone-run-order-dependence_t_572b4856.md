@@ -633,10 +633,31 @@ rc — its per-nodeid tally is identical on both sides and no reason string move
 nothing in `requirements-ci.txt`'s dependency set breaks the property §8 established;
 the third environment agrees with the first two on the thing the gate actually asserts.
 
-**Posture B — the runner itself, `leg hscc_daemon` on run 44884690833 @ `2b044516`:**
-`1 failed, 4031 passed, 28 skipped in 204.91s`, reported **green** because
-`HSCC_TESTS_ENFORCE` is unset. Two different host-state seams make the two postures
-red, and neither is an order effect:
+**Posture B — the runner itself, swept** by the dispatch instrument this card added
+(`pytest-legs.yml` run `44888694270`, head `17396ea1`, `alone_sweep=true`,
+`legs=hscc_daemon`; the artifact is the full `xml/` + `logs/` + `rc/` record, and the
+tallies below were recomputed from it, not read off a screenshot):
+
+```
+in-leg reference   1 failed, 4031 passed, 28 skipped in 234.85s   run_tests rc=1
+alone sweeps       131 files swept (131 xml, 131 rc), 130 rc 0, 1 rc 1
+diff               files whose ALONE run differs from the leg: 1
+                   test_kanban_cli: in-leg (25, 0, 0, 0) | alone (25, 0, 0, 0) | rc=1
+                   0 status changes · 0 skip-reason differences
+skip triples       in-leg 24 == alone 24, `diff` empty (byte-identical sets)
+RESULT             the LEG ITSELF is red — fix that before reading the diff.
+job conclusion     success — sweep_verdict.sh turned rc 1 advisory, as designed
+```
+
+Same verdict as posture A, on the machine that actually matters for promotion: **the
+agreement property holds on the CI runner too** — 131 files, one named file, named only
+by the rc of a leg that is red identically on both sides. The card's unmeasured reason is
+now measured on both thin postures, and it is not the obstacle.
+
+**What the runner's leg is red for, and why nobody sees it** (`leg hscc_daemon` on run
+44884690833 @ `2b044516`): `1 failed, 4031 passed, 28 skipped in 204.91s`, reported
+**green** because `HSCC_TESTS_ENFORCE` is unset. Two different host-state seams make the
+two postures red, and neither is an order effect:
 
 1. **On the runner** — `TestCmdKanban.test_listing_json_valid`,
    `IndexError: list index out of range` at `hscc_daemon/tests/test_kanban_cli.py:326`.
@@ -679,14 +700,27 @@ red, and neither is an order effect:
    posture has ever been green here.
 
 **What the sweep structurally cannot see, and a promotion must not assume.** The
-runner prints **28** `-rs` reason lines; the thin venv on this host prints **9**. Same
-131 files, same leg, same committed code — the difference is entirely which seams are
-present. `alone_sweep.sh` compares alone-vs-in-leg *within* one posture; it is not a
-posture-vs-posture diff, so a `GATE GREEN` on the nightly host says nothing about the
-runner's skip profile, and "a FAILED in a sibling leg is a regression" is only as
-true as the posture being compared. The skip-reason half of the diff is the reason the
-tool has teeth (§2); it is not a cross-machine comparison instrument, and should not
-be advertised as one.
+runner's `-rs` summary carries **24** distinct `(file, line, reason)` triples; the thin
+venv on this host carries **9** — same 131 files, same leg, same committed code, and the
+difference is entirely which seams happen to be present. `alone_sweep.sh` compares
+alone-vs-in-leg *within* one posture; it is not a posture-vs-posture diff, so a
+`GATE GREEN` on the nightly host says nothing about the runner's skip profile, and "a
+FAILED in a sibling leg is a regression" is only as true as the posture being compared.
+The skip-reason half of the diff is the reason the tool has teeth (§2); it is not a
+cross-machine comparison instrument, and should not be advertised as one.
+
+**One wart found by taking this measurement, recorded rather than papered over.** The
+runner's sweep printed `test_kanban_cli: in-leg (25, 0, 0, 0) | alone (25, 0, 0, 0)` for
+a file whose leg contains a **failure**. `diff_alone_vs_leg.py:54` stores junit's tag —
+`"failure"` — as the status, but `tally()` at `diff_alone_vs_leg.py:64` reads
+`counts["failed"]`, so the second slot of the printed 4-tuple can never be anything but
+0. The tool is **not** toothless because of it — the per-nodeid half still compares
+`failure` against `failure` and would name a flip, and a non-zero rc still forces the
+file to be named, which is exactly what happened here — but its *tally* line silently
+under-reports, and a reader who trusts `(25, 0, 0, 0)` over the `rc=1` beside it is being
+misled by the tool. One word fixes it; it needs a fixture that fails a test so the slot
+is pinned non-zero, so it is a card of its own rather than a drive-by edit to the audited
+tool.
 
 **What this licenses.** Not a blocking gate on the CI posture. The obstacle is not
 the sweep — it is two host-state seams that keep the leg underneath it from being
@@ -701,7 +735,9 @@ is exactly the right behaviour to keep. In order:
    answering a weaker question than "this environment can run it" (GAP-D-1's own
    standard);
 3. re-take this baseline **on the runner** with the dispatch instrument
-   (`.github/workflows/pytest-legs.yml`, `alone-sweep` input), a few times;
+   (`.github/workflows/pytest-legs.yml`, `alone-sweep` input), a few times — one is on
+   record (`44888694270`, above) and the leg it needs is red until steps 1 and 2 land,
+   so "a few green ones" is not obtainable yet;
 4. only then promote, and the smallest promotion is the one t_6cd17e1c proposed —
    a `needs: leg` sweep step gated by `HSCC_TESTS_ENFORCE`, not a new leg.
 
