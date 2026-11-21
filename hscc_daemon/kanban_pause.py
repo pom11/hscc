@@ -796,8 +796,133 @@ def _read_stream_state(state_dir=None) -> dict:
         return {}
 
 
+#: The leaf of the paused-policy document UNDER A ROOT: ``<root>/state/`` + this.
+#: A caller that threads its own ``~/.hscc``-shaped root through
+#: :func:`save_state` (the t_e9b0f048 seam) and through
+#: :func:`doctor_check(hscc_dir=...)` uses this name on both sides, and it is
+#: also the default leaf of :data:`STATE_PATH`. It is a constant rather than
+#: ``os.path.basename(STATE_PATH)`` because STATE_PATH is a whole-path test
+#: fence in this package (``test_kanban_pause_enforce_stream.py``'s autouse
+#: fixture rebinds it to a name that must never be read), and a guard whose
+#: artefact name came from that fence would look for a file no writer creates.
+PAUSED_FILENAME = "kanban_paused.json"
+
+
+def _enforce_files(root) -> tuple:
+    """The two artefacts that prove the enforcer lives at ``root``.
+
+    ``(paused-policy document, enforce stream stamp)`` — exactly what this
+    module's OWN writers create under a root: :func:`save_state` writes the
+    paused-policy document (:data:`PAUSED_FILENAME`) and :func:`enforce_tick`
+    stamps ``<root>/state/kanban_enforce.json`` through ``state.write_state``.
+    The daemon pid file is deliberately NOT one of them: it belongs to
+    ``daemon_ops``, not to this feature, and counting it would let a stray pid
+    file certify a root the enforcer has never written to — which is precisely
+    how :func:`doctor_check`'s fatal branch could fire.
+    """
+    state_dir = os.path.join(root, "state")
+    return (os.path.join(state_dir, PAUSED_FILENAME),
+            os.path.join(state_dir, f"{STREAM_NAME}.json"))
+
+
+def _root_holds_enforcer(root) -> bool:
+    """Has ``root`` EVER held an artefact of this feature?
+
+    Not a verdict — the only question it answers is "has anything of this
+    subject ever been written here", and it exists so the redirect guard can
+    tell a host with no paused boards (absence is the honest answer) apart from
+    a root that was never an enforcer root at all (absence is an artefact of the
+    caller's read). Two ``isfile`` calls, no reads.
+    """
+    return any(os.path.isfile(p) for p in _enforce_files(root))
+
+
+def _canonical_root() -> str:
+    """The root the feature's OWN writers resolve to: HOME-derived, no HSCC_DIR.
+
+    Derived from :data:`STATE_PATH` — the same constant the writer uses — so the
+    guard can never split from the writer, and ONE derivation serves both sides
+    of the comparison (the t_adb66608 pattern in ``cron_watchers._dirs``).
+    ``HSCC_KANBAN_PAUSE_STATE`` is honoured because the writer honours it;
+    ``HSCC_DIR`` is not, because the writer never sees it.
+    """
+    return os.path.dirname(os.path.dirname(STATE_PATH))
+
+
+def _canonical_holds_enforcer() -> bool:
+    """Does the root the writers actually use hold this feature's state?
+
+    ``_root_holds_enforcer(_canonical_root())`` plus the writer's OWN path:
+    ``HSCC_KANBAN_PAUSE_STATE`` may point STATE_PATH at any filename anywhere,
+    and a relocated document is still an artefact of the canonical root.
+    """
+    return (os.path.isfile(STATE_PATH)
+            or _root_holds_enforcer(_canonical_root()))
+
+
+def _honour_enforce_root(hscc_dir):
+    """Decide which root this read may use, and say so when the ask is refused.
+
+    Returns ``(root_or_None, note)``. A root named by the caller is obeyed
+    exactly — t_e9b0f048's seam, ONE caller threading the SAME root through both
+    sides of one call — UNLESS it has never held a single artefact of this
+    feature while the canonical root holds one. Such a root has never been an
+    enforcer root at all; obeying it would report "nothing paused / never
+    enforced" (and fatal RED, once a pid file happens to sit there) about a
+    daemon whose enforce stream stamped seconds ago. Then the read moves to the
+    canonical root and ``note`` carries a WARN naming both, so the row describes
+    reality instead of the empty directory it was aimed at (t_be690204, the same
+    failure t_adb66608 closed for the watcher ledger).
+
+    With no ``hscc_dir`` — what the doctor's row does now — it returns
+    ``(None, "")`` and the plain HOME-bound read happens. The ``realpath``
+    compare comes first so the production default (``HSCC_DIR`` left at
+    bootstrap.sh's ``$HOME/.hscc``) costs no extra stat at all. An unresolvable
+    canonical root (a relative ``HSCC_KANBAN_PAUSE_STATE``) obeys the caller:
+    there is nothing to compare against, and guessing is worse.
+    """
+    if not hscc_dir:
+        return None, ""
+    asked = os.path.expanduser(hscc_dir)
+    canon = _canonical_root()
+    if (not canon
+            or os.path.realpath(asked) == os.path.realpath(canon)
+            or _root_holds_enforcer(asked)
+            or not _canonical_holds_enforcer()):
+        return asked, ""
+    return canon, (
+        f"WARN: {asked} holds no kanban-enforce artefact (no state/"
+        f"{PAUSED_FILENAME}, no state/{STREAM_NAME}.json) but "
+        f"{canon} does — HSCC_DIR is not a kanban-enforce root relocation "
+        f"(every writer here resolves from HOME), so this row reads the "
+        f"enforcer at {canon} instead of calling it absent (t_be690204)")
+
+
 def doctor_check(now=None, state_dir=None, paused_path=None, stream_state=None,
-                 _daemon_running=None, hscc_dir=None, _predates_build=None) -> dict:
+                 _daemon_running=None, hscc_dir=None,
+                 _predates_build=None) -> dict:
+    """Doctor verdict: is the daemon actually enforcing the paused-board policy?
+
+    The public half is the redirect policy (:func:`_honour_enforce_root`); the
+    verdict branches live in :func:`_doctor_check` and are unchanged by this
+    card. Splitting it this way keeps every verdict string byte-identical (the
+    branches are pinned elsewhere) while making the one rule auditable in one
+    function: **the read happens at the root the writers can reach, and a refused
+    redirect is reported, not obeyed silently.**
+    """
+    root, note = _honour_enforce_root(hscc_dir)
+    res = _doctor_check(now=now, state_dir=state_dir, paused_path=paused_path,
+                        stream_state=stream_state,
+                        _daemon_running=_daemon_running, hscc_dir=root,
+                        _predates_build=_predates_build)
+    if note:
+        res = dict(res, detail=f"{note}; {res['detail']}")
+    return res
+
+
+def _doctor_check(now=None, state_dir=None, paused_path=None,
+                  stream_state=None, _daemon_running=None, hscc_dir=None,
+                  _predates_build=None) -> dict:
     """Doctor verdict: is the daemon actually enforcing the paused-board policy?
 
     There is no enable/disable toggle for this feature — a pause IS the opt-in
@@ -830,10 +955,23 @@ def doctor_check(now=None, state_dir=None, paused_path=None, stream_state=None,
     Reads only (the paused state file + the stream state file + daemon.pid), so
     it is safe to run while the daemon ticks and it never touches a board DB.
     ``stream_state=`` / ``_daemon_running=`` / ``_predates_build=`` inject the
-    three probes (tests); ``hscc_dir=`` (the doctor_notifier_mask convention —
-    run_doctor passes ``os.environ.get("HSCC_DIR")``) relocates the WHOLE
-    ``~/.hscc`` root for this read so a sandboxed bootstrap (HOME stays real)
-    reads the SANDBOX's state, not the operator's live daemon. Never raises:
+    three probes (tests); ``hscc_dir=`` relocates the WHOLE ``~/.hscc`` root for
+    this read (state dir, paused-policy document and daemon pid file together, so
+    one call cannot mix roots). It is t_e9b0f048's CALLER-THREADED seam and
+    nothing more: pass it only when the SAME root was threaded through this
+    feature's writers too. It is no longer fed by the environment —
+    ``run_doctor`` hands this row no root at all (``FEATURE_CHECK_ROWS`` declares
+    ``row_kwargs=()``; t_be690204), because every writer here resolves from
+    ``$HOME`` (:data:`STATE_PATH`, the stream stamp through ``state.STATE_DIR``,
+    :data:`DAEMON_PID_PATH`) and none of them reads ``HSCC_DIR``. The old
+    justification — a sandboxed bootstrap (HOME stays real) must read the
+    SANDBOX's state, not the operator's live daemon — is exactly what t_adb66608
+    rejected for the watcher ledger: a relocated root nothing can write to is not
+    a sandbox, it is an empty directory, and the row answered "the daemon is not
+    running — nothing enforces" about a daemon whose stream had stamped seconds
+    ago (and RED once a pid file sat there — both measured, t_be690204).
+    :func:`_honour_enforce_root` is what enforces that; a root that owns its own
+    enforcer artefacts is still obeyed exactly. Never raises:
     an unreadable paused-state file reads as "nothing paused" (fail-open for
     the ROW; enforce() itself re-reads the file and fails loud via the stream).
     """
@@ -841,11 +979,14 @@ def doctor_check(now=None, state_dir=None, paused_path=None, stream_state=None,
         now = _real_time()
     pid_file = None
     if hscc_dir:
+        # The root here is already the guard's verdict (see doctor_check): the
+        # caller's own root, or the canonical one when that root has never held
+        # an enforcer artefact. Everything below resolves under that ONE root.
         root = os.path.expanduser(hscc_dir)
         if state_dir is None:
             state_dir = os.path.join(root, "state")
         if paused_path is None:
-            paused_path = os.path.join(root, "state", "kanban_paused.json")
+            paused_path = os.path.join(root, "state", PAUSED_FILENAME)
         pid_file = os.path.join(root, "daemon.pid")
         if _daemon_running is None:
             _daemon_running = lambda: _daemon_pid_alive(pid_file)  # noqa: E731

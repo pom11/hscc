@@ -2093,9 +2093,106 @@ def _daemon_predates_build(pid_file=None, build_file=None) -> bool:
     return started < built
 
 
+def _waker_files(root) -> tuple:
+    """The two artefacts that prove the waker lives at ``root``.
+
+    ``(config file, stream stamp)`` — exactly what this module's OWN writers
+    create at a root: :func:`set_enabled` (and the CLI) write
+    ``<root>/orch_waker.json``, the leaf of :data:`DEFAULT_CONFIG_PATH`, and the
+    daemon's tick stamps ``<root>/state/orch_waker.json`` through
+    ``state.write_state``. The daemon pid file is deliberately NOT one of them:
+    it belongs to ``daemon_ops``, not to the waker, and counting it would let a
+    stray pid file certify a root the waker has never written to — which is
+    precisely how :func:`doctor_check`'s fatal branch could fire.
+    """
+    return (os.path.join(root, os.path.basename(DEFAULT_CONFIG_PATH)),
+            os.path.join(root, "state", f"{STREAM_NAME}.json"))
+
+
+def _root_holds_waker(root) -> bool:
+    """Has ``root`` EVER held a waker artefact?
+
+    Not a verdict — the only question it answers is "has anything of this
+    subject ever been written here", and it exists so the redirect guard can
+    tell a root where the waker was never set up (absence is the honest answer)
+    apart from a root that was never a waker root at all (absence is an
+    artefact of the caller's read). One ``isfile`` per artefact, no reads.
+    """
+    return any(os.path.isfile(p) for p in _waker_files(root))
+
+
+def _canonical_root() -> str:
+    """The root the waker's OWN writers resolve to: HOME-derived, no environment.
+
+    ONE derivation, used for both sides of the guard in
+    :func:`_honour_waker_root`, so the canonical side and the redirected side
+    are always the same shape (the t_adb66608 pattern in
+    ``cron_watchers._dirs``). It consults no ``HSCC_DIR`` — a per-process
+    variable cannot name the root of state whose writers (the daemon, the CLI)
+    never see it.
+    """
+    return os.path.dirname(config_path())
+
+
+def _honour_waker_root(hscc_dir):
+    """Decide which root this read may use, and say so when the ask is refused.
+
+    Returns ``(root_or_None, note)``. A root named by the caller is obeyed
+    exactly — that is t_e9b0f048's seam, ONE caller threading the SAME root
+    through both sides of one call — UNLESS it has never held a single artefact
+    of the waker while the canonical root holds one. Such a root has never been a
+    waker root at all; obeying it would report "never ticked" (and fatal RED, once
+    a pid file happens to sit there) about a waker that stamped seconds ago. Then
+    the read moves to the canonical root and ``note`` carries a WARN naming both,
+    so the row describes reality instead of the empty directory it was aimed at
+    (t_be690204, the same failure t_adb66608 closed for the watcher ledger).
+
+    With no ``hscc_dir`` — what the doctor's row does now — it returns
+    ``(None, "")`` and the plain HOME-bound read happens. The ``realpath``
+    compare comes first so the production default (``HSCC_DIR`` left at
+    bootstrap.sh's ``$HOME/.hscc``) costs no extra stat at all.
+    """
+    if not hscc_dir:
+        return None, ""
+    asked = _resolve(hscc_dir)
+    canon = _canonical_root()
+    if (os.path.realpath(asked) == os.path.realpath(canon)
+            or _root_holds_waker(asked)
+            or not _root_holds_waker(canon)):
+        return asked, ""
+    return canon, (
+        f"WARN: {asked} holds no orch-waker artefact (no "
+        f"{os.path.basename(DEFAULT_CONFIG_PATH)}, no state/{STREAM_NAME}.json) "
+        f"but {canon} does — HSCC_DIR is not an orch-waker root relocation "
+        f"(every writer here resolves from HOME), so this row reads the waker "
+        f"at {canon} instead of calling it absent (t_be690204)")
+
+
 def doctor_check(now=None, config_path=None, state_dir=None,
                  stream_state=None, _daemon_running=None,
                  hscc_dir=None, _predates_build=None) -> dict:
+    """Doctor verdict: is the built-in waker alive and doing its job?
+
+    The public half is the redirect policy (:func:`_honour_waker_root`); the
+    verdict branches themselves live in :func:`_doctor_check` and are unchanged
+    by this card. Splitting it this way keeps every verdict string byte-identical
+    (the branches are pinned elsewhere) while making the one rule here auditable
+    in one function: **the read happens at the root the writers can reach, and a
+    refused redirect is reported, not obeyed silently.**
+    """
+    root, note = _honour_waker_root(hscc_dir)
+    res = _doctor_check(now=now, config_path=config_path, state_dir=state_dir,
+                        stream_state=stream_state,
+                        _daemon_running=_daemon_running, hscc_dir=root,
+                        _predates_build=_predates_build)
+    if note:
+        res = dict(res, detail=f"{note}; {res['detail']}")
+    return res
+
+
+def _doctor_check(now=None, config_path=None, state_dir=None,
+                  stream_state=None, _daemon_running=None,
+                  hscc_dir=None, _predates_build=None) -> dict:
     """Doctor verdict: is the built-in waker alive and doing its job?
 
     * ``disabled``                -> ok, detail says ``disabled`` (the operator
@@ -2117,14 +2214,23 @@ def doctor_check(now=None, config_path=None, state_dir=None,
     daemon ticks and it never touches a board DB. ``stream_state=`` injects the
     stream entry and ``_daemon_running=`` the liveness probe (tests); otherwise
     they read ``<state_dir>/orch_waker.json`` / ``<root>/daemon.pid``.
-    ``hscc_dir=`` (the ``doctor_notifier_mask`` convention — run_doctor passes
-    ``os.environ.get("HSCC_DIR")``) relocates the WHOLE ``~/.hscc`` root for
-    this read: config, stream state and the daemon pid file all resolve under
-    it. That is what keeps a sandboxed bootstrap (HSCC_DIR = tmp, HOME = the
-    operator's real one — bootstrap.sh never fakes HOME) from reading the
-    OPERATOR's live daemon.pid while looking at the sandbox's missing stream
-    state and firing the fatal verdict over someone else's machine. Without
-    the env var every path is the plain ``~/.hscc`` default.
+    ``hscc_dir=`` relocates the WHOLE ``~/.hscc`` root for this read (config,
+    stream state and the daemon pid file together, so one call cannot mix
+    roots). It is t_e9b0f048's CALLER-THREADED seam and nothing more: pass it
+    only when the SAME root was threaded through this subject's writers too.
+    It is no longer fed by the environment — ``run_doctor`` hands this row no
+    root at all (``FEATURE_CHECK_ROWS`` declares ``row_kwargs=()``;
+    t_be690204), because every writer here resolves from ``$HOME``
+    (:data:`DEFAULT_CONFIG_PATH`, the stream stamp through ``state.STATE_DIR``,
+    :data:`DAEMON_PID_PATH`) and none of them reads ``HSCC_DIR``. The old
+    justification — a sandboxed bootstrap must not read the OPERATOR's
+    ``daemon.pid`` — is exactly what t_adb66608 rejected for the watcher
+    ledger: a relocated root nothing can write to is not a sandbox, it is an
+    empty directory, and the row answered "the daemon is not running" about a
+    daemon that had ticked seconds ago (and RED once a pid file sat there — both
+    measured, t_be690204). :func:`_honour_waker_root` is what enforces that; a
+    root that owns its own waker artefacts is still obeyed exactly. Without the
+    env var every path is the plain ``~/.hscc`` default.
     ``_predates_build=`` injects the upgrade-race probe (tests; the real one
     is :func:`_daemon_predates_build`, which needs NO injection because the
     pid file it stats is the same file the default liveness probe read).
@@ -2136,9 +2242,13 @@ def doctor_check(now=None, config_path=None, state_dir=None,
         now = _real_time()
     pid_file = None
     if hscc_dir:
+        # The root here is already the guard's verdict (see doctor_check): the
+        # caller's own root, or the canonical one when that root has never held
+        # a waker artefact. Everything below resolves under that ONE root.
         root = _resolve(hscc_dir)
+        config_leaf = os.path.basename(DEFAULT_CONFIG_PATH)
         if config_path is None:
-            config_path = os.path.join(root, "orch_waker.json")
+            config_path = os.path.join(root, config_leaf)
         if state_dir is None:
             state_dir = os.path.join(root, "state")
         pid_file = os.path.join(root, "daemon.pid")
