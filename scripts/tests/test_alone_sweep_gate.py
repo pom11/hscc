@@ -536,6 +536,57 @@ def test_uninstall_removes_both_the_job_and_the_wrapper(tmp_path):
     assert not (home / ".hermes" / "scripts" / "hscc-alone-sweep-gate.sh").exists()
 
 
+# ── the install marker: 'never ran' must not look like 'never installed' ────
+# GAP-B-4's other half. The doctor reads the marker to tell a registered job whose
+# passes all fail (17 consecutive failures, t_3aadd2c0) from a watcher nobody ever
+# installed — and only the installer knows whether the job was registered.
+
+def _marker(home):
+    return home / ".hscc" / "watcher-installs.json"
+
+
+def test_install_records_the_liveness_marker_the_doctor_needs(tmp_path):
+    proc, _log, home = _install(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    marker = _marker(home)
+    assert marker.is_file(), (
+        "no install marker — the doctor would report a registered nightly that "
+        "never completed a pass as 'not configured', which is the invisibility "
+        "this whole row exists to close")
+    data = json.loads(marker.read_text())
+    row = data.get("alone_sweep_gate") or {}
+    assert row.get("cron_job") == "hscc-alone-sweep-gate"
+    assert row.get("schedule") == "30 4 * * *", (
+        f"the marker must carry the schedule that was registered, got {row!r}")
+
+
+def test_uninstall_clears_the_marker_and_the_stamp(tmp_path):
+    """An operator who removed the job must land back on `not-configured`, not on
+    a `stale` warn that gets louder every day."""
+    proc, _log, home = _install(tmp_path)
+    assert proc.returncode == 0
+    stamp_dir = home / ".hscc" / "state"
+    stamp_dir.mkdir(parents=True, exist_ok=True)
+    (stamp_dir / "alone_sweep_gate.json").write_text(
+        '{"ok": false, "watcher": "alone_sweep_gate"}')
+    proc, _log, home = _install(tmp_path, "--uninstall")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "alone_sweep_gate" not in json.loads(_marker(home).read_text())
+    assert not (stamp_dir / "alone_sweep_gate.json").exists()
+
+
+def test_status_prints_the_doctor_verdict_for_this_stream(tmp_path):
+    """The marker + a missing stamp is the 17-failures shape — --status must say
+    so in the same words the doctor row uses, because this is where an operator
+    looks first."""
+    proc, _log, _home = _install(tmp_path)
+    assert proc.returncode == 0
+    status, _l, _h = _install(tmp_path, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "liveness: never-ran" in status.stdout, status.stdout
+    assert "never completed a pass" in status.stdout
+
+
 def test_schedule_is_nightly_and_not_a_second_of_the_suite():
     """The routing decision, pinned: this job is scheduled, so a wrong cadence is
     a wrong gate. Daily, and overridable — never per-PR (see the gate header)."""

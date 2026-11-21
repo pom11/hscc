@@ -171,6 +171,20 @@ def test_installed_but_never_ran_warns(sandbox):
     assert v["status"] == "not-configured" and v["warn"] is False
 
 
+def test_removing_the_stamp_ends_the_warn_for_a_removed_watcher(sandbox):
+    """--uninstall clears the marker AND the stamp: an operator who removed the
+    job deliberately must land back on `not-configured`, not on a `stale` warn
+    that gets louder every day for a job nobody wants any more."""
+    cw.stamp("dep_pr_watcher", prs=0, idle=True)
+    cw.mark_installed("dep_pr_watcher", "0 8 * * *")
+    assert cw.remove_stamp("dep_pr_watcher") is True
+    assert cw.mark_removed("dep_pr_watcher") is True
+    assert cw.verdict("dep_pr_watcher", now=NOW)["status"] == "not-configured"
+    # idempotent: nothing left to remove is still "no stamp present"
+    assert cw.remove_stamp("dep_pr_watcher") is True
+    assert cw.remove_stamp("nope_watcher") is False
+
+
 def test_bad_stamp_is_a_warning(sandbox):
     _write_stamp("escalate_watcher")
     path = os.path.join(state.STATE_DIR, "escalate_watcher.json")

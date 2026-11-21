@@ -344,6 +344,28 @@ def mark_removed(stream, directory=None):
         return False
 
 
+def remove_stamp(stream, directory=None):
+    """Drop a stream's stamp file (installer --uninstall). Best-effort.
+
+    A deliberately-removed watcher must go back to ``not-configured``, not age
+    into a permanent ``stale`` warn for a job nobody wants any more: the install
+    marker alone cannot say "this operator uninstalled it on purpose". Returns
+    True when there is no stamp left (absent counts as done), False when one
+    could not be removed.
+    """
+    if stream not in WATCHERS:
+        return False
+    stamp_dir, _ = _dirs(directory)
+    path = os.path.join(stamp_dir, stream + ".json")
+    if not os.path.exists(path):
+        return True
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
+
+
 def read_install_marker(stream, directory=None):
     """Install marker row for a stream, or None."""
     try:
