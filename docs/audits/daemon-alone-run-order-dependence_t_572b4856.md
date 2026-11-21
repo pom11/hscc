@@ -733,7 +733,23 @@ is exactly the right behaviour to keep. In order:
 2. make `real_root` *skip* rather than error when `hermes_cli` resolves but the agent
    tree is not usable — a fixture whose skip predicate is "the name imported" is
    answering a weaker question than "this environment can run it" (GAP-D-1's own
-   standard);
+   standard); **(landed, t_dd814180.)** The seeding call in the fixture is now the
+   probe — it is the first real call and the same one the bodies go on to make — and
+   an `ImportError` from it skips with a reason naming the module and the tree, while
+   the "not importable" reason above is untouched, so the two postures keep two
+   strings. Measured at the delivered head: the §11 CI-faithful venv file-alone
+   `18 passed, 2 errors` → `20 passed, 2 skipped`, its leg green, and the canonical
+   venv's leg still runs the pair (that leg's whole `-rs` is one unrelated skip).
+   The bounded window was NOT widened: `connect()` wants three top-level siblings
+   (`hermes_cli/kanban_db_connect.py:645`, `:723`, `:766`), so no single pre-import
+   makes a thin interpreter runnable, and `agent.*` is the deferred `os.execv` chain
+   `scripts/run_tests.sh:100-122` keeps out of the suite — the durable fix is upstream
+   in hermes, resolving its siblings through its own package instead of `sys.path`.
+   One premise correction, measured: `2b044516`'s red was recorded on the *stamp's*
+   thin sibling (`p313`), and at `e3d60c21` that interpreter is green
+   (`4078 passed, 24 skipped`) because `p313` carries no `ruamel`, so the probe fails
+   one step earlier and the pair skips. The red is posture-dependent (it needs a thin
+   env with hermes' deps present); the seam is not.
 3. re-take this baseline **on the runner** with the dispatch instrument
    (`.github/workflows/pytest-legs.yml`, `alone-sweep` input), a few times — one is on
    record (`44888694270`, above) and the leg it needs is red until steps 1 and 2 land,
