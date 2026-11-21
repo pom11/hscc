@@ -161,10 +161,20 @@ class TestNoAgentEscapeHatch:
 
 class TestResumeTool:
     def test_confirmed_resume_clears_pause_and_strikes(self, fleet):
-        node_pauses.pause(W1, units=["w1", "wspan"], span_nodes=[W1, W2])
+        # The strikes are earned BEFORE the pause: #568 made note_heal a no-op
+        # on a node the overlay holds, so a paused node accrues nothing and a
+        # post-pause slate could never trip the breaker. The point of this test
+        # is that a slate earned while healing SURVIVES the pause (which #568
+        # documents: "strikes earned before the pause still count after the
+        # resume") and that a confirmed resume clears it.
         for _ in range(7):
             heal_breaker.note_heal(W1)
         assert heal_breaker.suspended(W1) > 0.0
+        node_pauses.pause(W1, units=["w1", "wspan"], span_nodes=[W1, W2])
+        # The pause must still be in force at the moment of the resume, or this
+        # silently degrades into a plain "resume an unparked node" case and
+        # proves nothing about clearing strikes through a pause.
+        assert node_pauses.paused(W1) is not None
         out = npt.node_resume({"host": W1, "confirm": True})
         assert out["executed"] is True and out["ok"] is True
         assert all("--ensure" in " ".join(c) for c in fleet.calls)

@@ -481,15 +481,21 @@ class TestResume:
         assert node_pauses.paused(W1) is not None
 
     def test_apply_restarts_then_clears_pause_and_strikes(self, fleet):
-        seed_pause()
         # Past the breaker's cap, so the node is genuinely SUSPENDED before the
         # resume — clearing three strikes would prove nothing (HEAL_BREAKER_MAX
-        # is 6; suspended() is 0.0 below it).
+        # is 6; suspended() is 0.0 below it). The slate is earned BEFORE the
+        # pause: #568 made note_heal a no-op on a node the overlay holds, so a
+        # post-pause slate could never trip the breaker. That a slate earned
+        # while healing survives the pause is exactly the contract resume clears.
         for _ in range(7):
             heal_breaker.note_heal(W1)
         assert heal_breaker.strike_count(W1) == 7
         assert heal_breaker.suspended(W1) > 0.0, \
             "the fixture must trip the breaker for this to mean anything"
+        seed_pause()
+        # The pause must be in force at the moment of the resume, so this is a
+        # real "clear strikes THROUGH a pause" case, not a plain unparked resume.
+        assert node_pauses.paused(W1) is not None
         rc, out = run(["resume", W1, "--apply"])
         assert rc == 0, out
         assert len(fleet.calls) == 2, fleet.calls
@@ -501,8 +507,15 @@ class TestResume:
 
     def test_a_failing_restart_keeps_the_pause_and_the_strikes(self, fleet,
                                                                monkeypatch):
-        seed_pause()
+        # One strike earned BEFORE the pause (note_heal is a no-op on a node the
+        # overlay holds since #568). This test guards that a FAILED restart keeps
+        # BOTH the pause and that strike — heal_breaker.clear() runs only after a
+        # successful restart, so clearing the strike here would be the bug.
         heal_breaker.note_heal(W1)
+        seed_pause()
+        # The pause must be in force at the moment of the resume, or "keeps the
+        # pause" would be vacuous.
+        assert node_pauses.paused(W1) is not None
         monkeypatch.setattr(util, "run_cmd",
                             Recorder([{"ok": False, "output": "",
                                        "stderr": "ensure failed"}]))
@@ -511,7 +524,8 @@ class TestResume:
         assert "failed to restart" in out
         assert node_pauses.paused(W1) is not None, (
             "a half-started node stays parked")
-        assert heal_breaker.strike_count(W1) == 1
+        assert heal_breaker.strike_count(W1) == 1, (
+            "a failed resume must NOT clear the strike it did not earn")
 
     def test_a_unit_with_no_rebuildable_command_refuses_and_keeps_pause(
             self, fleet):
