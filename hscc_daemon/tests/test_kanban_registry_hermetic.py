@@ -26,10 +26,11 @@ as the un-poisoned answer. Out of process because the poison must hold for the
 whole run (the ``t_c51c87d7`` pattern), and because the files under test are the
 ones whose fixtures would otherwise normalise the difference away.
 
-Teeth: measured, not asserted. Deleting the pins in ``test_kanban_cli.py`` makes
-BOTH tests below red — see the card handoff for the probe. The structural
-assertions in ``test_the_pinned_seam_is_still_there`` are the cheap backstop that
-fires even when the sub-process cannot be spawned.
+Teeth: measured, not asserted. Deleting the pins in ``test_kanban_cli.py`` makes the
+TWO behavioural tests below red — and red even on a workstation where the un-pinned
+family still reports "all passed" (probe M2 in the card handoff / the audit doc). The
+structural assertions in ``test_the_pinned_seam_is_still_there`` are the cheap backstop
+that fires even when the sub-process cannot be spawned.
 """
 
 import os
