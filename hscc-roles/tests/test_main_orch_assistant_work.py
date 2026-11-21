@@ -16,6 +16,12 @@ Two things are pinned beyond "the text is there": the section is MAIN-only (a
 project orchestrator and a worker must not get it — proof it is wired into the
 right spec), and it is GENERIC (no install paths, no account names, no assistant
 product names — the repo is public).
+
+The eighth bullet the section used to carry was a **TRANSITIONAL** instruction to
+prefix every tmux/inject command with `TMUX_TMPDIR`. It named its own removal
+trigger (the tmux-socket fallback, which shipped as `t_4c5855a6` / PR #579) and
+has been deleted; the absence tests below pin that it stays gone rather than
+rotting into a permanent requirement.
 """
 import getpass
 import os
@@ -28,7 +34,17 @@ import main_orch
 import orchestrators
 
 HEADING = "## Work the way the operator's main assistant works"
-TRANSITIONAL = "**TRANSITIONAL (until the tmux-socket fallback lands, card t_58af8078"
+
+# Markers of the deleted TRANSITIONAL tmux/TMUX_TMPDIR bullet. Pinned as several
+# fragments rather than one whole sentence: the point is that no re-worded shape
+# of that workaround comes back once the fallback it waited for has shipped.
+TRANSITIONAL_MARKERS = (
+    "TRANSITIONAL",
+    "TMUX_TMPDIR",
+    "tmux-socket fallback",
+    "delete this line when it ships",
+    "t_58af8078",
+)
 
 
 @pytest.fixture
@@ -112,8 +128,6 @@ DETAILS = (
     "read-only",
     "point-in-time",
     "dated sync-notes file",
-    # the transitional tmux-socket line
-    "TMUX_TMPDIR",
 )
 
 OPERATOR_SECTION = (
@@ -160,8 +174,8 @@ def test_the_section_survives_a_bootstrap_render(registry_file, isolated_home):
 
 
 @pytest.mark.parametrize("soul_of", [_rendered_soul], ids=["compose_soul"])
-def test_all_seven_behaviours_and_the_marker_in_the_render(registry_file,
-                                                           soul_of):
+def test_all_seven_behaviours_render_and_the_transitional_line_does_not(
+        registry_file, soul_of):
     """Every behaviour and every named clause, in the pure render too."""
     soul = soul_of(registry_file)
     assert soul.count(HEADING) == 1
@@ -169,7 +183,10 @@ def test_all_seven_behaviours_and_the_marker_in_the_render(registry_file,
         assert marker in soul, f"behaviour {number} missing: {marker!r}"
     for detail in DETAILS:
         assert detail in soul, f"required clause missing: {detail!r}"
-    assert TRANSITIONAL in soul
+    for marker in TRANSITIONAL_MARKERS:
+        assert marker not in soul, (
+            f"the deleted TRANSITIONAL tmux line is back ({marker!r}); the "
+            "tmux-socket fallback shipped, the workaround is not the contract")
 
 
 @pytest.mark.parametrize("number", sorted(BEHAVIOURS))
@@ -188,15 +205,37 @@ def test_each_behaviour_is_a_distinct_bullet_in_the_render(registry_file,
         f"behaviour {number} is not a bullet of its own in the rendered SOUL")
 
 
-def test_the_transitional_line_names_the_socket_var_and_its_removal_trigger(
-        registry_file):
-    """The transitional line is self-removing: it names the trigger and the card."""
-    soul = _rendered_soul(registry_file)
-    assert soul.count(TRANSITIONAL) == 1
-    assert "TMUX_TMPDIR" in soul
-    assert "delete this line when it ships" in soul
-    # The line binds the workaround to the fallback, not to a host.
-    assert "tmux-socket fallback" in soul
+def _raw_block(_registry_file=None):
+    """The section straight from the accessor — no render involved."""
+    return orchestrators.main_assistant_work_block()
+
+
+@pytest.mark.parametrize("text_of", [_rendered_soul, _raw_block],
+                         ids=["compose_soul", "accessor"])
+def test_the_transitional_tmux_line_is_gone_and_the_seven_behaviours_remain(
+        registry_file, text_of):
+    """The removal trigger fired, so the transitional bullet is gone for good.
+
+    The fallback it waited for shipped (`t_4c5855a6`, PR #579), so the SOUL must
+    stop telling an agent to set `TMUX_TMPDIR` by hand: a stale workaround line
+    outlives its reason and contradicts what #579 made automatic — hscc now aims
+    every tmux call at the socket of the server that owns the panes. Checked on
+    the raw accessor text AND the render, so the deletion cannot be quietly
+    undone on one of the two write paths. The bullet count is the other half of
+    the assertion: the transitional line was the eighth bullet, so exactly seven
+    proves it was removed without taking a behaviour with it.
+    """
+    section = _section_only(text_of(registry_file))
+    for marker in TRANSITIONAL_MARKERS:
+        assert marker not in section, (
+            f"transitional marker present in the section: {marker!r}")
+    bullets = [line for line in section.splitlines() if line.startswith("- ")]
+    assert len(bullets) == len(BEHAVIOURS) == 7, (
+        f"expected exactly the seven behaviour bullets, got {len(bullets)}: "
+        f"{bullets}")
+    for number, marker in BEHAVIOURS.items():
+        assert any(line.startswith(f"- {marker}") for line in bullets), (
+            f"behaviour {number} is not one of the section's bullets: {marker!r}")
 
 
 # -- it stays in the part of the SOUL that regeneration owns ---------------
@@ -255,7 +294,8 @@ def test_a_changed_render_rewrites_the_section_and_keeps_operator_content(
         "the section was duplicated by the operator-section carry, or dropped")
     for marker in BEHAVIOURS.values():
         assert marker in soul
-    assert TRANSITIONAL in soul
+    for marker in TRANSITIONAL_MARKERS:
+        assert marker not in soul
     assert OPERATOR_SECTION.strip() in soul
 
 
