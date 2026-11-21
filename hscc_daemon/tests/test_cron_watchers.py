@@ -1055,3 +1055,190 @@ def test_doctor_must_not_read_a_host_scripts_dir_it_was_not_given(tmp_path,
                            hermes_home=str(tmp_path / ".hermes"),
                            repo_dir=str(tmp_path / "checkout"))
     assert seen["ok"] is False and "NOT the repo copy" in seen["detail"]
+
+
+# ── THE ROOT, CHOSEN ONCE: HOME's ledger vs. a decoy HSCC_DIR (t_adb66608) ──
+# t_e9b0f048 made a relocated root STAPPABLE; it did not relocate anything, and
+# the residual was that three sides of one feature resolved the root three ways:
+# the stamps through state.STATE_DIR (HOME, at import), the install markers
+# through _dirs(None) (HOME), and the bootstrap doctor through
+# os.environ["HSCC_DIR"] (doctor.run_doctor handed it down as `hscc_dir`). On a
+# host where those differ, the doctor read a root nothing writes to and every row
+# came back `not-configured`, ok=True, no warn — the live-host measurement in
+# docs/audits/daemon-alone-run-order-dependence_t_572b4856.md section 10.1.
+#
+# The rule (module docstring, "THE ROOT, CHOSEN ONCE"): the ledger has ONE root,
+# the canonical writer's. HSCC_DIR is not a relocation for it, because it is a
+# per-process variable and the writers -- Hermes cron jobs and the installers --
+# are not the process holding it. Everything below runs with HOME (hence
+# STATE_DIR, via the `sandbox` fixture) and HSCC_DIR pointed at DIFFERENT trees,
+# so "the reader followed the variable" and "the reader followed the writer"
+# cannot both pass the same test.
+
+def _decoy_root(tmp_path):
+    """A real, existing ~/.hscc-SHAPED root that nothing writes to.
+
+    Its shape (a `state/` subdir beside the marker level) is what makes it the
+    live-host scenario and not merely a missing path: the doctor's relocated read
+    succeeds, the directory exists, and it is empty forever.
+    """
+    root = tmp_path / "elsewhere" / ".hscc"
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_the_ledger_root_never_consults_the_environment(sandbox, monkeypatch):
+    """state_dir() resolves through the writer, full stop.
+
+    Mutation-proof in both directions: make state_dir() honour HSCC_DIR and the
+    row reads the empty decoy and says "not configured" about a watcher that
+    just stamped; make it read some other variable and the same happens.
+    """
+    decoy = _decoy_root(sandbox)
+    monkeypatch.setenv("HSCC_DIR", str(decoy))
+    _write_stamp("dep_pr_watcher", age_s=10)
+
+    assert cw.state_dir() == state.STATE_DIR
+    assert cw.state_dir() != os.path.join(str(decoy), "state")
+
+    row = cw.doctor_check(now=NOW)          # how run_doctor calls it today
+    statuses = {r["stream"]: r["status"] for r in row["rows"]}
+    # The seeded watcher is described from HOME's tree. Had the reader followed
+    # HSCC_DIR it would have read the empty decoy and reported this very stream
+    # `not-configured` -- which is the live-host failure this card closes.
+    assert statuses["dep_pr_watcher"] == "ok"
+    assert row["ok"] is True and row["fatal"] is False
+    assert "WARN" not in row["detail"]
+
+
+def test_the_writers_follow_home_and_ignore_hscs_dir_too(sandbox, monkeypatch):
+    """All three sides land in HOME's tree with HSCC_DIR set -- the agreement is
+    by construction, not by three call sites each picking the same root.
+
+    The stamp goes through the REAL writer (state.write_state), the marker
+    through the installer's no-directory call, and the read through the doctor's
+    no-root call: the exact three shapes production uses.
+    """
+    decoy = _decoy_root(sandbox)
+    monkeypatch.setenv("HSCC_DIR", str(decoy))
+
+    assert cw.stamp("escalate_watcher", actions=0, idle=True) is True
+    assert cw.mark_installed("escalate_watcher", "*/15 * * * *") is True
+
+    canon = sandbox / ".hscc"
+    assert (canon / "state" / "escalate_watcher.json").is_file()
+    assert (canon / cw.MARKER_FILENAME).is_file()
+    assert not (decoy / "state" / "escalate_watcher.json").exists()
+    assert not (decoy / cw.MARKER_FILENAME).exists()
+
+    row = cw.doctor_check(now=None)         # live stamp, so judge at real now
+    statuses = {r["stream"]: r["status"] for r in row["rows"]}
+    assert statuses["escalate_watcher"] == "ok"
+    assert row["ok"] is True and "WARN" not in row["detail"]
+
+
+def test_a_redirect_onto_a_root_that_never_held_a_ledger_reports_the_real_one(
+        sandbox):
+    """THE divergence this card was opened for, as a test.
+
+    A stale stamp under HOME's root, a real-but-empty root asked for by name --
+    the live-host shape. Before: three `not-configured` rows and ok=True, the
+    dead watcher invisible. Now: the row describes the stamp where it actually
+    is (stale, WARN) and names BOTH roots so nobody has to guess which was read.
+    """
+    decoy = _decoy_root(sandbox)
+    _write_stamp("dep_pr_watcher", age_s=4 * 86400)
+
+    row = cw.doctor_check(hscc_dir=str(decoy), now=NOW)
+    by_stream = {r["stream"]: r for r in row["rows"]}
+    assert row["ok"] is False and row["fatal"] is False
+    # The seeded stream is described as what it IS, not as absent. (The two
+    # streams nobody seeded really are not-configured, and say so -- that word
+    # stays reserved for them, which is the whole point.)
+    assert by_stream["dep_pr_watcher"]["status"] == "stale"
+    assert "not configured" not in by_stream["dep_pr_watcher"]["detail"]
+    assert "dep_pr_watcher" in row["detail"] and "WARN:" in row["detail"]
+    assert str(decoy) in row["detail"]
+    assert str(sandbox / ".hscc") in row["detail"]
+
+
+def test_a_redirect_reports_every_status_where_the_stamps_actually_are(sandbox):
+    """The rows must describe reality, not just stop lying.
+
+    One seed per interesting status at the canonical root, read through a decoy
+    redirect: if the guard merely appended a warning while still reading the
+    empty decoy, all three rows would read `not-configured` here and this test
+    would fail -- that is the mutation it pins.
+    """
+    decoy = _decoy_root(sandbox)
+    _write_stamp("dep_pr_watcher", ok=False, age_s=60, error="gh rate limited")
+    _write_stamp("escalate_watcher", age_s=60)
+    cw.mark_installed("alone_sweep_gate", "0 3 * * *")   # installed, never ran
+
+    row = cw.doctor_check(hscc_dir=str(decoy), now=NOW)
+    statuses = {r["stream"]: r["status"] for r in row["rows"]}
+    assert statuses == {"dep_pr_watcher": "failing",
+                        "escalate_watcher": "ok",
+                        "alone_sweep_gate": "never-ran"}
+    assert row["ok"] is False and row["fatal"] is False
+
+
+def test_a_marker_only_ledger_still_reaches_the_never_ran_row(sandbox):
+    """`not-configured` stays reserved for "nobody installed this" -- and the
+    never-ran row is the one that catches the t_3aadd2c0 class (17 consecutive
+    failed runs, nothing installed new). The guard must not downgrade an
+    install-marker-only root to absence.
+    """
+    decoy = _decoy_root(sandbox)
+    cw.mark_installed("dep_pr_watcher", "0 8 * * *")
+
+    row = cw.doctor_check(hscc_dir=str(decoy), now=NOW)
+    by_stream = {r["stream"]: r for r in row["rows"]}
+    assert by_stream["dep_pr_watcher"]["status"] == "never-ran"
+    assert by_stream["dep_pr_watcher"]["warn"] is True
+    assert row["ok"] is False and row["fatal"] is False
+
+
+def test_an_empty_root_everywhere_is_still_a_clean_not_configured(sandbox):
+    """The other half of the reservation: nothing installed, nothing anywhere --
+    then "not configured" is the HONEST answer and stays clean (ok=True, no
+    WARN). A guard that always warned would nag every host that never installed
+    the watchers, which is the same cry-wolf failure in the other direction.
+    """
+    decoy = _decoy_root(sandbox)
+    row = cw.doctor_check(hscc_dir=str(decoy), now=NOW)
+    assert row["ok"] is True and row["fatal"] is False
+    assert "not configured" in row["detail"] and "WARN" not in row["detail"]
+
+
+def test_a_redirect_that_owns_its_own_ledger_is_still_obeyed(sandbox):
+    """The guard's negative control -- and why the t_e9b0f048 seam survives it.
+
+    A caller that threaded the SAME root through both sides (write at X, read X)
+    is a root chosen once, so it is obeyed exactly: the decoy's own stamp reads
+    ok, the canonical root's stale stamp is NOT what this row reports, and there
+    is no mismatch WARN. Make the guard fire on any redirect and this fails.
+    """
+    other = _relocated(sandbox)
+    _write_stamp("dep_pr_watcher", age_s=4 * 86400)      # canonical: dead
+    assert cw.stamp("dep_pr_watcher", directory=str(other), idle=True) is True
+
+    row = cw.doctor_check(hscc_dir=str(other.parent), now=None)
+    assert "WARN" not in row["detail"]
+    assert row["ok"] is True
+    assert row["rows"][0]["status"] == "ok"
+
+
+def test_a_redirect_to_the_canonical_root_is_not_a_mismatch(sandbox):
+    """The cry-wolf guard on the production default.
+
+    bootstrap.sh defaults HSCC_DIR to $HOME/.hscc, so a caller may legitimately
+    hand the doctor the SAME root it would have picked anyway. That must be a
+    plain clean read -- one comparison, no extra stat, no WARN -- or every doctor
+    run on the live host would carry a warning line about a healthy host.
+    """
+    _write_stamp("dep_pr_watcher", age_s=10)
+    same = cw.doctor_check(hscc_dir=str(sandbox / ".hscc"), now=NOW)
+    plain = cw.doctor_check(now=NOW)
+    assert "WARN" not in same["detail"] and same["ok"] is True
+    assert same["detail"] == plain["detail"]
