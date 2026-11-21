@@ -464,8 +464,9 @@ class TestDryRunIsDefault:
     def test_stop_dry_run_prints_the_span_in_full(self):
         lines = Lines()
         npe.stop_units(self._units(W1), echo=lines)
-        span_line = [l for l in lines.lines if "wspan" in l][0]
-        assert W1 in span_line and W2 in span_line
+        span_lines = [l for l in lines.lines if "wspan" in l]
+        assert len(span_lines) == 1
+        assert W1 in span_lines[0] and W2 in span_lines[0]
 
     def test_resume_runs_nothing_without_apply(self):
         def exploding_run(cmd, timeout=None, **kw):

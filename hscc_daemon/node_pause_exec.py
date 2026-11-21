@@ -51,8 +51,7 @@ from __future__ import annotations
 
 import json
 
-from . import serving
-from . import util
+from . import serving, util
 
 #: Shell-out cap for ONE lifecycle command (a stop, or a --ensure resume).
 #: These are single-host sparkrun control calls, not a fleet sweep, so they sit
