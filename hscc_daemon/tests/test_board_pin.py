@@ -630,7 +630,12 @@ def test_real_root_skips_rather_than_errors_when_hermes_cannot_import(tmp_path):
     assert rc == 0, (
         f"the thin posture did not SKIP (rc {rc}):\n{out}")
     assert "1 skipped" in out, out
-    assert "hermes_state" in out, f"the skip must name what was missing:\n{out}"
+    # The CAUSE must be in the reason, not merely the module's name: the prose of
+    # the reason already spells hermes_state, so only the exception's own name —
+    # which appears nowhere in it — proves the skip was told by the failure and
+    # not recited from a template.
+    assert "ModuleNotFoundError" in out and "hermes_state" in out, (
+        f"the skip must name what was missing, from the failure itself:\n{out}")
     assert "CANNOT open a board" in out and "not importable" not in out, (
         "the 'here but unusable' posture and the 'no hermes here' posture "
         f"collapsed onto one skip reason:\n{out}")
