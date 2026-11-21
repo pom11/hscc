@@ -440,6 +440,29 @@ class TestPauseSeam:
                               paused=NODE_B)
         assert result["capacity"] == 1
 
+    def test_paused_argument_that_is_not_a_host_is_warned_not_swallowed(self, capsys):
+        """A caller handing over junk gets the unpaused decision AND a WARN.
+
+        The silent version of this is the shape that has burned this fleet
+        before: a seam that quietly degrades to the old behaviour and looks
+        green. An empty collection is the legitimate "nothing paused" and must
+        NOT warn, or the warning is noise nobody reads.
+        """
+        tp = _snapshot({NODE_A: (0, 0), NODE_B: (0, 0)})
+        for junk in (42, object(), 0):
+            result = decide_scale(tp, current_workers=2, min_workers=1,
+                                  paused=junk)
+            assert result["capacity"] == 2
+            assert result["paused_excluded"] == []
+            err = capsys.readouterr().err
+            assert "[autoscale] WARN" in err and "not a collection" in err
+
+        for legitimate_empty in (set(), [], {}, frozenset(), ""):
+            result = decide_scale(tp, current_workers=2, min_workers=1,
+                                  paused=legitimate_empty)
+            assert result["capacity"] == 2
+            assert capsys.readouterr().err == ""
+
     def test_paused_argument_accepts_a_pause_mapping(self):
         """list_pauses()/paused_nodes()-shaped input, not just a bare set."""
         tp = _snapshot({NODE_A: (0, 0), NODE_B: (0, 0)})

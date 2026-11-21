@@ -91,9 +91,8 @@ def _host_set(value):
     if isinstance(value, str):
         return {h for h in (host_of(value),) if h}
     items = value.keys() if isinstance(value, dict) else value
-    if not isinstance(items, (list, tuple, set, frozenset)) and not hasattr(
-            items, "__iter__"):
-        items = [items]
+    if not hasattr(items, "__iter__"):
+        return None  # not a collection of hosts at all — the caller decides
     out = set()
     for item in items:
         host = host_of(item)
@@ -102,22 +101,20 @@ def _host_set(value):
     return out
 
 
-def _warn_unreadable(exc):
-    """Say out loud that the overlay could not be read; never raise.
+def _warn(message):
+    """Say it out loud on stderr; never raise.
 
-    stderr, never stdout — stdout is ``hscc autoscale --json``'s channel — and
-    if even stderr is unusable, fall to the interpreter's original one. A WARN
-    that itself raises would become the very failure it reports.
+    Never stdout — that is ``hscc autoscale --json``'s channel — and if even
+    stderr is unusable, fall to the interpreter's original one. A WARN that
+    itself raises would become the very failure it reports.
     """
-    message = (f"[autoscale] WARN: pause overlay unreadable "
-               f"({type(exc).__name__}: {exc}); deciding with no paused nodes")
     for stream in (sys.stderr, sys.__stderr__):
         if stream is None:  # pythonw / a stripped interpreter has no stderr
             continue
         with contextlib.suppress(Exception):
             # suppress, not except/pass: the loop IS the fallback, and a WARN
             # must not be able to raise out of a read-only decision.
-            stream.write(message + "\n")
+            stream.write(f"[autoscale] WARN: {message}\n")
             return
 
 
@@ -135,7 +132,8 @@ def _overlay_nodes(directory=None):
         from hscc_daemon import node_pauses
         return _host_set(node_pauses.paused_nodes(directory)) or set()
     except Exception as exc:  # noqa: BLE001 - a decision must not die here
-        _warn_unreadable(exc)
+        _warn(f"pause overlay unreadable ({type(exc).__name__}: {exc}); "
+              f"deciding with no paused nodes")
     return set()
 
 
@@ -154,10 +152,19 @@ def _paused_overlay(paused, directory):
     ceiling: two reads could disagree across a pause the CLI wrote in between,
     and a decision built from two different overlays is worse than one built
     from a stale one.
+
+    An argument that is not a collection of hosts at all (``paused=42``) can
+    only be a caller bug — and a silently-degraded seam is the failure this
+    feature exists to prevent — so it is WARNed, not swallowed.
     """
     if paused is None:
         return _overlay_nodes(directory)
-    return _host_set(paused) or set()
+    hosts = _host_set(paused)
+    if hosts is None:
+        _warn(f"paused={paused!r} is not a collection of hosts; deciding "
+              f"with no paused nodes")
+        return set()
+    return hosts
 
 
 def paused_in(throughput, *, paused=None, directory=None):
