@@ -123,7 +123,7 @@ def test_parse_response_strips_markdown_fence():
     assert parsed[0]["content"] == "project uses sqlite"
 
 
-def test_parse_response_skips_invalid_and_falls_back():
+def test_parse_response_skips_invalid_facts_and_stores_nothing_unparseable():
     aug = LocalLLMAugmentation()
     # One valid, one missing object -> only the valid survives.
     parsed = aug._parse_response(
@@ -133,10 +133,21 @@ def test_parse_response_skips_invalid_and_falls_back():
     assert len(parsed) == 1
     assert parsed[0]["content"] == "a is x"
 
-    # Invalid JSON -> fallback single fact.
-    parsed = aug._parse_response("not json at all")
-    assert len(parsed) == 1
-    assert parsed[0]["metadata"].get("fallback") is True
+    # No fact list -> nothing stored (the old "Extraction: <reply>" fallback
+    # filled memory with model reasoning).
+    assert aug._parse_response("not json at all") == []
+    assert aug._parse_response("We need answer user's request: extract facts...") == []
+
+
+def test_parse_response_finds_the_list_after_reasoning_or_in_an_open_fence():
+    aug = LocalLLMAugmentation()
+    fact = '{"subject": "hscc", "predicate": "uses", "object": "kanban", "confidence": 0.9}'
+    after_reasoning = f"We need to extract facts. Output:\n[{fact}]\nDone."
+    assert [m["content"] for m in aug._parse_response(after_reasoning)] == ["hscc uses kanban"]
+    open_fence = f"```json\n[{fact}]\n"
+    assert [m["content"] for m in aug._parse_response(open_fence)] == ["hscc uses kanban"]
+    bad_confidence = '[{"subject": "a", "predicate": "is", "object": "b", "confidence": "high"}]'
+    assert aug._parse_response(bad_confidence)[0]["metadata"]["confidence"] == 0.8
 
 
 def _run(coro):
@@ -154,6 +165,13 @@ def test_process_writes_conversation_messages_and_facts():
         )
 
     aug._call_local_llm = fake_llm
+    embedded: list[tuple] = []
+
+    def fake_embed(texts, model):
+        embedded.append((list(texts), model))
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+    aug._embed = fake_embed
 
     ctx = _Ctx(_Payload(
         conversation_id="session-abc",
@@ -184,8 +202,54 @@ def test_process_writes_conversation_messages_and_facts():
     assert entity_id == 1
     assert facts == ["user prefers tea"]
     assert conv_id == 10
+    # Every fact carries its embedding, made with the recall model: a fact with
+    # no embedding makes memori.recall refuse every query (missing_embedding_data).
+    assert embeddings == [[0.1, 0.2, 0.3]]
+    assert embedded == [(["user prefers tea"], "all-MiniLM-L6-v2")]
     # Context kept for downstream use.
     assert ctx.data["memories"][0]["content"] == "user prefers tea"
+
+
+def _capture_with_embedder(embed) -> _Driver:
+    aug = LocalLLMAugmentation()
+
+    async def fake_llm(system_prompt, user_prompt):
+        return '[{"subject": "user", "predicate": "prefers", "object": "tea"}]'
+
+    aug._call_local_llm = fake_llm
+    aug._embed = embed
+    ctx = _Ctx(_Payload(
+        conversation_id="session-abc",
+        entity_id="entity-1",
+        process_id="process-1",
+        conversation_messages=[_Msg("user", "hi"), _Msg("assistant", "hello")],
+    ))
+    driver = _Driver()
+
+    async def go():
+        await aug.process(ctx, driver)
+        if aug._session is not None:
+            await aug._session.close()
+
+    _run(go())
+    return driver
+
+
+def test_embedding_failure_stores_no_unembedded_facts():
+    """An embedding failure must not write facts with no embedding, which would
+    break recall for every later query; the conversation is still kept."""
+
+    def boom(texts, model):
+        raise RuntimeError("fastembed model unavailable")
+
+    driver = _capture_with_embedder(boom)
+    assert driver.fact_creates == []
+    assert len(driver.message_creates) == 2
+
+
+def test_empty_embedding_result_stores_no_facts():
+    driver = _capture_with_embedder(lambda texts, model: [[] for _ in texts])
+    assert driver.fact_creates == []
 
 
 def test_process_noop_without_conversation_messages():
