@@ -481,15 +481,24 @@ class TestResume:
         assert node_pauses.paused(W1) is not None
 
     def test_apply_restarts_then_clears_pause_and_strikes(self, fleet):
-        seed_pause()
+        # STRIKES FIRST, PARK SECOND. note_heal() accrues NOTHING for a node the
+        # pause overlay is holding (#568 — its own docstring, pinned by
+        # test_heal_breaker_node_pause_t_e6ee7e60.py), so a fixture that parks
+        # first builds no slate at all and every strike assertion below would be
+        # reading a ledger nothing ever wrote. Accruing-then-parking is also the
+        # real sequence: a node trips the breaker, the operator parks it, the
+        # operator resumes it, and `suspended()` deliberately keeps answering
+        # from the breaker's own timeout for a parked node (module docstring,
+        # "WHAT IS DELIBERATELY UNCHANGED").
+        for _ in range(7):
+            heal_breaker.note_heal(W1)
         # Past the breaker's cap, so the node is genuinely SUSPENDED before the
         # resume — clearing three strikes would prove nothing (HEAL_BREAKER_MAX
         # is 6; suspended() is 0.0 below it).
-        for _ in range(7):
-            heal_breaker.note_heal(W1)
         assert heal_breaker.strike_count(W1) == 7
         assert heal_breaker.suspended(W1) > 0.0, \
             "the fixture must trip the breaker for this to mean anything"
+        seed_pause()
         rc, out = run(["resume", W1, "--apply"])
         assert rc == 0, out
         assert len(fleet.calls) == 2, fleet.calls
@@ -501,8 +510,14 @@ class TestResume:
 
     def test_a_failing_restart_keeps_the_pause_and_the_strikes(self, fleet,
                                                                monkeypatch):
-        seed_pause()
+        # Accrued before the park for the same reason as the test above — and
+        # the precondition below is what makes the final assertion mean
+        # something: on a slate nobody recorded, "the strikes survived" is just
+        # "0 == 0".
         heal_breaker.note_heal(W1)
+        assert heal_breaker.strike_count(W1) == 1, \
+            "the slate must be genuinely non-empty before the failed resume"
+        seed_pause()
         monkeypatch.setattr(util, "run_cmd",
                             Recorder([{"ok": False, "output": "",
                                        "stderr": "ensure failed"}]))
@@ -547,8 +562,14 @@ class TestResume:
                                                                    fleet):
         """Clearing is unconditional on a successful restart: a paused node
         that comes back must not still be carrying old strikes."""
-        seed_pause()
+        # Accrued before the park (see the note on the first test in this class)
+        # AND proven non-empty: with the pause seeded first, note_heal() was a
+        # no-op and both assertions below held on an empty ledger — the test
+        # passed while proving nothing.
         heal_breaker.note_heal(W1)
+        assert heal_breaker.strike_count(W1) == 1, \
+            "otherwise this resume clears a slate nobody recorded"
+        seed_pause()
         rc, _ = run(["resume", W1, "--apply"])
         assert rc == 0
         assert heal_breaker.strike_count(W1) == 0

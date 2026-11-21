@@ -161,10 +161,16 @@ class TestNoAgentEscapeHatch:
 
 class TestResumeTool:
     def test_confirmed_resume_clears_pause_and_strikes(self, fleet):
-        node_pauses.pause(W1, units=["w1", "wspan"], span_nodes=[W1, W2])
+        # STRIKES FIRST, PARK SECOND: note_heal() accrues NOTHING while the
+        # pause overlay holds the node (#568, heal_breaker.note_heal), so the
+        # old order left this resume clearing a slate that was never written and
+        # `suspended()` was 0.0 for the whole test. Same law the daemon-side
+        # twin pins, and for the same reason.
         for _ in range(7):
             heal_breaker.note_heal(W1)
-        assert heal_breaker.suspended(W1) > 0.0
+        assert heal_breaker.suspended(W1) > 0.0, \
+            "the fixture must trip the breaker for this to mean anything"
+        node_pauses.pause(W1, units=["w1", "wspan"], span_nodes=[W1, W2])
         out = npt.node_resume({"host": W1, "confirm": True})
         assert out["executed"] is True and out["ok"] is True
         assert all("--ensure" in " ".join(c) for c in fleet.calls)
