@@ -106,13 +106,24 @@ def strip_ansi(text: str) -> str:
     return ANSI.sub("", text)
 
 
-def fetch_help(help_file: str | None) -> str:
+def fetch_help(help_file: str | None,
+               env: dict[str, str] | None = None) -> str:
+    """The `hscc --help` text — from ``--help-file``, or from the installed CLI.
+
+    ``env`` is the environment the installed CLI is spawned with; ``None``
+    (what the generator's own call site passes) inherits the caller's. The
+    seam exists because a harness may sandbox ``HOME`` for its own
+    hermeticity while the installed console script resolves its payload
+    *through* ``HOME`` — see the note above the oracle in
+    scripts/tests/test_site_landing.py. Passing the caller's environment
+    unchanged is still the default, so nothing about the generator changes.
+    """
     if help_file:
         return (Path(help_file)).read_text(encoding="utf-8")
     try:
         proc = subprocess.run(
             ["hscc", "--help"], capture_output=True, text=True, timeout=60,
-            check=False,
+            check=False, env=env,
         )
     except FileNotFoundError:
         raise SystemExit(
@@ -122,9 +133,16 @@ def fetch_help(help_file: str | None) -> str:
     except subprocess.TimeoutExpired:
         raise SystemExit("error: `hscc --help` timed out.")
     if proc.returncode != 0 and not proc.stdout.strip():
+        # The child's WHOLE stderr, on purpose. A Python traceback puts the
+        # decisive line LAST, and this handback used to cut at 200 chars — so
+        # the cut landed mid-path and the red read
+        # "`hscc --help` exited 1: Traceback ... File ".../venv/lib/python"
+        # with no module ever named. The cause behind the real red
+        # (`ModuleNotFoundError: No module named 'hscc_daemon'`, t_b2b238c5)
+        # sat past the cut, and every reader had to go find it by hand.
         raise SystemExit(
-            f"error: `hscc --help` exited {proc.returncode}: "
-            f"{proc.stderr.strip()[:200]}"
+            f"error: `hscc --help` exited {proc.returncode}:\n"
+            f"{proc.stderr.strip()}"
         )
     return strip_ansi(proc.stdout)
 
