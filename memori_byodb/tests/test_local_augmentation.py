@@ -154,6 +154,13 @@ def test_process_writes_conversation_messages_and_facts():
         )
 
     aug._call_local_llm = fake_llm
+    embedded: list[tuple] = []
+
+    def fake_embed(texts, model):
+        embedded.append((list(texts), model))
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+    aug._embed = fake_embed
 
     ctx = _Ctx(_Payload(
         conversation_id="session-abc",
@@ -184,8 +191,54 @@ def test_process_writes_conversation_messages_and_facts():
     assert entity_id == 1
     assert facts == ["user prefers tea"]
     assert conv_id == 10
+    # Every fact carries its embedding, made with the recall model: a fact with
+    # no embedding makes memori.recall refuse every query (missing_embedding_data).
+    assert embeddings == [[0.1, 0.2, 0.3]]
+    assert embedded == [(["user prefers tea"], "all-MiniLM-L6-v2")]
     # Context kept for downstream use.
     assert ctx.data["memories"][0]["content"] == "user prefers tea"
+
+
+def _capture_with_embedder(embed) -> _Driver:
+    aug = LocalLLMAugmentation()
+
+    async def fake_llm(system_prompt, user_prompt):
+        return '[{"subject": "user", "predicate": "prefers", "object": "tea"}]'
+
+    aug._call_local_llm = fake_llm
+    aug._embed = embed
+    ctx = _Ctx(_Payload(
+        conversation_id="session-abc",
+        entity_id="entity-1",
+        process_id="process-1",
+        conversation_messages=[_Msg("user", "hi"), _Msg("assistant", "hello")],
+    ))
+    driver = _Driver()
+
+    async def go():
+        await aug.process(ctx, driver)
+        if aug._session is not None:
+            await aug._session.close()
+
+    _run(go())
+    return driver
+
+
+def test_embedding_failure_stores_no_unembedded_facts():
+    """An embedding failure must not write facts with no embedding, which would
+    break recall for every later query; the conversation is still kept."""
+
+    def boom(texts, model):
+        raise RuntimeError("fastembed model unavailable")
+
+    driver = _capture_with_embedder(boom)
+    assert driver.fact_creates == []
+    assert len(driver.message_creates) == 2
+
+
+def test_empty_embedding_result_stores_no_facts():
+    driver = _capture_with_embedder(lambda texts, model: [[] for _ in texts])
+    assert driver.fact_creates == []
 
 
 def test_process_noop_without_conversation_messages():
