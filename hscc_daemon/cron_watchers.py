@@ -52,13 +52,48 @@ standalone by path when the package import fails -- ``scripts/`` is not a
 deployed plugin package, and dep_pr_watcher.py deliberately imports nothing
 from ``hscc_daemon`` at module scope).
 
+THE ROOT, CHOSEN ONCE (t_adb66608). The ledger -- the stamp files and the
+install marker beside them -- has exactly ONE root on a host: the canonical state
+writer's, ``state.STATE_DIR`` for the stamps and the directory one level above
+for the marker. It is derived from ``$HOME`` at import, which is how every other
+``~/.hscc`` consumer in ``hscc_daemon`` names its root (``daemon_ops.HSCC_DIR``,
+``desktop.HSCC_DIR``, ``event_driven.HSCC_DIR``, ``install.HSCC_DIR``,
+``kanban_pause.STATE_PATH``) -- not one of them reads an ``HSCC_DIR`` out of the
+environment, and neither does this module.
+
+``HSCC_DIR`` is therefore NOT a relocation for the ledger. It belongs to the
+bootstrap layer (``hscc-bootstrap/bootstrap.sh`` defaults it to ``$HOME/.hscc``)
+and to whoever exports it into ONE process's environment -- but an environment
+variable is per-process and this ledger is handed ACROSS processes: the writers
+are Hermes cron jobs and installer runs that never see it. A reader that derives
+its root from that variable is not reading a shared root, it is reading a root
+nothing can write to, and every row it returns says "not configured" about
+watchers that are alive -- the live-host measurement in
+``docs/audits/daemon-alone-run-order-dependence_t_572b4856.md`` section 10.1. So
+:func:`state_dir` never consults the environment, and the doctor's cron-watcher
+row is never handed an ``hscc_dir`` from it (``doctor.FEATURE_CHECK_ROWS``
+declares no ``row_kwargs`` for this row).
+
+The only legitimate relocation left is the one t_e9b0f048 built: ONE caller
+threading the SAME root through BOTH sides of one call -- ``directory=`` on
+:func:`stamp` / :func:`stamp_failure` / :func:`mark_installed`, ``hscc_dir=`` /
+``directory=`` on the reads. A root chosen once and used on both sides is the
+invariant; a variable two processes each interpret is not. The last line of
+defence is in :func:`doctor_check`: an explicit redirect that lands on a root
+which has never held a ledger, while the canonical root holds one, is REPORTED
+(the rows are read from the canonical root, plus a WARN naming both) rather than
+returned as a clean "not configured" -- that status stays reserved for "nobody
+installed this", which is what lets the ``never-ran`` row catch the t_3aadd2c0
+class at all.
+
 Test seams: every read AND every write accepts an explicit ``directory`` (the
 stamp dir; the install marker lives one level above it), threaded through as a
 parameter rather than resolved from a mutated environment -- see
 :func:`state_dir`, :func:`_write_dir` and :func:`doctor_check`. The writes take
 it because the reads do: with only one side able to relocate, a ``HSCC_DIR``
 that differs from HOME's default was a root no watcher could ever stamp, and the
-doctor read that as "nobody installed this" (t_e9b0f048).
+doctor read that as "nobody installed this" (t_e9b0f048, closed for the reader
+side by t_adb66608).
 
 The default is never spelled on the writer's behalf. A stamp with no root named
 calls ``write_state(stream, entry)`` with exactly the two arguments it always
@@ -205,19 +240,30 @@ def state_dir():
 
     Reads go exactly where ``write_state`` writes -- the ``hscc_daemon.state``
     package module when importable (deployed runtime, and tests that patch its
-    STATE_DIR), else the sibling ``state.py`` loaded standalone. Callers that
-    must use a DIFFERENT root (the doctor's ``hscc_dir`` seam: bootstrap
-    sandboxes keep HOME real and relocate only HSCC_DIR) thread an explicit
-    ``directory`` through :func:`read_stamp` / :func:`verdict` AND through
-    :func:`stamp` / :func:`stamp_failure`, instead of mutating the environment,
-    so a redirected read can never split from where writes landed -- and can
-    never accidentally read the operator's live tree.
+    STATE_DIR), else the sibling ``state.py`` loaded standalone. This is the
+    module's ONLY root resolution and it never consults the environment (no
+    ``HSCC_DIR`` read, t_adb66608): the root a per-process variable can name is
+    not the root a cross-process ledger has, because the writers -- Hermes cron
+    jobs, the installers -- are not the process holding that variable.
+
+    Callers that must use a DIFFERENT root thread an explicit ``directory``
+    through :func:`read_stamp` / :func:`verdict` AND through :func:`stamp` /
+    :func:`stamp_failure` -- the SAME root on both sides of one call, which is
+    the only relocation this module recognises. Nobody relocates from the
+    environment, so a redirected read can never split from where writes landed.
     """
     return _state_writer().STATE_DIR
 
 
 def _dirs(directory=None):
-    """(stamp_dir, marker_dir) -- honours an explicit stamp-dir seam."""
+    """(stamp_dir, marker_dir) -- honours an explicit stamp-dir seam.
+
+    The single place the two halves of the ledger are located for BOTH the
+    writers and the readers: a stamp dir names its own root, and the marker
+    lives one level above it. With no seam both come from :func:`state_dir`,
+    which is why an installer that passes nothing and a doctor that passes
+    nothing cannot disagree.
+    """
     if directory:
         directory = os.path.expanduser(directory)
         return directory, os.path.dirname(directory)
@@ -574,6 +620,30 @@ def read_install_marker(stream, directory=None):
     return row if isinstance(row, dict) else None
 
 
+def _ledger_present(stamp_dir, marker_dir):
+    """True when this root has EVER held a watcher artefact.
+
+    A stamp for any stream, or the installer's marker (which lives in
+    ``marker_dir``, one level above ``stamp_dir`` -- the two halves :func:`_dirs`
+    hands back together). It is not a verdict -- "has ever held a ledger" is the
+    only question it answers, and it exists for one purpose: to tell a root that
+    is genuinely unconfigured (nothing ever installed, so ``not-configured`` is
+    the honest answer) apart from a root that was never a watcher root at all --
+    see the redirect guard in :func:`doctor_check` (t_adb66608). Cheap by
+    construction: one stat per stream plus one for the marker, no reads.
+
+    The marker is what makes this question answerable for the commonest real
+    case -- installed-but-never-ran (t_3aadd2c0): such a root holds a marker and
+    no stamp, and a check that looked only for stamps would call it unconfigured.
+    """
+    if os.path.isfile(os.path.join(marker_dir, MARKER_FILENAME)):
+        return True
+    for stream in STREAMS:
+        if os.path.isfile(os.path.join(stamp_dir, stream + ".json")):
+            return True
+    return False
+
+
 # ── deployed-copy drift (t_95eb9f15) ────────────────────────────────────────
 
 def bound_hermes_home(env=None):
@@ -898,14 +968,26 @@ def doctor_check(hscc_dir=None, *, now=None, env=None,
     the stamp format) and the bootstrap doctor only adapts the dict to its
     five Check fields, exactly as it does for ``orch_waker.doctor_check``.
 
-    ``hscc_dir`` is the ~/.hscc ROOT (where cluster.json lives), matching the
-    doctor_notifier_mask convention: the stamp dir is ``<hscc_dir>/state`` and
-    the install marker sits at ``<hscc_dir>/watcher-installs.json``. Redirected
-    by parameter, never by mutating os.environ -- a check whose seam is ignored
-    (because the state module resolves its dir from HOME at import) would read
-    the operator's live tree from a sandboxed bootstrap, which is exactly the
-    bug class that took down the live daemon-pid verdict before. Passing the
-    directory down keeps read and marker on ONE root, always.
+    ``hscc_dir`` is the ~/.hscc ROOT (where cluster.json lives): the stamp dir
+    is ``<hscc_dir>/state`` and the install marker sits at
+    ``<hscc_dir>/watcher-installs.json``. It is a CALLER-THREADED root, never an
+    environment lookup -- pass it only when the writes were aimed at that same
+    root (``stamp(..., directory=...)`` / ``mark_installed(..., directory=...)``),
+    because the writers do not follow ``HSCC_DIR`` and the doctor's cron-watcher
+    row therefore never receives one from it (t_adb66608; module docstring, "THE
+    ROOT, CHOSEN ONCE"). Redirecting by parameter rather than by mutating
+    os.environ is still what keeps read and marker on ONE root, always.
+
+    Redirect guard: obeying a redirect blindly is exactly how a healthy host
+    read as "not configured" (t_06ead443, audit section 10.1). When the root
+    named HERE holds no ledger at all -- no stamp for any stream, no marker --
+    while the canonical root DOES, that named root has never been a watcher root
+    at all: the rows are read from the canonical root instead and a WARN naming
+    both is prepended to the detail. The ledger is host-global, so reading it at
+    its own root is the truth the caller asked for, not a stray host read. A
+    redirect onto an empty root with nothing at the canonical root either stays
+    the clean "not configured" read (t_06ead443's doctrine: an empty sandbox is
+    genuinely unconfigured, not misrooted).
 
     Warn-only: ``ok`` is False for any stale/failing/never-ran/bad-stamp/
     copy-drifted watcher, but ``fatal`` is ALWAYS False -- an out-of-band Hermes
@@ -926,6 +1008,25 @@ def doctor_check(hscc_dir=None, *, now=None, env=None,
     """
     directory = (os.path.join(os.path.expanduser(hscc_dir), "state")
                  if hscc_dir else None)
+    # Redirect guard (t_adb66608). A root named here that has NEVER held a
+    # ledger, while the one root the writers use holds one, is not evidence that
+    # nobody installed the watchers -- it is evidence that the caller relocated
+    # a read nobody can write. Read the ledger where it is and say so loudly,
+    # rather than hand back the clean "not configured" that made the t_06ead443
+    # class invisible on the live host. The realpath compare comes FIRST so the
+    # common case -- no redirect, or HSCC_DIR left at its $HOME/.hscc default --
+    # costs no extra stat at all.
+    redirect = None
+    if directory:
+        asked_stamp, asked_marker_dir = _dirs(directory)
+        canon_stamp, canon_marker_dir = _dirs(None)
+        if (os.path.realpath(asked_stamp) != os.path.realpath(canon_stamp)
+                and not _ledger_present(asked_stamp, asked_marker_dir)
+                and _ledger_present(canon_stamp, canon_marker_dir)):
+            # Report the ROOTS (what an operator recognises), not the state dirs.
+            redirect = (os.path.dirname(asked_stamp),
+                        os.path.dirname(canon_stamp))
+            directory = canon_stamp
     copies = None
     if check_deployed_copies or hermes_home:
         copies = {s: deployed_copy_drift(s, hermes_home=hermes_home,
@@ -933,10 +1034,19 @@ def doctor_check(hscc_dir=None, *, now=None, env=None,
                   for s in STREAMS}
     rows = all_verdicts(now=now, env=env, directory=directory, copies=copies)
 
-    problems = [r["detail"] for r in rows if r["warn"]
-                or r["status"] not in HEALTHY_STATUSES]
+    row_problems = [r for r in rows if r["warn"]
+                    or r["status"] not in HEALTHY_STATUSES]
+    problems = [r["detail"] for r in row_problems]
     notes = [r["detail"] for r in rows if not r["warn"]
              and r["status"] in HEALTHY_STATUSES]
+    if redirect:
+        asked_root, ledger_root = redirect
+        problems = [
+            "WARN: %s holds no watcher ledger (no stamp, no %s) but %s does -- "
+            "HSCC_DIR is not a watcher-ledger relocation, so this row reads the "
+            "ledger at %s instead of calling it 'not configured' (t_adb66608)"
+            % (asked_root, MARKER_FILENAME, ledger_root, ledger_root)
+        ] + problems
     if problems:
         # Cheap-first: the sweep pass is ~25 min per pair, so the fix that fits
         # in a terminal session is the preflight + --status, not a re-run
@@ -958,16 +1068,27 @@ def doctor_check(hscc_dir=None, *, now=None, env=None,
             drift_hint = " -- " + "; ".join(
                 f"{s}'s deployed copy under <bound home>/scripts is STALE, not "
                 f"missing: re-run {WATCHERS[s]['install_script']}" for s in stale)
+        if redirect and not row_problems:
+            # Nothing is wrong with the watchers; the CALL was aimed at the
+            # wrong root. `hermes cron list` is the wrong advice here.
+            asked_root, ledger_root = redirect
+            fix = ("the watchers are alive at %s -- this call asked for %s, "
+                   "which has never held a ledger. Leave hscc_dir unset for "
+                   "this row (the writers do not follow HSCC_DIR), or thread "
+                   "the SAME root through stamp()/mark_installed() as well"
+                   % (ledger_root, asked_root))
+        else:
+            fix = ("check `hermes cron list` (job paused? ticker down? the "
+                   "script moved out of <bound home>/scripts? -- the "
+                   "t_3aadd2c0 failure class), then `hermes cron run <job>` "
+                   "to prove a pass; reinstall with "
+                   + " / ".join(sorted({r['install_script']
+                                        for r in WATCHERS.values()}))
+                   + " if a job is gone" + drift_hint + sweep_hint)
         return {
             "name": CHECK_NAME, "ok": False, "fatal": False, "rows": rows,
             "detail": "; ".join(problems + notes),
-            "fix": ("check `hermes cron list` (job paused? ticker down? the "
-                    "script moved out of <bound home>/scripts? -- the "
-                    "t_3aadd2c0 failure class), then `hermes cron run <job>` "
-                    "to prove a pass; reinstall with "
-                    + " / ".join(sorted({r['install_script']
-                                         for r in WATCHERS.values()}))
-                    + " if a job is gone" + drift_hint + sweep_hint),
+            "fix": fix,
         }
     return {"name": CHECK_NAME, "ok": True, "fatal": False, "rows": rows,
             "detail": "; ".join(notes) or "no watchers configured",
