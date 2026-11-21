@@ -191,19 +191,30 @@ def test_every_tools_table_reaches_the_register_loop(plugin_dir):
     )
 
 
-def test_cluster_manifest_is_exactly_the_23_registered_tools():
-    """The concrete GAP-A-7 receipt: 23 tools, the 10 that were missing are
-    named. If this count changes intentionally, the per-table tests above are
-    the generic contract — update the number here knowingly, never by drift."""
+def test_cluster_manifest_is_exactly_the_26_registered_tools():
+    """The concrete GAP-A-7 receipt: the manifest and the registry are the same
+    set, at the count that set currently has. If this count changes
+    intentionally, the per-table tests above are the generic contract — update
+    the number here knowingly, never by drift.
+
+    Amended 23 -> 26 by t_c28f4f14: `node_pause` / `node_resume` (in `_OPS_TOOLS`)
+    and `node_paused` (in `_READ_TOOLS`), the agent half of `hscc node ...`.
+    All three are in a table the register() loop concatenates and are declared
+    in plugin.yaml, so both directions of the contract above hold.
+    """
     declared = _manifest_tools(str(REPO / "hscc-cluster"))
     assert len(declared) == len(_registered_names(
-        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 23
+        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 26
     for previously_missing in ("orch_message", "apply_template", "list_templates",
                                "preview_template", "fleet_stats", "cluster_verify",
                                "cluster_throughput", "autoscale_advice",
                                "discovery_status", "nas_status"):
         assert previously_missing in declared, \
             f"GAP-A-7 regression: {previously_missing} dropped from the manifest"
+    # The node-pause trio is part of the manifest now, not just the registry.
+    for node_pause_tool in ("node_pause", "node_resume", "node_paused"):
+        assert node_pause_tool in declared, \
+            f"t_c28f4f14 regression: {node_pause_tool} missing from the manifest"
 
 
 @pytest.mark.parametrize("plugin_dir", MANIFESTED,

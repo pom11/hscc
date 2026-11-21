@@ -23,6 +23,7 @@ The template **format reference** is
 | `cluster_status` | Running models, idle nodes, serving units (+ free-VRAM when probed). |
 | `list_recipes` / `pick_node` | Browse sparkrun recipes / choose an idle worker. |
 | `provision_model` / `stop_model` / `model_health` | Model lifecycle (guarded: `confirm=true`). Correct sparkrun invocation (`--cluster/--port/--ensure`). |
+| `node_pause` / `node_resume` / `node_paused` | Park a node for maintenance (stop its units + record the pause the heal paths skip) / restart the recorded units and clear the pause + heal strikes / list what is parked. Guarded: `confirm=true`; the read is read-only. Both halves call `hscc node …`'s own verb functions — no second policy to drift (t_c28f4f14). |
 | `vllm_logs` / `node_diagnostics` / `nas_diagnose` | Debug a node / NAS. |
 | `restart_model` / `remount_nas` / `repair_nas_export` / `reap_orphans` | Self-heal (guarded). |
 | `orch_message` | Orchestrator-to-orchestrator **nudge** (queue-only, signed, audited) — see [Orchestrator-to-orchestrator messaging](#orchestrator-to-orchestrator-messaging). |

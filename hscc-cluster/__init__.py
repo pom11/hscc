@@ -9,6 +9,7 @@ from . import discovery
 from . import fleet
 from . import template_tools
 from . import orch_message
+from . import node_pause_tools as npt
 
 
 def _stringify(handler):
@@ -37,6 +38,9 @@ _READ_TOOLS = [
      "Live cluster topology map (orchestrator/workers/NAS, source); probe=true for VRAM/power/health."),
     ("nas_status", S.NAS_STATUS_SCHEMA, discovery.nas_status, "🗄️",
      "NAS health: discovery's NAS node + a single mount probe (no fan-out)."),
+    ("node_paused", npt.NODE_PAUSED_SCHEMA, npt.node_paused, "🅿️",
+     "Which nodes are paused, with the units stopped, reason, since and "
+     "until. Read-only: reads the pause overlay, never the fleet."),
 ]
 
 _OPS_TOOLS = [
@@ -46,6 +50,21 @@ _OPS_TOOLS = [
      "Stop a model on a node. GUARDED: confirm=true to execute."),
     ("model_health", S.MODEL_HEALTH_SCHEMA, ops.model_health, "❤️",
      "Check a node's vLLM endpoint health."),
+    # Node pause (t_c28f4f14): the agent half of `hscc node pause|resume`.
+    # These call the unified CLI's own verb functions — there is no second
+    # implementation to fall out of step, and no path by which an agent can
+    # mutate something the CLI would refuse (the #478 dry-run rule is the
+    # CLI's, not a convention these entries restate).
+    ("node_pause", npt.NODE_PAUSE_SCHEMA, npt.node_pause, "⏸️",
+     "Park one node: stop its sparkrun units and record a durable pause the "
+     "heal paths skip. GUARDED: confirm=true to execute; without confirm "
+     "returns the plan (every unit + every node it would touch). Refuses a "
+     "node serving the orchestrator model unless force=true, and a "
+     "multi-node unit unless span=true."),
+    ("node_resume", npt.NODE_RESUME_SCHEMA, npt.node_resume, "▶️",
+     "Restart the units a node pause recorded (sparkrun --ensure, same recipe "
+     "and flags), then clear the pause and that node's heal strikes. GUARDED: "
+     "confirm=true to execute; without confirm returns the commands."),
 ]
 
 _DEBUG_TOOLS = [
