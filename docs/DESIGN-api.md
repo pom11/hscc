@@ -106,6 +106,19 @@ verbatim from the engine, plus `speak`.
 Read-only. Backed by `cmd_monitor()` (`hscc-cluster/hscc.py:182`). One CPU/RAM/GPU
 snapshot across the fleet. Response carries the engine dict verbatim plus `speak`.
 
+Parked nodes are projected, not reported as failures. Every row of the host table
+(`json.hosts` / `json.nodes`, keyed by `host`) and of the serving table (`serving`,
+keyed by `node`) that belongs to a node the overlay holds gains `status: "paused"`,
+`paused_reason` and `paused_since`; the payload also states the parked set top-level
+as `paused_nodes`, because a parked host can be missing from the frame entirely
+(sparkrun does not list a machine whose workloads are stopped) and an absent row is
+a row nothing can tag. The read is span-aware — the other half of a paused
+tensor-parallel unit is tagged too — and it comes from `hscc_daemon/node_pauses` per
+request, not from the 20 s snapshot cache, so a resume shows up on the next poll.
+A parked row keeps its own `error`/`model` (they may still be true); what it
+guarantees is `status`, and a client that derives `down` from an error or a missing
+sample has to ask `status` first. Rows for unparked nodes are returned untouched.
+
 #### `GET /v1/cluster/jobs`
 
 Read-only. Backed by `cmd_jobs()` (`hscc-cluster/hscc.py:203`). Lists all sparkrun jobs.
@@ -153,13 +166,20 @@ Response (`ok`, `checks`, `speak` are the original shape; the rest is additive):
   "age_seconds": 42,
   "generated_at": 1795152000,
   "stale": false,
-  "source": "cache"
+  "source": "cache",
+  "paused_nodes": []
 }
 ```
 `generated_at` is the epoch second the verdict was produced, `age_seconds` its
 age now, `stale` is true when that age exceeds the 120 s TTL, and `source` is
 `"cache"` for a stored verdict or `"inline"` for the single verify this request
-had to run. When no verdict exists and none could be produced the answer is
+had to run. `paused_nodes` names the nodes the operator parked with `hscc node
+pause` — `{"node": "...", "status": "paused", "paused_reason": "...",
+"paused_since": "..."}` each — so a client can tell a parked machine from a
+broken one without touching the verdict: a pause is a choice, and this route
+reports it rather than forgiving anything. The same three field names appear on
+every paused row of `GET /v1/cluster/monitor`, and are a stable contract for the
+widgets. When no verdict exists and none could be produced the answer is
 `{"speak": "health check unavailable"}` with no `ok` or `checks` — that is "no
 health information", never a healthy fleet.
 
