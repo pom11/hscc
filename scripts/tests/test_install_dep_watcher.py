@@ -319,6 +319,62 @@ def test_unknown_argument_is_refused_rather_than_installing(tmp_path):
     assert "cron create" not in log
 
 
+def test_the_stub_keeps_the_checkout_module_winning(tmp_path):
+    """The reason the stub is allowed to point at a checkout at all (t_accbc5da).
+
+    ``dep_pr_watcher.py`` resolves ``hscc_daemon/cron_watchers.py``
+    sibling-then-deployed-plugin (``_stamp_module``, t_77db1513), so running it
+    from the checkout makes the CHECKOUT's module win — which is what makes a
+    wrapper install strictly better than a copy here: the job stops stamping
+    through the deployed plugin's older release copy. This proves the chain end
+    to end through the generated stub, with a deployed-plugin ``cron_watchers``
+    planted in the fake home that would win if the resolution order ever flipped
+    (it stamps a different payload and leaves a sentinel).
+
+    The pass is a real idle pass: PATH is scrubbed so ``gh`` is absent,
+    ``list_review_prs`` swallows the OSError and returns [], and HOME points at
+    the sandbox — so the stamp lands under tmp, never under the operator's
+    ~/.hscc."""
+    profile_home = tmp_path / "profile"
+    proc, _log = _run(tmp_path, hermes_home=profile_home)
+    assert proc.returncode == 0, proc.stderr
+    stub = profile_home / "scripts" / WRAPPER
+
+    home = tmp_path / "home"
+    decoy = home / ".hermes" / "plugins" / "hscc_daemon"
+    decoy.mkdir(parents=True)
+    sentinel = tmp_path / "decoy-stamped.txt"
+    (decoy / "cron_watchers.py").write_text(
+        "def stamp(*a, **k):\n"
+        f"    open({str(sentinel)!r}, 'w').write('decoy')\n"
+        "    return True\n\n"
+        "def stamp_failure(*a, **k):\n"
+        "    return stamp(*a, **k)\n"
+    )
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"   # no gh -> idle pass
+    for name in ("HSCC_DIR", "HERMES_HOME", "HSCC_KANBAN_BOARD"):
+        env.pop(name, None)
+    run = subprocess.run([sys.executable, str(stub)], capture_output=True,
+                         text=True, env=env, cwd=str(tmp_path), timeout=120)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+    stamp_file = home / ".hscc" / "state" / "dep_pr_watcher.json"
+    assert stamp_file.is_file(), (
+        "the idle pass must stamp through the checkout's cron_watchers; "
+        f"stdout={run.stdout!r} stderr={run.stderr!r}")
+    import json
+    stamped = json.loads(stamp_file.read_text())
+    assert stamped.get("cron_job") == "hscc-dep-watcher", stamped
+    assert stamped.get("idle") is True, stamped
+    assert not sentinel.exists(), (
+        "the deployed plugin's cron_watchers stamped — the sibling-first "
+        "resolution order (t_77db1513) has regressed, and the job is once more "
+        "running the release copy's detector instead of git's")
+
+
 def test_generated_stub_is_valid_python_and_bakes_no_relative_path(tmp_path):
     """A stub with a syntax error fails at 08:00 with a traceback nobody reads,
     and a relative baked path resolves against cron's cwd, not the repo's."""
