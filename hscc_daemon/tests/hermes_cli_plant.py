@@ -138,3 +138,97 @@ def restore_planted(evicted):
     """Hand back what ``evict_planted`` borrowed, by identity."""
     for name, mod in (evicted or {}).items():
         sys.modules[name] = mod
+
+
+# ---------------------------------------------------------------------------
+# The OTHER residue: hermes' REAL tree, left behind by a closed window
+# (t_572b4856)
+# ---------------------------------------------------------------------------
+#
+# ``hermes_import.agent_tree_on_path`` restores ``sys.path`` correctly — measured
+# over a whole ``hscc_daemon`` leg: 804 events touching the agent tree, zero
+# entries left on the path at the end. What a window cannot take back is what it
+# *imported*: ``sys.modules`` keeps every module the block loaded, and a resident
+# package carries ``__path__`` pointing into ``~/.hermes/hermes-agent``, so from
+# then on ``import hermes_cli.<anything>`` resolves with the tree nowhere on
+# ``sys.path``. A FAILED submodule import is enough to create it — ``from
+# hermes_cli import kanban_db`` on a thin interpreter imports the parent fine,
+# raises on the child, and leaves the parent resident.
+#
+# That is an order dependency, not a capability: the same ``importorskip`` line
+# answers ``No module named 'hermes_cli'`` in a file run alone and ``No module
+# named 'utils'`` in the full leg (full measurement, both interpreters:
+# ``docs/audits/daemon-alone-run-order-dependence_t_572b4856.md``). The rule here
+# is what lets the conftest fixture hand the NEXT test the cache it was given,
+# instead of the cache some earlier test's window happened to leave.
+#
+# Deliberately narrow, like ``is_planted_path``: it recognises a module by where
+# its own file lives, so a planted temp-root fake is still the plant rule's job
+# and this one never touches it.
+
+def agent_tree_root():
+    """realpath of the Hermes agent tree THIS process resolves hermes from.
+
+    Resolved through production's own ``hermes_import.resolve_agent_tree`` so the
+    test rule and the shipped code cannot disagree about where hermes lives. Call
+    it at fixture SETUP, not at teardown: a test that monkeypatches
+    ``HERMES_AGENT_PATH`` to a temp tree is planting, and plants are the rule
+    above.
+    """
+    try:
+        from hscc_daemon import hermes_import
+        raw = hermes_import.resolve_agent_tree()
+    except Exception:  # pragma: no cover — the fallback is the same resolution
+        raw = os.environ.get("HERMES_AGENT_PATH", "~/.hermes/hermes-agent")
+    return os.path.realpath(os.path.expanduser(str(raw)))
+
+
+def is_agent_tree_path(path, root=None):
+    """True for a path inside hermes' REAL agent tree (never a temp-root plant)."""
+    origin = str(path or "")
+    if not origin:
+        return False
+    resolved = os.path.realpath(origin)
+    r = root or agent_tree_root()
+    return resolved == r or resolved.startswith(r + os.sep)
+
+
+def resident_under_agent_tree(root=None):
+    """Names of resident modules loaded from hermes' real tree.
+
+    Covers packages with no ``__file__`` (their ``__path__`` is what makes
+    submodules resolvable, so a ``__path__`` under the tree is the residue that
+    matters) and skips a ``__path__`` that is a plain string, which would
+    otherwise iterate as characters.
+    """
+    r = root or agent_tree_root()
+    names = []
+    for name, mod in list(sys.modules.items()):
+        if mod is None:
+            continue
+        if is_agent_tree_path(getattr(mod, "__file__", ""), r):
+            names.append(name)
+            continue
+        search = getattr(mod, "__path__", None)
+        if isinstance(search, str):
+            search = [search]
+        if search and any(is_agent_tree_path(p, r) for p in search):
+            names.append(name)
+    return names
+
+
+def restore_agent_tree_cache(root, saved):
+    """Undo one test's window residue: drop what it imported, keep what it found.
+
+    ``root`` / ``saved`` come from the fixture (resolved + snapshotted BEFORE the
+    test ran). Modules that were already resident when the test started are put
+    back by identity, exactly as ``purge_planted`` does for a poisoned cache, so
+    an earlier test keeps the module objects it was handed; anything the test's
+    own window imported goes.
+    """
+    for name in resident_under_agent_tree(root):
+        if name not in saved:
+            del sys.modules[name]
+    if saved:
+        sys.modules.update(saved)
+

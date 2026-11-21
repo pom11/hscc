@@ -25,7 +25,16 @@ import sys
 
 import pytest
 
-import hscc as unified
+# t_572b4856: this was ``import hscc as unified`` — the ONLY file in the leg that
+# imported the bare name. It works in a full-leg run only because another file
+# (`test_api_launchd.py:11`, `test_hermes_python.py:16`) does
+# ``sys.path.insert(0, <repo>/hscc_daemon)`` at module import time and never
+# takes it back, so ``hscc_daemon/hscc.py`` is importable as a TOP-LEVEL module
+# for the rest of the process. Run alone, the file could not even be collected
+# (``ModuleNotFoundError: No module named 'hscc'``, rc=2) while the leg reported
+# 18 passed. Every other file that drives the unified CLI imports it through the
+# package (26 of them), which resolves in any order; so does this one now.
+import hscc_daemon.hscc as unified
 
 
 def _main(monkeypatch, argv):
