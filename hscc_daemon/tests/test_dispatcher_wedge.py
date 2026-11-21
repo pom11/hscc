@@ -863,22 +863,45 @@ class TestReviewDispatchCapabilityProbe:
         assert calls == [1]
 
     def test_unimportable_gate_reads_as_unknown(self, monkeypatch):
+        """A synthetic ``hermes_cli``, never the real one — see the body.
+
+        t_7c5f5051. This case opened with a bare ``import hermes_cli`` and then
+        shadowed its submodule. That made the ANSWER depend on whether some
+        earlier test in the process had left ``~/.hermes/hermes-agent`` on
+        ``sys.path`` (the import-window leak t_2be3b04e is about), and made the
+        case FAIL — not skip — on an interpreter with no hermes at all: alone
+        under the thin p313 sibling it was ``ModuleNotFoundError: No module
+        named 'hermes_cli'``, green in a full-leg run only by ordering luck.
+        That is the same order-dependence ``_review_dispatch_config_state``'s
+        own docstring records t_8eafef82 removing from PRODUCTION ("a bare
+        ``hermes_cli`` import answers None unless somebody leaked first").
+
+        The subject here is an interpreter where the dispatch module cannot be
+        imported, so the real package is the wrong prop: a synthetic top-level
+        package simulates it exactly, and the case now RUNS on both
+        interpreters instead of being gated away (the route t_c51c87d7 chose in
+        ``hscc-api`` for the same reason). ``hermes_cli_plant.poison_reason``
+        reads ``__file__``, which this module has none of, so it is correctly
+        neither a plant nor poison, and the conftest's autouse
+        ``_hermetic_hermes_cli_imports`` restores the cache either way.
+        """
         import sys
         import types
 
-        import hermes_cli
+        pkg = types.ModuleType("hermes_cli")
+        pkg.__path__ = []          # a package: `from hermes_cli import x` consults sys.modules
+        monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
         # An interpreter where kanban_db_dispatch cannot be imported at all:
         # unknown, NOT "off" — the raw-SQL/hasattr check still gates review.
         # BOTH surfaces must go: `from hermes_cli import kanban_db_dispatch`
         # resolves the parent-package ATTRIBUTE first and only then consults
         # sys.modules, so shadowing one leaves the other reachable.
-        monkeypatch.delattr(hermes_cli, "kanban_db_dispatch", raising=False)
+        monkeypatch.delattr(pkg, "kanban_db_dispatch", raising=False)
         monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db_dispatch", None)
         assert dw._review_dispatch_config_state() is None
         # And a module without the accessor is unknown too.
         stub = types.ModuleType("kbd_stub")
-        monkeypatch.setattr(hermes_cli, "kanban_db_dispatch", stub,
-                            raising=False)
+        monkeypatch.setattr(pkg, "kanban_db_dispatch", stub, raising=False)
         monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db_dispatch", stub)
         assert dw._review_dispatch_config_state() is None
 
