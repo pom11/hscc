@@ -87,7 +87,7 @@ while [ $# -gt 0 ]; do
     --python)   PYTHONS="$PYTHONS ${2:?--python needs an interpreter path}"; shift 2 ;;
     --resume)   RESUME=1; shift ;;
     --preflight) PREFLIGHT=1; shift ;;
-    -h|--help)  sed -n '2,4p;31,44p' "$0"; exit 0 ;;
+    -h|--help)  awk '/^# Usage:/{f=1} /^set -u/{exit} f' "$0"; exit 0 ;;
     *) echo "alone_sweep_gate.sh: unknown argument '$1' (see --help)" >&2; exit 2 ;;
   esac
 done
