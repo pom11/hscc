@@ -1422,15 +1422,18 @@ def _load_cron_watchers():
 
 
 #: Fallback for the check name when the module itself cannot be imported —
-#: same trick as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints.
-_CRON_WATCHERS_CHECK_NAME = "cron watchers (dep_pr/escalate)"
+#: same trick as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints. Must stay
+#: byte-identical to ``cron_watchers.CHECK_NAME``, which enumerates every stream
+#: in its WATCHERS roster (dep_pr, escalate, alone_sweep).
+_CRON_WATCHERS_CHECK_NAME = "cron watchers (dep_pr/escalate/alone_sweep)"
 
 
 def _refused_cron_watchers_check() -> dict:
     """In-suite stand-in for the cron-watcher check when no seam was injected.
 
     The check's real targets are ``~/.hscc/state/dep_pr_watcher.json``,
-    ``~/.hscc/state/escalate_watcher.json`` and the install marker beside them
+    ``~/.hscc/state/escalate_watcher.json``,
+    ``~/.hscc/state/alone_sweep_gate.json`` and the install marker beside them
     — the OPERATOR's live tree when the suite runs from a dispatched worker.
     Same fence shape as ``_refused_orch_waker_check``: an ERROR naming the
     missing seam, never a silent pass and never a real read.

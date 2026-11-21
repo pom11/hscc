@@ -420,6 +420,65 @@ stops a new file starting to depend on that residue is the nightly alone sweep,
 and the pin that stops the *gate itself* from quietly shrinking is
 `test_sweep_enumerates_the_whole_leg_dir`.
 
+### 10. The nightly is a doctor watcher now (t_13a70290)
+
+§9 shipped a scheduled job and left its liveness as "look in
+`$HSCC_ALONE_SWEEP_OUT`, or run `hermes cron runs`" — two things nobody does on a
+schedule. That is the exact shape `t_3aadd2c0` recorded for the dep watcher: 17
+consecutive failed daily runs before anyone looked. So the nightly is registered in
+`hscc_daemon/cron_watchers.py`'s `WATCHERS` roster (third row,
+`alone_sweep_gate`, cadence 86400 = the installer's `30 4 * * *`) and every
+non-preflight pass stamps through it.
+
+**What the row means, because a gate that produces a verdict could lie about
+liveness.** The row is a **liveness** row — it answers "did the 04:30 job fire?" —
+and the verdict only *rides inside* the stamp:
+
+| row status | sentence |
+|---|---|
+| `ok` | it fired and the sweep was GREEN |
+| `failing` | it fired and the sweep said RED, or could not measure |
+| `stale` | the stamp is past 72 h — the cron job is not firing |
+| `never-ran` | the installer registered the job, no pass ever completed |
+| `not-configured` | nobody installed this job (clean, never a warn) |
+
+A non-green pass stamps `ok=False` (`stamp_failure`, which now carries the same
+`**fields` as `stamp`: verdict, gate rc, interpreter count, head, report dir), so
+**a RED sweep cannot render as "watcher alive and well"** — the failure the card
+refused to accept. The warn line quotes the gate's own sentence
+(`GATE RED: at least one file answers alone differently…`), which is what keeps
+"it fired and found something" from being mistaken for "it is dead". Both warn;
+neither is ever fatal, because a red sweep is a finding about the test suite, not
+a broken host — and `hscc verify` never sees these stamps at all
+(`verify._watcher_stream_names()` excludes the stream by name, pinned for the
+red case as well as the aged one).
+
+The other option — record why the roster should *not* cover it, on the grounds that
+a verdict is not a liveness stream — was rejected for a reason §9 already
+establishes: the argument proves only that a row must not say both things with one
+word. It does not: the status says liveness, the detail says verdict. Silencing the
+row would have left the 17-failures class exactly as invisible as it was.
+
+**The cadence window absorbs the pass itself.** `MISS_FACTOR` (3) x 86400 = 72 h,
+against a pass measured at 10m23s for the interpreter pair (§9) whose stamp is
+written at the END. The previous stamp can therefore legitimately be ~24 h + 11 min
+old while the current pass is mid-flight; `test_a_pass_mid_flight_does_not_false_warn`
+pins exactly that. A customised `HSCC_ALONE_SWEEP_SCHEDULE` has to move the window
+with it via `HSCC_ALONE_SWEEP_CADENCE_S` (the installer's header says so), or a
+weekly pass reads stale on Tuesday.
+
+**Three things deliberately not done here.** No second measurement: the gate still
+routes `docs/audits/support/t_572b4856/alone_sweep.sh` and contains no pytest call
+of its own — the stamp is a record a pass makes about itself, and the card changed
+nothing about what is measured or how. No verdict in the cluster smoke test: `hscc
+verify` stays ok on a red sweep stamp. And no stamp from a `--preflight`, which
+measured nothing — a wiring check that advanced the liveness stamp would let a
+nightly that never swept look alive, which is the same lie in a new costume.
+
+Cost, for the record: one extra interpreter exec per pass (the stamp bridge loads
+`cron_watchers.py` by path from the gate's own checkout, not from the tree being
+measured — t_77db1513's rule on the scheduling side), against a ~10-minute pass.
+
 ## What the stamp may claim now
 
 The thin leg's `-rs` output is now a property of the interpreter, not of the file

@@ -45,7 +45,10 @@ JOB="hscc-alone-sweep-gate"
 WRAPPER="hscc-alone-sweep-gate.sh"
 # Nightly 04:30 local: quiet hours, ~25 min for the interpreter pair, and it
 # finishes before the 08:00 dep watcher so two --no-agent jobs never overlap on
-# one host. Override with HSCC_ALONE_SWEEP_SCHEDULE (a Hermes cron spec).
+# one host. Override with HSCC_ALONE_SWEEP_SCHEDULE (a Hermes cron spec) — and if
+# you do, move the doctor's staleness window with it: export
+# HSCC_ALONE_SWEEP_CADENCE_S=<seconds> (hscc_daemon/cron_watchers.py reads that
+# for the `alone_sweep_gate` row, so a weekly pass is not judged stale on Tuesday).
 SCHEDULE="${HSCC_ALONE_SWEEP_SCHEDULE:-30 4 * * *}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -60,10 +63,46 @@ OUT="${HSCC_ALONE_SWEEP_OUT:-$HOME/.hscc/alone-sweep}"
 if [ "${1:-}" = "--uninstall" ]; then
   "$HERMES_BIN" cron remove "$JOB" 2>/dev/null || true
   rm -f "$HERMES_SCRIPTS/$WRAPPER"
+  # The liveness marker AND the stamp go with the job (GAP-B-4): leaving the
+  # stamp behind would leave the doctor ageing a deliberately-removed nightly
+  # into a permanent `stale` warn for a job nobody wants any more.
+  python3 - "$REPO" <<'PY' 2>/dev/null || true
+import importlib.util, os, sys
+repo = sys.argv[1]
+p = os.path.join(repo, "hscc_daemon", "cron_watchers.py")
+spec = importlib.util.spec_from_file_location("hscc_cron_watchers", p)
+if spec is None or spec.loader is None:
+    raise SystemExit(0)
+cw = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cw)
+cw.mark_removed("alone_sweep_gate")
+cw.remove_stamp("alone_sweep_gate")
+PY
   echo "removed cron job '$JOB' and $HERMES_SCRIPTS/$WRAPPER"
+  echo "  also cleared its doctor liveness marker + stamp (bootstrap doctor -> 'cron watchers')"
   echo "reports under $OUT stay where they are (delete by hand if you want them gone)"
   exit 0
 fi
+
+# The bootstrap doctor's own verdict for this stream, printed where an operator
+# looks first (t_13a70290). Read through hscc_daemon/cron_watchers.py so --status
+# and `python3 hscc-bootstrap/doctor.py` cannot disagree about what "alive" means,
+# and best-effort: a host without the module gets the paths and the report lines,
+# not a crash.
+_liveness_line() {
+  python3 - "$REPO" <<'PY' 2>/dev/null
+import importlib.util, os, sys
+repo = sys.argv[1]
+p = os.path.join(repo, "hscc_daemon", "cron_watchers.py")
+spec = importlib.util.spec_from_file_location("hscc_cron_watchers", p)
+if spec is None or spec.loader is None:
+    raise SystemExit(0)
+cw = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cw)
+v = cw.verdict("alone_sweep_gate")
+print(f'{v["status"]}: {v["detail"]}')
+PY
+}
 
 if [ "${1:-}" = "--status" ]; then
   echo "job:      $JOB"
@@ -83,6 +122,8 @@ if [ "${1:-}" = "--status" ]; then
   pythons="$(sed -n 's/^export HSCC_ALONE_SWEEP_PYTHONS="\(.*\)"$/\1/p' "$HERMES_SCRIPTS/$WRAPPER" 2>/dev/null | tail -1 || true)"
   echo "reports:  $reports"
   [ -n "$pythons" ] && echo "sweeps:   $pythons"
+  liveness="$(_liveness_line || true)"
+  if [ -n "$liveness" ]; then echo "liveness: $liveness"; fi
   if [ -f "$reports/latest.txt" ]; then
     latest="$(cat "$reports/latest.txt")"
     echo "last pass: $latest"
@@ -145,6 +186,24 @@ chmod 0755 "$HERMES_SCRIPTS/$WRAPPER"
   --no-agent --script "$WRAPPER" \
   --name "$JOB"
 
+# Liveness marker (GAP-B-4, same shape as install_dep_watcher.sh): without it the
+# doctor cannot tell "registered but the job never completed a pass" — the
+# 17-consecutive-failures incident class, t_3aadd2c0 — from "nobody ever
+# installed this". Written through hscc_daemon/cron_watchers.py so the file schema
+# stays in ONE place, and best-effort: a host without the module must still get a
+# working install.
+python3 - "$REPO" "$SCHEDULE" <<'PY' || echo "note: could not write the liveness install marker (the doctor will report this job as never-installed)"
+import importlib.util, os, sys
+repo, schedule = sys.argv[1], sys.argv[2]
+p = os.path.join(repo, "hscc_daemon", "cron_watchers.py")
+spec = importlib.util.spec_from_file_location("hscc_cron_watchers", p)
+if spec is None or spec.loader is None:
+    sys.exit(1)
+cw = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cw)
+sys.exit(0 if cw.mark_installed("alone_sweep_gate", schedule) else 1)
+PY
+
 echo "installed Hermes cron job '$JOB' (schedule: $SCHEDULE)"
 echo "  wrapper : $HERMES_SCRIPTS/$WRAPPER  -> $GATE"
 echo "  repo    : $REPO (baked; re-run this installer after moving the checkout)"
@@ -152,6 +211,8 @@ echo "  sweeps  : $PY_BAKED"
 echo "  reports : $OUT_BAKED (latest.txt + a per-interpreter verdict.json)"
 echo "  inspect : $HERMES_BIN cron list   |   scripts/install_alone_sweep_gate.sh --status"
 echo "  run now : $HERMES_BIN cron run $JOB && $HERMES_BIN cron tick"
-echo "  note    : liveness is the report dir + '$HERMES_BIN cron runs'; this job is NOT"
-echo "            in hscc_daemon/cron_watchers.py's WATCHERS roster, so the doctor's"
-echo "            watcher-staleness row does not cover it (deliberate — see the card)."
+echo "  liveness: every pass stamps hscc_daemon/cron_watchers.py (stream alone_sweep_gate),"
+echo "            so the bootstrap doctor (python3 hscc-bootstrap/doctor.py) reports"
+echo "            'cron watchers' when this nightly stops firing OR fires and comes"
+echo "            back RED. The detail is in"
+echo "            '$HERMES_BIN cron runs', this --status, and $OUT_BAKED."

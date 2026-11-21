@@ -27,7 +27,10 @@ scheduled gate is still *capable* of going red —
     file absent from the leg — plus one green fixture, because a tool that fails
     for everything also "catches" everything,
   * and the gate fails CLOSED: no interpreter, broken wiring, or a concurrent
-    pass all exit 2, never 0.
+    pass all exit 2, never 0,
+  * and every non-preflight pass STAMPS the doctor's cron-watcher roster
+    (``hscc_daemon/cron_watchers.py``), so a nightly that stops firing — or fires
+    and comes back RED — is loud instead of merely un-read (t_13a70290).
 
 Nothing here runs pytest over the checkout — by design. Two pytest processes over
 one checkout trip the port/lock fixtures, and that flake reads exactly like an
@@ -35,6 +38,8 @@ order effect.
 """
 
 import glob
+import importlib.util
+import json
 import os
 import re
 import shlex
@@ -531,6 +536,57 @@ def test_uninstall_removes_both_the_job_and_the_wrapper(tmp_path):
     assert not (home / ".hermes" / "scripts" / "hscc-alone-sweep-gate.sh").exists()
 
 
+# ── the install marker: 'never ran' must not look like 'never installed' ────
+# GAP-B-4's other half. The doctor reads the marker to tell a registered job whose
+# passes all fail (17 consecutive failures, t_3aadd2c0) from a watcher nobody ever
+# installed — and only the installer knows whether the job was registered.
+
+def _marker(home):
+    return home / ".hscc" / "watcher-installs.json"
+
+
+def test_install_records_the_liveness_marker_the_doctor_needs(tmp_path):
+    proc, _log, home = _install(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    marker = _marker(home)
+    assert marker.is_file(), (
+        "no install marker — the doctor would report a registered nightly that "
+        "never completed a pass as 'not configured', which is the invisibility "
+        "this whole row exists to close")
+    data = json.loads(marker.read_text())
+    row = data.get("alone_sweep_gate") or {}
+    assert row.get("cron_job") == "hscc-alone-sweep-gate"
+    assert row.get("schedule") == "30 4 * * *", (
+        f"the marker must carry the schedule that was registered, got {row!r}")
+
+
+def test_uninstall_clears_the_marker_and_the_stamp(tmp_path):
+    """An operator who removed the job must land back on `not-configured`, not on
+    a `stale` warn that gets louder every day."""
+    proc, _log, home = _install(tmp_path)
+    assert proc.returncode == 0
+    stamp_dir = home / ".hscc" / "state"
+    stamp_dir.mkdir(parents=True, exist_ok=True)
+    (stamp_dir / "alone_sweep_gate.json").write_text(
+        '{"ok": false, "watcher": "alone_sweep_gate"}')
+    proc, _log, home = _install(tmp_path, "--uninstall")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "alone_sweep_gate" not in json.loads(_marker(home).read_text())
+    assert not (stamp_dir / "alone_sweep_gate.json").exists()
+
+
+def test_status_prints_the_doctor_verdict_for_this_stream(tmp_path):
+    """The marker + a missing stamp is the 17-failures shape — --status must say
+    so in the same words the doctor row uses, because this is where an operator
+    looks first."""
+    proc, _log, _home = _install(tmp_path)
+    assert proc.returncode == 0
+    status, _l, _h = _install(tmp_path, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "liveness: never-ran" in status.stdout, status.stdout
+    assert "never completed a pass" in status.stdout
+
+
 def test_schedule_is_nightly_and_not_a_second_of_the_suite():
     """The routing decision, pinned: this job is scheduled, so a wrong cadence is
     a wrong gate. Daily, and overridable — never per-PR (see the gate header)."""
@@ -541,3 +597,146 @@ def test_schedule_is_nightly_and_not_a_second_of_the_suite():
     assert "*/" not in m.group(1), (
         "a sub-daily cadence would put ~25 min of pytest back on a hot path and "
         "risk overlapping passes")
+
+
+# ── liveness: every pass stamps the doctor's watcher roster (t_13a70290) ────
+# The gate is a cron job whose verdict otherwise lives only in a report dir
+# nothing reads, which is how the dep watcher managed 17 consecutive failed runs
+# before anyone looked (t_3aadd2c0). The bootstrap doctor's "cron watchers" row
+# reads the stamp this gate writes. GREEN and RED passes are driven here in
+# milliseconds with a STUBBED sweep inside a FAKE checkout: the real measurement
+# stays single-sourced in the audit's `alone_sweep.sh`, and nothing in this
+# section runs pytest over this checkout.
+
+def _fake_repo(tmp_path, sweep_rc=0, bogus_stamp_module=False):
+    """The smallest tree the gate's preflight accepts, sweep stubbed to `sweep_rc`."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "run_tests.sh").write_text("#!/bin/sh\nexit 0\n")
+    support = repo / "docs" / "audits" / "support" / "t_572b4856"
+    support.mkdir(parents=True)
+    stub = support / "alone_sweep.sh"
+    stub.write_text(f"#!/bin/bash\necho 'stub sweep — 1 file'\nexit {sweep_rc}\n")
+    stub.chmod(0o755)
+    tests = repo / "hscc_daemon" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test_alpha.py").write_text("def test_one():\n    assert True\n")
+    if bogus_stamp_module:
+        # A copy that must NOT be the one the gate stamps through: it kills the
+        # stamp subprocess, so a stamp that still landed proves the gate resolved
+        # to its OWN checkout (t_77db1513's rule, on the scheduling side).
+        (repo / "hscc_daemon" / "cron_watchers.py").write_text(
+            "raise SystemExit(9)\n")
+    return repo
+
+
+def _gate_in(tmp_path, repo, home, out, *args, env=None):
+    e = dict(os.environ)
+    e["HOME"] = str(home)
+    e["HSCC_ALONE_SWEEP_REPO"] = str(repo)
+    e.pop("HSCC_ALONE_SWEEP_PYTHONS", None)
+    e.update(env or {})
+    cmd = ["bash", GATE, "--python", sys.executable, "--out", str(out)]
+    return _run(cmd + list(args), env=e, cwd=None)
+
+
+def _stamp_path(home):
+    return os.path.join(str(home), ".hscc", "state", "alone_sweep_gate.json")
+
+
+def _read_stamp(home):
+    with open(_stamp_path(home), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _stamp_verdict(home):
+    """The doctor's read side, on the redirected dir — never the operator's tree."""
+    path = os.path.join(REPO, "hscc_daemon", "cron_watchers.py")
+    spec = importlib.util.spec_from_file_location("cw_for_alone_gate_test", path)
+    assert spec is not None and spec.loader is not None, path
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.verdict("alone_sweep_gate",
+                       directory=os.path.dirname(_stamp_path(home)))
+
+
+def test_a_green_pass_stamps_liveness_and_the_doctor_reads_it_ok(tmp_path):
+    home, out = tmp_path / "home", tmp_path / "out"
+    proc = _gate_in(tmp_path, _fake_repo(tmp_path), home, out)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "GATE GREEN" in proc.stdout and "liveness: stamped" in proc.stdout
+    stamp = _read_stamp(home)
+    assert stamp["ok"] is True and stamp["verdict"] == "green"
+    assert stamp["gate_rc"] == 0 and stamp["interpreters"] == 1
+    assert stamp["watcher"] == "alone_sweep_gate"
+    assert stamp["cron_job"] == "hscc-alone-sweep-gate"
+    v = _stamp_verdict(home)
+    assert v["status"] == "ok" and v["warn"] is False
+
+
+def test_a_red_pass_stamps_ok_false_and_names_the_verdict(tmp_path):
+    """THE constraint on the row: a RED sweep must never read as a healthy
+    watcher. It fired — so it is not `stale` — and it failed — so it is
+    `failing`, and the warn line quotes the verdict."""
+    home, out = tmp_path / "home", tmp_path / "out"
+    proc = _gate_in(tmp_path, _fake_repo(tmp_path, sweep_rc=1), home, out)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "GATE RED" in proc.stdout
+    stamp = _read_stamp(home)
+    assert stamp["ok"] is False and stamp["verdict"] == "red"
+    assert "GATE RED" in stamp["error"]
+    v = _stamp_verdict(home)
+    assert v["status"] == "failing" and v["warn"] is True
+    assert "GATE RED" in v["detail"]
+
+
+def test_a_refused_pass_stamps_too_because_nothing_measured_is_news(tmp_path):
+    """A pass that could not run used to leave no trace either. The lock-held
+    refusal is a pass that did not measure — the nothing-ran class the gate
+    refuses to hide, so it stamps as loudly as a red one does."""
+    home, out = tmp_path / "home", tmp_path / "out"
+    lock = out / ".gate.lock"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    proc = _gate_in(tmp_path, _fake_repo(tmp_path), home, out)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    stamp = _read_stamp(home)
+    assert stamp["ok"] is False and stamp["verdict"] == "not-measured"
+    assert "another pass" in stamp["error"]
+    assert _stamp_verdict(home)["status"] == "failing"
+
+
+def test_preflight_stamps_nothing_because_it_measured_nothing(tmp_path):
+    home, out = tmp_path / "home", tmp_path / "out"
+    proc = _gate_in(tmp_path, _fake_repo(tmp_path), home, out, "--preflight")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not os.path.exists(_stamp_path(home)), (
+        "a preflight is a wiring check, not a pass — stamping it would let a "
+        "nightly that never swept look alive")
+
+
+def test_a_lost_stamp_never_changes_the_gate_verdict(tmp_path):
+    """Best-effort by contract: the sweep is the pass's work, the stamp is only
+    its signal. Losing the signal must not touch the verdict — and must be
+    printed, never swallowed (the same rule the two python watchers run by)."""
+    home, out = tmp_path / "home", tmp_path / "out"
+    home.mkdir(parents=True)
+    (home / ".hscc").write_text("not a directory")   # stamp dir cannot be created
+    proc = _gate_in(tmp_path, _fake_repo(tmp_path), home, out)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "GATE GREEN" in proc.stdout
+    assert "liveness stamp WRITE FAILED" in proc.stderr
+
+
+def test_the_gate_stamps_through_its_own_checkout_module(tmp_path):
+    """t_77db1513, scheduling side: the stamp format's SOT is the checkout the
+    GATE lives in. A stale (here: fatal) copy in the tree being MEASURED must not
+    become the stamp writer."""
+    home, out = tmp_path / "home", tmp_path / "out"
+    repo = _fake_repo(tmp_path, bogus_stamp_module=True)
+    proc = _gate_in(tmp_path, repo, home, out)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "liveness stamp WRITE FAILED" not in proc.stderr, (
+        "the stamp subprocess died — the gate resolved cron_watchers.py from the "
+        "measured tree instead of its own checkout")
+    assert _read_stamp(home)["ok"] is True
