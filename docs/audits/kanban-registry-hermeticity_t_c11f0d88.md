@@ -1,6 +1,7 @@
 # The kanban read surfaces read the operator's project registry (t_c11f0d88)
 
-**Status: fixed on `wt/t_c11f0d88` (`3196f7e8`, `0dc4e24b`).** Product rule unchanged.
+**Status: fixed on `wt/t_c11f0d88` → PR #553 (`6796f450`..`4f15c2dd`, base `e3d60c21`).**
+Product rule unchanged. `leg hscc_daemon` is green on the runner at that head.
 
 ## The claim, and the number behind it
 
@@ -26,6 +27,15 @@ exist — the CI posture is a machine that has never registered a project:
 The leg-wide poison is the number that matters: across 4100 tests in the daemon leg,
 **exactly one** reads project-registry host state, and it is this one. So this was never
 a flake or an environment quirk — one unpinned seam, reproducible in 0.16 s.
+
+**And on the runner itself, which is the posture this whole card is about.** `leg
+hscc_daemon` on PR #553 (`pytest-legs.yml` run `44897698273`, job `136826821284`, head
+`4f15c2dd`): **`4078 passed, 28 skipped in 228.57s`** — zero failures, and no
+`leg_verdict.sh` warning annotation (the only annotations on the job are the Node-20
+deprecation notice and a runner-capacity notice). The same job was
+`1 failed, 4031 passed, 28 skipped` at head `2b044516`. The runner has no flightdeck
+registry and no hermes, so that green is the hermeticity proof in the environment that
+matters, not a local simulation of it.
 
 ## Why the test passed at all
 
