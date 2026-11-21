@@ -113,6 +113,74 @@ class TestWriteState:
         assert data["system"]["os"] == "macOS"
 
 
+class TestWriteStateDirectorySeam:
+    """write_state()'s `directory` seam (t_e9b0f048).
+
+    The ONE writer must be able to be told which stamp root to use, which is
+    what lets cron_watchers' WRITES meet the root its reads already honoured.
+    `directory=None` — every daemon caller — keeps the old behaviour exactly:
+    STATE_DIR stays the writer's own choice, not a second default open-coded by
+    a caller.
+    """
+
+    def test_directory_moves_the_write_and_is_created(self, tmp_hfcc_dir,
+                                                      monkeypatch):
+        from hscc_daemon import state
+        monkeypatch.setattr(state, "STATE_DIR", str(tmp_hfcc_dir / "canonical"))
+        elsewhere = tmp_hfcc_dir / "relocated" / "state"
+        assert not elsewhere.exists()
+        state.write_state("dgx", {"ok": True}, directory=str(elsewhere))
+        assert (elsewhere / "dgx.json").is_file()
+        assert not (tmp_hfcc_dir / "canonical" / "dgx.json").exists()
+
+    def test_none_keeps_the_state_dir_selection(self, tmp_hfcc_dir, monkeypatch):
+        """Negative control: the seam must not shift the default path."""
+        from hscc_daemon import state
+        monkeypatch.setattr(state, "STATE_DIR", str(tmp_hfcc_dir))
+        state.write_state("dgx", {"ok": True})
+        assert (tmp_hfcc_dir / "dgx.json").is_file()
+
+    def test_directory_carries_the_same_envelope(self, tmp_hfcc_dir,
+                                                 monkeypatch):
+        """One format, whichever root is named: timestamp + stream, atomic."""
+        from hscc_daemon import state
+        monkeypatch.setattr(state, "STATE_DIR", str(tmp_hfcc_dir))
+        elsewhere = tmp_hfcc_dir / "other"
+        entry = state.write_state("dgx", {"ok": True, "gate_rc": 0},
+                                 directory=str(elsewhere))
+        assert entry["stream"] == "dgx" and entry["timestamp"]
+        on_disk = json.loads((elsewhere / "dgx.json").read_text())
+        assert on_disk == entry
+        assert list((elsewhere).iterdir()) == [elsewhere / "dgx.json"]
+
+    def test_directory_honours_the_same_stream_name(self, tmp_hfcc_dir,
+                                                    monkeypatch):
+        """A second pass overwrites the first at the named root — no second
+        stamp file, so a watcher can never have two places to be seen."""
+        from hscc_daemon import state
+        monkeypatch.setattr(state, "STATE_DIR", str(tmp_hfcc_dir))
+        elsewhere = tmp_hfcc_dir / "other"
+        state.write_state("dgx", {"ok": True}, directory=str(elsewhere))
+        state.write_state("dgx", {"ok": False, "error": "boom"},
+                          directory=str(elsewhere))
+        assert list(elsewhere.iterdir()) == [elsewhere / "dgx.json"]
+        assert json.loads((elsewhere / "dgx.json").read_text())["ok"] is False
+
+    def test_directory_still_honours_persist_disabled(self, tmp_hfcc_dir,
+                                                     monkeypatch):
+        """The suppression rule is uniform: an ad-hoc CLI run publishes nothing,
+        to any root — the seam is not a way around persist_disabled()."""
+        from hscc_daemon import state
+        monkeypatch.setattr(state, "STATE_DIR", str(tmp_hfcc_dir))
+        elsewhere = tmp_hfcc_dir / "other"
+        with state.persist_disabled():
+            entry = state.write_state("dgx", {"ok": True},
+                                      directory=str(elsewhere))
+        assert entry["ok"] is True          # callers still see the entry
+        assert not elsewhere.exists()
+        assert not (tmp_hfcc_dir / "dgx.json").exists()
+
+
 class TestReadState:
     """read_state() reads the last result for a stream."""
 

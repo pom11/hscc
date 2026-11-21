@@ -432,6 +432,341 @@ def test_a_red_sweep_stamp_never_turns_verify_red(sandbox):
     assert "excluded" in r["detail"]
 
 
+# ── the WRITE seam: a relocated root a watcher can actually stamp ───────────
+# t_e9b0f048: every read took `directory`, neither write did, and `**fields`
+# swallowed `directory=` into the stamp PAYLOAD. So `stamp(stream, directory=X)`
+# returned True, created nothing at X, and left behind a stamp advertising a root
+# the writer never touched — which made a relocated HSCC_DIR a root no watcher
+# could stamp through the supported API. Measured on the live host: doctor_check
+# at a relocated root read `not-configured` for all three streams while
+# hscc-escalate-watcher had stamped successfully minutes earlier, ok=True, no
+# warn. These are the two pins the card owes: (a) the seam moves the write,
+# (b) a keyword that names a parameter or an envelope key raises instead of
+# becoming payload. Both were measured as absent/survivors before the fix.
+#
+# A live stamp carries the REAL clock, so every verdict below is judged at
+# now=None (real now) rather than the fixed NOW this file uses elsewhere — an
+# age judgement against a 2026-11-01 NOW would be meaningless here.
+
+def _relocated(tmp_path):
+    """A stamp root OUTSIDE the sandbox's canonical STATE_DIR (tmp/.hscc/state),
+    so "it landed at X" and "it landed at STATE_DIR" cannot be confused."""
+    return tmp_path / "relocated-hscc" / "state"
+
+
+def test_stamp_directory_seam_moves_the_write(sandbox):
+    """(a) stamp(stream, directory=X) creates X/<stream>.json and NOTHING under
+    state.STATE_DIR — the seam relocates the write, it does not annotate it."""
+    other = _relocated(sandbox)
+    assert cw.stamp("dep_pr_watcher", directory=str(other), prs=0,
+                    idle=True) is True
+    assert (other / "dep_pr_watcher.json").is_file()
+    assert not (sandbox / ".hscc" / "state" / "dep_pr_watcher.json").exists()
+    # same format, not a second one: the canonical envelope is intact at X
+    stamp = cw.read_stamp("dep_pr_watcher", directory=str(other))
+    assert stamp is not None
+    assert stamp["ok"] is True and stamp["watcher"] == "dep_pr_watcher"
+    assert stamp["cron_job"] == "hscc-dep-watcher" and "timestamp" in stamp
+    assert stamp["prs"] == 0 and stamp["idle"] is True
+
+
+def test_stamp_failure_uses_the_same_root_as_stamp(sandbox):
+    """One root, chosen once (module invariant "one writer, one format, one
+    place"): the red pass overwrites the clean stamp AT X — a second location a
+    watcher could pick between is exactly what this card must not create."""
+    other = _relocated(sandbox)
+    assert cw.stamp("alone_sweep_gate", directory=str(other), gate_rc=0,
+                    verdict="green") is True
+    assert cw.stamp_failure("alone_sweep_gate", "GATE RED: one file differs",
+                            directory=str(other), verdict="red") is True
+    assert sorted(p.name for p in other.iterdir()) == ["alone_sweep_gate.json"]
+    assert not (sandbox / ".hscc" / "state" / "alone_sweep_gate.json").exists()
+    row = cw.verdict("alone_sweep_gate", directory=str(other), now=None)
+    assert row["status"] == "failing" and row["warn"] is True
+    assert "GATE RED" in row["detail"]
+
+
+def test_a_stamp_at_a_relocated_root_reads_ok_through_the_doctor(sandbox):
+    """THE round trip the defect broke: stamp at X, then ask the doctor about X.
+    Before the fix every row here read `not-configured` — "cron job alive" and
+    "nobody installed this" one environment variable apart."""
+    other = _relocated(sandbox)
+    assert cw.stamp("escalate_watcher", directory=str(other), actions=0,
+                    idle=True) is True
+    row = cw.doctor_check(hscc_dir=str(other.parent))
+    by_stream = {r["stream"]: r for r in row["rows"]}
+    assert by_stream["escalate_watcher"]["status"] == "ok"
+    assert by_stream["escalate_watcher"]["warn"] is False
+    # the other two really are judged on the RELOCATED root, not the sandbox one
+    assert by_stream["dep_pr_watcher"]["status"] == "not-configured"
+    assert by_stream["alone_sweep_gate"]["status"] == "not-configured"
+    assert row["ok"] is True and row["fatal"] is False
+
+
+def test_the_stamp_payload_can_never_carry_a_directory_key(sandbox):
+    """The literal leak: `directory` landed INSIDE the JSON, so the stamp
+    advertised a root the writer never wrote to (and verdict() read it back as
+    an ordinary field). It is a parameter now, so it cannot be payload."""
+    other = _relocated(sandbox)
+    assert cw.stamp("dep_pr_watcher", directory=str(other)) is True
+    stamp = cw.read_stamp("dep_pr_watcher", directory=str(other)) or {}
+    assert "directory" not in stamp
+    assert cw.verdict("dep_pr_watcher", directory=str(other),
+                      now=None)["status"] == "ok"
+
+
+@pytest.mark.parametrize("field", ["stream", "ok", "timestamp",
+                                   "watcher", "cron_job"])
+def test_a_reserved_keyword_raises_instead_of_becoming_payload(sandbox, field):
+    """(b) `**fields` used to absorb ANY keyword. A stamp that fakes its own
+    envelope (`ok=False` from a clean pass, a frozen `timestamp`) is the same
+    class of silent failure as a stamp that names a root it never wrote to, so
+    the write functions reject these — loudly, and BEFORE the never-raises try,
+    which would otherwise swallow them into a bare False. (`stream` is rejected
+    by the signature itself; the rest by the reserved-keyword guard.)"""
+    with pytest.raises(TypeError) as exc:
+        cw.stamp("dep_pr_watcher", **{field: "nope"})
+    assert field in str(exc.value)
+    # and the rejection costs no write at all — nothing half-landed anywhere
+    assert not (sandbox / ".hscc" / "state" / "dep_pr_watcher.json").exists()
+
+
+def test_directory_is_a_real_parameter_of_both_writers():
+    """The structural reason `directory` can no longer be swallowed: it is a
+    named parameter of BOTH writers (default None, like every read), so a
+    `directory=` kwarg binds to the seam instead of riding into the payload.
+    Introspection pin — a future edit that drops it back into **fields goes red
+    here, not at a doctor that silently reads `not-configured`."""
+    import inspect
+    for fn in (cw.stamp, cw.stamp_failure):
+        params = inspect.signature(fn).parameters
+        assert "directory" in params, fn.__name__
+        assert params["directory"].default is None, fn.__name__
+
+
+def test_stamp_failure_rejects_a_reserved_keyword_too(sandbox):
+    """Same guard on the other writer: a reserved envelope name raises there too.
+    Asserted with `ok=`, deliberately NOT with `verdict=` — `verdict` is
+    legitimate payload (the sweep gate stamps `verdict="green"/"red"`, and
+    `test_a_green_sweep_pass_is_ok_and_carries_the_gate_fields` above pins it), so
+    reserving it would break the one row this module exists to render."""
+    with pytest.raises(TypeError) as exc:
+        cw.stamp_failure("alone_sweep_gate", "boom", ok=True)
+    assert "ok" in str(exc.value)
+    assert not (sandbox / ".hscc" / "state" / "alone_sweep_gate.json").exists()
+
+
+def test_an_ordinary_payload_field_is_still_accepted(sandbox):
+    """The guard is a RESERVED list, not a whitelist: watchers own their payload
+    (gate_rc / head / report / fail_limit were never parameters of anything)."""
+    assert cw.stamp("alone_sweep_gate", gate_rc=0, interpreters=2,
+                    head="abc1234", report="/tmp/r.txt") is True
+    stamp = cw.read_stamp("alone_sweep_gate") or {}
+    assert stamp["head"] == "abc1234" and stamp["report"] == "/tmp/r.txt"
+
+
+def test_stamp_failure_honours_persist_disabled(sandbox):
+    """Symmetry with stamp(), which already refused this (t_06ead443 follow-up):
+    an ad-hoc `hscc check` is not a watcher pass, so it must stamp NOTHING —
+    before this it could stamp a FAILURE on the operator's live tree at a moment
+    a clean pass was refused."""
+    with state.persist_disabled():
+        assert cw.stamp_failure("escalate_watcher", RuntimeError("boom")) is False
+        assert not os.path.isfile(
+            os.path.join(state.STATE_DIR, "escalate_watcher.json"))
+    assert state.read_state("escalate_watcher") is None
+
+
+# ── the split pairing: new writer code, an OLD state.py behind it ───────────
+# Review round 1 on this card measured a regression the legs could not see: the
+# writers passed `directory=` to `state.write_state` UNCONDITIONALLY, and
+# `_state_writer()` prefers `from hscc_daemon import state` — which in the live
+# cron runtime resolves to the DEPLOYED plugin copy
+# (~/.hermes/plugins/hscc_daemon/state.py, 5573 B, `write_state(stream_name,
+# data)`, no `directory`). Its TypeError was swallowed by these writers' own
+# never-raises try, so every stamp silently vanished:
+# scripts/tests/test_escalate_watcher_run.py went 10 passed -> 1 failed with a
+# stderr `liveness stamp write failed`, i.e. the live */15 escalate job would
+# have stopped stamping post-merge -> doctor `missing` -> `never-ran`. Under
+# run_tests.sh BOTH sides resolve to the checkout, so no leg could observe the
+# split. That pairing is a deployment fact, so the pin must not depend on what
+# happens to be deployed: it installs an old-shape writer on purpose.
+#
+# Two old shapes matter and they fail differently:
+#   STRICT   — `def write_state(stream_name, data)`: a `directory=` kwarg raises
+#              TypeError. Must stay invisible to a caller that asked for nothing.
+#   ABSORBER — `def write_state(stream_name, data, **kwargs)`: swallows the
+#              kwarg, returns success, writes to ITS root. The worst shape (True,
+#              wrong place), and the one a call-and-catch feature-detect misses.
+
+def _strict_old_writer(monkeypatch):
+    """write_state exactly as the deployed copy has it: two params, no seam."""
+    calls = []
+
+    def write_state(stream_name, data):
+        calls.append((stream_name, dict(data)))
+        os.makedirs(state.STATE_DIR, exist_ok=True)
+        path = os.path.join(state.STATE_DIR, stream_name + ".json")
+        with open(path, "w") as f:
+            json.dump({"timestamp": state.now_iso(), "stream": stream_name,
+                       **data}, f)
+        return data
+
+    monkeypatch.setattr(state, "write_state", write_state)
+    return calls
+
+
+def _absorbing_old_writer(monkeypatch):
+    """An old writer that takes ANY keyword and ignores it — it reports success
+    while writing to its own root, so a naive try/except feature-detect sees no
+    error at all."""
+    calls = []
+
+    def write_state(stream_name, data, **kwargs):
+        calls.append((stream_name, dict(data), kwargs))
+        os.makedirs(state.STATE_DIR, exist_ok=True)
+        path = os.path.join(state.STATE_DIR, stream_name + ".json")
+        with open(path, "w") as f:
+            json.dump({"timestamp": state.now_iso(), "stream": stream_name,
+                       **data}, f)
+        return data
+
+    monkeypatch.setattr(state, "write_state", write_state)
+    return calls
+
+
+def test_a_writer_without_the_seam_still_gets_the_base_two_arg_call(sandbox,
+                                                                    monkeypatch):
+    """Req (1) of the rework, and the regression itself: with `directory=None`
+    the call must keep the shape it had before this card existed, so an older
+    resolved writer still takes the stamp. At 3c28aa73 this returned False and
+    wrote nothing — the reviewer's one-command repro (test_escalate_watcher_run
+    10 passed -> 1 failed) is the same event one level up."""
+    calls = _strict_old_writer(monkeypatch)
+    assert cw.stamp("escalate_watcher", actions=0, idle=True) is True
+    assert len(calls) == 1
+    stream, payload = calls[0]
+    assert stream == "escalate_watcher" and payload["idle"] is True
+    assert payload["ok"] is True and payload["cron_job"] == "hscc-escalate-watcher"
+    assert os.path.isfile(os.path.join(state.STATE_DIR, "escalate_watcher.json"))
+
+
+def test_stamp_failure_with_an_old_writer_also_keeps_the_base_call(sandbox,
+                                                                  monkeypatch):
+    """Same rule on the other writer — the red pass is the same writer and must
+    not be the half that breaks against a deployed copy."""
+    calls = _strict_old_writer(monkeypatch)
+    assert cw.stamp_failure("alone_sweep_gate", "GATE RED",
+                            verdict="red") is True
+    assert len(calls) == 1
+    assert calls[0][0] == "alone_sweep_gate"
+    assert calls[0][1]["ok"] is False and calls[0][1]["error"] == "GATE RED"
+
+
+def test_no_directory_keyword_reaches_a_writer_that_never_asks(sandbox,
+                                                              monkeypatch):
+    """The call-shape pin, stated directly: an ABSORBING old writer accepts any
+    keyword, so it is the only writer shape that can tell "we did not send
+    `directory`" from "we sent it and it was ignored". At 3c28aa73 the recorded
+    kwargs were `{'directory': None}` — invisible to a strict stub (which just
+    raises) and silently relocated by an absorber."""
+    calls = _absorbing_old_writer(monkeypatch)
+    assert cw.stamp("dep_pr_watcher", prs=0) is True
+    assert cw.stamp_failure("dep_pr_watcher", "boom") is True
+    assert [c[2] for c in calls] == [{}, {}], calls
+
+
+def test_an_explicit_directory_the_writer_cannot_honour_raises_loudly(sandbox,
+                                                                     monkeypatch):
+    """Req (2): asking for a root the resolved writer cannot write to is a
+    deployment/API mismatch, not an operational hiccup, so it must NOT come back
+    as the same bare False as a full disk. Strict stub -> the writer itself would
+    raise TypeError; the guard turns that into a named refusal BEFORE the try and
+    spends no write at either root."""
+    calls = _strict_old_writer(monkeypatch)
+    other = _relocated(sandbox)
+    with pytest.raises(TypeError) as exc:
+        cw.stamp("dep_pr_watcher", directory=str(other))
+    msg = str(exc.value)
+    assert "directory" in msg and "write_state" in msg
+    assert not (other / "dep_pr_watcher.json").exists()
+    assert not os.path.isfile(os.path.join(state.STATE_DIR,
+                                          "dep_pr_watcher.json"))
+    assert calls == []                       # nothing was attempted
+
+
+def test_a_writer_that_absorbs_the_keyword_is_refused_too(sandbox, monkeypatch):
+    """The absorber is the case a call-and-catch feature-detect misses: passing
+    `directory=` raises nothing, the writer ignores it, and stamp() returns True
+    after writing to the writer's root — the original defect wearing a different
+    hat. Detection must read the SIGNATURE, not the outcome."""
+    calls = _absorbing_old_writer(monkeypatch)
+    other = _relocated(sandbox)
+    with pytest.raises(TypeError) as exc:
+        cw.stamp("escalate_watcher", directory=str(other), actions=0)
+    assert "directory" in str(exc.value)
+    assert calls == []
+    assert not (other / "escalate_watcher.json").exists()
+
+
+def test_a_positional_only_directory_is_not_mistaken_for_the_seam(sandbox,
+                                                                  monkeypatch):
+    """The capability check honours a name only where it can be passed BY KEYWORD.
+    `def write_state(stream, data, directory, /)` does have a `directory`, and
+    still cannot take `directory=` — an "is the name there" check would send the
+    keyword anyway, take the TypeError the writer raises for it, and lose the
+    stamp in exactly the silence the deployed copy produces."""
+    calls = []
+
+    def write_state(stream_name, data, directory, /):
+        calls.append(directory)
+        return data
+
+    monkeypatch.setattr(state, "write_state", write_state)
+    with pytest.raises(TypeError) as exc:
+        cw.stamp("dep_pr_watcher", directory=str(_relocated(sandbox)))
+    assert "directory" in str(exc.value)
+    assert calls == []
+
+
+def test_stamp_failure_refuses_an_unhonourable_root_as_well(sandbox, monkeypatch):
+    """Symmetry: a red pass must not quietly relocate to STATE_DIR when the clean
+    pass refused — one root, chosen once, including when there is no root to
+    choose."""
+    _strict_old_writer(monkeypatch)
+    with pytest.raises(TypeError):
+        cw.stamp_failure("alone_sweep_gate", "boom",
+                         directory=str(_relocated(sandbox)))
+    assert not os.path.isfile(os.path.join(state.STATE_DIR,
+                                          "alone_sweep_gate.json"))
+
+
+def test_a_genuine_write_failure_is_still_a_bare_false(sandbox, monkeypatch):
+    """The other half of "must not become the same bare False as a full disk":
+    the disk failure keeps its bare False. A writer that raises OSError is an
+    operational failure the watcher survives (it warns to stderr and keeps
+    working); only the seam mismatch is loud."""
+    def write_state(stream_name, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(state, "write_state", write_state)
+    assert cw.stamp("escalate_watcher", actions=0) is False
+    assert cw.stamp_failure("escalate_watcher", RuntimeError("x")) is False
+
+
+def test_the_loud_refusal_is_a_typeerror_and_names_itself(sandbox):
+    """Callers catch Exception and warn (escalate_watcher_run._stamp_pass), so
+    the class only has to be a TypeError for them — but it must be its OWN class
+    so a future `except TypeError:` around the writer cannot re-silence it, and
+    so the checkout's own state.py is proven to satisfy it."""
+    assert issubclass(cw.WriterSeamUnsupported, TypeError)
+    import inspect
+    params = inspect.signature(state.write_state).parameters
+    assert "directory" in params, (
+        "the checkout writer must carry the seam the writers detect")
+    assert params["directory"].default is None
+
+
 # ── deployed-copy drift (t_95eb9f15) ────────────────────────────────────────
 #
 # The incident this section pins: `hscc-dep-watcher` was installed, [active] and
