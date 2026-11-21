@@ -1,8 +1,10 @@
 # The `hscc_daemon` thin-sibling green is partly order-dependent: a file run ALONE can FAIL where the full leg passes
 
 **Card:** t_572b4856 (opened from t_7c5f5051's review, which found and fixed one
-instance of it). **Status: IN PROGRESS** — this page is being filled as the
-measurement lands.
+instance of it). **Status: LOCATED and FIXED** — the enumeration the card asked
+for is §2, the mechanism (which is *not* the one the card hypothesised) is §3,
+the fix and its runtime pin are §5, and §6 is the before/after on both
+interpreters.
 
 ## Question
 
@@ -224,10 +226,90 @@ passing quietly. Measured: **RED on the pre-fix tree on both interpreters**
 (thin `p313` and canonical venv — file B's assert fires, `hermes_cli` reached the
 next file), GREEN after the fix on both.
 
-The static rule should stay static and the answer to "should it grow a runtime
+The static rule should stay static, and the answer to "should it grow a runtime
 half" is: it grew a *separate* runtime half, in the file that already owns import
 isolation, because the seam rule's subject is "does this case reach the CLI
 without a gate" and this one's is "does the process still look like it did before
 the case ran". Two different questions, one file family, no shared predicate.
+
+### 6. Verification
+
+`-rs` reason text, thin `p313`, the same six sites, before and after. The point is
+not "green" — it is that the leg and the alone run now print **the same answer**:
+
+| site | pre-fix in-leg | pre-fix alone | post-fix (in-leg == alone) |
+| --- | --- | --- | --- |
+| `test_dispatcher_wedge.py:855` | `No module named 'utils'` | `No module named 'hermes_cli'` | `No module named 'hermes_cli'` |
+| `:909` | `No module named 'utils'` | `No module named 'hermes_cli'` | `No module named 'hermes_cli'` |
+| `:1197` | `No module named 'utils'` | `No module named 'toolsets'` | `No module named 'hermes_cli'` |
+| `:1220` | `No module named 'utils'` | `No module named 'toolsets'` | `No module named 'hermes_cli'` |
+| `:1250` | `No module named 'utils'` | `No module named 'toolsets'` | `No module named 'hermes_cli'` |
+| `test_profile_roster_multiplex_t1c545ebb.py:210` | no skip there — the gate passed and the case died later at `real_hermes.py:114` (`hermes_yaml`) | `No module named 'hermes_constants'` | `No module named 'hermes_constants'` |
+
+| run | pre-fix | post-fix |
+| --- | --- | --- |
+| `hscc_daemon` leg, thin `p313` (3.13.12) | 4024 passed, 23 skipped, rc0, 133.95 s | **4025 passed, 23 skipped, rc0, 132.99 s** (+1 = the new pin; wall time unchanged) |
+| per-file alone vs in-leg, all 7 suspect files | 1 collection error + 6 reason mismatches | **0 and 0** |
+| `test_cli_orch_waker.py` alone | collection ERROR (`No module named 'hscc'`, rc=2) | 18 passed |
+
+Runtime pin: RED on the pre-fix tree under **both** interpreters (thin `p313`
+3.13.12 and canonical venv 3.14.10; file B's assert fires — `hermes_cli` reached
+the next file), GREEN after the fix on both.
+
+## What the stamp may claim now
+
+The thin leg's `-rs` output is now a property of the interpreter, not of the file
+order, for every file measured: 131 files swept alone, one collection error found
+and fixed, six reason mismatches found and fixed, zero remaining on both sides.
+Two honest limits:
+
+* The sweep compares the **leg's** order against **alone**. A third order (some
+  other subset of files in one process) is not enumerated; what makes it safe is
+  that the per-test guarantee is now unconditional, not that this pair of orders
+  agrees.
+* The residue rule recognises a module by a **path prefix** under the tree
+  resolved at fixture setup, exactly as the plant rule recognises a plant by a
+  temp-root prefix. A test that points `HERMES_AGENT_PATH` at a real hermes copy
+  outside the temp root and outside the default path would be outside both rules.
+
+## Follow-ups (not done here)
+
+* The two module-level `sys.path.insert(0, <repo>/hscc_daemon)` sites
+  (`test_api_launchd.py:11`, `test_hermes_python.py:16`) still leak for the rest
+  of the process. Nothing depends on them any more, but nothing *stops a new file
+  from depending on them* either. The only check that catches that class is this
+  audit's alone-sweep, which today is a manual 131-process loop; running it as a
+  scheduled gate would be the small durable version.
+* `hermes_import.agent_tree_on_path`'s `finally` has a documented "bookkeeping was
+  reset under us" branch (`hermes_import.py:109-110`) that leaves the path in
+  place if a test replaces `_WINDOWS` mid-window. Not observed in 804 events over
+  this leg; it is the one remaining way a real path entry could survive.
+
+## Reproduce
+
+The sweep and the diff are shipped with this audit —
+`docs/audits/support/t_572b4856/alone_sweep.sh` (and its `diff_alone_vs_leg.py`)
+— so the recipe is one command per interpreter:
+
+```sh
+docs/audits/support/t_572b4856/alone_sweep.sh ~/miniconda3/envs/p313/bin/python hscc_daemon
+docs/audits/support/t_572b4856/alone_sweep.sh ~/.hermes/hermes-agent/venv/bin/python hscc_daemon
+```
+
+It runs the leg once through `scripts/run_tests.sh` (so the reference gets the
+runner's own environment, including the `SUITE_ENV_UNSET` scrub) with
+`--junitxml` added — extra argv is forwarded to pytest by design — then runs every
+test file alone with the same argv and the same scrub mirrored explicitly, so the
+only variable is the file set. Exit 0 means every file answers alone exactly as it
+does inside the leg.
+
+The diff has teeth, measured rather than asserted: pointed at the pre-fix sweep
+directory it exits 1 and names the three files (the `hscc` collection error, the
+five `test_dispatcher_wedge.py` reason mismatches, and
+`test_profile_roster_multiplex_t1c545ebb.py` — whose *tally* matches on both
+sides, so only the skip-reason half of the diff can see it); pointed at the
+post-fix directory it exits 0.
+
+
 
 
