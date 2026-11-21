@@ -551,7 +551,36 @@ def _alias(name: str) -> str:
     return name[:-len("-model")] if name.endswith("-model") else name
 
 
-def serving_table(rows: list, width: int | None = None) -> Table:
+def serving_table(rows: list, width: int | None = None,
+                  pauses: dict | None = None) -> Table:
+    """The serving grid. ``pauses`` is the node-pause overlay, and its ABSENCE
+    is meaningful.
+
+    ``None`` — the default — means "this caller has no pause knowledge", and the
+    table then spells an unreachable backend ``down`` exactly as it always did.
+    That is deliberate, not an oversight: this function is also the offline
+    golden generator's renderer (``ios-app/scripts/cluster_monitor_cli_parity.py``
+    feeds a committed fixture through it and the Swift view-model is pinned to the
+    result), and a formatter that went and read ``~/.hscc`` by itself would make
+    that committed golden depend on whether whoever regenerated it had parked a
+    node. The two live surfaces — ``hscc cluster monitor`` (``run_live``) and the
+    ``hscc cluster monitor`` snapshot (``cluster_render.render_monitor``) — pass
+    the overlay, and that is what the tests pin.
+
+    A parked backend's Model cell therefore reads ``paused (reason, since <t>)``
+    in the theme's ``warn`` rather than ``down`` in ``error`` — the same polarity
+    the API's own monitor payload carries (``status: "paused"``,
+    ``hscc-api/routes_cluster.py``, t_824b617f), so the CLI and the widgets cannot
+    call one machine healthy and the other broken. It can ELLIPSIS at the
+    column's 26-character cap like every other cell here; the block
+    :func:`render` prints under the table carries the string on any terminal
+    wide enough to hold it (below that it folds, like every other line).
+
+    The row's error text stays: "could not sample this host" may still be true,
+    and the operator parking a node has not made a real diagnostic disappear.
+    """
+    if pauses is None:
+        pauses = {}
     wide = width is None or width >= WIDE_MIN
     cols = [("Node", "left", 15), ("Port", "right", 4), ("Model", "left", None)]
     if wide:
@@ -572,13 +601,19 @@ def serving_table(rows: list, width: int | None = None) -> Table:
             cells.append(rest[6])
         t.add_row(*cells)
 
+    from hscc_daemon.cluster_render import pause_for_node
+
     totals: dict[str, list] = {}
     for r in rows:
         routes = ", ".join(_alias(a) for a in r["routes"] if a != r["model"]) or "-"
         # 'org/Model-Name' -> 'Model-Name': the org prefix eats the column.
         short = r["model"].rsplit("/", 1)[-1]
         if r.get("error"):
-            row(esc(r["node"]), esc(r["port"]), Text("down", style="error"), esc(routes),
+            parked = pause_for_node(pauses, r.get("node"))
+            row(esc(r["node"]), esc(r["port"]),
+                Text(parked, style="warn") if parked
+                else Text("down", style="error"),
+                esc(routes),
                 Text(esc(r["error"])[:30], style="error"), "", "", "", "", "", "")
             continue
         run, wait = r["running"], r["waiting"]
@@ -607,7 +642,18 @@ def serving_table(rows: list, width: int | None = None) -> Table:
 
 
 def render(frame, rows, interval, proxy_error=None, host_error=None,
-           snapshot=False, width=None) -> Group:
+           snapshot=False, width=None, pauses=None) -> Group:
+    """The whole monitor view.
+
+    ``pauses`` follows :func:`serving_table`'s rule: ``None`` means "no pause
+    knowledge", so the view is exactly what it rendered before (and the offline
+    golden generator stays hermetic). The live surfaces pass the overlay, and a
+    parked machine then reads ``paused (…)`` in the grid plus this block under it
+    — the grid's Model column caps at 26 characters, so the block is where the
+    full ``paused (reason, since <t>)`` string reaches a terminal that can hold
+    it. Below that width it folds, which is what Rich does to every long line
+    here; it is never truncated mid-stamp.
+    """
     n = len((frame or {}).get("hosts") or [])
     when = "snapshot (use --live to refresh)" if snapshot else f"every {interval}s"
     parts = [Text(f"hscc cluster monitor — {n} host(s) — {when}", style="title"),
@@ -621,7 +667,16 @@ def render(frame, rows, interval, proxy_error=None, host_error=None,
     if proxy_error:
         parts.append(Text(f"proxy /v1/model/info unreachable: {esc(proxy_error)}"
                           + (" (showing last known routes)" if rows else ""), style="warn"))
-    parts.append(serving_table(rows, width) if rows else Text("no backends behind the proxy", style="dim"))
+    parts.append(serving_table(rows, width, pauses) if rows
+                 else Text("no backends behind the proxy", style="dim"))
+    if pauses:
+        # Str children of a Group go through Rich's markup parser, so the
+        # ``[warn]`` markup in these lines is live while the data inside them
+        # stays escaped by the seam that built them.
+        from hscc_daemon.cluster_render import pause_lines
+        parts.append(Text(""))
+        parts.append(Text("node pauses", style="title"))
+        parts.extend(pause_lines(pauses))
     if not snapshot:
         parts.append(Text("Ctrl-C to quit", style="dim"))
     return Group(*parts)
@@ -632,14 +687,23 @@ def render(frame, rows, interval, proxy_error=None, host_error=None,
 def run_live(console, interval: int = DEFAULT_INTERVAL, cluster: str | None = None) -> int:
     from rich.live import Live
 
+    from hscc_daemon.cluster_render import pause_overlay
+
     hosts = HostStream(interval, cluster)
     serving = ServingPoller()
     try:
         with Live(console=console, auto_refresh=False, screen=False) as live:
             while True:
                 rows = serving.poll()
+                # The overlay is read per frame, like the API reads it per
+                # request: pause or resume must show up on the NEXT frame, not
+                # whenever something notices. It is one small local file next to
+                # two HTTP scrapes and an ssh stream, so it is the cheapest read
+                # on this tick — and the only one that can explain a missing
+                # backend without calling it a fault.
                 live.update(render(hosts.frame, rows, interval, serving.proxy_error,
-                                   hosts.error, width=console.width), refresh=True)
+                                   hosts.error, width=console.width,
+                                   pauses=pause_overlay()), refresh=True)
                 time.sleep(interval)
     except KeyboardInterrupt:
         return 0
