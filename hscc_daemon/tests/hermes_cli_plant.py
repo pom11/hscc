@@ -165,6 +165,46 @@ def restore_planted(evicted):
 # Deliberately narrow, like ``is_planted_path``: it recognises a module by where
 # its own file lives, so a planted temp-root fake is still the plant rule's job
 # and this one never touches it.
+#
+# Cost matters here: the fixture calls this for EVERY test in a 4000-test leg, so
+# the classifier must not do a syscall per resident module. Two things keep it
+# flat — a plain string prefix test before any ``realpath``, and a verdict cache
+# keyed by the module OBJECT (a module's ``__file__`` does not change), so after
+# the first scan a call is one dict lookup per module.
+
+_ROOT_ENV = None                     # $HERMES_AGENT_PATH the cache was built for
+_ROOTS = ("", "")                    # (raw, realpath) spellings
+_REALPATH_MEMO = {}
+_VERDICT_CACHE = {}                  # root -> {module object: bool} (identity-keyed)
+
+
+def _realpath(path):
+    hit = _REALPATH_MEMO.get(path)
+    if hit is None:
+        hit = _REALPATH_MEMO[path] = os.path.realpath(path)
+    return hit
+
+
+def _agent_tree_roots():
+    """(raw, realpath) spellings of the agent tree, cached per $HERMES_AGENT_PATH.
+
+    Both are needed: a module's ``__file__`` is spelled with whatever form of the
+    root sat on ``sys.path`` when it was imported, and ``hermes_import`` hands
+    out the un-resolved form.
+    """
+    global _ROOT_ENV, _ROOTS
+    env = os.environ.get("HERMES_AGENT_PATH")
+    if _ROOT_ENV != env or not _ROOTS[0]:
+        try:
+            from hscc_daemon import hermes_import
+            raw = hermes_import.resolve_agent_tree()
+        except Exception:  # pragma: no cover — the fallback is the same resolution
+            raw = os.path.expanduser(env or "~/.hermes/hermes-agent")
+        raw = os.path.expanduser(str(raw))
+        _ROOTS = (raw, _realpath(raw))
+        _ROOT_ENV = env
+    return _ROOTS
+
 
 def agent_tree_root():
     """realpath of the Hermes agent tree THIS process resolves hermes from.
@@ -175,12 +215,7 @@ def agent_tree_root():
     ``HERMES_AGENT_PATH`` to a temp tree is planting, and plants are the rule
     above.
     """
-    try:
-        from hscc_daemon import hermes_import
-        raw = hermes_import.resolve_agent_tree()
-    except Exception:  # pragma: no cover — the fallback is the same resolution
-        raw = os.environ.get("HERMES_AGENT_PATH", "~/.hermes/hermes-agent")
-    return os.path.realpath(os.path.expanduser(str(raw)))
+    return _agent_tree_roots()[1]
 
 
 def is_agent_tree_path(path, root=None):
@@ -188,9 +223,37 @@ def is_agent_tree_path(path, root=None):
     origin = str(path or "")
     if not origin:
         return False
-    resolved = os.path.realpath(origin)
-    r = root or agent_tree_root()
+    raw, real = _agent_tree_roots()
+    r = root or real
+    # No syscall unless the string could already be under one of the trees. This
+    # rejects every stdlib and site-packages path, which is >99% of the calls.
+    if not (origin.startswith(r) or origin.startswith(raw)
+            or origin.startswith(real)):
+        return False
+    resolved = _realpath(origin)
     return resolved == r or resolved.startswith(r + os.sep)
+
+
+def _is_agent_tree_module(mod, r):
+    """Verdict for one module object, cached by identity (see the note above)."""
+    cache = _VERDICT_CACHE.setdefault(r, {})
+    try:
+        verdict = cache.get(mod)
+    except TypeError:                      # unhashable module object
+        verdict = None
+    if verdict is None:
+        verdict = is_agent_tree_path(getattr(mod, "__file__", ""), r)
+        if not verdict:
+            search = getattr(mod, "__path__", None)
+            if isinstance(search, str):
+                search = [search]
+            verdict = bool(search) and any(
+                is_agent_tree_path(p, r) for p in search)
+        try:
+            cache[mod] = verdict
+        except TypeError:
+            pass
+    return verdict
 
 
 def resident_under_agent_tree(root=None):
@@ -202,19 +265,8 @@ def resident_under_agent_tree(root=None):
     otherwise iterate as characters.
     """
     r = root or agent_tree_root()
-    names = []
-    for name, mod in list(sys.modules.items()):
-        if mod is None:
-            continue
-        if is_agent_tree_path(getattr(mod, "__file__", ""), r):
-            names.append(name)
-            continue
-        search = getattr(mod, "__path__", None)
-        if isinstance(search, str):
-            search = [search]
-        if search and any(is_agent_tree_path(p, r) for p in search):
-            names.append(name)
-    return names
+    return [name for name, mod in list(sys.modules.items())
+            if mod is not None and _is_agent_tree_module(mod, r)]
 
 
 def restore_agent_tree_cache(root, saved):
