@@ -94,6 +94,96 @@ def test_pattern_comes_from_the_shipped_guard():
     assert redactor.load_pattern() is not None
 
 
+# ── selecting the step under test ────────────────────────────────────────────
+#
+# Every behavioural test here drives ONE step of the real workflow: the one that
+# runs the guard and pipes BOTH of its streams through the redactor. That step
+# used to be reached as ``steps[-1]``, which reads as "the step under test" only
+# while it happens to be the job's last step. PR #524 appended a docs-index lint
+# lane after it, so the index silently re-pointed 33 of these tests at the LINT
+# command; each died with exit 127 in the throwaway checkout (`.lint-venv` is
+# provisioned by a workflow step that no test reproduces) and the whole leg went
+# red on main without one line of guard behaviour changing — t_5646c5d3.
+#
+# So select by what the step DOES. The anchor is the redactor the step execs: it
+# is the reason the step exists, and no other step in the job can carry it. An
+# anchor matching zero or several steps is a hard error rather than a guess,
+# because a wrong-but-plausible step here would redden nothing while testing
+# nothing — which is the exact failure mode this file is written to refuse.
+GUARD_STEP_ANCHOR = "redact_guard_report.py"
+LINT_STEP_ANCHOR = "readme_lint.py"
+
+
+def _job_steps():
+    """Every step of the `guard` job, in job order."""
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    return doc["jobs"]["guard"]["steps"]
+
+
+def _steps_running(anchor):
+    """The job steps whose run script names ANCHOR, in job order."""
+    return [s for s in _job_steps() if anchor in s.get("run", "")]
+
+
+def _guard_step():
+    """The single guard-lane step — the script the behavioural tests execute.
+
+    Refuses to pick one for you. Two steps carrying the anchor would mean the
+    redaction logic had been split across steps, and each test here would then
+    cover only half the story while still looking green; that ambiguity has to
+    be a decision made by whoever splits the step, not one taken silently here.
+    """
+    hits = _steps_running(GUARD_STEP_ANCHOR)
+    if len(hits) != 1:
+        pytest.fail(
+            f"expected exactly one step running {GUARD_STEP_ANCHOR!r} in the "
+            f"guard job, found {len(hits)}. The step under test is identified by "
+            "what it runs, never by its position — a step appended to this job "
+            "must not re-point these tests (t_5646c5d3)."
+        )
+    return hits[0]
+
+
+def test_this_file_never_selects_a_workflow_step_by_position():
+    """The shape that reddened the whole leg is now banned here by construction.
+
+    ``steps[-1]`` was not wrong the day it was written — it was only true while no
+    later step existed. Every such read is a delayed-action defect: it goes off in
+    some other card's PR, on a file that card never touched, in the leg that is the
+    merge queue's own local gate. Re-reading the list by index is therefore not a
+    style preference to be lost again in review.
+
+    Prose is exempt on purpose: this file has to be able to NAME the bug. Comment
+    lines and docstrings are skipped (found via ``ast``, so the exemption is
+    structural rather than a substring guess); an index in real code is not.
+    """
+    lines = Path(__file__).read_text(encoding="utf-8").splitlines()
+    prose: set = set()
+    for node in ast.walk(ast.parse("\n".join(lines))):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            body = getattr(node, "body", [])
+            first = body[0] if body else None
+            if (isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                prose.update(range(first.value.lineno,
+                                   (first.value.end_lineno or first.value.lineno) + 1))
+    # `steps[-1]` and `["steps"][-1]`; the pattern cannot match its own source
+    # (`\D` after `steps` is a backslash, never `[`), so no self-exemption needed.
+    indexer = re.compile(r"steps\D{0,4}\[\s*-?\d")
+    offenders = [
+        f"{n}: {text.strip()}"
+        for n, text in enumerate(lines, 1)
+        if n not in prose and not text.lstrip().startswith("#")
+        and indexer.search(text)
+    ]
+    assert not offenders, (
+        "workflow steps must be reached through _job_steps()/_guard_step() and "
+        f"matched by content, never indexed: {offenders}"
+    )
+
+
 # ── the workflow shape (structural) ─────────────────────────────────────────
 
 def test_workflow_exists_and_is_valid_yaml():
@@ -125,8 +215,7 @@ def test_workflow_is_advisory_by_default_and_opt_in_blocking():
     Advisory must still fail when the guard cannot run (rc=2) — a silent pass is
     the failure mode this whole card exists to close.
     """
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    step = doc["jobs"]["guard"]["steps"][-1]
+    step = _guard_step()
     assert "continue-on-error" not in step, \
         "continue-on-error would swallow rc=2; the step decides its own exit code"
     run = step["run"]
@@ -147,23 +236,70 @@ def test_guard_cannot_run_is_reported_before_the_redactor():
     but misleading, since the missing file is the guard's. rc=2 must be checked
     first so the annotation names the component that is actually absent.
     """
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    run = doc["jobs"]["guard"]["steps"][-1]["run"]
+    run = _guard_step()["run"]
     assert run.index('"$rc" -eq 2') < run.index('"$redact_out_rc" -ne 0'), \
         "rc=2 must be diagnosed before the redactor's own failure"
     # both captured streams are gated, so neither can slip past the diagnosis
     assert '"$redact_err_rc" -ne 0' in run
 
 
-def test_workflow_needs_no_network_beyond_checkout():
-    """Acceptance: nothing in the job may reach the network."""
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    steps = doc["jobs"]["guard"]["steps"]
-    used = [s["uses"] for s in steps if "uses" in s]
-    assert used == ["actions/checkout@v4"], "only checkout may be an external action"
-    run = " ".join(s.get("run", "") for s in steps)
+def test_guard_lane_needs_no_network_beyond_checkout():
+    """The lane that READS the committed tree must not be able to publish from it.
+
+    This test used to read "nothing in the job may reach the network", and it
+    failed after PR #524 — correctly, as a statement about the whole job: the
+    docs-index lint lane it added needs network (setup-python fetches an
+    interpreter, actions/cache talks to the cache service, the build step runs
+    `pip install -r requirements.txt`). Holding that form red is not a guard, it
+    is a stale claim about a decision main already made.
+
+    What still has to hold — and what this now pins about the guard lane alone —
+    is that the steps which read the tree and report on it have no way out. That
+    is the leak channel this file exists to close: a public job log is one thing,
+    an outbound request carrying the matched address is another. The job-wide
+    half of the old assertion is not deleted, it moves to
+    ``test_the_lint_lane_is_the_only_egress_in_the_guard_job``.
+    """
+    step = _guard_step()
+    assert "uses" not in step, \
+        "the guard step may not fetch an action: its inputs are the checkout " \
+        "and the guard's own two streams, and an action is an egress channel"
     for net in ("curl", "wget", "pip install", "npm ", "apt-get", "gh api"):
-        assert net not in run, f"job would need network: {net}"
+        assert net not in step.get("run", ""), \
+            f"the guard-lane step would need network: {net}"
+
+
+def test_the_lint_lane_is_the_only_egress_in_the_guard_job():
+    """Every byte the job can send out is accounted for, item by item.
+
+    The old whole-job "no network" assertion is replaced by an exact pin rather
+    than dropped: the job's external-action surface is listed in full, so egress
+    added ANYWHERE — a third lane, a bumped action, a lane that gains a `uses` —
+    still reddens this. A reviewer reading a red here is reading "new egress in
+    the address-guard job", which is the question worth asking.
+
+    It also pins lane ORDER, which the old test could not see while the guard
+    step was the job's last one: the lint step is a hard gate (it exits non-zero
+    on an unlisted doc), and a hard step placed BEFORE the guard would abort the
+    job and swallow the leak report — a green-looking job that never scanned.
+    """
+    steps = _job_steps()
+    used = [s["uses"] for s in steps if "uses" in s]
+    assert used == ["actions/checkout@v4", "actions/setup-python@v5",
+                    "actions/cache@v4"], (
+        "the job's external-action surface changed: every entry reaches the "
+        "network, so a new one is new egress and must be reviewed as such (and "
+        "must never be added to the guard lane)"
+    )
+    guard_at = [i for i, s in enumerate(steps)
+                if GUARD_STEP_ANCHOR in s.get("run", "")]
+    lint_at = [i for i, s in enumerate(steps)
+               if LINT_STEP_ANCHOR in s.get("run", "")]
+    assert len(lint_at) == 1, f"expected one lint step, found {len(lint_at)}"
+    assert guard_at[0] < lint_at[0], (
+        "the guard step must precede the hard-failing lint step: a lint failure "
+        "placed first aborts the job before the tree is ever scanned"
+    )
 
 
 # ── end to end: the real command the job runs ───────────────────────────────
@@ -335,8 +471,12 @@ def test_the_real_repo_passes_the_job_leg():
 # copy of it.
 
 def _step_script():
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    return doc["jobs"]["guard"]["steps"][-1]["run"]
+    """The guard-lane step's shell script, verbatim as it ships.
+
+    Reached only through ``_guard_step()`` — see the selector block above for why
+    the positional form (``steps[-1]``) is the bug that reddened this leg.
+    """
+    return _guard_step()["run"]
 
 
 def _run_step(tmp_path, guard_rc, report, enforce, guard_source=None):
