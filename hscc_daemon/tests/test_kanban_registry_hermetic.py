@@ -53,6 +53,12 @@ TARGETS = ("test_kanban_cli.py", "test_kanban_blocked.py", "test_kanban_live.py"
 MISSING_REGISTRY = os.path.join(
     tempfile.gettempdir(), "hscc-t_c11f0d88-no-such-flightdeck-registry.yaml")
 
+#: A ``monkeypatch.setattr(..., "registered_board_names", lambda ...: ({"x", ...}, ...))``
+#: — i.e. a pin that hands the narrowing something to keep. Written against the
+#: two-line call shape the family uses.
+_NON_EMPTY_PIN = re.compile(
+    r"""registered_board_names",\s*lambda[^:]*:\s*\(\s*\{[^{}]+\}""")
+
 
 def _run_poisoned(extra_env=None):
     """Run the family in a child pytest with a missing project registry."""
@@ -158,14 +164,19 @@ def test_the_pinned_seam_is_still_there():
     assert "autouse=True" in src and "registered_board_names" in src, (
         "test_kanban_cli.py lost its project-registry fence (t_c11f0d88)")
 
-    # The case itself, with its pin, still present.
+    # The case itself, with its pin, still present. "Present" means a pin that
+    # answers with a NON-EMPTY board set: the same test also measures the
+    # product rule with an empty one, and a checker that only looked for the
+    # symbol would stay green on a file that had deleted the narrowing pin and
+    # kept that measurement (measured, t_c11f0d88 probe M3).
     m = re.search(r"def test_listing_json_valid\(.*?\n(?=    def |\nclass |\Z)",
                   src, re.S)
     assert m, "test_listing_json_valid vanished from test_kanban_cli.py"
-    assert "registered_board_names" in m.group(0), (
-        "test_listing_json_valid no longer pins registered_board_names — it "
-        "will pass on a workstation that has an 'hscc' project registered and "
-        "IndexError on a clean runner (the exact red of t_c11f0d88)")
+    assert _NON_EMPTY_PIN.search(m.group(0)), (
+        "test_listing_json_valid no longer pins registered_board_names to a "
+        "non-empty board set — it will pass on a workstation that has an "
+        "'hscc' project registered and IndexError on a clean runner (the exact "
+        "red of t_c11f0d88)")
 
     # The family files that reach the narrowing keep their own pins.
     for name in ("test_kanban_blocked.py", "test_kanban_live.py"):
