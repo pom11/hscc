@@ -88,24 +88,35 @@ MISS_FACTOR = 3
 #   measure). Both warn; neither is fatal -- a red sweep is a finding about the
 #   test suite, not a broken host.
 #
-# ``deploy`` says how the code reaches <bound home>/scripts, and it is not the
-# same for all three (t_95eb9f15):
-#   ``copy``    the installer ``cp``s the repo file next to the cron binding.
-#               The deployed copy is then a SECOND copy of the code, and nothing
-#               ever compared the two -- a host whose deployed copy predates the
-#               repo's current code runs stale code in silence.
-#   ``wrapper`` the installer generates a one-line wrapper that execs the repo's
-#               file (install_alone_sweep_gate.sh's header; the shape the other
-#               two should move to). There is no second copy, so there is
-#               nothing to drift: the measured code is always the code in git.
+# ``deploy`` says how the code reaches <bound home>/scripts (t_95eb9f15), and as
+# of t_accbc5da all three streams use the second shape:
+#   ``wrapper`` the installer generates a stub that runs the repo's file
+#               (install_alone_sweep_gate.sh's shape; install_dep_watcher.sh and
+#               install_escalate_watcher.sh now generate the same kind of stub).
+#               There is no second copy, so there is nothing to drift: the code
+#               the cron job runs is always the code in git.
+#   ``copy``    LEGACY. The installer ``cp``s the repo file next to the cron
+#               binding, which leaves a SECOND copy of the code on the host --
+#               the shape that let a live, healthy ``hscc-dep-watcher`` report
+#               ``not configured`` (t_95eb9f15). No shipping installer does this
+#               any more, and this module must keep handling it, because
+#               "the stream is a wrapper in git" says nothing about a host that
+#               has not re-run its installer: the stale file is still sitting
+#               under <bound home>/scripts and its cron job still runs it. That
+#               is why :func:`deployed_copy_drift` compares a leftover copy for
+#               a ``wrapper`` stream instead of shrugging.
 DEPLOY_COPY = "copy"
 DEPLOY_WRAPPER = "wrapper"
 
 WATCHERS = {
     "dep_pr_watcher": {
         "cron_job": "hscc-dep-watcher",
+        # ``script`` is the repo's file AND (since t_accbc5da) the path the
+        # RETIRED copy shape deployed to. deployed_copy_drift looks at exactly
+        # this path for the leftover copy, so it must keep naming the copy-shape
+        # leaf rather than the generated wrapper (hscc-dep-watcher.py).
         "script": "dep_pr_watcher.py",
-        "deploy": DEPLOY_COPY,
+        "deploy": DEPLOY_WRAPPER,
         "cadence_s": 86400,           # daily (`0 8 * * *`)
         "cadence_env": "HSCC_DEP_WATCHER_CADENCE_S",
         "install_script": "scripts/install_dep_watcher.sh",
@@ -113,7 +124,7 @@ WATCHERS = {
     "escalate_watcher": {
         "cron_job": "hscc-escalate-watcher",
         "script": "escalate_watcher_run.py",
-        "deploy": DEPLOY_COPY,
+        "deploy": DEPLOY_WRAPPER,
         "cadence_s": 900,             # every 15 min (`*/15 * * * *`)
         "cadence_env": "HSCC_ESCALATE_CADENCE_S",
         "install_script": "scripts/install_escalate_watcher.sh",
@@ -485,17 +496,29 @@ def deployed_copy_drift(stream, *, hermes_home=None, repo_dir=None, env=None):
     Returns ``{stream, status, deployed, repo, candidates, detail}`` where
     ``status`` is:
 
-      ``in-sync``          byte-identical -- nothing to say.
+      ``in-sync``          byte-identical -- nothing to say. For a ``wrapper``
+                           stream this means a leftover copy from the retired
+                           copy shape is present and still matches git.
       ``drifted``          both exist and differ -- the deployed copy is stale
                            code. This is the case that must be said out loud.
-      ``missing-deployed`` nothing under any candidate ``scripts`` dir --
+      ``missing-deployed`` nothing under any candidate ``scripts`` dir, and the
+                           stream is (or was installed as) a ``copy`` stream --
                            genuinely not installed, which is what
                            ``not-configured`` means.
       ``missing-repo``     no repo copy to compare against (this module is not
                            running from a checkout) -- UNKNOWN, never a warning.
       ``unreadable``       a copy exists but could not be hashed -- unknown.
       ``not-a-copy``       the stream deploys as a generated wrapper
-                           (:data:`DEPLOY_WRAPPER`) -- no second copy exists.
+                           (:data:`DEPLOY_WRAPPER`) AND nothing sits at the path
+                           the retired copy shape used -- no second copy exists,
+                           so there is nothing to compare (t_accbc5da).
+
+    A ``wrapper`` stream is NOT exempt from the comparison. "git says wrapper" is
+    a statement about the installer, not about the host: an operator who has not
+    re-run it still has the old ``cp``-ed file under ``<bound home>/scripts`` and
+    its cron job still runs it. So a wrapper stream answers ``not-a-copy`` only
+    when that path is empty, and compares the leftover otherwise -- which is what
+    keeps the ``copy-drifted`` warn alive across the transition (t_95eb9f15).
 
     ``hermes_home`` narrows the search to ONE home (the test seam, and what an
     installer knows its own binding to); without it every home in
@@ -513,13 +536,7 @@ def deployed_copy_drift(stream, *, hermes_home=None, repo_dir=None, env=None):
     out = {"stream": stream, "status": "unknown", "deployed": None,
            "repo": None, "candidates": [], "detail": ""}
 
-    if row.get("deploy") != DEPLOY_COPY:
-        out["status"] = "not-a-copy"
-        out["detail"] = (f"{stream}'s cron job is a generated wrapper that execs "
-                         f"the repo's {row['script']} -- there is no deployed "
-                         f"copy that could go stale")
-        return out
-
+    is_copy = row.get("deploy") == DEPLOY_COPY
     homes = ([os.path.expanduser(hermes_home)] if hermes_home
              else hermes_home_candidates(env))
     repo_root = os.path.expanduser(repo_dir) if repo_dir else checkout_root()
@@ -529,8 +546,15 @@ def deployed_copy_drift(stream, *, hermes_home=None, repo_dir=None, env=None):
     existing = [p for p in copies if os.path.isfile(p)]
 
     if not existing:
-        out["status"] = "missing-deployed"
-        out["detail"] = f"nothing deployed at {' or '.join(copies)}"
+        if is_copy:
+            out["status"] = "missing-deployed"
+            out["detail"] = f"nothing deployed at {' or '.join(copies)}"
+        else:
+            out["status"] = "not-a-copy"
+            out["detail"] = (f"{stream}'s cron job is a generated wrapper that runs "
+                             f"the repo's {row['script']} -- nothing was copied to "
+                             f"{' or '.join(copies)}, so there is no deployed copy "
+                             f"that could go stale")
         return out
 
     if not repo_root:
@@ -569,14 +593,22 @@ def deployed_copy_drift(stream, *, hermes_home=None, repo_dir=None, env=None):
         out["detail"] = (f"deployed copy matches the repo copy ({r_size} B, "
                          f"{r_hash[:8]})"
                          + (f" in all {len(existing)} candidate homes"
-                            if len(existing) > 1 else ""))
+                            if len(existing) > 1 else "")
+                         + ("" if is_copy else
+                            f" -- but a copy is still installed, and the "
+                            f"installer does not copy any more: re-run "
+                            f"{row['install_script']} to drop it and let the "
+                            f"generated wrapper run the repo's file"))
         return out
     deployed, d_hash, d_size = stale
     out["deployed"] = deployed
     out["status"] = "drifted"
     out["detail"] = (f"the deployed copy {deployed} ({d_size} B, {d_hash[:8]}) is "
                      f"NOT the repo copy {repo} ({r_size} B, {r_hash[:8]}) -- the "
-                     f"job runs stale code; re-run {row['install_script']}")
+                     f"job runs stale code; re-run {row['install_script']}"
+                     + ("" if is_copy else
+                        f" (that installer now generates a wrapper instead of a "
+                        f"copy, which removes this leftover)"))
     return out
 
 
