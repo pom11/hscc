@@ -353,12 +353,14 @@ def test_feature_rows_keep_their_relative_order(tmp_path, monkeypatch):
 def test_row_fn_path_resolves_the_hook_per_call(tmp_path, monkeypatch):
     """The compatibility path must look the row function up on the module each
     call: test_doctor_kanban_enforce.py swaps doctor._kanban_enforce_check_row
-    to pin the hscc_dir forwarding at the call site, and a registry that
-    captured function objects at import time would make that patch a no-op."""
+    to pin what reaches the row at the call site, and a registry that captured
+    function objects at import time would make that patch a no-op."""
     seen = {}
 
-    def builder(injected=None, hscc_dir=None):
-        seen["hscc_dir"] = hscc_dir
+    def builder(injected=None, **ctx):
+        # ``**ctx``: record what the wiring actually handed this row, not the
+        # builder's own parameter defaults.
+        seen.update(ctx)
         seen["injected"] = injected
         return doctor.Check("kanban enforce (paused-board hold)", True,
                             detail="swapped row", fix="", fatal=False)
@@ -368,10 +370,37 @@ def test_row_fn_path_resolves_the_hook_per_call(tmp_path, monkeypatch):
                     "fatal": False, "detail": "seam", "fix": ""}
     res = _doctor(tmp_path, monkeypatch, _kanban_enforce_check=seam)
     assert seen["injected"] is seam
-    assert seen["hscc_dir"] == str(tmp_path / ".hscc")
+    # t_be690204: this row declares row_kwargs=(), so the per-call resolution
+    # must deliver the seam WITHOUT a root (it used to assert the opposite).
+    assert "hscc_dir" not in seen
     row = {c["name"]: c for c in res["checks"]}[
         "kanban enforce (paused-board hold)"]
     assert row["detail"] == "swapped row"
+
+
+def test_the_daemon_state_rows_declare_no_root_context():
+    """The wiring half of t_be690204, stated as a registry fact.
+
+    Every writer of what these two rows read resolves from HOME — the waker's
+    config, the ``orch_waker``/``kanban_enforce`` stream stamps through
+    ``state.STATE_DIR``, the paused-policy document through
+    ``kanban_pause.STATE_PATH``, the pid through ``daemon_ops`` — and none of
+    them reads ``HSCC_DIR``. A root taken from that variable is therefore not a
+    relocation of this state; it is a read of a directory nothing writes to, and
+    the row reported absence as a fact about a live host (a pid file at that root
+    even made it a fatal RED).
+
+    ``row_kwargs=()`` is the difference between "unwired" and "un-wireable":
+    ``render_rows`` filters the context by declaration, so run_doctor cannot hand
+    these rows a root even by accident. t_adb66608 did exactly this for the
+    cron-watcher ledger row; the call-site half lives in
+    test_doctor_orch_waker.py / test_doctor_kanban_enforce.py.
+    """
+    by_key = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}
+    for key in ("orch_waker", "kanban_enforce"):
+        assert by_key[key].row_kwargs == (), (
+            f"the {key} row must declare no per-row context: a handed root "
+            "splits the reader from writers that resolve from HOME (t_be690204)")
 
 
 def test_budget_row_gets_hermes_home_and_no_hscc_dir(tmp_path, monkeypatch):

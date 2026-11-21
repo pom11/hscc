@@ -1373,11 +1373,21 @@ def _orch_waker_check_row(injected=None, hscc_dir=None) -> "Check":
     (a human CLI run), and the in-suite refusal (pytest with no seam — never a
     real read of the operator's daemon state). A module that cannot be imported
     at all reports itself UNVERIFIABLE rather than vanishing from the list, the
-    same honesty rule as the notifier-mask check. ``hscc_dir`` is forwarded to
-    the real check exactly like ``doctor_notifier_mask.check`` takes it: a
-    sandboxed bootstrap (doctor is Stage 1, HOME stays real there) must read
-    the SANDBOX's ~/.hscc root — config, stream state and daemon.pid — or the
-    check fires a fatal verdict over the operator's live daemon.
+    same honesty rule as the notifier-mask check.
+
+    ``hscc_dir`` is accepted because every feature row's function takes the same
+    shape, and is deliberately NOT forwarded (t_be690204). Every writer of what
+    this row reads resolves from ``$HOME`` — the waker's config
+    (``orch_waker.DEFAULT_CONFIG_PATH``), its stream stamp
+    (``state.STATE_DIR``) and ``daemon.pid`` (``daemon_ops``) — and not one of
+    them reads ``HSCC_DIR`` from the environment. A row handed the ambient root
+    was reading a directory nothing can write to and answering "the daemon is
+    not running" about a daemon that had ticked seconds ago (and FATAL, once a
+    pid file happened to sit at that root — both measured). The registry entry
+    for this row declares no ``row_kwargs``, so the wiring itself cannot hand a
+    root to a row that must not choose one; ``orch_waker.doctor_check`` keeps the
+    parameter purely as t_e9b0f048's caller-threaded seam, and refuses a redirect
+    onto a root that has never held a waker artefact.
     """
     if injected is not None:
         res = injected()
@@ -1392,7 +1402,9 @@ def _orch_waker_check_row(injected=None, hscc_dir=None) -> "Check":
                          fix="Deploy the hscc_daemon plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = waker.doctor_check(hscc_dir=hscc_dir)
+        # No hscc_dir: the waker's root is its writers' root, not this
+        # process's environment (t_be690204, above).
+        res = waker.doctor_check()
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 
@@ -1623,9 +1635,21 @@ def _kanban_enforce_check_row(injected=None, hscc_dir=None) -> "Check":
     Three sources, same trust order as the waker row: an injected callable
     (tests), the real :func:`hscc_daemon.kanban_pause.doctor_check` (a human
     CLI run), and the in-suite refusal (pytest with no seam — never a real
-    read of the operator's daemon state). ``hscc_dir`` is forwarded exactly
-    like ``doctor_notifier_mask.check`` takes it, so a sandboxed bootstrap
-    (doctor is Stage 1, HOME stays real) reads the SANDBOX's ~/.hscc root.
+    read of the operator's daemon state).
+
+    ``hscc_dir`` is accepted because every feature row's function takes the same
+    shape, and is deliberately NOT forwarded (t_be690204). Both files this row
+    reads are written by writers that resolve from ``$HOME`` — the paused-policy
+    document (``kanban_pause.STATE_PATH``) and the ``kanban_enforce`` stream
+    stamp (``state.STATE_DIR``), plus ``daemon.pid`` from ``daemon_ops`` — and
+    none of them reads ``HSCC_DIR``. A row handed the ambient root read a
+    directory nothing can write to and answered "the daemon is not running —
+    nothing enforces" about a daemon whose enforce stream had stamped seconds
+    ago (and FATAL, once a pid file happened to sit there — both measured). The
+    registry entry declares no ``row_kwargs``, so the wiring cannot hand a root
+    to a row that must not choose one; ``kanban_pause.doctor_check`` keeps the
+    parameter purely as t_e9b0f048's caller-threaded seam, and refuses a redirect
+    onto a root that has never held an enforcer artefact.
     """
     if injected is not None:
         res = injected()
@@ -1641,7 +1665,9 @@ def _kanban_enforce_check_row(injected=None, hscc_dir=None) -> "Check":
                          fix="Deploy the hscc_daemon plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = kp.doctor_check(hscc_dir=hscc_dir)
+        # No hscc_dir: the enforcer's root is its writers' root, not this
+        # process's environment (t_be690204, above).
+        res = kp.doctor_check()
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 
@@ -1994,7 +2020,17 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # running, this stream never stamped".
     doctor_rows.FeatureCheckRow(
         key="orch_waker", seam_kwarg="_orch_waker_check",
-        row_fn="_orch_waker_check_row"),
+        row_fn="_orch_waker_check_row",
+        # NO row_kwargs — deliberately not even the default "hscc_dir"
+        # (t_be690204). Everything this row reads is written by a writer that
+        # resolves from HOME (waker config, stream stamp through
+        # state.STATE_DIR, daemon.pid), and none of them sees HSCC_DIR, so a row
+        # handed the ambient root reads a directory nothing can write to and
+        # calls a live waker "not running" — RED once a pid file sits there.
+        # Declaring no context makes the writer/reader split un-wireable rather
+        # than merely unwired today (the shape t_adb66608 proved for the cron
+        # row).
+        row_kwargs=()),
     # GAP-B-4 (audit B): the dep_pr / escalate Hermes-cron watchers run OUTSIDE
     # the daemon, so no stream notices when they stop firing — the dep-watcher
     # once failed 17 consecutive daily runs unnoticed (t_3aadd2c0). Each pass
@@ -2035,7 +2071,13 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # stream never stamped).
     doctor_rows.FeatureCheckRow(
         key="kanban_enforce", seam_kwarg="_kanban_enforce_check",
-        row_fn="_kanban_enforce_check_row"),
+        row_fn="_kanban_enforce_check_row",
+        # NO row_kwargs — same reason as the orch-waker row above
+        # (t_be690204): the paused-policy document and the kanban_enforce stamp
+        # are written by HOME-bound writers (kanban_pause.STATE_PATH,
+        # state.STATE_DIR) that never see HSCC_DIR, so a root taken from the
+        # environment is a root no pause can ever reach.
+        row_kwargs=()),
     # M3 (t_7b55db57): does the machine-wide kanban current board still point
     # at the main orchestrator's board? Bootstrap creates it and switches to it
     # so board-less cards land there, never on a project board; this row flags

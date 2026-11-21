@@ -154,16 +154,37 @@ def test_refusal_leaves_the_canary_daemon_state_untouched(tmp_path, monkeypatch)
     assert canary_pid.read_text() == "999999"
 
 
-def test_run_doctor_forwards_the_hscc_dir_env_to_the_row_builder(
+def test_run_doctor_hands_the_enforce_row_no_root_at_all(
         tmp_path, monkeypatch):
-    """Call-site pin: the row builder must receive HSCC_DIR, not just be able
-    to take it. Bootstrap's sandbox keeps HOME real and relocates only
-    HSCC_DIR, so a builder that dropped this kwarg would read the OPERATOR's
-    ~/.hscc from inside a sandboxed Stage-1 run (the historical doctor bug)."""
+    """Call-site pin, INVERTED by t_be690204: the row builder must NOT be handed
+    a root for this subject.
+
+    This test used to pin the opposite ("the builder must receive HSCC_DIR, or a
+    sandboxed Stage-1 run reads the OPERATOR's ~/.hscc"). That was the rationale
+    t_adb66608 rejected for the watcher ledger, and it fails the same way here:
+    a Stage-1 sandbox relocates HSCC_DIR while HOME stays real, and BOTH writers
+    of what this row reads — the paused-policy document through
+    ``kanban_pause.STATE_PATH`` and the ``kanban_enforce`` stamp through
+    ``state.STATE_DIR`` — resolve from HOME. So the sandbox root is a directory
+    the enforcer has never written to, and the honest reading of it is not the
+    operator's enforcer, it is an empty tree: the row answered "nothing paused,
+    the daemon is not running" about a stream that had stamped seconds ago, and
+    a pid file at that root made it a fatal RED.
+
+    A genuinely sandboxed daemon that owns its own config and stamps is still
+    readable — ``kanban_pause.doctor_check`` obeys a caller-threaded root that
+    holds its own artefacts (t_e9b0f048's seam, pinned in
+    test_kanban_pause_enforce_stream.py). What is now impossible is handing this
+    row a root it cannot be wired to: ``row_kwargs=()`` means the context never
+    even reaches the builder.
+    """
     seen = {}
 
-    def builder(injected=None, hscc_dir=None):
-        seen["hscc_dir"] = hscc_dir
+    def builder(injected=None, **ctx):
+        # ``**ctx`` so the record shows what the WIRING handed the row, not the
+        # builder's own defaults: a signature-level ``hscc_dir=None`` would make
+        # "no root was passed" indistinguishable from "a root was passed".
+        seen.update(ctx)
         seen["injected"] = injected
         return doctor.Check(CHECK_NAME, True, detail="stub row", fix="",
                             fatal=False)
@@ -171,7 +192,9 @@ def test_run_doctor_forwards_the_hscc_dir_env_to_the_row_builder(
     monkeypatch.setattr(doctor, "_kanban_enforce_check_row", builder)
     injected = _row()
     _doctor(tmp_path, monkeypatch, _kanban_enforce_check=injected)
-    assert seen["hscc_dir"] == str(tmp_path / ".hscc")
+    assert "hscc_dir" not in seen, (
+        "the kanban-enforce row declares row_kwargs=() — the wiring itself must "
+        "not be able to hand it a root, not merely choose to ignore one")
     assert seen["injected"] is injected, "the seam must be forwarded verbatim"
 
 
@@ -215,9 +238,14 @@ def test_row_builder_reports_unverifiable_when_module_missing(tmp_path,
 
 def test_row_builder_uses_the_real_check_outside_pytest(tmp_path, monkeypatch):
     """The human-CLI path: with the pytest branch forced off, the row delegates
-    to kanban_pause.doctor_check(hscc_dir=...) — the injected stub proves the
-    delegation AND that the HSCC_DIR pass-through is wired, so no real policy
-    file, stream file or pid file is read."""
+    to kanban_pause.doctor_check() — and hands it NO root. The stub proves both
+    halves at once: the delegation happened, and the root the caller named was
+    DELIBERATELY dropped (t_be690204). Passing ``hscc_dir`` rather than omitting
+    it is the point: the parameter is still accepted — feature rows have one
+    shape — it just cannot reach the check, because both writers of what this
+    row reads resolve from HOME and never see HSCC_DIR. No real policy file,
+    stream file or pid file is read either way.
+    """
     calls = []
 
     def fake_check(hscc_dir=None):
@@ -231,7 +259,8 @@ def test_row_builder_uses_the_real_check_outside_pytest(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "_load_kanban_pause", lambda: KP())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     row = doctor._kanban_enforce_check_row(None, hscc_dir="/sandbox/.hscc")
-    assert calls == ["/sandbox/.hscc"] and row.detail == "from the real check"
+    assert calls == [None], "the env-derived root must not reach the check"
+    assert row.detail == "from the real check"
     assert row.ok is True and row.fatal is False
 
 
