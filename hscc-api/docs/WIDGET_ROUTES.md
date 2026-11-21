@@ -583,3 +583,13 @@ registered project board + one orphan board) and runs both sides on it:
 `hscc kanban stale --json`, and `/v1/mobile/summary` vs
 `kanban_live.collect()` + `board_status_counts()`. Each asserts equal
 counts/rows and that the orphan board appears in neither answer.
+
+Both sides reach `age_s` through `kanban_live.collect`, which samples its clock
+once per pass (`int(time.time())`), so the file pins ONE instant for every
+`collect()` in the process (`pinned_collect_clock`, which fills `collect()`'s
+existing `now=` seam): with an unpinned clock the two sides compare two
+wall-clock samples taken milliseconds apart and go red whenever a whole-second
+boundary lands between them (t_0e457f72).
+`test_running_route_parity_survives_a_clock_step` keeps that pin honest — it
+replaces `kanban_live`'s clock with one that steps 1.5 s per call, so the two
+sides can never land in the same second.

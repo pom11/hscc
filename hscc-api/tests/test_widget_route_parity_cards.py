@@ -4,6 +4,10 @@ One fixture board set is read twice — once through the CLI verbs
 (``hscc cards monitor`` / ``hscc kanban monitor|blocked|stale``) and once over
 the real HTTP routes — and the numbers/rows must be equal. A second, UNREGISTERED
 board is present in the fake Hermes lib and must appear in neither answer.
+
+Both reads share ONE pinned instant (`pinned_collect_clock`): `age_s` is derived
+from `collect()`'s single clock sample, and the two doors sample it
+independently, so an unpinned clock makes the exact-equality assertions a race.
 """
 
 import contextlib
@@ -117,6 +121,35 @@ class _FakeKb:
         yield self.conns[board]
 
 
+@pytest.fixture(autouse=True)
+def pinned_collect_clock(monkeypatch):
+    """ONE pinned instant for every ``collect()`` pass in the process.
+
+    ``age_s`` is ``collect()``'s ``now_s - created_at``, and ``now_s`` is sampled
+    per call as ``int(time.time())`` (kanban_live.py:378). Both sides of every
+    parity assertion here read the SAME code through two different doors — the
+    CLI verb in-process, the route on the API server's worker thread — so each
+    door samples the wall clock independently, milliseconds apart. When a
+    whole-second boundary falls between the two samples, the two ``int()``
+    truncations differ by one and the exact-equality assertion fails
+    (measured: 4 failing runs in 51 solo runs of this file at 4764ff85).
+
+    ``collect()`` already takes ``now=`` — the seam ``cards_live.Monitor`` and
+    ``test_mobile_summary_equals_collect_board_view`` use — but nothing on the
+    CLI or the route path passes it, so the pin goes at the module attribute
+    both paths look up at call time. Only a MISSING ``now`` is filled: every
+    other argument the callers pass reaches ``collect`` untouched, so a route
+    that collected a different board scope than the CLI would still disagree.
+    """
+    real = kanban_live.collect
+
+    def pinned(*args, **kwargs):
+        kwargs.setdefault("now", NOW)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(kanban_live, "collect", pinned)
+
+
 @pytest.fixture
 def kb(monkeypatch, tmp_path):
     fake = _FakeKb()
@@ -186,6 +219,42 @@ def test_running_route_equals_kanban_monitor(running, token, kb, capsys):
         r["id"] for r in cli["running"]]
     assert payload["tasks"][0]["age_s"] == cli["running"][0]["age_s"]
     assert "junk-unregistered" not in payload["boards"]
+
+
+class _SteppingClock:
+    """A ``time`` stand-in whose ``time()`` jumps past whole-second marks.
+
+    Only ``time()`` is needed on this path — the one other ``time.*`` use inside
+    ``kanban_live`` is ``run_live``'s ``sleep``, which no test here enters.
+    """
+
+    def __init__(self, start, step):
+        self.t = start
+        self.step = step
+
+    def time(self):
+        value, self.t = self.t, self.t + self.step
+        return value
+
+
+def test_running_route_parity_survives_a_clock_step(running, token, kb, capsys,
+                                                    monkeypatch):
+    """The parity assertion holds even when the wall clock crosses a second.
+
+    The flake this pins (t_0e457f72) is a ~1 in 10 race, so the regression test
+    cannot wait for it: it replaces ``kanban_live``'s clock with one that steps
+    1.5 s per call, so the CLI's ``collect()`` pass and the route's can never
+    land in the same second. Without the pinned instant in
+    ``pinned_collect_clock`` the two sides of
+    ``test_running_route_equals_kanban_monitor``'s exact-equality assertion land
+    seconds apart and it goes red — that red is the proof the pin is
+    load-bearing (verified at 4764ff85, the pre-fix sha).
+    """
+    monkeypatch.setattr(kanban_live, "time",
+                        _SteppingClock(1_800_000_000.9, 1.5))
+    cli = _cli_json(capsys, ["monitor", "--json"])
+    payload = _get(running, token, "/v1/kanban/running")
+    assert cli["running"][0]["age_s"] == payload["tasks"][0]["age_s"] == 9000
 
 
 def test_blocked_route_equals_kanban_blocked(running, token, kb, capsys):
