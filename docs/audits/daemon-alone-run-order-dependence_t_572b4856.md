@@ -567,7 +567,7 @@ three stamps in the operator's **live** `~/.hscc/state/` (all three carried
 `dep_pr_watcher.json` and `alone_sweep_gate.json` did not exist before and do not exist
 now. `escalate_watcher.json` did exist — the genuine 09:45 pass — and the probe
 overwrote it; it was deleted rather than left carrying fabricated fields, and the
-real `*/15` job re-stamped it at `10:15:11.057565+00:00`, in the watcher's own
+real `*/15` job re-stamped it at `08:15:11.057565+00:00`, in the watcher's own
 222-byte schema and with no `probe` key, so the row self-healed on schedule. No other
 file was touched, and `grep '"probe"' ~/.hscc/state/*.json` is empty.
 
