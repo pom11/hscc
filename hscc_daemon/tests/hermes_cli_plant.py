@@ -176,6 +176,7 @@ _ROOT_ENV = None                     # $HERMES_AGENT_PATH the cache was built fo
 _ROOTS = ("", "")                    # (raw, realpath) spellings
 _REALPATH_MEMO = {}
 _VERDICT_CACHE = {}                  # root -> {module object: bool} (identity-keyed)
+_INTERP_ROOTS = None                 # the interpreter's own installation, once
 
 
 def _realpath(path):
@@ -183,6 +184,35 @@ def _realpath(path):
     if hit is None:
         hit = _REALPATH_MEMO[path] = os.path.realpath(path)
     return hit
+
+
+def _interpreter_roots():
+    """realpaths of the interpreter's OWN installation — never residue.
+
+    This matters more than it looks on the canonical runner: hermes' venv lives
+    *inside* the agent tree (``~/.hermes/hermes-agent/venv``), so every third-party
+    package that interpreter boots with — ``rich``, ``typer``, ``pydantic`` — is
+    literally under ``agent_tree_root()``. A rule that called those "residue"
+    evicted them from ``sys.modules`` after every test, and the next test then
+    re-imported a second copy of the same package while the first was still
+    referenced: ``rich.panel`` rendering a title against a freshly-imported
+    ``rich.text`` raised ``TypeError: Text.append() takes from 2 to 3 positional
+    arguments but 24 were given`` and took 5 CLI files / 72 tests down on the
+    canonical interpreter only.
+    """
+    global _INTERP_ROOTS
+    if _INTERP_ROOTS is None:
+        cands = [sys.prefix, getattr(sys, "base_prefix", sys.prefix),
+                 getattr(sys, "exec_prefix", sys.prefix)]
+        try:
+            import site
+            cands += list(site.getsitepackages())
+            cands.append(site.getusersitepackages())
+        except Exception:  # pragma: no cover — a stripped interpreter has no site
+            pass
+        _INTERP_ROOTS = tuple(sorted(
+            {_realpath(os.path.expanduser(str(c))) for c in cands if c}))
+    return _INTERP_ROOTS
 
 
 def _agent_tree_roots():
@@ -218,23 +248,37 @@ def agent_tree_root():
     return _agent_tree_roots()[1]
 
 
-def is_agent_tree_path(path, root=None):
-    """True for a path inside hermes' REAL agent tree (never a temp-root plant)."""
+def is_agent_tree_path(path, root=None, interp_roots=None):
+    """True for a path inside hermes' REAL agent tree (never a temp-root plant).
+
+    Excludes the interpreter's own installation: on the canonical runner the venv
+    sits inside the agent tree, so ``site-packages`` must not read as residue —
+    see ``_interpreter_roots``.
+
+    ``root`` / ``interp_roots`` are injectable so a test can exercise both halves
+    against a synthetic tree WITHOUT repatching the module globals: those are read
+    by this module's autouse fixture during its own teardown, and a monkeypatched
+    global is still patched while that runs.
+    """
     origin = str(path or "")
     if not origin:
         return False
     raw, real = _agent_tree_roots()
-    r = root or real
+    r = str(root or real)
     # No syscall unless the string could already be under one of the trees. This
     # rejects every stdlib and site-packages path, which is >99% of the calls.
-    if not (origin.startswith(r) or origin.startswith(raw)
-            or origin.startswith(real)):
+    if not any(origin.startswith(p) for p in (r, raw, real)):
         return False
     resolved = _realpath(origin)
-    return resolved == r or resolved.startswith(r + os.sep)
+    if not (resolved == r or resolved.startswith(r + os.sep)):
+        return False
+    prefixes = _interpreter_roots() if interp_roots is None else tuple(
+        str(p) for p in interp_roots)
+    return not any(resolved == p or resolved.startswith(p + os.sep)
+                   for p in prefixes)
 
 
-def _is_agent_tree_module(mod, r):
+def _is_agent_tree_module(mod, r, interp_roots=None):
     """Verdict for one module object, cached by identity (see the note above)."""
     cache = _VERDICT_CACHE.setdefault(r, {})
     try:
@@ -242,13 +286,13 @@ def _is_agent_tree_module(mod, r):
     except TypeError:                      # unhashable module object
         verdict = None
     if verdict is None:
-        verdict = is_agent_tree_path(getattr(mod, "__file__", ""), r)
+        verdict = is_agent_tree_path(getattr(mod, "__file__", ""), r, interp_roots)
         if not verdict:
             search = getattr(mod, "__path__", None)
             if isinstance(search, str):
                 search = [search]
             verdict = bool(search) and any(
-                is_agent_tree_path(p, r) for p in search)
+                is_agent_tree_path(p, r, interp_roots) for p in search)
         try:
             cache[mod] = verdict
         except TypeError:
@@ -256,7 +300,7 @@ def _is_agent_tree_module(mod, r):
     return verdict
 
 
-def resident_under_agent_tree(root=None):
+def resident_under_agent_tree(root=None, interp_roots=None):
     """Names of resident modules loaded from hermes' real tree.
 
     Covers packages with no ``__file__`` (their ``__path__`` is what makes
@@ -264,9 +308,9 @@ def resident_under_agent_tree(root=None):
     matters) and skips a ``__path__`` that is a plain string, which would
     otherwise iterate as characters.
     """
-    r = root or agent_tree_root()
+    r = str(root or agent_tree_root())
     return [name for name, mod in list(sys.modules.items())
-            if mod is not None and _is_agent_tree_module(mod, r)]
+            if mod is not None and _is_agent_tree_module(mod, r, interp_roots)]
 
 
 def restore_agent_tree_cache(root, saved):

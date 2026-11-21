@@ -359,3 +359,72 @@ def test_purging_hands_back_the_pre_test_cache_by_identity():
     finally:
         for name in ("hermes_cli._t2be_kept", "hermes_cli._t2be_new"):
             sys.modules.pop(name, None)
+
+
+# ── the interpreter's own installation is NOT residue (t_572b4856) ────────────
+# The first cut of the agent-tree rule classified by prefix alone. On the
+# canonical runner the venv lives INSIDE the agent tree
+# (~/.hermes/hermes-agent/venv/lib/python3.14/site-packages), so `rich`, `typer`
+# and friends read as "hermes residue" and were evicted after every test. The
+# next test re-imported a second copy while the first was still referenced and
+# rich blew up inside Panel rendering — 5 CLI files / 72 tests, canonical only.
+
+
+def test_the_agent_tree_rule_excludes_a_venv_nested_in_the_tree(tmp_path):
+    """Synthetic version: a `<tree>/venv/lib/pythonX/site-packages` package is
+    the interpreter's own, a `<tree>/hermes_cli` module is residue.
+
+    Both halves are asserted against the SAME synthetic tree, so the last line is
+    the mutation probe built into the pin: with the interpreter exclusion removed
+    (`interp_roots=()`) the venv path reads as residue again, which is exactly the
+    bug this test exists to keep dead.
+    """
+    from hscc_daemon.tests import hermes_cli_plant as plant
+
+    root = tmp_path / "hermes-agent"
+    site_pkgs = root / "venv" / "lib" / "python3.14" / "site-packages" / "rich"
+    site_pkgs.mkdir(parents=True)
+    (site_pkgs / "__init__.py").write_text("")
+    src = root / "hermes_cli"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+
+    r = str(root.resolve())
+    nested_venv = (str(root.resolve() / "venv"),)
+
+    assert plant.is_agent_tree_path(str(src / "__init__.py"), root=r,
+                                    interp_roots=nested_venv) is True
+    assert plant.is_agent_tree_path(str(site_pkgs / "__init__.py"), root=r,
+                                    interp_roots=nested_venv) is False
+    assert plant.is_agent_tree_path(str(site_pkgs / "__init__.py"), root=r,
+                                    interp_roots=()) is True
+    # A package is judged by __path__ too — that is what makes submodules
+    # resolvable, so it is the half that must not read as residue either.
+    pkg = types.ModuleType("rich")
+    pkg.__path__ = [str(site_pkgs)]
+    assert plant._is_agent_tree_module(pkg, r, nested_venv) is False
+
+
+def test_installed_packages_are_never_reported_as_residue():
+    """The live version of the same rule, on the interpreter actually running.
+
+    Non-vacuous exactly where the bug was possible: a venv nested under the agent
+    tree (the canonical layout). On a sibling interpreter whose prefix is outside
+    the tree there is no such overlap, so it says so instead of passing quietly.
+    """
+    from hscc_daemon.tests import hermes_cli_plant as plant
+
+    root = plant.agent_tree_root()
+    nested = str(sys.prefix) == root or str(sys.prefix).startswith(root + os.sep)
+    if not nested:
+        pytest.skip(f"sys.prefix {sys.prefix!r} is not inside the agent tree "
+                    f"{root!r} — no nested-venv overlap to check here")
+    under_prefix = {n for n, m in list(sys.modules.items())
+                    if getattr(m, "__file__", "")
+                    and str(m.__file__).startswith(sys.prefix + os.sep)}
+    assert under_prefix, "no installed package resident? the sweep would be vacuous"
+    reported = set(plant.resident_under_agent_tree())
+    assert reported & under_prefix == set(), (
+        f"the interpreter's own packages read as hermes residue: "
+        f"{sorted(reported & under_prefix)[:5]}")
+
