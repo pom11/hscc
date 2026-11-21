@@ -305,6 +305,21 @@ if len(paths) > 20:
   fi
 fi
 
+hdr "Install: memori SDK in Hermes environments (memory provider)"
+# Hermes runs from package-manager environments under $HERMES_HOME/installs that
+# never carry the memori SDK, so the memori_byodb memory provider failed to start
+# in every profile (t_4b0e7956). ensure_memori_sdk.py installs it, --no-deps and
+# pinned, wherever it is missing; a Hermes update that rebuilds an environment is
+# repaired by the next bootstrap. A failure only warns: memory is degraded, the
+# rest of the install is not.
+if $DRY_RUN; then
+  plan "memori SDK: $PYBIN $BOOT_DIR/ensure_memori_sdk.py --apply (uv pip install --no-deps into each $HERMES_HOME/installs/*/environments/*/venv missing it)"
+elif MEM_JSON=$(HERMES_HOME="$HERMES_HOME" "$PYBIN" "$BOOT_DIR/ensure_memori_sdk.py" --apply 2>&1); then
+  ok "memori SDK present in every Hermes environment"
+else
+  warn "memori SDK install failed in some Hermes environment — memory provider stays down there: $MEM_JSON"
+fi
+
 hdr "Install: hscc CLI entry point (into the Hermes venv)"
 # The `hscc` CLI reads the Hermes runtime from the SAME interpreter: the
 # project chat/sessions/ask verbs import `hermes_cli`/`hermes_state` (which live
