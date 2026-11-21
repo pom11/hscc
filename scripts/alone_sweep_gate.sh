@@ -62,6 +62,12 @@
 #                  The defaults are `$HOME`-relative, and a Hermes cron job may run
 #                  with a bound home that is not the operator's shell HOME, so the
 #                  installer resolves and bakes this rather than leaving it to 04:30.
+# Liveness: every non-preflight pass stamps through
+#   hscc_daemon/cron_watchers.py (stream `alone_sweep_gate`, roster row nightly
+#   86400s), so `hscc doctor`'s "cron watchers" row sees a nightly that stops
+#   firing — and sees one that fires and comes back RED, which stamps ok=False.
+#   The stamp is best-effort: losing it costs the pass its liveness signal, never
+#   its verdict.
 #
 # Exit codes — the distinction the CI header insists on ("a leg that could not
 # run at all fails EITHER way"):
@@ -106,11 +112,84 @@ PYTHONS="$CLI_PYTHONS${HSCC_ALONE_SWEEP_PYTHONS:+ $HSCC_ALONE_SWEEP_PYTHONS}"
 
 SWEEP="$REPO/docs/audits/support/t_572b4856/alone_sweep.sh"
 
+# ── liveness stamp ──────────────────────────────────────────────────────────
+# This is a Hermes cron job whose verdict otherwise lives only in $OUT, so a
+# nightly that stops firing is discovered by nobody — the exact shape the cron
+# watchers' roster exists for (the dep watcher failed 17 consecutive daily runs,
+# t_3aadd2c0). Every pass that is not a preflight stamps through
+# ``hscc_daemon/cron_watchers.py``, the ONE liveness stamp format on this host:
+# loaded BY PATH from this checkout (a deployed plugin copy must not stamp
+# through older code — t_77db1513), read back by the doctor's "cron watchers"
+# row. Cadence/window live in that module's WATCHERS roster, not here.
+#
+# THE VERDICT RIDES INSIDE THE STAMP; it does not replace it. The row is a
+# LIVENESS row ("did the job fire?"), and a pass that was not clean stamps
+# ok=False — so `stale`/`never-ran` mean "the nightly stopped firing" and
+# `failing` means "it fired and the sweep said RED / NOT MEASURED". A red sweep
+# can never render as a healthy watcher (t_13a70290), and a green pass advances
+# the stamp exactly like the watchers' idle passes do.
+#
+# Best-effort by contract: a stamp failure costs the pass its liveness signal,
+# never its verdict — printed, never swallowed (same rule as the two python
+# watchers). A preflight measured nothing, so it stamps nothing.
+STAMP_STREAM="alone_sweep_gate"
+GATE_VERDICT="not-measured"
+
+_stamp() {   # _stamp <gate-rc> <note-for-the-warn-line>
+  [ "$PREFLIGHT" = 1 ] && return 0
+  local rc="${1:-2}" note="${2:-}" py="" mod="" cand
+  for cand in ${AVAIL:-}; do py="$cand"; break; done
+  [ -n "$py" ] || py="$(command -v python3 2>/dev/null || true)"
+  for cand in "$HERE/../hscc_daemon/cron_watchers.py" \
+              "$REPO/hscc_daemon/cron_watchers.py" \
+              "$HOME/.hermes/plugins/hscc_daemon/cron_watchers.py"; do
+    [ -f "$cand" ] && { mod="$cand"; break; }
+  done
+  if [ -z "$py" ] || [ -z "$mod" ]; then
+    echo "   (liveness stamp SKIPPED: no interpreter or no hscc_daemon/cron_watchers.py — the doctor cannot see this pass)" >&2
+    return 0
+  fi
+  # Fields are argv pairs, never a hand-built JSON string: a report path with a
+  # quote in it must not corrupt the stamp.
+  if ! "$py" - "$mod" "$STAMP_STREAM" "$rc" "$note" \
+        gate_rc "$rc" verdict "$GATE_VERDICT" interpreters "${RAN:-0}" \
+        head "${SHA:-NO-GIT}" report "$OUT" <<'PY'
+import importlib.util
+import sys
+
+mod_path, stream, rc, note = (sys.argv[1], sys.argv[2], int(sys.argv[3]),
+                              sys.argv[4])
+spec = importlib.util.spec_from_file_location("hscc_cron_watchers", mod_path)
+if spec is None or spec.loader is None:
+    raise SystemExit(1)
+cw = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cw)
+pairs = sys.argv[5:]
+fields = dict(zip(pairs[::2], pairs[1::2]))
+for key in ("gate_rc", "interpreters"):
+    try:
+        fields[key] = int(fields[key])
+    except (KeyError, ValueError):
+        pass
+if rc == 0:
+    landed = cw.stamp(stream, **fields)
+else:
+    landed = cw.stamp_failure(stream, note, **fields)
+sys.exit(0 if landed else 1)
+PY
+  then
+    echo "   (liveness stamp WRITE FAILED — the doctor's cron-watchers row will not see this pass)" >&2
+  else
+    echo "   liveness: stamped $STAMP_STREAM verdict=$GATE_VERDICT (hscc doctor -> 'cron watchers')"
+  fi
+  return 0
+}
+
 # ── preflight: the wiring that would otherwise fail as a silent green ───────
 # Every one of these is a way the gate could report nothing and look fine: wrong
 # repo, sweep tooling renamed away, a leg dir with no tests, interpreters that
 # are all missing. Checked before the lock so a broken install costs nothing.
-fail2() { echo "GATE NOT MEASURED: $*" >&2; exit 2; }
+fail2() { _stamp 2 "GATE NOT MEASURED: $*"; echo "GATE NOT MEASURED: $*" >&2; exit 2; }
 
 [ -f "$REPO/scripts/run_tests.sh" ] || fail2 "'$REPO' has no scripts/run_tests.sh — pass --repo (or set HSCC_ALONE_SWEEP_REPO) with the checkout to measure"
 [ -x "$SWEEP" ] || [ -f "$SWEEP" ] || fail2 "the sweep tooling is missing at docs/audits/support/t_572b4856/alone_sweep.sh — the gate has no measurement to route"
@@ -202,9 +281,18 @@ echo "$dir" > "$OUT/latest.txt"          # last pass, whatever the verdict
 echo
 if [ "$WORST" = "0" ]; then
   echo "GATE GREEN: every file answers alone exactly as it does inside the leg."
+  GATE_VERDICT="green"
+  STAMP_NOTE=""
 elif [ "$WORST" = "1" ]; then
-  echo "GATE RED: at least one file answers alone differently than inside the leg (or its leg is red). See the logs above and $OUT/latest.txt"
+  STAMP_NOTE="GATE RED: at least one file answers alone differently than inside the leg (or its leg is red). See the logs above and $OUT/latest.txt"
+  echo "$STAMP_NOTE"
+  GATE_VERDICT="red"
 else
-  echo "GATE NOT MEASURED: see the lines above — this is not a pass."
+  STAMP_NOTE="GATE NOT MEASURED: see the lines above — this is not a pass. Report dir: $OUT/latest.txt"
+  echo "$STAMP_NOTE"
+  GATE_VERDICT="not-measured"
 fi
+# The stamp is the LAST thing a pass does, so it reports what the whole pass
+# concluded — including the sweep-side failures that left WORST at 2.
+_stamp "$WORST" "$STAMP_NOTE"
 exit "$WORST"
