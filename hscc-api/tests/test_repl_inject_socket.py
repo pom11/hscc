@@ -442,3 +442,22 @@ def test_real_binary_under_pytest_never_probes(sandbox, monkeypatch):
 
     assert repl_inject.tmux_socket_args() == ()
     assert sandbox.calls.all() == [], "discovered/execed with the real binary"
+
+
+def test_real_binary_under_pytest_does_not_even_scan(sandbox, monkeypatch):
+    """The pytest short-circuit must not even LOOK at the filesystem.
+
+    The exec guard would already refuse a probe, so a resolution that skipped
+    this short-circuit would still end up passing no `-S` — indistinguishable by
+    outcome, which is exactly how a guard becomes dead code. What is not
+    acceptable is a suite run walking the operator's directories (and paying a
+    real exec per candidate) only to conclude nothing, so the pin is on the scan
+    itself.
+    """
+    scans = []
+    monkeypatch.setattr(repl_inject, "discover_tmux_sockets",
+                        lambda env=None: scans.append(1) or [])
+    monkeypatch.setattr(repl_inject, "TMUX_BIN", "tmux")
+
+    assert repl_inject.tmux_socket_args() == ()
+    assert scans == [], "discovery walked the filesystem with the real binary"
