@@ -25,7 +25,9 @@ Fix shape deliberately copied from the daemon streams, not invented:
   * Every pass calls :func:`stamp`, which stamps through the daemon's OWN
     ``state.write_state()`` -- same files under ``~/.hscc/state``, same
     ``timestamp`` field, same atomic tmp+replace, same ``persist_disabled()``
-    honour. There is exactly ONE liveness stamp format on this host.
+    honour. There is exactly ONE liveness stamp format on this host, and ONE
+    root for it: :func:`_dirs` resolves the stamp dir for the writes and the
+    reads alike, so no call can put a stamp somewhere its reader will not look.
   * The stamp moves on EVERY pass -- idle passes included. "Ran, nothing to do"
     must advance it, or a healthy idle watcher is indistinguishable from a dead
     one. A pass whose upstream probe failed still stamps (ok=True) with the
@@ -50,10 +52,13 @@ standalone by path when the package import fails -- ``scripts/`` is not a
 deployed plugin package, and dep_pr_watcher.py deliberately imports nothing
 from ``hscc_daemon`` at module scope).
 
-Test seams: every read accepts an explicit ``directory`` (the stamp dir; the
-install marker lives one level above it), threaded through as a parameter
-rather than resolved from a mutated environment -- see :func:`state_dir` and
-:func:`doctor_check`.
+Test seams: every read AND every write accepts an explicit ``directory`` (the
+stamp dir; the install marker lives one level above it), threaded through as a
+parameter rather than resolved from a mutated environment -- see
+:func:`state_dir`, :func:`_write_dir` and :func:`doctor_check`. The writes take
+it because the reads do: with only one side able to relocate, a ``HSCC_DIR``
+that differs from HOME's default was a root no watcher could ever stamp, and the
+doctor read that as "nobody installed this" (t_e9b0f048).
 """
 
 import datetime
@@ -159,11 +164,12 @@ def state_dir():
     Reads go exactly where ``write_state`` writes -- the ``hscc_daemon.state``
     package module when importable (deployed runtime, and tests that patch its
     STATE_DIR), else the sibling ``state.py`` loaded standalone. Callers that
-    must read a DIFFERENT root (the doctor's ``hscc_dir`` seam: bootstrap
+    must use a DIFFERENT root (the doctor's ``hscc_dir`` seam: bootstrap
     sandboxes keep HOME real and relocate only HSCC_DIR) thread an explicit
-    ``directory`` through :func:`read_stamp` / :func:`verdict` instead of
-    mutating the environment, so a redirected read can never split from where
-    writes landed -- and can never accidentally read the operator's live tree.
+    ``directory`` through :func:`read_stamp` / :func:`verdict` AND through
+    :func:`stamp` / :func:`stamp_failure`, instead of mutating the environment,
+    so a redirected read can never split from where writes landed -- and can
+    never accidentally read the operator's live tree.
     """
     return _state_writer().STATE_DIR
 
@@ -175,6 +181,53 @@ def _dirs(directory=None):
         return directory, os.path.dirname(directory)
     d = state_dir()
     return d, os.path.dirname(d)
+
+
+def _write_dir(directory=None):
+    """Stamp dir for a WRITE, resolved through the SAME :func:`_dirs` the reads
+    use -- so one mechanism picks the root for both sides (t_e9b0f048).
+
+    With no explicit seam it hands back ``None`` and lets ``state.write_state``
+    pick its own ``STATE_DIR``. Resolving the default here too would put a
+    second place in charge of where a stamp lives, which is precisely the
+    invariant this module protects (one writer, one format, one place): the
+    caller that knows a root passes it, everyone else inherits the writer's.
+    """
+    return _dirs(directory)[0] if directory else None
+
+
+#: Keyword names a stamp payload may NEVER carry. ``directory`` is the reason
+#: the list exists: with no parameter of that name, ``stamp(stream,
+#: directory=X)`` put the path in the PAYLOAD, wrote to HOME's ``STATE_DIR``
+#: and returned True -- a stamp advertising a root the writer never touched, and
+#: a relocated ``HSCC_DIR`` no watcher could stamp (t_e9b0f048). The envelope
+#: keys and this module's other parameter names are the same class of mistake:
+#: a keyword that names how the write or the read WORKS is not a field a watcher
+#: owns, and a stamp that can fake ``ok`` or freeze its own ``timestamp`` can
+#: silence a dead watcher just as well as a wrong root can.
+RESERVED_FIELDS = frozenset({
+    "directory", "stream", "error", "schedule",    # this module's parameters
+    "now", "env", "state",                         # verdict() / all_verdicts()
+    "timestamp", "ok", "watcher", "cron_job",      # state.write_state's envelope
+})
+
+
+def _reject_reserved(fn_name, fields):
+    """Refuse a keyword that names a parameter or an envelope key.
+
+    Raises -- and is called BEFORE the never-raises ``try`` in each writer, so
+    ``stamp()`` cannot swallow its own misuse into a bare ``False``. That is the
+    point: a write API reporting success after writing the wrong thing is the
+    silent failure this module exists to remove. The watchers already print the
+    difference (``_stamp_pass`` catches Exception, warns to stderr, keeps
+    working), so a loud TypeError costs a stamp, never a pass.
+    """
+    clash = sorted(RESERVED_FIELDS.intersection(fields))
+    if clash:
+        raise TypeError(
+            f"{fn_name}() refuses reserved stamp field(s) {clash}: they name a "
+            f"parameter of this module's API or a key write_state owns, so "
+            f"they must steer the write, not ride along in the payload")
 
 
 def cadence_s(stream, env=None):
@@ -209,17 +262,25 @@ def _parse_ts(value):
     return ts
 
 
-def stamp(stream, **fields):
+def stamp(stream, directory=None, **fields):
     """Record one watcher pass through the canonical state writer.
 
     Never raises: a stamp failure must never break -- or silently un-stamp --
     the watcher's real work, and silent no-op is exactly the GAP-B-4 failure
     mode this closes. Returns True when the stamp landed, False otherwise
-    (callers print the difference; they never act on it).
+    (callers print the difference; they never act on it). The ONE exception is a
+    reserved keyword (:func:`_reject_reserved`), which raises before any write:
+    misuse of the writer must not be swallowed into the same False as a full
+    disk.
+
+    ``directory`` is the same stamp-root seam every read takes, resolved
+    through :func:`_dirs`, so a relocated ``HSCC_DIR`` is a root a watcher can
+    stamp as well as read (t_e9b0f048). It is a parameter, never a payload key.
 
     Honours ``state.persist_disabled_active()``: inside an ad-hoc ``hscc
     check`` run there is no real pass to record, so nothing is written.
     """
+    _reject_reserved("stamp", fields)
     row = WATCHERS.get(stream)
     if row is None:
         return False
@@ -232,13 +293,13 @@ def stamp(stream, **fields):
             "watcher": stream,
             "cron_job": row["cron_job"],
             **fields,
-        })
+        }, directory=_write_dir(directory))
         return True
     except Exception:
         return False
 
 
-def stamp_failure(stream, error, **fields):
+def stamp_failure(stream, error, directory=None, **fields):
     """Record a pass that raised: the stamp MOVES, ok=False carries the fault.
 
     A watcher that crashes mid-pass is the single most important thing to
@@ -250,19 +311,31 @@ def stamp_failure(stream, error, **fields):
     clean one, so the gate stamps ``verdict="red"`` plus the head it measured and
     the report dir, and the doctor's ``failing`` line names what the operator has
     to go read.
+
+    Same two rules as :func:`stamp`, because a failure stamp is the same writer
+    and must land in the same place: ``directory`` resolves through
+    :func:`_write_dir` (so the red pass overwrites the clean stamp at that root
+    rather than opening a second location), reserved keywords raise, and an
+    ad-hoc ``hscc check`` run under ``persist_disabled()`` stamps NOTHING --
+    including a failure, which used to be the half that was refused by nobody
+    (t_06ead443: an operator's ``hscc check`` could write a `failing` row to the
+    live tree at a moment a clean pass was refused).
     """
+    _reject_reserved("stamp_failure", fields)
     row = WATCHERS.get(stream)
     if row is None:
         return False
     try:
         s = _state_writer()
+        if getattr(s, "persist_disabled_active", lambda: False)():
+            return False
         s.write_state(stream, {
             "ok": False,
             "watcher": stream,
             "cron_job": row["cron_job"],
             "error": str(error)[:400],
             **fields,
-        })
+        }, directory=_write_dir(directory))
         return True
     except Exception:
         return False
