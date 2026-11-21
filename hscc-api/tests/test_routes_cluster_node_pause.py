@@ -376,6 +376,38 @@ def test_the_overlay_root_is_the_server_root(running, token, monkeypatch,
     assert seen and set(seen) == {hscc_dir}
 
 
+def test_a_request_with_no_named_root_reads_no_overlay_and_still_answers(
+        monkeypatch):
+    """No root named for the request → tag nothing, guess nothing, do not raise.
+
+    The direction that matters: a context-less caller must NOT be served the
+    default ``~/.hscc``, because that is the root-split bug class — a reader
+    pointed at a tree the caller's writer can never have written. And this is
+    the route the apps poll as their liveness probe, so a missing context is
+    not allowed to become a 500 either.
+    """
+    import types
+
+    calls = []
+    monkeypatch.setattr(routes_cluster, "_backing_node_pauses",
+                        lambda directory=None: calls.append(directory) or {
+                            PARKED: {"reason": "r", "since": "s"}})
+
+    assert routes_cluster._pause_overlay_for(None) == {}
+    assert routes_cluster._pause_overlay_for(
+        types.SimpleNamespace(hscc_dir=None)) == {}
+    assert calls == [], "a request with no root must not read one"
+
+    import health_cache
+    health_cache.record({"ok": True, "unverified": [], "checks": []})
+    monkeypatch.setattr(routes_cluster, "_backing_verify",
+                        lambda: pytest.fail("no verify expected"))
+    status, payload = routes_cluster.handle_health(None, None, {}, None)
+    assert status == 200
+    assert payload["paused_nodes"] == []
+    health_cache.reset_state()
+
+
 def test_unreadable_overlay_tags_nothing_and_fails_nothing(
         running, token, monkeypatch):
     """A broken overlay is the overlay's problem to WARN about, not the route's

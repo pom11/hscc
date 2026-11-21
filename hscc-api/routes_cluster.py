@@ -553,6 +553,31 @@ def _paused_nodes(overlay):
     return [dict({"node": node}, **overlay[node]) for node in sorted(overlay)]
 
 
+def _pause_overlay_for(ctx):
+    """The pause overlay for the root THIS request carries, or nothing at all.
+
+    Two failures this refuses, in both directions:
+
+    * A request whose context has no root must not fall back to the default
+      ``~/.hscc``. A route reading a root nobody named for it is the root-split
+      bug class this repo has already been bitten by — the reader ends up
+      pointed at a tree the writer (the CLI, another profile, a test's sealed
+      home) can never have written. No named root therefore means no tags, not
+      a guessed root.
+    * It must not raise. ``GET /v1/health`` is the connection probe the apps
+      poll every 15 s; a missing context turning that into a 500 would take the
+      app's "the API is alive" signal down with it.
+
+    Handlers pass the request context they already have (``ctx.hscc_dir``),
+    which is the root the server was started with and — in production — the
+    same ``~/.hscc`` the CLI writes the overlay into.
+    """
+    root = getattr(ctx, "hscc_dir", None)
+    if root is None:
+        return {}
+    return _pause_overlay(root)
+
+
 def _annotate_paused_rows(rows, overlay, keys=("host", "node", "name")):
     """A copy of ``rows`` with the pause keys added to parked-node rows.
 
@@ -589,7 +614,7 @@ def _annotate_paused_rows(rows, overlay, keys=("host", "node", "name")):
     return out
 
 
-def _with_pause_overlay(payload, directory=None):
+def _with_pause_overlay(payload, ctx):
     """The monitor payload with parked nodes tagged, as a NEW payload dict.
 
     Tags both row families the route carries — the sparkrun host table under
@@ -597,7 +622,7 @@ def _with_pause_overlay(payload, directory=None):
     states the parked set at the top level. The payload handed in (the cached
     snapshot's) is never modified.
     """
-    overlay = _pause_overlay(directory)
+    overlay = _pause_overlay_for(ctx)
     out = dict(payload)
     frame = payload.get("json")
     if isinstance(frame, dict):
@@ -893,7 +918,7 @@ def handle_cluster_monitor(server, ctx, query, body):
         "success": True,
         "degraded": False,
         "taken_at": taken,
-    }, ctx.hscc_dir)
+    }, ctx)
 
 
 def handle_cluster_hosts(server, ctx, query, body):
@@ -975,7 +1000,7 @@ def handle_health(server, ctx, query, body):
         "generated_at": snap["generated_at"],
         "stale": snap["stale"],
         "source": snap["source"],
-        "paused_nodes": _paused_nodes(_pause_overlay(ctx.hscc_dir)),
+        "paused_nodes": _paused_nodes(_pause_overlay_for(ctx)),
     }
 
 

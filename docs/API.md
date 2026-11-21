@@ -162,7 +162,7 @@ endpoints (confirm-gated, see below).
 | Method | Path | Description | Mutates |
 |---|---|---|---|
 | GET | `/v1/ping` | The **API's own** liveness — confirms the API process is up. Returns `{ok, service, version, speak}`. This is NOT the fleet health check. | read |
-| GET | `/v1/health` | **Fleet** health — the last cached verify snapshot: cheap, and safe to poll. Returns `{ok, checks: [...], speak, age_seconds, generated_at, stale, source}`. `ok` is true only when every check in that snapshot passed; `checks` is an array of per-check `{name, ok, ...}`; `generated_at` is the epoch second the verdict was produced and `age_seconds` its age now; `stale` is true when that verdict is older than the 120 s cache TTL; `source` is `"cache"` or `"inline"`. | read |
+| GET | `/v1/health` | **Fleet** health — the last cached verify snapshot: cheap, and safe to poll. Returns `{ok, checks: [...], speak, age_seconds, generated_at, stale, source, paused_nodes}`. `ok` is true only when every check in that snapshot passed; `checks` is an array of per-check `{name, ok, ...}`; `generated_at` is the epoch second the verdict was produced and `age_seconds` its age now; `stale` is true when that verdict is older than the 120 s cache TTL; `source` is `"cache"` or `"inline"`. `paused_nodes` lists the nodes parked by `hscc node pause` as `{node, status: "paused", paused_reason, paused_since}` — a parked machine is a choice, not a fault, and this route names it without softening the verdict. | read |
 | GET | `/v1/verify` | **Run the fleet check now** — inline: every check of the fleet smoke test, real GPU chat round-trips included. Returns `{ok, checks: [...], speak}`. Never serves the cache, and its verdict also refreshes the snapshot `/v1/health` answers with. | read |
 
 > **`/v1/ping` vs `/v1/health` vs `/v1/verify`:** `/v1/ping` answers neither
@@ -192,7 +192,7 @@ endpoints (confirm-gated, see below).
 |---|---|---|---|
 | GET | `/v1/cluster/status` | Running workloads + idle hosts. Returns `{workloads, idle_hosts, total_hosts, speak}`. | read |
 | GET | `/v1/cluster/hosts` | Registered hosts + saved clusters + live status. Returns `{hosts, saved_clusters, live_status, speak}`. | read |
-| GET | `/v1/cluster/monitor` | Fleet monitor snapshot (aggregate metrics). | read |
+| GET | `/v1/cluster/monitor` | Fleet monitor snapshot (aggregate metrics). Nodes the pause overlay holds are projected as parked rather than broken: their host and serving rows carry `{status: "paused", paused_reason, paused_since}`, and the parked set is also stated top-level as `paused_nodes`. | read |
 | GET | `/v1/cluster/jobs` | Spark job list. | read |
 | GET | `/v1/cluster/info` | Cluster configuration summary. | read |
 
