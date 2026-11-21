@@ -79,15 +79,16 @@ cw.mark_removed("alone_sweep_gate")
 cw.remove_stamp("alone_sweep_gate")
 PY
   echo "removed cron job '$JOB' and $HERMES_SCRIPTS/$WRAPPER"
-  echo "  also cleared its doctor liveness marker + stamp (hscc doctor -> 'cron watchers')"
+  echo "  also cleared its doctor liveness marker + stamp (bootstrap doctor -> 'cron watchers')"
   echo "reports under $OUT stay where they are (delete by hand if you want them gone)"
   exit 0
 fi
 
-# The doctor's own verdict for this stream, printed where an operator looks
-# first (t_13a70290). Read through hscc_daemon/cron_watchers.py so --status and
-# `hscc doctor` cannot disagree about what "alive" means, and best-effort: a
-# host without the module gets the paths and the report lines, not a crash.
+# The bootstrap doctor's own verdict for this stream, printed where an operator
+# looks first (t_13a70290). Read through hscc_daemon/cron_watchers.py so --status
+# and `python3 hscc-bootstrap/doctor.py` cannot disagree about what "alive" means,
+# and best-effort: a host without the module gets the paths and the report lines,
+# not a crash.
 _liveness_line() {
   python3 - "$REPO" <<'PY' 2>/dev/null
 import importlib.util, os, sys
@@ -211,6 +212,7 @@ echo "  reports : $OUT_BAKED (latest.txt + a per-interpreter verdict.json)"
 echo "  inspect : $HERMES_BIN cron list   |   scripts/install_alone_sweep_gate.sh --status"
 echo "  run now : $HERMES_BIN cron run $JOB && $HERMES_BIN cron tick"
 echo "  liveness: every pass stamps hscc_daemon/cron_watchers.py (stream alone_sweep_gate),"
-echo "            so 'hscc doctor' -> 'cron watchers' warns when this nightly stops"
-echo "            firing OR fires and comes back RED. The detail is in"
+echo "            so the bootstrap doctor (python3 hscc-bootstrap/doctor.py) reports"
+echo "            'cron watchers' when this nightly stops firing OR fires and comes"
+echo "            back RED. The detail is in"
 echo "            '$HERMES_BIN cron runs', this --status, and $OUT_BAKED."

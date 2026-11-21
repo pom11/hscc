@@ -602,11 +602,11 @@ def test_schedule_is_nightly_and_not_a_second_of_the_suite():
 # ── liveness: every pass stamps the doctor's watcher roster (t_13a70290) ────
 # The gate is a cron job whose verdict otherwise lives only in a report dir
 # nothing reads, which is how the dep watcher managed 17 consecutive failed runs
-# before anyone looked (t_3aadd2c0). `hscc doctor`'s "cron watchers" row reads the
-# stamp this gate writes. GREEN and RED passes are driven here in milliseconds
-# with a STUBBED sweep inside a FAKE checkout: the real measurement stays single-
-# sourced in the audit's `alone_sweep.sh`, and nothing in this section runs pytest
-# over this checkout.
+# before anyone looked (t_3aadd2c0). The bootstrap doctor's "cron watchers" row
+# reads the stamp this gate writes. GREEN and RED passes are driven here in
+# milliseconds with a STUBBED sweep inside a FAKE checkout: the real measurement
+# stays single-sourced in the audit's `alone_sweep.sh`, and nothing in this
+# section runs pytest over this checkout.
 
 def _fake_repo(tmp_path, sweep_rc=0, bogus_stamp_module=False):
     """The smallest tree the gate's preflight accepts, sweep stubbed to `sweep_rc`."""

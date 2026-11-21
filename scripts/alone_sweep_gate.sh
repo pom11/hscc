@@ -64,10 +64,10 @@
 #                  installer resolves and bakes this rather than leaving it to 04:30.
 # Liveness: every non-preflight pass stamps through
 #   hscc_daemon/cron_watchers.py (stream `alone_sweep_gate`, roster row nightly
-#   86400s), so `hscc doctor`'s "cron watchers" row sees a nightly that stops
-#   firing — and sees one that fires and comes back RED, which stamps ok=False.
-#   The stamp is best-effort: losing it costs the pass its liveness signal, never
-#   its verdict.
+#   86400s), so the bootstrap doctor's "cron watchers" row sees a nightly that
+#   stops firing — and sees one that fires and comes back RED, which stamps
+#   ok=False. The stamp is best-effort: losing it costs the pass its liveness
+#   signal, never its verdict.
 #
 # Exit codes — the distinction the CI header insists on ("a leg that could not
 # run at all fails EITHER way"):
@@ -180,7 +180,7 @@ PY
   then
     echo "   (liveness stamp WRITE FAILED — the doctor's cron-watchers row will not see this pass)" >&2
   else
-    echo "   liveness: stamped $STAMP_STREAM verdict=$GATE_VERDICT (hscc doctor -> 'cron watchers')"
+    echo "   liveness: stamped $STAMP_STREAM verdict=$GATE_VERDICT (bootstrap doctor -> 'cron watchers')"
   fi
   return 0
 }

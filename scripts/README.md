@@ -316,8 +316,13 @@ what its baseline is. The cheap always-on half — the diff tool's teeth on
 fixtures, the argv/scrub drift pins, the "no curated subset" pin and the
 fail-closed pins — runs inside the `scripts` leg in milliseconds
 (`scripts/tests/test_alone_sweep_gate.py`). Reports land under
-`~/.hscc/alone-sweep/` (`latest.txt` + a `verdict.json` per interpreter); liveness
-is that dir plus `hermes cron runs`.
+`~/.hscc/alone-sweep/` (`latest.txt` + a `verdict.json` per interpreter). Liveness
+is not left to that dir: every non-preflight pass stamps
+`hscc_daemon/cron_watchers.py` (stream `alone_sweep_gate`, nightly cadence), so the
+bootstrap doctor (`hscc-bootstrap/doctor.py`) warns on its `cron watchers` row when
+the job stops firing **or** fires and comes back `GATE RED` — the row is liveness,
+and the verdict rides inside the stamp. `scripts/install_alone_sweep_gate.sh` with
+`--status` prints that same verdict line; `hermes cron runs` keeps the per-run record.
 
 ## Customization
 
