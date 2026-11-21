@@ -1,26 +1,61 @@
 #!/usr/bin/env bash
-# Wire the dependency-bump watcher into Hermes' native cron. Installs the
-# poller under ~/.hermes/scripts/ and registers a daily Hermes cron job that
-# runs it (--no-agent: the script IS the job). The poller turns dep-bump PRs
-# (opened by the check-runtime-deps GitHub Action, labelled needs-cluster-check
-# with the owner as reviewer) into kanban verification cards; the poller itself
-# sends a native desktop notification when it creates a card — hermes
-# `--deliver desktop` is a silent no-op. Idempotent: re-running refreshes the
-# job.
+# Wire the dependency-bump watcher into Hermes' native cron. Generates a stub
+# under <bound home>/scripts/ and registers a daily Hermes cron job that runs it
+# (--no-agent: the script IS the job). The stub holds NO copy of the poller — it
+# runs the repo's file — so the code the job executes is the code in git. The
+# poller turns dep-bump PRs (opened by the check-runtime-deps GitHub Action,
+# labelled needs-cluster-check with the owner as reviewer) into kanban
+# verification cards; the poller itself sends a native desktop notification when
+# it creates a card — hermes `--deliver desktop` is a silent no-op. Idempotent:
+# re-running refreshes the job.
+#
+# WHY A GENERATED STUB AND NOT A COPY (t_accbc5da, removing the class t_95eb9f15
+# made visible). This installer used to `cp` the poller into the bound home, and a
+# second copy of the code on a host is a second copy that can go stale: the
+# deployed copy on the operator's host predated GAP-B-4 stamping, so
+# hscc-dep-watcher ran fine every morning, stamped nothing, and the bootstrap
+# doctor answered `dep_pr_watcher: not configured` — a missing stamp blamed on an
+# operator who had installed the watcher, when the install itself was the stale
+# part. There is nothing left to compare, because there is nothing left to go
+# stale: `git pull` moves the job. (hscc_daemon/cron_watchers.py still compares a
+# leftover copy for exactly one release — an operator who has not re-run this
+# installer yet is still running the file the old shape left behind, and the
+# `copy:` line of --status below is what tells them to re-run it.)
+#
+# THE STUB IS A .py, AND IT HANDS OFF IN-PROCESS — both are load-bearing:
+#   Hermes picks a cron script's interpreter by EXTENSION and deliberately
+#   ignores the shebang (cron/scheduler_script.py::_script_argv: .sh/.bash ->
+#   bash, .py -> Hermes' own dependency venv). dep_pr_watcher.py needs that venv
+#   (it imports hermes_cli.kanban_db), so the job has to stay a .py — a .sh stub
+#   like install_alone_sweep_gate.sh's would put a PATH python3 in front of the
+#   poller and lose hermes_cli. And the handoff must not spawn a child: on a
+#   managed-store install hermes_cli is importable only inside the process Hermes
+#   bootstrapped (hermes-agent #123044), so exec-ing the interpreter again would
+#   lose it. runpy in the same process keeps the interpreter, the sys.path Hermes
+#   set up, and the target's exit code.
 #
 # Usage:  scripts/install_dep_watcher.sh [--uninstall | --status]
 set -euo pipefail
 
 JOB="hscc-dep-watcher"
+# Named after the cron job (install_alone_sweep_gate.sh's convention), NOT after
+# the repo script: the deployed file is a generated stub and an operator who cats
+# it must see that at a glance. It is also why the retired copy gets removed
+# rather than overwritten — nothing named `dep_pr_watcher.py` belongs under
+# <bound home>/scripts any more.
+WRAPPER="hscc-dep-watcher.py"
+WATCHER="dep_pr_watcher.py"
 SCHEDULE="${HSCC_DEP_WATCHER_SCHEDULE:-0 8 * * *}"   # daily 08:00 (cron spec)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 # DRIFT RULE (t_3aadd2c0): `hermes cron create --script NAME` resolves NAME only
 # against <bound home>/scripts, and profiles never share files — the bound home
 # is $HERMES_HOME (default ~/.hermes). The old installer hard-coded the shared
 # ~/.hermes/scripts while the job bound to the INVOKING profile's home, so
 # installing from a profile produced a job whose script could never be found:
-# hscc-dep-watcher failed 17 consecutive daily runs that way. The install dir
-# and the cron binding must resolve from the SAME home — derive both here.
+# hscc-dep-watcher failed 17 consecutive daily runs that way. The stub
+# destination and the cron binding must resolve from the SAME home — derive both
+# here, and pass only the FILENAME to `cron create`.
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_SCRIPTS="$HERMES_HOME/scripts"
 HERMES="$HOME/.hermes/hermes-agent"
@@ -32,10 +67,16 @@ HERMES_PLUGINS="$HERMES_HOME/plugins"
 # The hscc_daemon/cron_watchers.py stream this job stamps (the doctor's row and
 # this --status read the same roster row, so they cannot disagree).
 STREAM="dep_pr_watcher"
+# The path the stub bakes, and how --status reads it back out. Keep the
+# `# HSCC-TARGET:` spelling identical across the watcher installers.
+TARGET="$SCRIPT_DIR/$WATCHER"
 
 if [ "${1:-}" = "--uninstall" ]; then
   "$HERMES_BIN" cron remove "$JOB" 2>/dev/null || true
-  rm -f "$HERMES_SCRIPTS/dep_pr_watcher.py"
+  rm -f "$HERMES_SCRIPTS/$WRAPPER"
+  # And the file the RETIRED copy shape left behind: the job no longer runs it, so
+  # leaving it is a decoy a future registration could pick up.
+  rm -f "$HERMES_SCRIPTS/$WATCHER"
   # Drop the liveness install marker too (GAP-B-4), or the doctor keeps
   # reporting a watcher nobody installed as "installed but never ran".
   python3 - <<'PY' 2>/dev/null || true
@@ -49,25 +90,25 @@ except ImportError:
     raise SystemExit(0)
 cw.mark_removed("dep_pr_watcher")
 PY
-  echo "removed cron job '$JOB' and the installed poller"
+  echo "removed cron job '$JOB', $HERMES_SCRIPTS/$WRAPPER and any leftover $WATCHER"
   exit 0
 fi
 
 # --status: what to check first, in the shape install_alone_sweep_gate.sh
-# --status already established. Both lines come from the CHECKOUT's
+# --status already established. The comparison lines come from the CHECKOUT's
 # hscc_daemon/cron_watchers.py, so this installer, `python3
-# hscc-bootstrap/doctor.py` and `hscc verify` cannot disagree about what
-# "alive" or "the same file" means.
+# hscc-bootstrap/doctor.py` and `hscc verify` cannot disagree about what "alive"
+# or "the same file" means.
 #
-# The `copy:` line is the reason this exists (t_95eb9f15). This installer `cp`s
-# the poller into the bound home, which leaves a SECOND copy of the code on the
-# host, and nothing had ever compared the two: the deployed copy here predated
-# GAP-B-4 stamping, so the job ran fine every morning and the doctor reported
-# `dep_pr_watcher: not configured` — a missing stamp blamed on an operator who
-# had installed the watcher, when the install itself was the stale part. The
-# `alone_sweep_gate` job has this problem structurally removed (it generates a
-# one-line wrapper that execs the repo's gate); until these two move to that
-# shape, the comparison has to be said out loud.
+# `target:` is the wrapper shape's OWN failure mode (t_accbc5da): the stub bakes
+# an absolute repo path at install time, so moving or deleting the checkout leaves
+# it dangling and the job fails on its next tick. `copy:` stays (t_95eb9f15) for
+# hosts still running the copy shape — that line is what tells an operator to
+# re-run this installer, and it settles on `not-a-copy` once they have.
+_wrapper_target() {
+  sed -n 's/^# HSCC-TARGET: \(.*\)$/\1/p' "$1" 2>/dev/null | tail -1 || true
+}
+
 _watcher_status_lines() {
   python3 - "$SCRIPT_DIR/.." "$STREAM" <<'PY' 2>/dev/null
 import importlib.util, os, sys
@@ -89,14 +130,25 @@ if [ "${1:-}" = "--status" ]; then
   echo "job:       $JOB"
   "$HERMES_BIN" cron list 2>/dev/null | grep -F "$JOB" \
     || echo "           NOT REGISTERED — run: scripts/install_dep_watcher.sh"
-  echo "installs:  $HERMES_SCRIPTS/dep_pr_watcher.py"
-  if [ -f "$HERMES_SCRIPTS/dep_pr_watcher.py" ]; then
-    echo "           present"
+  echo "wrapper:   $HERMES_SCRIPTS/$WRAPPER"
+  if [ ! -f "$HERMES_SCRIPTS/$WRAPPER" ]; then
+    echo "           MISSING — the job fails on its next tick (re-run this installer)"
   else
-    echo "           MISSING in this home — the job fails on its next tick if this"
-    echo "           home is the bound one (the copy: line checks every candidate home)"
+    baked="$(_wrapper_target "$HERMES_SCRIPTS/$WRAPPER")"
+    if [ -z "$baked" ]; then
+      echo "           NOT GENERATED by this installer (no HSCC-TARGET marker)"
+    elif [ -f "$baked" ]; then
+      echo "           runs $baked"
+    else
+      echo "           DANGLING — it runs $baked, which does not exist: the"
+      echo "           checkout moved or was deleted. Re-run this installer."
+    fi
   fi
-  echo "repo copy: $SCRIPT_DIR/dep_pr_watcher.py"
+  if [ -e "$HERMES_SCRIPTS/$WATCHER" ]; then
+    echo "leftover:  $HERMES_SCRIPTS/$WATCHER — this installer does not copy any"
+    echo "           more; re-run it to drop the file and run the repo's copy"
+  fi
+  echo "repo copy: $SCRIPT_DIR/$WATCHER"
   lines="$(_watcher_status_lines || true)"
   if [ -n "$lines" ]; then
     printf '%s\n' "$lines"
@@ -110,15 +162,64 @@ fi
 
 [ -z "${1:-}" ] || { echo "install_dep_watcher.sh: unknown argument '$1' (expected --uninstall or --status)" >&2; exit 2; }
 
+[ -f "$TARGET" ] \
+  || { echo "no watcher at $TARGET — is this checkout complete?" >&2; exit 2; }
+
 mkdir -p "$HERMES_SCRIPTS"
-cp "$SCRIPT_DIR/dep_pr_watcher.py" "$HERMES_SCRIPTS/dep_pr_watcher.py"
+if [ -e "$HERMES_SCRIPTS/$WATCHER" ]; then
+  # The retired copy shape's file. Deleting it is what closes the class on this
+  # host: while it sits there, a stale second copy of the poller is one
+  # `--script dep_pr_watcher.py` away from running again.
+  rm -f "$HERMES_SCRIPTS/$WATCHER"
+  echo "removed the deployed copy $HERMES_SCRIPTS/$WATCHER (this installer does not copy any more)"
+fi
+
+# Generated stub: the resolved repo path baked at install time, then run the
+# repo's file. Same shape as install_alone_sweep_gate.sh's wrapper, .py for the
+# interpreter reason in the header. Written to a .tmp and moved so a failure
+# mid-write cannot leave a half-written stub that the 08:00 tick would run.
+cat > "$HERMES_SCRIPTS/$WRAPPER.tmp" <<EOF
+#!/usr/bin/env python3
+# GENERATED by $REPO/scripts/install_dep_watcher.sh — do not edit.
+# HSCC-TARGET: $TARGET
+# Hermes cron job '$JOB' runs this stub. It holds NO copy of the poller: it runs
+# the file named in HSCC-TARGET above, so \`git pull\` in that checkout is what
+# changes what this job does and there is no second copy that can go stale
+# (t_accbc5da — the drift a copy used to leave behind is what t_95eb9f15 caught).
+# Re-run scripts/install_dep_watcher.sh to re-point this stub (a moved checkout
+# makes the baked path dangle) or to change the schedule.
+#
+# The handoff is IN-PROCESS on purpose: Hermes picked this process's interpreter
+# (and, on a managed-store install, its sys.path) for a .py cron script, and
+# exec-ing a fresh interpreter would drop hermes_cli — see the header of
+# $REPO/scripts/install_dep_watcher.sh.
+import os
+import runpy
+import sys
+
+TARGET = "$TARGET"
+
+if not os.path.isfile(TARGET):
+    sys.stderr.write(
+        "hscc-dep-watcher: the checkout this stub was installed from is gone:\\n"
+        "  %s\\n"
+        "  re-run: <that checkout>/scripts/install_dep_watcher.sh\\n" % TARGET)
+    raise SystemExit(2)
+
+# Mirror \`python <script>\`: sys.path[0] is the script's own directory.
+sys.path.insert(0, os.path.dirname(TARGET))
+sys.argv[0] = TARGET
+runpy.run_path(TARGET, run_name="__main__")
+EOF
+mv "$HERMES_SCRIPTS/$WRAPPER.tmp" "$HERMES_SCRIPTS/$WRAPPER"
+chmod 0755 "$HERMES_SCRIPTS/$WRAPPER"
 
 # Idempotent: drop any existing job of this name, then (re)create it.
 # No --deliver: hermes `--deliver desktop` is a silent no-op; the poller sends
 # its own native desktop notification on card creation.
 "$HERMES_BIN" cron remove "$JOB" 2>/dev/null || true
 "$HERMES_BIN" cron create "$SCHEDULE" \
-  --no-agent --script dep_pr_watcher.py \
+  --no-agent --script "$WRAPPER" \
   --name "$JOB"
 
 # Liveness marker (GAP-B-4): the doctor's staleness check must be able to tell
@@ -139,5 +240,8 @@ sys.exit(0 if cw.mark_installed("dep_pr_watcher", schedule) else 1)
 PY
 
 echo "installed Hermes cron job '$JOB' (schedule: $SCHEDULE)"
+echo "  wrapper : $HERMES_SCRIPTS/$WRAPPER -> $TARGET"
+echo "  repo    : $REPO (baked; re-run this installer after moving the checkout)"
 echo "inspect:  $HERMES_BIN cron list"
+echo "status:   scripts/install_dep_watcher.sh --status"
 echo "run now:  $HERMES_BIN cron run $JOB && $HERMES_BIN cron tick"
