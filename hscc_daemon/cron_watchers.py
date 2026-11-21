@@ -59,10 +59,20 @@ parameter rather than resolved from a mutated environment -- see
 it because the reads do: with only one side able to relocate, a ``HSCC_DIR``
 that differs from HOME's default was a root no watcher could ever stamp, and the
 doctor read that as "nobody installed this" (t_e9b0f048).
+
+The default is never spelled on the writer's behalf. A stamp with no root named
+calls ``write_state(stream, entry)`` with exactly the two arguments it always
+took, so a ``state.py`` that predates the seam -- the deployed plugin copy is one
+-- still takes stamps rather than silently losing them, and a root that IS named
+is refused loudly when the resolved writer cannot be aimed at it. Both halves are
+what keeps "new cron_watchers.py over an older deployed state.py" a working
+pairing instead of a legs-green way to lose every liveness stamp on the host
+(t_e9b0f048 review round 1).
 """
 
 import datetime
 import importlib.util
+import inspect
 import json
 import os
 
@@ -196,6 +206,73 @@ def _write_dir(directory=None):
     return _dirs(directory)[0] if directory else None
 
 
+class WriterSeamUnsupported(TypeError):
+    """The resolved state writer cannot be aimed at the root that was asked for.
+
+    A ``TypeError`` subclass, because that is what the watchers' ``except
+    Exception`` in ``_stamp_pass`` already turns into a stderr warning and a
+    kept pass -- but its OWN class, so `except TypeError:` added around a writer
+    call somewhere later cannot quietly re-silence it, and so it is tellable
+    apart from the two failures that share a bare ``False`` (a full disk, an
+    unreadable dir). Version skew between ``cron_watchers.py`` and ``state.py``
+    is a deployment defect; a full disk is weather. Only the first one can be
+    fixed by redeploying, so only the first one is allowed to say so.
+    """
+
+
+def _honours_directory_seam(writer):
+    """True when ``writer.write_state`` can actually be passed ``directory``.
+
+    Reads the SIGNATURE, never the outcome. The difference matters: a writer
+    whose third parameter is ``**kwargs`` accepts ``directory=``, ignores it,
+    writes to its own ``STATE_DIR`` and returns success -- a call-and-catch
+    feature-detect sees no error at all and keeps exactly the silent-wrong-root
+    failure this module exists to remove. And a name is only honoured when it can
+    be passed BY KEYWORD (a positional-only parameter would raise).
+    """
+    try:
+        params = inspect.signature(writer.write_state).parameters
+    except (TypeError, ValueError):        # non-callable / C callable / odd module
+        return False
+    param = params.get("directory")
+    return (param is not None
+            and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                               inspect.Parameter.KEYWORD_ONLY))
+
+
+def _write_kwargs(writer, fn_name, directory):
+    """The kwargs for the canonical ``write_state`` call, decided in ONE place.
+
+    With no explicit seam this returns ``{}`` -- the call keeps the shape it had
+    before this seam existed, because ``write_state``'s own default is what picks
+    ``STATE_DIR`` (the invariant: one place chooses the root). Handing it
+    ``directory=None`` explicitly is NOT harmless: the deployed
+    ``~/.hermes/plugins/hscc_daemon/state.py`` copy still has
+    ``write_state(stream_name, data)``, so the kwarg raises ``TypeError``, the
+    writer's never-raises ``try`` swallows it, and the stamp vanishes with only a
+    stderr warning for company. Measured at 3c28aa73: the live */15 escalate job
+    would have stopped stamping the day this merged, and the doctor would have
+    called that ``never-ran`` -- a legs-green change, because the runner makes
+    both sides resolve to the checkout and only the live loader splits them.
+
+    With an explicit root the parameter is capability-checked first
+    (:func:`_honours_directory_seam`) and refused loudly, so a caller that asked
+    for a root nobody can write to learns that instead of getting a stamp at
+    someone else's root plus a ``True``.
+    """
+    wd = _write_dir(directory)
+    if wd is None:
+        return {}
+    if not _honours_directory_seam(writer):
+        raise WriterSeamUnsupported(
+            f"{fn_name}() cannot honour directory={wd!r}: the resolved state "
+            f"writer ({getattr(writer, '__file__', '<unknown module>')}) has no "
+            f"`directory` keyword on write_state, so it would write under its "
+            f"own STATE_DIR and still report success. Redeploy state.py beside "
+            f"cron_watchers.py, or omit `directory` to stamp the writer's root.")
+    return {"directory": wd}
+
+
 #: Keyword names a stamp payload may NEVER carry. ``directory`` is the reason
 #: the list exists: with no parameter of that name, ``stamp(stream,
 #: directory=X)`` put the path in the PAYLOAD, wrote to HOME's ``STATE_DIR``
@@ -268,14 +345,21 @@ def stamp(stream, directory=None, **fields):
     Never raises: a stamp failure must never break -- or silently un-stamp --
     the watcher's real work, and silent no-op is exactly the GAP-B-4 failure
     mode this closes. Returns True when the stamp landed, False otherwise
-    (callers print the difference; they never act on it). The ONE exception is a
-    reserved keyword (:func:`_reject_reserved`), which raises before any write:
-    misuse of the writer must not be swallowed into the same False as a full
-    disk.
+    (callers print the difference; they never act on it). TWO things are loud
+    instead, both raised out of the never-raises ``try`` and neither of them an
+    operational failure: a reserved keyword (:func:`_reject_reserved`), which is
+    misuse of this API, and a ``directory`` the resolved writer cannot honour
+    (:func:`_write_kwargs` / :class:`WriterSeamUnsupported`), which is version
+    skew between ``cron_watchers.py`` and ``state.py``. Either one surfacing as
+    the same bare ``False`` as a full disk would put a deployment defect in the
+    bin labelled "weather".
 
     ``directory`` is the same stamp-root seam every read takes, resolved
     through :func:`_dirs`, so a relocated ``HSCC_DIR`` is a root a watcher can
-    stamp as well as read (t_e9b0f048). It is a parameter, never a payload key.
+    stamp as well as read (t_e9b0f048). It is a parameter, never a payload key,
+    and it is only ever passed on when the caller actually named a root -- with
+    no root named the call keeps its original two-argument shape and lets
+    ``write_state`` pick its own ``STATE_DIR``.
 
     Honours ``state.persist_disabled_active()``: inside an ad-hoc ``hscc
     check`` run there is no real pass to record, so nothing is written.
@@ -293,8 +377,10 @@ def stamp(stream, directory=None, **fields):
             "watcher": stream,
             "cron_job": row["cron_job"],
             **fields,
-        }, directory=_write_dir(directory))
+        }, **_write_kwargs(s, "stamp", directory))
         return True
+    except WriterSeamUnsupported:
+        raise                              # deployment skew, not weather
     except Exception:
         return False
 
@@ -312,14 +398,15 @@ def stamp_failure(stream, error, directory=None, **fields):
     the report dir, and the doctor's ``failing`` line names what the operator has
     to go read.
 
-    Same two rules as :func:`stamp`, because a failure stamp is the same writer
-    and must land in the same place: ``directory`` resolves through
-    :func:`_write_dir` (so the red pass overwrites the clean stamp at that root
-    rather than opening a second location), reserved keywords raise, and an
-    ad-hoc ``hscc check`` run under ``persist_disabled()`` stamps NOTHING --
-    including a failure, which used to be the half that was refused by nobody
-    (t_06ead443: an operator's ``hscc check`` could write a `failing` row to the
-    live tree at a moment a clean pass was refused).
+    Same rules as :func:`stamp`, because a failure stamp is the same writer and
+    must land in the same place: ``directory`` resolves through :func:`_write_dir`
+    (so the red pass overwrites the clean stamp at that root rather than opening a
+    second location) and is only passed on when a root was actually named,
+    reserved keywords raise, an unhonourable ``directory`` raises, and an ad-hoc
+    ``hscc check`` run under ``persist_disabled()`` stamps NOTHING -- including a
+    failure, which used to be the half that was refused by nobody (t_06ead443: an
+    operator's ``hscc check`` could write a `failing` row to the live tree at a
+    moment a clean pass was refused).
     """
     _reject_reserved("stamp_failure", fields)
     row = WATCHERS.get(stream)
@@ -335,8 +422,10 @@ def stamp_failure(stream, error, directory=None, **fields):
             "cron_job": row["cron_job"],
             "error": str(error)[:400],
             **fields,
-        }, directory=_write_dir(directory))
+        }, **_write_kwargs(s, "stamp_failure", directory))
         return True
+    except WriterSeamUnsupported:
+        raise                              # deployment skew, not weather
     except Exception:
         return False
 

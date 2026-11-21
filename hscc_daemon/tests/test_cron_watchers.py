@@ -572,3 +572,173 @@ def test_stamp_failure_honours_persist_disabled(sandbox):
         assert not os.path.isfile(
             os.path.join(state.STATE_DIR, "escalate_watcher.json"))
     assert state.read_state("escalate_watcher") is None
+
+
+# ── the split pairing: new writer code, an OLD state.py behind it ───────────
+# Review round 1 on this card measured a regression the legs could not see: the
+# writers passed `directory=` to `state.write_state` UNCONDITIONALLY, and
+# `_state_writer()` prefers `from hscc_daemon import state` — which in the live
+# cron runtime resolves to the DEPLOYED plugin copy
+# (~/.hermes/plugins/hscc_daemon/state.py, 5573 B, `write_state(stream_name,
+# data)`, no `directory`). Its TypeError was swallowed by these writers' own
+# never-raises try, so every stamp silently vanished:
+# scripts/tests/test_escalate_watcher_run.py went 10 passed -> 1 failed with a
+# stderr `liveness stamp write failed`, i.e. the live */15 escalate job would
+# have stopped stamping post-merge -> doctor `missing` -> `never-ran`. Under
+# run_tests.sh BOTH sides resolve to the checkout, so no leg could observe the
+# split. That pairing is a deployment fact, so the pin must not depend on what
+# happens to be deployed: it installs an old-shape writer on purpose.
+#
+# Two old shapes matter and they fail differently:
+#   STRICT   — `def write_state(stream_name, data)`: a `directory=` kwarg raises
+#              TypeError. Must stay invisible to a caller that asked for nothing.
+#   ABSORBER — `def write_state(stream_name, data, **kwargs)`: swallows the
+#              kwarg, returns success, writes to ITS root. The worst shape (True,
+#              wrong place), and the one a call-and-catch feature-detect misses.
+
+def _strict_old_writer(monkeypatch):
+    """write_state exactly as the deployed copy has it: two params, no seam."""
+    calls = []
+
+    def write_state(stream_name, data):
+        calls.append((stream_name, dict(data)))
+        os.makedirs(state.STATE_DIR, exist_ok=True)
+        path = os.path.join(state.STATE_DIR, stream_name + ".json")
+        with open(path, "w") as f:
+            json.dump({"timestamp": state.now_iso(), "stream": stream_name,
+                       **data}, f)
+        return data
+
+    monkeypatch.setattr(state, "write_state", write_state)
+    return calls
+
+
+def _absorbing_old_writer(monkeypatch):
+    """An old writer that takes ANY keyword and ignores it — it reports success
+    while writing to its own root, so a naive try/except feature-detect sees no
+    error at all."""
+    calls = []
+
+    def write_state(stream_name, data, **kwargs):
+        calls.append((stream_name, dict(data), kwargs))
+        os.makedirs(state.STATE_DIR, exist_ok=True)
+        path = os.path.join(state.STATE_DIR, stream_name + ".json")
+        with open(path, "w") as f:
+            json.dump({"timestamp": state.now_iso(), "stream": stream_name,
+                       **data}, f)
+        return data
+
+    monkeypatch.setattr(state, "write_state", write_state)
+    return calls
+
+
+def test_a_writer_without_the_seam_still_gets_the_base_two_arg_call(sandbox,
+                                                                    monkeypatch):
+    """Req (1) of the rework, and the regression itself: with `directory=None`
+    the call must keep the shape it had before this card existed, so an older
+    resolved writer still takes the stamp. At 3c28aa73 this returned False and
+    wrote nothing — the reviewer's one-command repro (test_escalate_watcher_run
+    10 passed -> 1 failed) is the same event one level up."""
+    calls = _strict_old_writer(monkeypatch)
+    assert cw.stamp("escalate_watcher", actions=0, idle=True) is True
+    assert len(calls) == 1
+    stream, payload = calls[0]
+    assert stream == "escalate_watcher" and payload["idle"] is True
+    assert payload["ok"] is True and payload["cron_job"] == "hscc-escalate-watcher"
+    assert os.path.isfile(os.path.join(state.STATE_DIR, "escalate_watcher.json"))
+
+
+def test_stamp_failure_with_an_old_writer_also_keeps_the_base_call(sandbox,
+                                                                  monkeypatch):
+    """Same rule on the other writer — the red pass is the same writer and must
+    not be the half that breaks against a deployed copy."""
+    calls = _strict_old_writer(monkeypatch)
+    assert cw.stamp_failure("alone_sweep_gate", "GATE RED",
+                            verdict="red") is True
+    assert len(calls) == 1
+    assert calls[0][0] == "alone_sweep_gate"
+    assert calls[0][1]["ok"] is False and calls[0][1]["error"] == "GATE RED"
+
+
+def test_no_directory_keyword_reaches_a_writer_that_never_asks(sandbox,
+                                                              monkeypatch):
+    """The call-shape pin, stated directly: an ABSORBING old writer accepts any
+    keyword, so it is the only writer shape that can tell "we did not send
+    `directory`" from "we sent it and it was ignored". At 3c28aa73 the recorded
+    kwargs were `{'directory': None}` — invisible to a strict stub (which just
+    raises) and silently relocated by an absorber."""
+    calls = _absorbing_old_writer(monkeypatch)
+    assert cw.stamp("dep_pr_watcher", prs=0) is True
+    assert cw.stamp_failure("dep_pr_watcher", "boom") is True
+    assert [c[2] for c in calls] == [{}, {}], calls
+
+
+def test_an_explicit_directory_the_writer_cannot_honour_raises_loudly(sandbox,
+                                                                     monkeypatch):
+    """Req (2): asking for a root the resolved writer cannot write to is a
+    deployment/API mismatch, not an operational hiccup, so it must NOT come back
+    as the same bare False as a full disk. Strict stub -> the writer itself would
+    raise TypeError; the guard turns that into a named refusal BEFORE the try and
+    spends no write at either root."""
+    calls = _strict_old_writer(monkeypatch)
+    other = _relocated(sandbox)
+    with pytest.raises(TypeError) as exc:
+        cw.stamp("dep_pr_watcher", directory=str(other))
+    msg = str(exc.value)
+    assert "directory" in msg and "write_state" in msg
+    assert not (other / "dep_pr_watcher.json").exists()
+    assert not os.path.isfile(os.path.join(state.STATE_DIR,
+                                          "dep_pr_watcher.json"))
+    assert calls == []                       # nothing was attempted
+
+
+def test_a_writer_that_absorbs_the_keyword_is_refused_too(sandbox, monkeypatch):
+    """The absorber is the case a call-and-catch feature-detect misses: passing
+    `directory=` raises nothing, the writer ignores it, and stamp() returns True
+    after writing to the writer's root — the original defect wearing a different
+    hat. Detection must read the SIGNATURE, not the outcome."""
+    calls = _absorbing_old_writer(monkeypatch)
+    other = _relocated(sandbox)
+    with pytest.raises(TypeError) as exc:
+        cw.stamp("escalate_watcher", directory=str(other), actions=0)
+    assert "directory" in str(exc.value)
+    assert calls == []
+    assert not (other / "escalate_watcher.json").exists()
+
+
+def test_stamp_failure_refuses_an_unhonourable_root_as_well(sandbox, monkeypatch):
+    """Symmetry: a red pass must not quietly relocate to STATE_DIR when the clean
+    pass refused — one root, chosen once, including when there is no root to
+    choose."""
+    _strict_old_writer(monkeypatch)
+    with pytest.raises(TypeError):
+        cw.stamp_failure("alone_sweep_gate", "boom",
+                         directory=str(_relocated(sandbox)))
+    assert not os.path.isfile(os.path.join(state.STATE_DIR,
+                                          "alone_sweep_gate.json"))
+
+
+def test_a_genuine_write_failure_is_still_a_bare_false(sandbox, monkeypatch):
+    """The other half of "must not become the same bare False as a full disk":
+    the disk failure keeps its bare False. A writer that raises OSError is an
+    operational failure the watcher survives (it warns to stderr and keeps
+    working); only the seam mismatch is loud."""
+    def write_state(stream_name, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(state, "write_state", write_state)
+    assert cw.stamp("escalate_watcher", actions=0) is False
+    assert cw.stamp_failure("escalate_watcher", RuntimeError("x")) is False
+
+
+def test_the_loud_refusal_is_a_typeerror_and_names_itself(sandbox):
+    """Callers catch Exception and warn (escalate_watcher_run._stamp_pass), so
+    the class only has to be a TypeError for them — but it must be its OWN class
+    so a future `except TypeError:` around the writer cannot re-silence it, and
+    so the checkout's own state.py is proven to satisfy it."""
+    assert issubclass(cw.WriterSeamUnsupported, TypeError)
+    import inspect
+    params = inspect.signature(state.write_state).parameters
+    assert "directory" in params, (
+        "the checkout writer must carry the seam the writers detect")
+    assert params["directory"].default is None
