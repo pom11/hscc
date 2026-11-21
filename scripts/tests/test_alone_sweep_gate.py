@@ -284,12 +284,13 @@ def _gate(*args, out=None, env=None, python=None):
     The scripts-leg conftest redirects ``HOME`` into a sandbox, and the gate's
     DEFAULT interpreters are `$HOME/...` paths, so without an explicit
     ``--python`` every test here would (correctly) hit the gate's no-interpreter
-    refusal and test the wrong path.
+    refusal and test the wrong path. ``python=False`` means "inject nothing", for
+    the cases that are testing how the interpreter list is resolved.
     """
     cmd = ["bash", GATE]
     if out is not None:
         cmd += ["--out", str(out)]
-    if python is None and not any(a == "--python" for a in args):
+    if python is not False and not any(a == "--python" for a in args):
         cmd += ["--python", python or sys.executable]
     cmd += list(args)
     e = dict(os.environ)
@@ -358,7 +359,12 @@ def test_gate_leaves_no_lock_behind(tmp_path):
 # ── the scheduler wiring ────────────────────────────────────────────────────
 
 def _stub_hermes(tmp_path):
-    """A fake `hermes` that logs its argv; the installer prefers this path."""
+    """A fake `hermes` that logs its argv; the installer prefers this path.
+
+    Also plants an executable `python` at the canonical stamp-interpreter path
+    (`<home>/.hermes/hermes-agent/venv/bin/python`) — the installer resolves and
+    bakes the interpreters it can actually see, and refuses when it sees none.
+    """
     home = tmp_path / "home"
     bindir = home / ".hermes" / "hermes-agent" / "venv" / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
@@ -368,6 +374,9 @@ def _stub_hermes(tmp_path):
                     f'printf \'%s\\n\' "$*" >> "{log}"\n'
                     'exit 0\n')
     stub.chmod(0o755)
+    fake_py = bindir / "python"
+    fake_py.write_text("#!/bin/sh\nexit 0\n")
+    fake_py.chmod(0o755)
     return home, log
 
 
@@ -386,7 +395,7 @@ def _install(tmp_path, *args, hermes_home=None):
 
 
 def test_installer_measures_committed_code_from_the_checkout_it_ran_in(tmp_path):
-    proc, log, _home = _install(tmp_path)
+    proc, log, home = _install(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "cron create" in log and "--name hscc-alone-sweep-gate" in log
     assert "--script hscc-alone-sweep-gate.sh" in log
@@ -397,11 +406,53 @@ def test_installer_measures_committed_code_from_the_checkout_it_ran_in(tmp_path)
     text = wrapper.read_text()
     assert f'HSCC_ALONE_SWEEP_REPO="{REPO}"' in text, (
         "the nightly must run the gate from the checkout, not from a stale copy")
+    # Hermes may run a --no-agent job under a bound home that is NOT the
+    # operator's shell HOME, so everything the gate resolves from $HOME has to be
+    # resolved at install time instead (test_hermes_python.py is the same trap on
+    # the resolver side).
+    assert f'HSCC_ALONE_SWEEP_PYTHONS="{home}/.hermes/hermes-agent/venv/bin/python"' \
+        in text, f"the interpreter list is not baked from the installing shell:\n{text}"
+    assert 'export HSCC_ALONE_SWEEP_OUT="' in text, \
+        "the report root is not baked — the job and --status could disagree on where " \
+        "the verdict lives"
     exec_line = [l for l in text.splitlines() if l.startswith("exec ")]
     assert exec_line, "the wrapper must exec the gate, not copy it"
     parts = shlex.split(exec_line[0])
     assert parts[0] == "exec" and os.path.isfile(parts[1]), \
         f"the wrapper execs a path that does not exist: {exec_line}"
+
+
+def test_gate_honours_the_baked_interpreter_list(tmp_path):
+    """The bake is only real if the gate reads it: a sandboxed HOME has neither
+    default interpreter, so the ONLY way this preflight can pass is the env list.
+    """
+    ok = _gate("--preflight", out=tmp_path, python=False,
+               env={"HSCC_ALONE_SWEEP_PYTHONS": sys.executable})
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "interpreter present" in ok.stdout
+    bogus = _gate("--preflight", out=tmp_path / "b", python=False,
+                  env={"HSCC_ALONE_SWEEP_PYTHONS": "/nope/python"})
+    assert bogus.returncode == 2, bogus.stdout + bogus.stderr
+
+
+def test_installer_refuses_when_it_can_see_no_interpreter(tmp_path):
+    """Installing a job whose interpreters do not exist would produce a nightly
+    that exits 2 forever — the same class as the 17 failed runs this installer's
+    header documents. Refuse at install, in the operator's own shell, where the
+    reason is legible.
+    """
+    home, log = _stub_hermes(tmp_path)
+    (home / ".hermes" / "hermes-agent" / "venv" / "bin" / "python").unlink()
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    env.pop("HERMES_HOME", None)
+    env["HSCC_ALONE_SWEEP_PYTHONS"] = str(tmp_path / "absent-python")
+    proc = _run(["bash", INSTALLER], env=env, cwd=str(tmp_path), timeout=60)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "no stamp interpreter" in (proc.stdout + proc.stderr)
+    assert "cron create" not in (log.read_text() if log.exists() else "")
+    assert not (home / ".hermes" / "scripts" / "hscc-alone-sweep-gate.sh").exists()
 
 
 def test_installer_binds_the_wrapper_to_the_same_home_cron_binds(tmp_path):
@@ -447,6 +498,28 @@ def test_status_says_so_when_no_pass_has_ever_run(tmp_path):
     status, _l, _h = _install(tmp_path, "--status")
     assert status.returncode == 0, status.stdout + status.stderr
     assert "NONE on record" in status.stdout
+
+
+def test_status_works_on_a_host_with_nothing_installed(tmp_path):
+    """The first thing an operator runs is also the one with nothing to read.
+
+    Measured, not hypothetical: the first version of this path read the baked
+    paths out of the wrapper with a command substitution under `set -euo pipefail`,
+    so on a host where the wrapper did not exist `sed` failed inside the
+    substitution, the assignment inherited rc 1, and --status died printing three
+    lines and none of the answer. A missing wrapper is a STATUS LINE.
+    """
+    home, _log = _stub_hermes(tmp_path)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    env.pop("HERMES_HOME", None)
+    env.pop("HSCC_ALONE_SWEEP_OUT", None)
+    status = _run(["bash", INSTALLER, "--status"], env=env,
+                  cwd=str(tmp_path), timeout=60)
+    assert status.returncode == 0, status.stdout + status.stderr
+    for line in ("NOT REGISTERED", "MISSING", "NONE on record"):
+        assert line in status.stdout, f"--status lost '{line}':\n{status.stdout}"
 
 
 def test_uninstall_removes_both_the_job_and_the_wrapper(tmp_path):

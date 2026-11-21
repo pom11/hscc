@@ -54,6 +54,14 @@
 #                  tree that no longer exists. Fresh is the default for that
 #                  reason, and cron uses the default.
 #   --preflight    check the wiring and print the plan, run nothing
+# Environment (also baked by the installer, see install_alone_sweep_gate.sh):
+#   HSCC_ALONE_SWEEP_REPO      checkout to measure (--repo wins)
+#   HSCC_ALONE_SWEEP_LEG       leg dir (--leg wins, default hscc_daemon)
+#   HSCC_ALONE_SWEEP_OUT       report root (--out wins)
+#   HSCC_ALONE_SWEEP_PYTHONS   space-separated interpreter list (--python wins).
+#                  The defaults are `$HOME`-relative, and a Hermes cron job may run
+#                  with a bound home that is not the operator's shell HOME, so the
+#                  installer resolves and bakes this rather than leaving it to 04:30.
 #
 # Exit codes — the distinction the CI header insists on ("a leg that could not
 # run at all fails EITHER way"):
@@ -71,12 +79,13 @@ LEG="${HSCC_ALONE_SWEEP_LEG:-hscc_daemon}"
 OUT="${HSCC_ALONE_SWEEP_OUT:-$HOME/.hscc/alone-sweep}"
 PREFLIGHT=0
 RESUME=0
-PYTHONS=""
-
+CLI_PYTHONS=""
 # The two interpreters the dual-interpreter stamp is taken on. Both matter: the
 # §7 regression was invisible on the thin sibling and visible only on the
 # canonical venv (agent-tree eviction of rich/typer/_pytest), so a gate that
-# swept one interpreter would have missed it.
+# swept one interpreter would have missed it. Both are `$HOME`-relative, which is
+# why the installed cron job bakes the resolved list at install time — Hermes may
+# bind a profile home, and cron's HOME is not the operator's shell HOME.
 DEFAULT_PYTHONS="$HOME/.hermes/hermes-agent/venv/bin/python $HOME/miniconda3/envs/p313/bin/python"
 
 while [ $# -gt 0 ]; do
@@ -84,13 +93,15 @@ while [ $# -gt 0 ]; do
     --repo)     REPO="${2:?--repo needs a directory}"; shift 2 ;;
     --out)      OUT="${2:?--out needs a directory}"; shift 2 ;;
     --leg)      LEG="${2:?--leg needs a directory}"; shift 2 ;;
-    --python)   PYTHONS="$PYTHONS ${2:?--python needs an interpreter path}"; shift 2 ;;
+    --python)   CLI_PYTHONS="$CLI_PYTHONS ${2:?--python needs an interpreter path}"; shift 2 ;;
     --resume)   RESUME=1; shift ;;
     --preflight) PREFLIGHT=1; shift ;;
     -h|--help)  awk '/^# Usage:/{f=1} /^set -u/{exit} f' "$0"; exit 0 ;;
     *) echo "alone_sweep_gate.sh: unknown argument '$1' (see --help)" >&2; exit 2 ;;
   esac
 done
+# Explicit --python beats the environment beats the shipped defaults.
+PYTHONS="$CLI_PYTHONS${HSCC_ALONE_SWEEP_PYTHONS:+ $HSCC_ALONE_SWEEP_PYTHONS}"
 [ -n "$PYTHONS" ] || PYTHONS="$DEFAULT_PYTHONS"
 
 SWEEP="$REPO/docs/audits/support/t_572b4856/alone_sweep.sh"

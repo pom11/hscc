@@ -347,8 +347,13 @@ write-up, so the sweep is now routed:
   wiring, lock held) — never green because nothing ran.
 * **`scripts/install_alone_sweep_gate.sh`** — registers it as a daily Hermes cron
   job (`hscc-alone-sweep-gate`, `30 4 * * *`, `--no-agent`). The installed job is
-  a generated one-line wrapper that bakes the repo path and `exec`s the gate from
-  git, so the nightly measures committed code and a copied script cannot go stale.
+  a generated one-line wrapper that bakes the repo path, the interpreter list and
+  the report root it resolved from the installing shell, then `exec`s the gate from
+  git — so the nightly measures committed code, a copied script cannot go stale,
+  and nothing is left to resolve at 04:30 under a bound profile home that is not
+  the operator's `$HOME`. It refuses to register a job it knows cannot measure
+  anything (no gate, no sweep tooling, or no visible interpreter) rather than
+  installing a failure that nobody notices until a red goes unseen.
 * **`scripts/tests/test_alone_sweep_gate.py`** — the half that stays in the per-PR
   lane, at milliseconds instead of minutes.
 

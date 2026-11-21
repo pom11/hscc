@@ -54,7 +54,7 @@ kind: Verified
   gate is green again on the reverted tree. The 20-second probe pair
   (`pytest <planter> <mutant>` → `52 passed`; `pytest <mutant>` alone → rc 2) is the
   cheap re-check that needs no sweep.
-* `scripts/tests/test_alone_sweep_gate.py` — 20 cases, **1.4 s**, no pytest over
+* `scripts/tests/test_alone_sweep_gate.py` — 23 cases, **~1.5 s**, no pytest over
   the checkout: the diff tool's teeth re-measured on fixtures (a status change, a
   collection error, a file the leg never ran, and the skip-reason change whose
   *tally matches* — the §2 shape, invisible to junit) plus a green fixture, because
@@ -65,7 +65,13 @@ kind: Verified
   nightly cannot quietly shrink; the gate pinned to fail closed on all three
   not-measured paths and to leave no lock behind; the installer pinned to the
   `$HERMES_HOME/scripts` binding rule (t_3aadd2c0's 17-consecutive-failures
-  incident) and refused before it registers anything on a tree it cannot measure.
+  incident), to baking the interpreter list and report root it resolved from the
+  installing shell (a Hermes job may run under a bound home that is not the
+  operator's `$HOME`, and `$HOME`-relative interpreter defaults would then resolve
+  nowhere at 04:30 — found end-to-end, not on the first pass), to execing the gate
+  from git rather than a stale copy, to refusing a tree it cannot measure or an
+  interpreter it cannot see BEFORE registering a job, and `--status` to say 'NONE on
+  record' rather than rendering a never-run job as a pass.
 * `scripts/readme_lint.py --strict` clean (23 files, 597 commands, docs-index
   219/219, 0 findings).
 
