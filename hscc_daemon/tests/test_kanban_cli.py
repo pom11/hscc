@@ -54,6 +54,42 @@ def _no_live_prci_probes(monkeypatch):
         "ok": True, "reason": "", "blocking": None})
 
 
+@pytest.fixture(autouse=True)
+def _no_project_registry(monkeypatch):
+    """Hermeticity fixture for this file (t_c11f0d88): no test here may read a
+    real flightdeck project registry.
+
+    ``hscc kanban stale`` narrows its board list through
+    ``_enum_board_names(..., registered_only=True)``, which asks
+    ``registered_board_names()`` — the flightdeck PROJECT registry
+    (``~/.flightdeck/registry.yaml``, or ``$FLIGHTDECK_REGISTRY``). That is host
+    state and this file pinned the kanban-lib seam but not this one, so the
+    fake ``hscc`` board survived the filter only because the OPERATOR has an
+    ``hscc`` project registered: ``test_listing_json_valid`` passed on a
+    workstation and died ``IndexError`` on the runner, where no registry exists
+    (an absent registry is ``(set(), None)`` — "no project boards", deliberately,
+    autodown.py:341-343, and NOT something a test may paper over).
+
+    The fence answers the seam with a loud ERROR rather than a plausible set, so
+    a test that reaches the narrowing without pinning it FAILS instead of
+    returning whatever the machine happens to have — the same backstop role the
+    GH probe fence in conftest.py plays for ``gh`` (see the note above). A test
+    that does want the narrowing answers the fence with its own pin, the way
+    test_kanban_blocked.py:279 and test_kanban_live.py:166 already do::
+
+        monkeypatch.setattr(ad, "registered_board_names",
+                            lambda *a, **k: ({"hscc"}, None))
+
+    ``test_kanban_cli_registry_hermetic.py`` is the outer guard: it re-runs this
+    whole file with ``FLIGHTDECK_REGISTRY`` pointed at a missing file, which is
+    the CI posture, and asserts the answer does not move.
+    """
+    monkeypatch.setattr(
+        ad, "registered_board_names",
+        lambda *a, **k: (set(), "HERMETICITY FENCE: project registry seam "
+                                "not pinned by this test"))
+
+
 # ---------------------------------------------------------------------------
 # Fake Hermes kanban lib — real in-memory sqlite, board-aware
 # ---------------------------------------------------------------------------
@@ -320,19 +356,42 @@ class TestCmdKanban:
     def test_listing_json_valid(self, capsys, monkeypatch):
         kb = _FakeKb({"hscc": [_t("t-1", "todo", 8)]})
         monkeypatch.setattr(ad, "_load_kanban_db_or_default", lambda: kb)
+        # The listing narrows to REGISTERED project boards (kanban_cli.py:253),
+        # so without this pin the fake board's presence depends on whether the
+        # machine running the test has an ``hscc`` project in its flightdeck
+        # registry. It did on the workstation, and did not on the runner — the
+        # exact red in t_c11f0d88. Pinning it is the hermetic answer; the
+        # product rule stays as it is.
+        monkeypatch.setattr(ad, "registered_board_names",
+                            lambda *a, **k: ({"hscc"}, None))
         rc = cmd_kanban(["stale", "--json"])
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert data["tasks"][0]["id"] == "t-1"
         assert data["tasks"][0]["board"] == "hscc"
+        # Hermeticity of THIS case, measured: an empty registry is not silently
+        # "no narrowing". With the seam pinned to no project boards the board
+        # must drop out of the listing (the product rule), which is what makes
+        # the pin above load-bearing rather than decorative.
+        monkeypatch.setattr(ad, "registered_board_names",
+                            lambda *a, **k: (set(), None))
+        capsys.readouterr()
+        assert cmd_kanban(["stale", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["tasks"] == []
 
     def test_listing_reuses_load_kanban_db(self, capsys, monkeypatch):
         # Prove the CLI goes through _load_kanban_db_or_default (the same seam
         # _has_active_work uses), the reuse requirement.
         kb = _FakeKb({"default": [_t("t-1", "todo", 8)]})
         monkeypatch.setattr(ad, "_load_kanban_db_or_default", lambda: kb)
+        # Same registry seam as above: the reuse claim is only exercised if the
+        # board survives the registered-only narrowing, so pin it to the fake's
+        # own slug instead of hoping the host registry names ``default``.
+        monkeypatch.setattr(ad, "registered_board_names",
+                            lambda *a, **k: ({"default"}, None))
         rc = cmd_kanban(["stale"])
         assert rc == 0
+        assert "t-1" in capsys.readouterr().out
 
     def test_archive_via_cli(self, capsys, monkeypatch):
         kb = _FakeKb({"hscc": [_t("t-1", "todo", 8),
