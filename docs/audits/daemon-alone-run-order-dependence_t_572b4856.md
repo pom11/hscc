@@ -722,6 +722,14 @@ misled by the tool. One word fixes it; it needs a fixture that fails a test so t
 is pinned non-zero, so it is a card of its own rather than a drive-by edit to the audited
 tool.
 
+**FIXED (`t_760dda87`).** `tally()` now reads `counts["failure"]`, and
+`scripts/tests/test_alone_sweep_gate.py` carries two fixtures in this file's own shape
+(25 cases, 1 failure) — one one-sided (`in-leg (25, 0, 0, 0) | alone (24, 1, 0, 0)`), one
+where **both** sides fail the same nodeid, the case the zeroed slot hid — measured
+`2 failed, 32 passed` before the fix and `34 passed` after. The `(25, 0, 0, 0)` lines
+above stay as the record of what the runner really printed at head `17396ea1`; a re-taken
+sweep reports the failure in slot 2.
+
 **What this licenses.** Not a blocking gate on the CI posture. The obstacle is not
 the sweep — it is two host-state seams that keep the leg underneath it from being
 green in both postures, and `alone_sweep.sh` already refuses to render an agreement

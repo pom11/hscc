@@ -41,7 +41,7 @@ def module_of(classname):
 
 
 def load_junit(path):
-    """-> {module: {nodeid: passed|skipped|failed|error}}"""
+    """-> {module: {nodeid: passed|skipped|failure|error}} (junit's own tags)"""
     out = defaultdict(dict)
     for tc in ET.parse(path).iter("testcase"):
         mod = module_of(tc.get("classname"))
@@ -61,7 +61,7 @@ def tally(mapping):
     counts = defaultdict(int)
     for status in mapping.values():
         counts[status] += 1
-    return (counts["passed"], counts["failed"], counts["skipped"],
+    return (counts["passed"], counts["failure"], counts["skipped"],
             counts["error"])
 
 

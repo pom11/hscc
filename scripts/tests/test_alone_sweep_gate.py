@@ -23,9 +23,11 @@ scheduled gate is still *capable* of going red —
     is the whole failure class),
   * the enumeration is still the whole leg dir, never a curated subset,
   * the diff tool has TEETH, measured on fixtures rather than asserted: a status
-    change, a skip-reason change whose tally matches, a collection error, and a
-    file absent from the leg — plus one green fixture, because a tool that fails
-    for everything also "catches" everything,
+    change, a skip-reason change whose tally matches, a collection error, a file
+    absent from the leg, and a failure that reaches the printed tally's failure
+    slot (one-sided, and shared by both sides — the shape the `counts["failed"]`
+    bug zeroed) — plus one green fixture, because a tool that fails for
+    everything also "catches" everything,
   * and the gate fails CLOSED: no interpreter, broken wiring, or a concurrent
     pass all exit 2, never 0,
   * and every non-preflight pass STAMPS the doctor's cron-watcher roster
@@ -279,6 +281,60 @@ def test_diff_catches_a_file_the_leg_never_ran(tmp_path):
     proc = _diff(out)
     assert proc.returncode == 1, proc.stdout
     assert "test_gamma" in proc.stdout
+
+
+# ── the tally's FAILURE SLOT is real (t_760dda87) ───────────────────────────
+#
+# `load_junit` stores junit's own tag as the status, and that tag is `<failure>`
+# — but `tally()` read `counts["failed"]`, a key the status above can never
+# produce. So slot 2 of every printed 4-tuple was structurally 0 on every
+# posture for every file, and the tuple comparison `at == it` was blind to
+# failures as a class. The runner sweep of §11 printed
+# `test_kanban_cli: in-leg (25, 0, 0, 0) | alone (25, 0, 0, 0) | rc=1` for a file
+# taken from a leg that reported `1 failed, 4031 passed, 28 skipped`. The
+# per-nodeid half and the rc check still named that file; what lied was the
+# printed evidence. These fixtures are the incident's own shape (25 cases, 1
+# failure), and they are the reason the fix is one word instead of a re-design.
+
+def _twenty_five(failing=None):
+    """25 cases of one file; `failing` is the junit tag of the last one (or None)."""
+    return ([("tests.test_kanban_cli", f"test_n{i:02d}", None) for i in range(24)]
+            + [("tests.test_kanban_cli", "test_zz_listing", failing)])
+
+
+def test_diff_shows_a_failure_in_the_tally_and_names_the_file(tmp_path):
+    """One side fails: the tally must SAY so, not just exit 1 beside a 0.
+
+    Both halves are pinned on purpose. The naming half was already covered by
+    the rc check; the tally half is what the bug silently zeroed.
+    """
+    out = _fixture(tmp_path, _twenty_five(), {
+        "test_kanban_cli": (_twenty_five("failure"), 1, []),
+    })
+    proc = _diff(out)
+    assert proc.returncode == 1, proc.stdout
+    assert "test_kanban_cli" in proc.stdout
+    assert "in-leg (25, 0, 0, 0)" in proc.stdout, proc.stdout
+    assert "alone (24, 1, 0, 0)" in proc.stdout, proc.stdout
+
+
+def test_diff_shows_a_failure_both_sides_share(tmp_path):
+    """The case the bug hid outright: the SAME nodeid fails on both sides.
+
+    No status change, no reason difference — the per-nodeid half has nothing to
+    report, and only rc names the file. The tally is the sole place a reader is
+    told a failure exists, so it must read `(24, 1, 0, 0)` on both sides and
+    never the `(25, 0, 0, 0)` the broken slot printed.
+    """
+    out = _fixture(tmp_path, _twenty_five("failure"), {
+        "test_kanban_cli": (_twenty_five("failure"), 1, []),
+    })
+    proc = _diff(out)
+    assert proc.returncode == 1, proc.stdout
+    assert "test_kanban_cli" in proc.stdout
+    assert "in-leg (24, 1, 0, 0)" in proc.stdout, proc.stdout
+    assert "alone (24, 1, 0, 0)" in proc.stdout, proc.stdout
+    assert "(25, 0, 0, 0)" not in proc.stdout, proc.stdout
 
 
 # ── the gate fails closed ───────────────────────────────────────────────────
