@@ -49,6 +49,7 @@ so unit tests never touch a real tmux server or the operator's panes.
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import time
@@ -148,6 +149,26 @@ PROFILE_FLAG_RE = re.compile(r"(?:^|\s)(?:-p|--profile)[ =](\S+)")
 _CHAT_MARK = " chat"
 _GATEWAY_MARK = "gateway"            # never a REPL target (see pane_chat_command)
 DEFAULT_PROFILE = "default"          # the reference tool's no-flag fallback
+#: Hermes's managed launcher (``python3 -I -c "...; sys.argv = ['…/hermes',
+#: '-p', 'general', 'chat']; ..."``) carries the real argv as a Python list
+#: literal, which neither the flag pattern nor the chat marker can read.
+_ARGV_LITERAL_RE = re.compile(r"sys\.argv = (\[[^\]]*\])")
+
+
+def _argv_as_command_line(cmd: str) -> str:
+    """``cmd`` with an embedded ``sys.argv = [...]`` literal appended as a plain
+    space-joined command line, so the one flag/chat rule reads both launch forms.
+    Anything that is not a clean list of strings leaves ``cmd`` unchanged."""
+    m = _ARGV_LITERAL_RE.search(cmd)
+    if not m:
+        return cmd
+    try:
+        argv = ast.literal_eval(m.group(1))
+    except (ValueError, SyntaxError):
+        return cmd
+    if not (isinstance(argv, list) and all(isinstance(a, str) for a in argv)):
+        return cmd
+    return f"{cmd} {' '.join(argv)}"
 
 
 def normalize_mode(mode: str) -> str:
@@ -209,6 +230,7 @@ def pane_chat_command(cmds) -> tuple[str, str] | None:
     """
     fallback: tuple[str, str] | None = None
     for cmd in cmds:
+        cmd = _argv_as_command_line(cmd)
         if "hermes" not in cmd or _CHAT_MARK not in f" {cmd}":
             continue
         if _GATEWAY_MARK in cmd:
