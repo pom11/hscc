@@ -161,16 +161,24 @@ class TestNoAgentEscapeHatch:
 
 class TestResumeTool:
     def test_confirmed_resume_clears_pause_and_strikes(self, fleet):
-        # STRIKES FIRST, PARK SECOND: note_heal() accrues NOTHING while the
-        # pause overlay holds the node (#568, heal_breaker.note_heal), so the
-        # old order left this resume clearing a slate that was never written and
-        # `suspended()` was 0.0 for the whole test. Same law the daemon-side
-        # twin pins, and for the same reason.
+        # The strikes are earned BEFORE the pause: #568 made note_heal a no-op
+        # on a node the overlay holds, so a paused node accrues nothing and a
+        # post-pause slate could never trip the breaker. The point of this test
+        # is that a slate earned while healing SURVIVES the pause (which #568
+        # documents: "strikes earned before the pause still count after the
+        # resume") and that a confirmed resume clears it.
         for _ in range(7):
             heal_breaker.note_heal(W1)
-        assert heal_breaker.suspended(W1) > 0.0, \
-            "the fixture must trip the breaker for this to mean anything"
+        assert heal_breaker.strike_count(W1) == 7, (
+            "the slate must be EARNED before the pause — without this pin "
+            "the test cannot show the strikes the resume clears were "
+            "actually accrued pre-pause")
+        assert heal_breaker.suspended(W1) > 0.0
         node_pauses.pause(W1, units=["w1", "wspan"], span_nodes=[W1, W2])
+        # The pause must still be in force at the moment of the resume, or this
+        # silently degrades into a plain "resume an unparked node" case and
+        # proves nothing about clearing strikes through a pause.
+        assert node_pauses.paused(W1) is not None
         out = npt.node_resume({"host": W1, "confirm": True})
         assert out["executed"] is True and out["ok"] is True
         assert all("--ensure" in " ".join(c) for c in fleet.calls)
