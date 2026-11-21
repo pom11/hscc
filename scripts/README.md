@@ -324,6 +324,15 @@ the job stops firing **or** fires and comes back `GATE RED` — the row is liven
 and the verdict rides inside the stamp. `scripts/install_alone_sweep_gate.sh` with
 `--status` prints that same verdict line; `hermes cron runs` keeps the per-run record.
 
+The **CI posture is a separate environment and is swept separately** (t_4447d736): the
+nightly above runs on the host that carries both stamp interpreters, while
+`.github/workflows/pytest-legs.yml` has an advisory `alone-sweep` job — dispatched with
+`alone_sweep=true`, `needs: leg` so it never runs alongside the leg it compares against,
+on the runner's own `requirements-ci.txt` venv — that answers the same question for the
+environment the nightly cannot see. It is advisory on purpose and its verdict comes from
+`.github/scripts/sweep_verdict.sh`; what it took and what it found is
+`docs/audits/daemon-alone-run-order-dependence_t_572b4856.md` §11.
+
 ## Customization
 
 Each script is self-contained shell + hardcoded host IPs / model ids. Cluster topology assumptions live at the top of each script — edit there if your cluster differs.
