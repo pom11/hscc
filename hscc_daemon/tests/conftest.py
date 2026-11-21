@@ -533,11 +533,14 @@ def _hermetic_kanban_root(tmp_path, monkeypatch):
 # above and swaps the live fence out from under the running suite. Importing
 # ``hermes_cli_plant`` has no such side effect and is what every site does.
 from hscc_daemon.tests.hermes_cli_plant import (  # noqa: E402
+    agent_tree_root as _agent_tree_root,
     evict_planted as _evict_planted_hermes_cli,
     hermes_cli_names as _hermes_cli_names,
     is_planted_path as _is_planted_path,
     poison_reason as _hermes_cli_poison_reason,
-    purge_planted as _purge_planted_hermes_cli)
+    purge_planted as _purge_planted_hermes_cli,
+    resident_under_agent_tree as _resident_under_agent_tree,
+    restore_agent_tree_cache as _restore_agent_tree_cache)
 
 
 @pytest.fixture(autouse=True)
@@ -545,24 +548,36 @@ def _hermetic_hermes_cli_imports():
     """Pin the ``hermes_cli`` import cache per test, like every other hermetic
     autouse fixture here pins the kanban root, the topology and sparkrun.
 
-    Teardown does two things, both cheap (the real subtree re-imports in ~5 ms
+    Teardown does three things, all cheap (the real subtree re-imports in ~5 ms
     once the source is cached):
 
       * drop every ``sys.path`` entry under a pytest temp root, so a planted
         ``<tmp>/hermes-agent`` cannot be the winner for a LATER test;
+      * put the ``sys.modules`` cache back to exactly what this test FOUND, so
+        nothing a window imported while the test ran is handed to the next one
+        (t_572b4856 — see ``hermes_cli_plant``'s second rule: a closed window
+        restores ``sys.path`` but not what it imported, and a resident
+        ``hermes_cli`` carries ``__path__`` into the real tree, which is how one
+        ``importorskip`` line came to answer ``No module named 'hermes_cli'``
+        alone and ``No module named 'utils'`` in-leg);
       * if the resident cache is poisoned by this test — a planted module, or a
         real module still holding one — purge the whole subtree and put back the
         cache as this test found it.
 
-    A test that only ever touched the REAL library pays nothing: no purge, no
-    re-import. The point is that one file planting a fake can no longer decide
-    what a later file's board enumeration sees.
+    A test that only ever touched the REAL library pays the re-import, nothing
+    else. The point is that neither a file planting a fake nor a file that
+    opened one import window can decide what a later file sees.
     """
     saved = {n: sys.modules[n] for n in _hermes_cli_names()}
+    # Resolved BEFORE the test runs: a test that points HERMES_AGENT_PATH at a
+    # temp tree is planting, and that is the plant rule's job, not this one's.
+    agent_root = _agent_tree_root()
+    saved_tree = {n: sys.modules[n] for n in _resident_under_agent_tree(agent_root)}
     yield
     strays = [p for p in sys.path if _is_planted_path(p)]
     if strays:
         sys.path[:] = [p for p in sys.path if not _is_planted_path(p)]
+    _restore_agent_tree_cache(agent_root, saved_tree)
     if _hermes_cli_poison_reason() is not None:
         _purge_planted_hermes_cli(saved)
 

@@ -24,6 +24,7 @@ The end-to-end case runs a REAL nested pytest over two generated files, so the
 proof is the cross-FILE leak the card is about, not a simulation of it.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -118,14 +119,17 @@ def _conftest():
     pytest.skip("conftest is not loaded under a known name in this run")
 
 
-def _run_nested(tmp_path):
+def _run_nested(tmp_path, a_file=_PLANT_FILE, b_file=_PROBE_FILE,
+                marker_env=("HSCC_T2BE3B04E_PLANT_MARKER", "planted.txt"),
+                names=("test_a_plant.py", "test_b_probe.py")):
     """Run a two-file pytest suite in its OWN process against this repo, with
     the real conftest loaded as a plugin. Returns (returncode, output)."""
-    (tmp_path / "test_a_plant.py").write_text(_PLANT_FILE)
-    (tmp_path / "test_b_probe.py").write_text(_PROBE_FILE)
+    a_name, b_name = names
+    (tmp_path / a_name).write_text(a_file)
+    (tmp_path / b_name).write_text(b_file)
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
-    env["HSCC_T2BE3B04E_PLANT_MARKER"] = str(tmp_path / "planted.txt")
+    env[marker_env[0]] = str(tmp_path / marker_env[1])
     # A worker shell's board pins must not steer the nested run (t_7e343e04).
     for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_HOME",
                 "HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT",
@@ -134,7 +138,7 @@ def _run_nested(tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
          "-p", "hscc_daemon.tests.conftest",
-         "test_a_plant.py", "test_b_probe.py"],
+         a_name, b_name],
         env=env, cwd=str(tmp_path), capture_output=True, text=True, timeout=300)
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -166,6 +170,105 @@ def test_a_planted_fake_does_not_reach_the_next_file(tmp_path):
     assert "hermes-agent" in planted, planted
     assert rc == 0, (
         "a planted hermes_cli leaked out of the file that planted it:\n" + out)
+
+
+# ── t_572b4856: the OTHER leak — what a CLOSED window leaves in sys.modules ──
+#
+# The pair above pins the planted tree. This pair pins its sibling, which is
+# invisible to that fixture: ``hermes_import.agent_tree_on_path`` restores
+# ``sys.path`` (804 events over a leg, zero residue on the path) but cannot
+# un-import what the block imported. A resident ``hermes_cli`` carries
+# ``__path__`` into ``~/.hermes/hermes-agent``, so every LATER ``import
+# hermes_cli.<anything>`` resolves with the tree nowhere on ``sys.path`` — and a
+# failing submodule import is enough to create it, because the parent succeeds.
+# Measured, both interpreters:
+# ``docs/audits/daemon-alone-run-order-dependence_t_572b4856.md``.
+#
+# File A: open a window through the PRODUCTION entry (not a hand-rolled import)
+# and record the cache it found vs the cache it ended with — the marker is what
+# stops this pin going green by never opening a window at all.
+_WINDOW_FILE = '''
+import json
+import os
+import sys
+from pathlib import Path
+
+from hscc_daemon import autodown
+
+
+def _cli_slice():
+    return sorted(n for n in sys.modules
+                  if n == "hermes_cli" or n.startswith("hermes_cli."))
+
+
+def test_open_a_real_import_window(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_AGENT_PATH", raising=False)
+    before = _cli_slice()
+    lib = autodown._load_kanban_db_or_default()
+    after = _cli_slice()
+    marker = os.environ.get("HSCC_T572B4856_WINDOW_MARKER")
+    if marker:
+        Path(marker).write_text(json.dumps(
+            {"before": before, "after": after, "resolved": lib is not None}))
+    assert after != before or lib is not None, (
+        "the production loader imported nothing through its window — this pin "
+        "would be green for the wrong reason")
+'''
+
+# File B: same process, NEXT FILE. The answer must be the one the file would get
+# ALONE — the cache file A found, not the cache file A's window left behind.
+_WINDOW_PROBE_FILE = '''
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def _cli_slice():
+    return sorted(n for n in sys.modules
+                  if n == "hermes_cli" or n.startswith("hermes_cli."))
+
+
+def test_the_closed_window_left_nothing_behind():
+    marker = os.environ.get("HSCC_T572B4856_WINDOW_MARKER")
+    seen = json.loads(Path(marker).read_text()) if marker else {}
+    expected = set(seen.get("before", []))
+    now = set(_cli_slice())
+    assert now == expected, (
+        f"hermes_cli modules outlived the window that imported them: "
+        f"{sorted(now - expected)} (file A found {sorted(expected)}, ended with "
+        f"{sorted(seen.get('after', []))}). A resident hermes_cli carries "
+        "__path__ into the real agent tree, so every later import of a hermes "
+        "submodule resolves through it and an importorskip answers a question "
+        "about test order, not about this interpreter.")
+'''
+
+
+def test_a_closed_import_window_leaves_no_residue_for_the_next_file(tmp_path):
+    """THE t_572b4856 regression, run the way it happens: one process, two files.
+
+    Not gated on hermes being *importable* — on thin the point is precisely that
+    the parent package imports and the submodule does not, which is the shape
+    that used to hand ``hermes_cli`` to the next file. The only thing skipped is
+    a host with no agent tree at all, where there is nothing to leak.
+    """
+    from hscc_daemon import hermes_import
+    if not os.path.isdir(hermes_import.resolve_agent_tree()):
+        pytest.skip("no Hermes agent tree on this host — no window to leak from")
+    rc, out = _run_nested(
+        tmp_path, a_file=_WINDOW_FILE, b_file=_WINDOW_PROBE_FILE,
+        marker_env=("HSCC_T572B4856_WINDOW_MARKER", "window.json"),
+        names=("test_a_window.py", "test_b_window_probe.py"))
+    marker = tmp_path / "window.json"
+    assert marker.exists(), (
+        f"file A never ran — this test would be green for the wrong reason:\n{out}")
+    seen = json.loads(marker.read_text())
+    assert set(seen["after"]) - set(seen["before"]), (
+        f"file A's window imported nothing ({seen}) — the probe below proves "
+        "nothing either:\n" + out)
+    assert rc == 0, (
+        "a hermes_cli imported inside one test's import window reached the "
+        f"next file:\n{seen}\n{out}")
 
 
 def test_no_planted_agent_dir_is_on_sys_path_right_now():
@@ -256,3 +359,72 @@ def test_purging_hands_back_the_pre_test_cache_by_identity():
     finally:
         for name in ("hermes_cli._t2be_kept", "hermes_cli._t2be_new"):
             sys.modules.pop(name, None)
+
+
+# ── the interpreter's own installation is NOT residue (t_572b4856) ────────────
+# The first cut of the agent-tree rule classified by prefix alone. On the
+# canonical runner the venv lives INSIDE the agent tree
+# (~/.hermes/hermes-agent/venv/lib/python3.14/site-packages), so `rich`, `typer`
+# and friends read as "hermes residue" and were evicted after every test. The
+# next test re-imported a second copy while the first was still referenced and
+# rich blew up inside Panel rendering — 5 CLI files / 72 tests, canonical only.
+
+
+def test_the_agent_tree_rule_excludes_a_venv_nested_in_the_tree(tmp_path):
+    """Synthetic version: a `<tree>/venv/lib/pythonX/site-packages` package is
+    the interpreter's own, a `<tree>/hermes_cli` module is residue.
+
+    Both halves are asserted against the SAME synthetic tree, so the last line is
+    the mutation probe built into the pin: with the interpreter exclusion removed
+    (`interp_roots=()`) the venv path reads as residue again, which is exactly the
+    bug this test exists to keep dead.
+    """
+    from hscc_daemon.tests import hermes_cli_plant as plant
+
+    root = tmp_path / "hermes-agent"
+    site_pkgs = root / "venv" / "lib" / "python3.14" / "site-packages" / "rich"
+    site_pkgs.mkdir(parents=True)
+    (site_pkgs / "__init__.py").write_text("")
+    src = root / "hermes_cli"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+
+    r = str(root.resolve())
+    nested_venv = (str(root.resolve() / "venv"),)
+
+    assert plant.is_agent_tree_path(str(src / "__init__.py"), root=r,
+                                    interp_roots=nested_venv) is True
+    assert plant.is_agent_tree_path(str(site_pkgs / "__init__.py"), root=r,
+                                    interp_roots=nested_venv) is False
+    assert plant.is_agent_tree_path(str(site_pkgs / "__init__.py"), root=r,
+                                    interp_roots=()) is True
+    # A package is judged by __path__ too — that is what makes submodules
+    # resolvable, so it is the half that must not read as residue either.
+    pkg = types.ModuleType("rich")
+    pkg.__path__ = [str(site_pkgs)]
+    assert plant._is_agent_tree_module(pkg, r, nested_venv) is False
+
+
+def test_installed_packages_are_never_reported_as_residue():
+    """The live version of the same rule, on the interpreter actually running.
+
+    Non-vacuous exactly where the bug was possible: a venv nested under the agent
+    tree (the canonical layout). On a sibling interpreter whose prefix is outside
+    the tree there is no such overlap, so it says so instead of passing quietly.
+    """
+    from hscc_daemon.tests import hermes_cli_plant as plant
+
+    root = plant.agent_tree_root()
+    nested = str(sys.prefix) == root or str(sys.prefix).startswith(root + os.sep)
+    if not nested:
+        pytest.skip(f"sys.prefix {sys.prefix!r} is not inside the agent tree "
+                    f"{root!r} — no nested-venv overlap to check here")
+    under_prefix = {n for n, m in list(sys.modules.items())
+                    if getattr(m, "__file__", "")
+                    and str(m.__file__).startswith(sys.prefix + os.sep)}
+    assert under_prefix, "no installed package resident? the sweep would be vacuous"
+    reported = set(plant.resident_under_agent_tree())
+    assert reported & under_prefix == set(), (
+        f"the interpreter's own packages read as hermes residue: "
+        f"{sorted(reported & under_prefix)[:5]}")
+
