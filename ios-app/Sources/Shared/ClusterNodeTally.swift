@@ -423,8 +423,14 @@ enum FleetFormat {
     }
 
     /// `paused`, `paused (reason)`, `paused (3h ago)` or `paused (reason, 3h ago)`.
+    ///
+    /// A blank reason is not a reason: the route sends `""` for a pause record
+    /// written without one, and it must degrade to the shorter truth rather than
+    /// to `paused (, 3h ago)`.
     static func paused(reason: String?, since: String?, now: Date = Date()) -> String {
-        let parts = [reason, sinceText(since, now: now)].compactMap { $0 }
+        let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = [trimmed.flatMap { $0.isEmpty ? nil : $0 },
+                     sinceText(since, now: now)].compactMap { $0 }
         guard !parts.isEmpty else { return pausedWord }
         return "\(pausedWord) (\(parts.joined(separator: ", ")))"
     }
@@ -434,6 +440,12 @@ enum FleetFormat {
     /// one can read at a glance off a 60 mm tile is not information — and
     /// measured against `now`, which the caller injects so a gate can pin it.
     ///
+    /// The minutes are ROUNDED, not floored, and the hours and days are derived
+    /// from those rounded minutes: a pause that began three hours ago minus one
+    /// eighth of a second is three hours ago, and flooring each step
+    /// independently would have it claim two. Every smaller unit is derived from
+    /// the larger one for the same reason — the copy cannot disagree with itself.
+    ///
     /// A `since` the parser cannot read comes back VERBATIM rather than nil: the
     /// route sent a fact, and dropping it to render a shorter line would be the
     /// surface deciding the operator's pause began at no particular time.
@@ -441,25 +453,50 @@ enum FleetFormat {
         guard let raw = since?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return nil }
         guard let date = iso8601(raw) else { return raw }
-        let seconds = now.timeIntervalSince(date)
-        if seconds < 60 { return "just now" }
-        let minutes = Int(seconds / 60)
-        if minutes < 60 { return "\(minutes)m ago" }
-        let hours = minutes / 60
+        let totalMinutes = Int(max(0, now.timeIntervalSince(date) / 60).rounded())
+        if totalMinutes < 1 { return "just now" }
+        if totalMinutes < 60 { return "\(totalMinutes)m ago" }
+        let hours = totalMinutes / 60
         if hours < 24 { return "\(hours)h ago" }
         return "\(hours / 24)d ago"
     }
 
-    /// The two shapes this route emits: Python's `datetime.isoformat()` gives
-    /// second-precision `+00:00` and microsecond-precision when the record has
-    /// fractions; a `Z` suffix is the same instant written differently, and
-    /// swapping it for an offset is the only normalisation done here. Anything
-    /// else fails to parse and is drawn as it arrived.
+    /// The shapes this route emits: Python's `datetime.isoformat()` writes
+    /// second precision with an offset, and SIX fractional digits whenever the
+    /// record has any sub-second precision at all; a `Z` suffix is the same
+    /// instant written differently, and swapping it for an offset is the only
+    /// normalisation done here. Anything else fails to parse and is drawn as it
+    /// arrived.
     static func iso8601(_ raw: String) -> Date? {
         let text = raw.hasSuffix("Z")
             ? String(raw.dropLast()) + "+00:00"
             : raw
-        return fractionalISO.date(from: text) ?? zoneISO.date(from: text)
+        if let date = fractionalISO.date(from: text) ?? zoneISO.date(from: text) {
+            return date
+        }
+        // `ISO8601DateFormatter`'s fractional option reads EXACTLY three digits,
+        // so a microsecond timestamp — the common case for a Python-written
+        // record — fails it and would otherwise be drawn as raw text. Cutting to
+        // milliseconds loses nothing this copy can show: the smallest unit it
+        // prints is a minute.
+        if let shortened = truncatedFractional(text),
+           let date = fractionalISO.date(from: shortened) {
+            return date
+        }
+        return nil
+    }
+
+    /// `T10:00:00.123456+00:00` to `T10:00:00.123+00:00`. nil when there is no
+    /// over-long fractional run to shorten, so the retry above is a second
+    /// attempt at the same instant and never a second guess at it.
+    private static func truncatedFractional(_ text: String) -> String? {
+        guard let dot = text.firstIndex(of: "."),
+              text[text.startIndex..<dot].contains("T") else { return nil }
+        var end = text.index(after: dot)
+        while end < text.endIndex, text[end].isNumber { end = text.index(after: end) }
+        guard text.distance(from: text.index(after: dot), to: end) > 3 else { return nil }
+        let keep = text.index(text.index(after: dot), offsetBy: 3)
+        return String(text.prefix(upTo: keep)) + String(text.suffix(from: end))
     }
 
     private static let fractionalISO: ISO8601DateFormatter = {
