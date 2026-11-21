@@ -545,8 +545,11 @@ def test_directory_is_a_real_parameter_of_both_writers():
 
 
 def test_stamp_failure_rejects_a_reserved_keyword_too(sandbox):
-    """Same guard on the other writer — a `verdict=` typo must not ride along in
-    a failure stamp either (the sweep gate passes real payload fields)."""
+    """Same guard on the other writer: a reserved envelope name raises there too.
+    Asserted with `ok=`, deliberately NOT with `verdict=` — `verdict` is
+    legitimate payload (the sweep gate stamps `verdict="green"/"red"`, and
+    `test_a_green_sweep_pass_is_ok_and_carries_the_gate_fields` above pins it), so
+    reserving it would break the one row this module exists to render."""
     with pytest.raises(TypeError) as exc:
         cw.stamp_failure("alone_sweep_gate", "boom", ok=True)
     assert "ok" in str(exc.value)
@@ -704,6 +707,26 @@ def test_a_writer_that_absorbs_the_keyword_is_refused_too(sandbox, monkeypatch):
     assert "directory" in str(exc.value)
     assert calls == []
     assert not (other / "escalate_watcher.json").exists()
+
+
+def test_a_positional_only_directory_is_not_mistaken_for_the_seam(sandbox,
+                                                                  monkeypatch):
+    """The capability check honours a name only where it can be passed BY KEYWORD.
+    `def write_state(stream, data, directory, /)` does have a `directory`, and
+    still cannot take `directory=` — an "is the name there" check would send the
+    keyword anyway, take the TypeError the writer raises for it, and lose the
+    stamp in exactly the silence the deployed copy produces."""
+    calls = []
+
+    def write_state(stream_name, data, directory, /):
+        calls.append(directory)
+        return data
+
+    monkeypatch.setattr(state, "write_state", write_state)
+    with pytest.raises(TypeError) as exc:
+        cw.stamp("dep_pr_watcher", directory=str(_relocated(sandbox)))
+    assert "directory" in str(exc.value)
+    assert calls == []
 
 
 def test_stamp_failure_refuses_an_unhonourable_root_as_well(sandbox, monkeypatch):
