@@ -425,6 +425,195 @@ def _degraded(lead, data=None, exc=None):
 
 
 # ---------------------------------------------------------------------------
+# The node-pause overlay — a parked node reads PAUSED, never down
+# ---------------------------------------------------------------------------
+# WHY THE ROUTE PROJECTS THIS AND NOT THE BACKING. ``hscc node pause`` stops a
+# unit through sparkrun and records the intent in ``~/.hscc/node_pauses.json``
+# (hscc_daemon/node_pauses.py). Every read path downstream of that stop — the
+# sparkrun host table, the serving poller, the widget tally — then sees the
+# same thing a crash sees: no container, no answering engine. Without an
+# overlay read at the API edge a paused node is therefore reported as DOWN, and
+# the operator's deliberate act is rendered as a fault: the widget paints it
+# hot, the Needs-me badge fires, and the fleet looks broken while it is doing
+# exactly what they asked. The repair loops already skip parked nodes
+# (watchdog auto-heal, keepalive, ``cluster up``, autoscale); this is the same
+# overlay on the VISIBILITY side, so the fleet reads the same way everywhere.
+#
+# THE THREE FIELD NAMES ARE A CONTRACT, NOT A SUGGESTION. ``status``,
+# ``paused_reason`` and ``paused_since`` are what the iOS/macOS widgets read
+# (t_983f177e), so renaming or reshaping one is a breaking change for shipped
+# bundles, not a refactor. They are additive: a row that is not parked keeps
+# exactly the keys it had before this existed, which is why the parity gates on
+# the monitor payload still pass.
+#
+# WHY THE OVERLAY IS READ PER REQUEST, NOT CACHED. The sparkrun frame and the
+# serving rows behind them cost subprocesses, so they live in the 20 s snapshot
+# cache above. The overlay is one small local JSON file, and pausing or
+# resuming must be visible on the NEXT request rather than up to a TTL later —
+# so it is read at request time and merged onto a COPY of the cached rows.
+# Nothing here mutates a cached object: the cache holds the pre-overlay truth.
+
+#: The value ``status`` carries on a parked row. One constant so a route,
+#: a test and the widget contract can never drift into three spellings.
+PAUSE_STATUS = "paused"
+
+#: The keys a parked row gains. Stable contract — see the block above.
+PAUSE_ROW_KEYS = ("status", "paused_reason", "paused_since")
+
+
+def _backing_node_pauses(directory=None):
+    """The durable node-pause overlay as ``{host: entry}``.
+
+    The monkeypatch seam the route tests use, like every other ``_backing_*``
+    here. ``directory`` is threaded through to :func:`node_pauses.list_pauses`
+    because that module's documented test seam is an explicit root, never an
+    environment variable: a root passed in is one root both sides of the call
+    share, while a root read from the process env is a root no other process
+    (the CLI that wrote the overlay) can ever have had. Handlers pass
+    ``ctx.hscc_dir``, which in production resolves to HOME's ``~/.hscc`` — the
+    same root the CLI writes — and in a test is that test's own tmp dir.
+    """
+    from hscc_daemon import node_pauses
+    return node_pauses.list_pauses(directory)
+
+
+def _node_key(value):
+    """A comparable node identity, or ``None`` when this value names none.
+
+    Deliberately not clever: trim and case-fold, no address normalisation, no
+    hostname suffix stripping. The overlay is keyed by the host string the
+    operator passed to ``hscc node pause``, which is the same string sparkrun
+    uses in its rows. Guessing that ``node-3`` means ``192.0.2.13`` would
+    invent a paused node on a machine nobody parked, which is a worse lie than
+    a missing overlay tag on an aliased host.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed.casefold() if trimmed else None
+
+
+def _pause_row(reason, since):
+    """The three contract keys, always all three, in the documented order."""
+    return {"status": PAUSE_STATUS,
+            "paused_reason": reason if isinstance(reason, str) else "",
+            "paused_since": since if isinstance(since, str) else None}
+
+
+def _pause_overlay(directory=None):
+    """``{node: {status, paused_reason, paused_since}}`` for parked nodes.
+
+    Span-aware on purpose. A pause record is keyed by the host the operator
+    named, and a unit that spans several hosts is parked as a whole — the
+    machines named only in ``span_nodes`` are just as out of service as the
+    keyed one, and painting them down would fault the operator's own action
+    twice. That is ``node_pauses.covering``'s rule; this is its projection.
+
+    A host's OWN record wins over a span record that happens to name it
+    (``covering`` prefers the keyed entry, and the operator's own reason is the
+    truthful one to show).
+
+    Fails open to ``{}``: an unreadable overlay is already ``{"pauses": {}}``
+    inside :func:`node_pauses.load`, and the one thing left that could raise is
+    the import. A route must never turn a fleet read into an error because the
+    overlay could not be parsed — the overlay WARNs about itself.
+    """
+    try:
+        pauses = _backing_node_pauses(directory)
+    except Exception:  # noqa: BLE001 - a visibility tag is never worth a 500
+        return {}
+    overlay = {}
+    if not isinstance(pauses, dict):
+        return overlay
+    for host, entry in pauses.items():
+        if not isinstance(entry, dict):
+            continue
+        row = _pause_row(entry.get("reason"), entry.get("since"))
+        keyed = _node_key(host)
+        if keyed:
+            overlay[keyed] = dict(row)
+        for node in entry.get("span_nodes") or []:
+            spanned = _node_key(node)
+            if spanned:
+                overlay.setdefault(spanned, dict(row))
+    return overlay
+
+
+def _paused_nodes(overlay):
+    """The overlay as the payload's own ``paused_nodes`` list, sorted by node.
+
+    Why a list and not only the annotated rows: a parked host can be MISSING
+    from the monitor frame entirely — sparkrun does not list a machine whose
+    workloads are stopped, and an absent row is a row there is nothing to tag.
+    A client that only walked the rows would count such a node as gone, or
+    subtract nothing from its down tally. This is the authoritative "these
+    nodes are parked, by choice, since then" set, independent of what the
+    sample managed to reach.
+    """
+    return [dict({"node": node}, **overlay[node]) for node in sorted(overlay)]
+
+
+def _annotate_paused_rows(rows, overlay, keys=("host", "node", "name")):
+    """A copy of ``rows`` with the pause keys added to parked-node rows.
+
+    ``keys`` is the row's identity field, tried in order, because the two row
+    families this route carries name their machine differently: the sparkrun
+    host table uses ``host``, the serving rows use ``node``.
+
+    Rows the overlay does not hold come back as the SAME objects, so an
+    unpaused payload is byte-identical to the pre-overlay response — including
+    its key order and its ``error`` text. Rows it does hold come back as new
+    dicts, because the rows in hand belong to the shared snapshot cache and
+    writing into them there would leak one request's pause state into every
+    later request for the rest of the TTL.
+
+    A parked row keeps its ``error``: "could not sample this host" may still be
+    true, and a node the operator parked is not a reason to lose a real
+    diagnostic. What the row promises instead is that ``status`` says
+    ``"paused"`` — and a consumer that derives ``down`` from ``error`` or from
+    a missing sample MUST ask ``status`` first. That is the widget rule
+    (t_983f177e), and it is why ``paused`` and ``down`` can never collide.
+    """
+    if not overlay or not isinstance(rows, list):
+        return rows
+    out = []
+    for row in rows:
+        fields = None
+        if isinstance(row, dict):
+            for key in keys:
+                node = _node_key(row.get(key))
+                if node and node in overlay:
+                    fields = overlay[node]
+                    break
+        out.append({**row, **fields} if fields else row)
+    return out
+
+
+def _with_pause_overlay(payload, directory=None):
+    """The monitor payload with parked nodes tagged, as a NEW payload dict.
+
+    Tags both row families the route carries — the sparkrun host table under
+    ``json.hosts``/``json.nodes`` and the serving rows under ``serving`` — and
+    states the parked set at the top level. The payload handed in (the cached
+    snapshot's) is never modified.
+    """
+    overlay = _pause_overlay(directory)
+    out = dict(payload)
+    frame = payload.get("json")
+    if isinstance(frame, dict):
+        frame = dict(frame)
+        for key in ("hosts", "nodes"):
+            if key in frame:
+                frame[key] = _annotate_paused_rows(frame[key], overlay)
+        out["json"] = frame
+    if "serving" in payload:
+        out["serving"] = _annotate_paused_rows(payload["serving"], overlay,
+                                               keys=("node", "host", "name"))
+    out["paused_nodes"] = _paused_nodes(overlay)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # speak helpers (pure — take the computed dict, return the sentence)
 # ---------------------------------------------------------------------------
 
@@ -699,12 +888,12 @@ def handle_cluster_monitor(server, ctx, query, body):
             "speak": f"Fleet monitor failed: {detail}",
             "taken_at": taken,
         }
-    return 200, {
+    return 200, _with_pause_overlay({
         **snapshot["payload"],
         "success": True,
         "degraded": False,
         "taken_at": taken,
-    }
+    }, ctx.hscc_dir)
 
 
 def handle_cluster_hosts(server, ctx, query, body):
@@ -756,8 +945,19 @@ def handle_health(server, ctx, query, body):
     of starting its own.
 
     The payload stays a strict superset of what it was ({ok, checks, speak}) so
-    the iOS ``HealthResponse`` keeps decoding; ``age_seconds``,
-    ``generated_at``, ``stale`` and ``source`` are additive.
+    the iOS ``HealthResponse`` keeps decoding; ``age_seconds``, ``generated_at``,
+    ``stale`` and ``source`` are additive.
+
+    So is ``paused_nodes`` (t_824b617f): this route answers "is the fleet
+    healthy", and a node the operator parked on purpose is not a fault. The
+    overlay is read per request — the same read the monitor route makes, so the
+    two routes can never disagree about which nodes are parked — and it is the
+    only node-level information here, because the checks are named fleet checks
+    rather than per-machine rows. Clients that show a down count subtract this
+    list from it. The verdict itself (``ok``, ``checks``) is NOT edited here:
+    suppressing a parked unit inside the checks is the verify layer's business,
+    and quietly greying out a red check at the HTTP edge would launder a real
+    signal into a reassuring one.
     """
     try:
         snap = health_cache.get_snapshot(verify=_backing_verify)
@@ -775,6 +975,7 @@ def handle_health(server, ctx, query, body):
         "generated_at": snap["generated_at"],
         "stale": snap["stale"],
         "source": snap["source"],
+        "paused_nodes": _paused_nodes(_pause_overlay(ctx.hscc_dir)),
     }
 
 
