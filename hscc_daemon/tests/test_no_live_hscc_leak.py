@@ -134,6 +134,12 @@ def test_suite_never_writes_live_hscc(tmp_path):
         # its `directory=` seam would rewrite the planted pause and trip the
         # manifest diff below.
         "test_node_pauses.py",
+        # t_af9901e2: the wake path READS that overlay through node_pauses'
+        # `directory=` seam. These tests write pauses of their own, so they
+        # belong in the same sandbox — a wake test that lost its
+        # `pauses_directory=` argument would read (and a CLI-style test could
+        # write) the operator's real pause record.
+        "test_autodown_paused_wake.py",
     ]
     paths = [os.path.join(tests_dir, t) for t in targets]
 
