@@ -331,6 +331,7 @@ Audit notes (`*_audit.md`) ship with their e2e verify scripts (`*_verify_e2e.py`
 ### test environment: the thin sibling interpreter (record)
 
 - `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` — why 21 hermes-integration tests hard-failed under the sanctioned `p313` sibling interpreter (it is a thin pytest env with no `ruamel`/`hermes_state`), the 21-test roster, the measured rejection of dep-stuffing the sibling env, and the capability-probe skip posture now written into `scripts/run_tests.sh`. **record** (t_02c98915)
+- `docs/audits/require-real-hermes-lazy-sibling-seam_t_ace3c8d5.md` — measured-clean follow-up to the same predicate weakness: the five `require_real_hermes`-gated files were swept file-alone on the CI-faithful thin venv, `p313` and canonical (0 errors; on thin the gate does **not** skip — the gated tests run) and an `sys.addaudithook` import-attempt counter shows they never enter hermes' `connect()` at all, while a control that does enter it dies at `kanban_db_connect.py:766` on thin. Records why (`list_boards()` never connects; `orch_waker` opens its own read-only URIs), the `HERMES_DELEGATED_CHILD_CONTEXT` fencing posture that masks this seam, and two instruments that produced fake zeros before the audit hook. **record** (t_ace3c8d5)
 
 ### Test-suite leg strategy (live)
 
