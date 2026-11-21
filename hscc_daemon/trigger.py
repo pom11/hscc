@@ -5,6 +5,7 @@ import os
 import re
 import time
 
+from . import node_pauses
 from .state import read_state, read_all_states, now_iso, write_state
 from .lifecycle import save_watchdog_block
 from .desktop import send_macos_notification, emit_event
@@ -291,13 +292,165 @@ def _serving_layer_notify(rule):
             and str(condition.get("value")) in _OPERATOR_DOWN_SUPPRESSED_METRICS)
 
 
+# ── NODE-PAUSE NOTIFY GATE (t_81de1863) ────────────────────────────────────
+#
+# WHY THIS GATE EXISTS
+#
+# ``hscc node pause`` parks ONE node and edits nothing the cluster is built
+# from, so the node's units are down with nothing the notify paths look at
+# saying "deliberate". The serving-layer metrics go true BY CONSTRUCTION while
+# its node is parked — exactly the shape STAY-DOWN-NOTIFY was written for — but
+# the stay-down record is a FLEET-WIDE instruction (``expected-up.json`` written
+# by ``clear_expected_up``), and a per-node pause deliberately never writes it:
+# parking one worker must not silence a gateway page for an unrelated node.
+# Without this gate the operator's own command pages them ("HSCC:
+# orchestrator/DGX unhealthy"), which is the same contradiction t_50c6edc4
+# closed for ``hscc cluster down``, one level finer.
+#
+# WHY THE DECISION LIVES HERE AND NOT IN THE RULES
+#
+# A rule cannot express it: the shipped rules match metrics, not hosts, and
+# ``hscc-bootstrap`` only ever ADDS missing rule ids — it cannot retro-fit a
+# condition into a live ``triggers.json``. So the skip belongs in the one place
+# every notify passes through, beside the gate this one is modelled on.
+#
+# WHICH NODE — AND WHY THIS IS NOT "stay quiet whenever anything is parked"
+#
+# See :func:`_signal_host`. A signal that does not name a node is never
+# suppressed by it, and a pause on a node the signal is NOT about never
+# silences it. Over-suppression here would be the same class of bug as the
+# fail-open liveness checks this package keeps removing: an operator who parked
+# a worker would silently lose the NAS-mount page.
+#
+# ASK ``covering``, NEVER ``paused``
+#
+# A tensor-parallel unit stops as one thing, so the nodes named only in the
+# pause record's ``span_nodes`` are just as parked as the keyed host — and their
+# health check degrades too. Same pin the watchdog seam (t_4ecbd9d0) and the
+# heal-breaker seam (t_e6ee7e60) make.
+#
+# FAIL-SAFE TOWARD PAGING — the same direction as :func:`_operator_down`
+#
+# A missing or malformed overlay makes ``node_pauses`` answer "no pauses" (and
+# WARN), so the page goes out exactly as it did before the overlay existed;
+# unparseable ``until`` is read as open-ended by that module, so an expired
+# pause keeps suppressing until the daemon's own auto-resume clears it —
+# conservative in the only direction that cannot cost an operator an alert.
+# There is deliberately no try/except around the read: ``node_pauses``' read
+# path is documented never to raise, and heal_breaker.py makes the same call
+# for the same reason.
+#
+# NO STALE SUPPRESSION
+#
+# The overlay on disk is the only state this gate has — nothing is cached in
+# memory, nothing is written to the feed or the cooldown ledger by the skip, so
+# ``node_pauses.clear(host)`` (or the daemon's expiry pass) restores alerting
+# on the next call, and a daemon restart cannot lose or invent a suppression.
+# The rule's own cooldown is a SEPARATE, pre-existing silence: ``trigger_engine``
+# stamps it after ``fire_trigger_action`` returns whether or not the notify was
+# suppressed (that is what dampened the 2026-10-08 storm of 178 notifications in
+# 11 minutes), and this gate leaves that behaviour untouched — see
+# test_the_suppressed_tick_still_stamps_the_rule_cooldown.
+
+#: The field names a health record uses to say which node it is about.
+#: ``node`` is this package's own spelling for a per-node/unit record
+#: (health.py's unit rows, ``heal_breaker.tripped``'s payload); ``host`` is the
+#: spelling a client/mount record uses. Nothing else is scraped: a title or a
+#: body that happens to contain an IP is NOT evidence of what a signal is about.
+_PAUSE_HOST_KEYS = ("node", "host")
+
+
+def _clean_host(value):
+    """A usable host string, or ``None``. Anything non-string or blank is
+    "this record does not name a node" — never a guess."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _signal_host(rule, target, primary_node_fn=None):
+    """The node a ``(rule, target)`` match is ABOUT, or ``None`` when it names none.
+
+    Precedence, and nothing else:
+
+    1. the target's own ``node``/``host``, then the same keys inside
+       ``payload`` — the envelope :func:`desktop.emit_event` writes, which is
+       where a discrete per-node event puts its host;
+    2. otherwise, when the rule's condition is one of the serving-layer signals
+       in :data:`_OPERATOR_DOWN_SUPPRESSED_METRICS`, the serving node
+       (``serving.PRIMARY_NODE``) — that is the node those checks answer for,
+       the same node the watchdog's heal seam asks about;
+    3. otherwise ``None``: a signal that names no node is never suppressed.
+
+    Never raises: a non-dict target, a non-dict ``payload`` or a junk host
+    value all answer "no host named here" (fail-safe toward paging). Step 2 is
+    deliberately NOT gated on the target being readable: a state-metric rule
+    like ``failed_dgx`` answers itself from the stream-state file and never
+    looks at the target at all, and the degraded-state pseudo-event the engine
+    builds for it carries a stream name, not a host — the metric is what
+    answers for the serving node. ``primary_node_fn`` is the seam for step 2 —
+    the real loop reads the live topology, tests hand a fake, and it is called
+    only when the rule really is a serving-layer signal, so a notify rule on
+    some other metric never triggers topology resolution.
+    """
+    if isinstance(target, dict):
+        for container in (target, target.get("payload")):
+            if not isinstance(container, dict):
+                continue
+            for key in _PAUSE_HOST_KEYS:
+                host = _clean_host(container.get(key))
+                if host:
+                    return host
+    if _serving_layer_notify(rule if isinstance(rule, dict) else {}):
+        if primary_node_fn is None:
+            from . import serving
+            return _clean_host(serving.PRIMARY_NODE)
+        try:
+            return _clean_host(primary_node_fn())
+        except Exception:
+            # Fail-safe toward paging: a topology that cannot be read names no
+            # node, so the page goes out instead of hiding behind a guess.
+            return None
+    return None
+
+
+def _node_pause_for_signal(rule, target, directory=None, primary_node_fn=None):
+    """``(host, entry)`` when the node this signal is about is parked.
+
+    ``(None, None)`` when nothing is suppressed: no node attributable, or the
+    overlay does not cover it. ``directory`` is ``node_pauses``' own
+    explicit-root seam — the only relocation seam that module has, and the
+    reason this takes a parameter rather than an env var (an env root is
+    per-process, so it is not a root the CLI that wrote the pause can share).
+    """
+    host = _signal_host(rule, target, primary_node_fn=primary_node_fn)
+    if host is None:
+        return None, None
+    entry = node_pauses.covering(host, directory=directory)
+    if entry is None:
+        return None, None
+    return host, entry
+
+
+def _pause_label(entry):
+    """``" (reason)"`` for a pause entry, ``""`` when it carries no reason."""
+    reason = ((entry or {}).get("reason") or "").strip()
+    return f" ({reason})" if reason else ""
+
+
 def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=None,
-                        *, deliberately_down_fn=None):
+                        *, deliberately_down_fn=None, pauses_directory=None,
+                        primary_node_fn=None):
     """Fire the action defined by a trigger rule.
 
     ``deliberately_down_fn`` is the STAY-DOWN-NOTIFY seam (see
     :func:`_operator_down`): keyword-only and defaulted, so every existing
     caller keeps its behaviour and the real loop gets the real predicate.
+
+    ``pauses_directory`` / ``primary_node_fn`` are the node-pause notify seam
+    (see the block above :func:`_signal_host`): keyword-only and defaulted like
+    every other seam here, so the real loop passes nothing and reads the live
+    overlay and the live topology.
     """
     rule_id = rule.get("id", "?")
     trigger_params = rule.get("trigger_params", {})
@@ -318,6 +471,20 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
                 log(f"Trigger {rule_id}: notify suppressed — "
                     f"fleet deliberately down ({down.get('reason')})")
                 return
+        # NODE-PAUSE (t_81de1863): the node this signal is about is parked by
+        # the operator, so its absence/down is the instruction, not a fault.
+        # AFTER the stay-down gate on purpose — a fleet-wide stay-down is the
+        # broader reason and keeps its wording — and ONLY on this notify
+        # branch: auto_restart and block_pipeline are not this seam's business
+        # (restart_vllm's rule 0 and the heal breaker already honour the
+        # overlay), so an operator rule that blocks the pipeline still does.
+        paused_host, pause = _node_pause_for_signal(
+            rule, event, directory=pauses_directory,
+            primary_node_fn=primary_node_fn)
+        if pause is not None:
+            log(f"Trigger {rule_id}: notify suppressed — node {paused_host} "
+                f"is paused{_pause_label(pause)}")
+            return
         title = trigger_params.get("title", f"Trigger: {rule_id}")
         body = trigger_params.get("body", f"Rule {rule_id} fired")
         send_macos_notification(title, body, priority="normal")
@@ -363,7 +530,8 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
 
 def trigger_engine(check_gateway_fn=None,
                    pipeline_watchdog_fn=None, watchdog_block_fn=None,
-                   restart_vllm_fn=None, *, deliberately_down_fn=None):
+                   restart_vllm_fn=None, *, deliberately_down_fn=None,
+                   pauses_directory=None, primary_node_fn=None):
     """Evaluate all trigger rules against recent events and state checks.
 
     ``deliberately_down_fn`` is the STAY-DOWN-NOTIFY seam, threaded straight to
@@ -371,6 +539,11 @@ def trigger_engine(check_gateway_fn=None,
     passes nothing and therefore reads the real
     :func:`post_boot.deliberately_down`. Keyword-only and defaulted like every
     other seam here, so existing callers are unaffected.
+
+    ``pauses_directory`` / ``primary_node_fn`` are the node-pause notify seam
+    (t_81de1863), threaded straight to :func:`fire_trigger_action` the same way
+    — the real loop passes neither and therefore reads the real
+    ``~/.hscc/node_pauses.json`` and the real topology.
 
     Runs NO health check. Its DGX/gateway/NAS signals (`failed_dgx`,
     `vllm_down`, `watchdog_blocked`, `nas_down`, `state.<stream>`) are answered
@@ -459,6 +632,8 @@ def trigger_engine(check_gateway_fn=None,
                 watchdog_block_fn=watchdog_block_fn,
                 restart_vllm_fn=restart_vllm_fn,
                 deliberately_down_fn=deliberately_down_fn,
+                pauses_directory=pauses_directory,
+                primary_node_fn=primary_node_fn,
             )
             # Timestamp what the suppression logic consults, and only that: a
             # discrete event fire must not later silence a degradation alert

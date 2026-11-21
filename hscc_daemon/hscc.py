@@ -449,6 +449,7 @@ def _get_help_text():
         *_entry("notify <title> <body> | list | ack <id>",
                 "Post, read or acknowledge an HSCC alert-feed entry",
                 ["flags: --level info|action|critical --key <dedupe-key>",
+                 "--node <host> (a paused node's alert is refused at the feed)",
                  "list: --since <id> --limit <n>; all: --json",
                  "requires the API: hscc api start"]),
         *_entry("bootstrap [flags]",
@@ -518,11 +519,13 @@ COMMAND_HELP = {
     "notify": "Post, list or acknowledge HSCC alert-feed entries.\n"
               "  Usage: hscc notify <title> <body>\n"
               "         [--level info|action|critical] [--key <dedupe-key>]\n"
-              "         [--json]\n"
+              "         [--node <host>] [--json]\n"
               "         hscc notify list [--since <id>] [--limit <n>] [--json]\n"
               "         hscc notify ack <id> [--json]\n"
               "  A keyed alert does not repeat until its content changes or\n"
               "  it is acknowledged; per-key and global rate limits apply.\n"
+              "  --node scopes the alert to one node: while 'hscc node pause'\n"
+              "  holds that host the post is refused and nothing is stored.\n"
               "  list prints newest first. The API must be up (hscc api\n"
               "  start).",
     # bootstrap (card t_bc5a3fee): installer verb. Every line authored <=76 so
