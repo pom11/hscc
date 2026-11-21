@@ -471,6 +471,29 @@ def test_a_pid_at_a_root_the_enforcer_never_wrote_can_never_fire_the_fatal(
     assert killed == []
 
 
+def test_a_redirect_is_refused_when_the_canonical_root_holds_only_the_stamp(
+        enforcer_home):
+    """The stamp ALONE is enough to prove the enforcer lives at HOME.
+
+    This is the ordinary healthy host: nobody has paused a board, so there is no
+    policy document, but the daemon's enforce loop stamps every tick. A redirect
+    onto an empty root then reads "the daemon is not running — nothing enforces"
+    about a loop that stamped seconds ago, and the fatal branch is one pid file
+    away. The canonical side of the guard therefore has to see the stamp, not
+    only the policy document: a guard that asked only "is there a paused-policy
+    file?" would answer this host by obeying the empty root.
+    """
+    decoy = _decoy_root(enforcer_home)
+    _seed_enforce_stamp(enforcer_home, age_s=10.0)     # no paused-policy document
+
+    res = kp.doctor_check(now=1000.0, hscc_dir=str(decoy))
+    assert res["ok"] is True and res["fatal"] is False
+    assert "no boards paused, last enforce 10s ago" in res["detail"]
+    assert "not running" not in res["detail"]
+    assert res["detail"].startswith("WARN:")
+    assert str(decoy) in res["detail"] and str(enforcer_home) in res["detail"]
+
+
 def test_a_redirect_that_owns_its_own_enforcer_state_is_still_obeyed(
         enforcer_home):
     """The guard's negative control — why t_e9b0f048's seam survives it.
