@@ -20,9 +20,20 @@ PY="${1:?usage: alone_sweep.sh <python> <leg-dir> [out-dir]}"
 LEG="${2:?usage: alone_sweep.sh <python> <leg-dir> [out-dir]}"
 OUT="${3:-/tmp/alone-sweep-$(basename "$LEG")-$$}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/../../.." && pwd)"
+# This file lives at docs/audits/support/<card>/ — four levels below the repo.
+REPO="$(cd "$HERE/../../../.." && pwd)"
+if [ ! -f "$REPO/scripts/run_tests.sh" ]; then
+  echo "alone_sweep.sh: no scripts/run_tests.sh under '$REPO' — repo inference is wrong" >&2
+  exit 99
+fi
 mkdir -p "$OUT/xml" "$OUT/logs" "$OUT/rc" || exit 99
 cd "$REPO" || exit 99
+shopt -s nullglob
+FILES=("$LEG"/tests/test_*.py)
+if [ "${#FILES[@]}" -eq 0 ]; then
+  echo "alone_sweep.sh: no test files under '$REPO/$LEG/tests' — is '$LEG' a leg dir?" >&2
+  exit 99
+fi
 
 echo "== in-leg reference (one process, via the canonical runner) -> $OUT/inleg.log"
 HSCC_TEST_PY="$PY" HSCC_TEST_LEGS="$LEG" \
@@ -31,7 +42,7 @@ LEG_RC=$?
 echo "   run_tests rc=$LEG_RC  $(grep -E '^[0-9]+ (passed|failed)' "$OUT/inleg.log" | tail -1)"
 
 echo "== alone sweep (one process per file)"
-for f in "$LEG"/tests/test_*.py; do
+for f in "${FILES[@]}"; do
   b=$(basename "$f" .py)
   [ -f "$OUT/rc/$b.rc" ] && continue          # resumable
   # -u list mirrors scripts/run_tests.sh SUITE_ENV_UNSET.
