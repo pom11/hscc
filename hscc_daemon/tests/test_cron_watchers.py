@@ -835,7 +835,7 @@ def test_a_stale_deployed_copy_is_named_as_not_the_repo_copy(tmp_path):
 
 
 def test_only_a_proven_mismatch_is_a_drift(tmp_path):
-    """in-sync / missing-deployed / missing-repo are all fail-OPEN. A detector
+    """in-sync / not-a-copy / missing-repo are all fail-OPEN. A detector
     that inferred staleness from a missing comparison would nag every host that
     never installed a watcher — the false alarm the GAP-B-4 rows forbid."""
     same = "the same code\n"
@@ -844,9 +844,12 @@ def test_only_a_proven_mismatch_is_a_drift(tmp_path):
         "dep_pr_watcher", hermes_home=str(hermes_home),
         repo_dir=str(repo_dir))["status"] == "in-sync"
     hermes_home, repo_dir = _homes(tmp_path, deployed=None, repo=same)
+    # dep_pr_watcher deploys as a wrapper now (t_accbc5da), so an empty scripts
+    # dir is the healthy answer rather than `missing-deployed`; the copy-kind
+    # half of this pair is test_the_retired_copy_kind_is_still_understood.
     assert cw.deployed_copy_drift(
         "dep_pr_watcher", hermes_home=str(hermes_home),
-        repo_dir=str(repo_dir))["status"] == "missing-deployed"
+        repo_dir=str(repo_dir))["status"] == "not-a-copy"
     hermes_home, repo_dir = _homes(tmp_path, deployed=same, repo=None)
     assert cw.deployed_copy_drift(
         "dep_pr_watcher", hermes_home=str(hermes_home),
@@ -854,16 +857,59 @@ def test_only_a_proven_mismatch_is_a_drift(tmp_path):
 
 
 def test_a_wrapper_stream_has_no_deployed_copy_to_go_stale(tmp_path):
-    """install_alone_sweep_gate.sh generates a one-line wrapper that execs the
-    repo's gate — the shape that cannot drift, and the one the two copying
-    installers should move to. Comparing a copy for that stream is meaningless,
-    so it must answer `not-a-copy` and never `drifted`."""
-    assert cw.WATCHERS["dep_pr_watcher"]["deploy"] == cw.DEPLOY_COPY
-    assert cw.WATCHERS["escalate_watcher"]["deploy"] == cw.DEPLOY_COPY
+    """install_alone_sweep_gate.sh generates a wrapper that runs the repo's gate,
+    and since t_accbc5da the other two installers generate the same kind of stub.
+    There is then no second copy of the code on the host, so comparing a copy is
+    meaningless: `not-a-copy`, never `drifted`."""
+    assert cw.WATCHERS["dep_pr_watcher"]["deploy"] == cw.DEPLOY_WRAPPER
+    assert cw.WATCHERS["escalate_watcher"]["deploy"] == cw.DEPLOY_WRAPPER
     assert cw.WATCHERS["alone_sweep_gate"]["deploy"] == cw.DEPLOY_WRAPPER
     d = cw.deployed_copy_drift("alone_sweep_gate", hermes_home=str(tmp_path),
                                repo_dir=str(tmp_path))
     assert d["status"] == "not-a-copy" and "wrapper" in d["detail"]
+
+
+def test_a_wrapper_stream_still_compares_the_copy_the_old_installer_left(tmp_path):
+    """The transition window — the reason `deploy: wrapper` is not simply "stop
+    looking". git says wrapper; the HOST says whatever it installed. An operator
+    who has not re-run the installer yet still has the `cp`-ed file under
+    <bound home>/scripts and its cron job still runs it, which is the exact state
+    t_95eb9f15 made loud. So a leftover at the copy-shape path is still hashed:
+    mismatch → `drifted` (the warn survives the conversion), match → `in-sync`
+    (honest advice, no warn)."""
+    hermes_home, repo_dir = _homes(tmp_path, deployed="old code\n",
+                                   repo="new code\n")
+    d = cw.deployed_copy_drift("dep_pr_watcher", hermes_home=str(hermes_home),
+                               repo_dir=str(repo_dir))
+    assert d["status"] == "drifted", d
+    assert "re-run scripts/install_dep_watcher.sh" in d["detail"]
+    # The sentence must also say why re-running fixes it for good, or the
+    # operator re-runs the same `cp` forever.
+    assert "wrapper" in d["detail"]
+    same = "the same code\n"
+    hermes_home, repo_dir = _homes(tmp_path, deployed=same, repo=same)
+    d = cw.deployed_copy_drift("dep_pr_watcher", hermes_home=str(hermes_home),
+                               repo_dir=str(repo_dir))
+    assert d["status"] == "in-sync", d
+
+
+def test_the_retired_copy_kind_is_still_understood(tmp_path, monkeypatch):
+    """`deploy: copy` has no shipping user since t_accbc5da and must keep
+    working anyway: a host's DEPLOYED plugin payload is a release copy whose
+    cron_watchers still declares these streams as copies, and `missing-deployed`
+    for a stream that genuinely was installed by copy is what `not-configured`
+    means. Pinned on a fabricated row instead of being deleted with the `cp`."""
+    hermes_home, repo_dir = _homes(tmp_path, deployed=None, repo="code\n")
+    monkeypatch.setitem(cw.WATCHERS["dep_pr_watcher"], "deploy", cw.DEPLOY_COPY)
+    assert cw.deployed_copy_drift(
+        "dep_pr_watcher", hermes_home=str(hermes_home),
+        repo_dir=str(repo_dir))["status"] == "missing-deployed"
+    # Same empty tree, wrapper kind: the absence is the healthy answer.
+    monkeypatch.setitem(cw.WATCHERS["dep_pr_watcher"], "deploy",
+                        cw.DEPLOY_WRAPPER)
+    assert cw.deployed_copy_drift(
+        "dep_pr_watcher", hermes_home=str(hermes_home),
+        repo_dir=str(repo_dir))["status"] == "not-a-copy"
 
 
 def test_the_bound_home_resolves_the_way_the_installers_resolve_it(tmp_path,
@@ -881,11 +927,12 @@ def test_the_bound_home_resolves_the_way_the_installers_resolve_it(tmp_path,
 def test_the_default_comparison_target_is_this_checkout(sandbox, tmp_path):
     """No repo_dir passed == compare against the checkout this module runs from
     (the doctor's own tree). The deployed plugin payload is not a checkout, and
-    a host with nothing deployed gets `missing-deployed`, never `drifted`."""
+    a host with nothing deployed gets `not-a-copy` (this stream deploys as a
+    wrapper now), never `drifted`."""
     assert cw.checkout_root() == REPO_ROOT
     d = cw.deployed_copy_drift("dep_pr_watcher",
                                hermes_home=str(tmp_path / "nothing-here"))
-    assert d["status"] == "missing-deployed" and d["repo"] is None
+    assert d["status"] == "not-a-copy" and d["repo"] is None
 
 
 def test_a_drifted_copy_may_no_longer_read_as_not_configured(sandbox):
@@ -952,9 +999,9 @@ def test_a_stale_copy_in_the_shared_home_is_found_from_a_profile_shell(tmp_path,
                                                                         monkeypatch):
     """The live case, measured while writing this: the drifted copy lives in the
     SHARED ~/.hermes/scripts, but a doctor run from a profile shell has
-    HERMES_HOME set to that profile's home. Consulting only the caller's own
-    home reported `missing-deployed` — a confident clean verdict about a copy
-    one directory away, which is worse than no check. Both homes get compared."""
+    HERMES_HOME set to that profile's home. Consulting only the caller's own home
+    reported an absence — a confident clean verdict about a copy one directory
+    away, which is worse than no check. Both homes get compared."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile-home"))
     (tmp_path / "profile-home" / "scripts").mkdir(parents=True)
@@ -964,11 +1011,14 @@ def test_a_stale_copy_in_the_shared_home_is_found_from_a_profile_shell(tmp_path,
     assert d["status"] == "drifted", d
     assert d["deployed"] == str(hermes_home / "scripts" / DRIFT_SCRIPT)
     assert str(tmp_path / "profile-home" / "scripts" / DRIFT_SCRIPT) in d["candidates"]
-    # And the narrow seam is what hides it: same tree, one home only.
+    # And the narrow seam is what hides it: same tree, one home only. The status
+    # reads `not-a-copy` because this stream is a wrapper stream now
+    # (t_accbc5da) — an absence either way, and the point of the test is that the
+    # narrow seam MISSES the drift, not which absence word it prints.
     narrow = cw.deployed_copy_drift("dep_pr_watcher",
                                     hermes_home=str(tmp_path / "profile-home"),
                                     repo_dir=str(repo_dir))
-    assert narrow["status"] == "missing-deployed"
+    assert narrow["status"] == "not-a-copy"
 
 
 def test_the_candidate_homes_are_the_bound_home_and_the_shared_one(tmp_path,

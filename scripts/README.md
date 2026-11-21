@@ -356,13 +356,26 @@ dependencies (hermes-agent, sparkrun) current, gated by human review:
 3. A worker upgrades the runtime, re-bootstraps, runs the suites, and reports on
    the card. The human reviewer merges the PR (bumping the lock) once satisfied.
 
-Install the cluster side (installs the poller to `~/.hermes/scripts/` and
-registers the Hermes cron job, idempotently):
+Install the cluster side (idempotently). It does **not** copy the poller: it
+generates `<$HERMES_HOME>/scripts/hscc-dep-watcher.py`, a stub with this
+checkout's path baked in that runs `scripts/dep_pr_watcher.py`, and binds the
+Hermes cron job to that. So `git pull` is what changes what the job runs, and
+there is no second copy of the code on the host to go stale. (A deployed copy
+that could go stale is what `hscc_daemon/cron_watchers.py`'s `copy-drifted`
+doctor row still catches on a host that has not re-installed yet — t_95eb9f15
+made it visible, t_accbc5da removed the shape.):
 
 ```
 scripts/install_dep_watcher.sh            # daily 08:00 by default
+scripts/install_dep_watcher.sh --status    # cron + wrapper target + liveness
 scripts/install_dep_watcher.sh --uninstall
 ```
+
+`scripts/install_escalate_watcher.sh` (`hscc-escalate-watcher`, every 15 min)
+installs `scripts/escalate_watcher_run.py` the same generated-stub way, with the
+same `--status` / `--uninstall` pair. All three watcher installers
+(`install_alone_sweep_gate.sh` included) now share that shape: one file under
+`<bound home>/scripts/`, generated, pointing into git.
 
 The GitHub Action runs from the default branch once merged; the poller/cron is
 independent and needs no network path from GitHub to the cluster.
