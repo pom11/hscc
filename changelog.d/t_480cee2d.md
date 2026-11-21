@@ -22,12 +22,25 @@ task: t_480cee2d
   host's own record wins over a span record naming it, and an empty `reason` or a
   missing `since` degrades to `paused (since …)` / `paused (…)` / bare `paused`
   rather than inventing either.
+* **The same word in `hscc cluster monitor`'s serving grid.** A parked backend
+  whose metrics endpoint stopped answering read `down` in red — while the API's
+  own monitor payload had been saying `status: "paused"` for that very row since
+  #569, so the CLI and the widgets called one machine broken and the other
+  deliberate. `serving_table`/`render` now take the overlay and the cell reads
+  `paused (reason, since …)` in `warn`, the row's error text intact, plus a
+  `node pauses` block under the table (the grid's Model column caps at 26 chars;
+  the block carries the string on any terminal that can hold it). `pauses=None`
+  still means "no pause knowledge" rather than "go read `~/.hscc`", so
+  `cluster_monitor_cli_parity.py`'s committed golden stays hermetic to whoever
+  regenerates it; the two live surfaces (`--live` and the snapshot) pass the
+  overlay, and a test pins that each of them actually does.
 * **The seam: `pause_overlay(directory=None)`, plus `pause_display` /
-  `pause_lines`.** One reader, one formatter, both reused by any other fleet view;
-  the renderer holds a projection and no parser of its own (pinned: it never opens
+  `pause_for_node` / `pause_lines`.** One reader, one formatter, one identity
+  rule (trim + case-fold, nothing clever), reused by every fleet view; the
+  renderer holds a projection and no parser of its own (pinned: it never opens
   the overlay file, and calls `node_pauses.list_pauses` exactly once). `directory=`
   is the overlay's documented explicit-root seam, threaded not env-read, so the
   reader and the CLI that wrote the pause can agree on a root the way two processes
   do. An unreadable overlay fails open to "no pauses" and the screen still renders;
-  the error panel path never reads it at all. 34 tests, all against TEST-NET-1
+  the error panel path never reads it at all. 51 tests, all against TEST-NET-1
   (192.0.2.0/24) hosts and a tmp-dir overlay — no live overlay, no sparkrun, no ssh.

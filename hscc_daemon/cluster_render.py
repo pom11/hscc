@@ -182,6 +182,24 @@ def pause_display(reason, since) -> str:
     return text
 
 
+def pause_for_node(overlay, node):
+    """The paused display for ``node`` if ``overlay`` holds it, else ``None``.
+
+    The single place the CLI side asks "is THIS row's machine parked", so the
+    identity rule (trim + case-fold, nothing clever) lives once rather than per
+    renderer — a second spelling is how one surface calls a machine paused and
+    another calls it down. Returns the finished display string, never a dict,
+    because the caller wants a cell and not a decision of its own.
+    """
+    if not overlay:
+        return None
+    key = _node_key(node)
+    fields = overlay.get(key) if key else None
+    if not isinstance(fields, dict):
+        return None
+    return pause_display(fields.get("reason"), fields.get("since"))
+
+
 def pause_lines(overlay: dict) -> list[str]:
     """One escaped, marked-up line per parked node: ``<node>  paused (…)``.
 
@@ -319,7 +337,8 @@ def render_monitor(console: Console, result: dict) -> int:
         finally:
             poller.close()
         console.print(cluster_live.render(data, rows, None, poller.proxy_error,
-                                          snapshot=True, width=console.width))
+                                          snapshot=True, width=console.width,
+                                          pauses=pause_overlay()))
         return 0
     if isinstance(data, dict):
         table = theme.make_table("cluster monitor")

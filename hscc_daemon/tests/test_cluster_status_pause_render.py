@@ -37,12 +37,12 @@ root-split class, t_adb66608). Hosts are TEST-NET-1 documentation addresses
 """
 
 import io
-import json
 import os
+import time
 
 import pytest
 
-from hscc_daemon import cli_theme, cluster_render, node_pauses
+from hscc_daemon import cli_theme, cluster_live, cluster_render, node_pauses
 
 # ── fixtures and helpers ───────────────────────────────────────────────────
 
@@ -311,6 +311,225 @@ def test_markup_in_a_host_key_cannot_break_the_view():
                                                          "since": SINCE}})
     assert rc == 0
     assert "[dim]192.0.2.99[/dim]" in text
+
+
+# ── the serving grid: the same word the API's monitor payload carries ──────
+#
+# `hscc cluster monitor` is the CLI twin of the API's monitor payload, and
+# t_824b617f taught that payload to say `status: "paused"` for a parked node.
+# The grid still spelled the same machine `down`, which is the split this seam
+# exists to close: two surfaces, one machine, two verdicts.
+
+PARKED_PORT = "8000"
+
+
+def _down_row(node=PARKED, error="HTTP Error 111: Connection refused"):
+    """One ServingPoller row for an unreachable backend — exactly its shape."""
+    return {"node": node, "port": PARKED_PORT, "routes": ["orchestrator-model"],
+            "model": "-", "error": error}
+
+
+def _live_row(node=LIVE, model="@official/model-a"):
+    return {"node": node, "port": "8001", "routes": [model], "model": model,
+            "running": 2, "waiting": 0, "kv": 0.1, "gen_tps": 31.0,
+            "prompt_tps": 12.0, "prompt_total": 100, "gen_total": 200}
+
+
+def _grid(rows, width=200, **kwargs):
+    buf = io.StringIO()
+    cli_theme.make_console(file=buf, width=width).print(
+        cluster_live.serving_table(rows, width, **kwargs))
+    return buf.getvalue()
+
+
+def _view(rows, width=200, **kwargs):
+    buf = io.StringIO()
+    cli_theme.make_console(file=buf, width=width).print(
+        cluster_live.render({"hosts": []}, rows, 5, None, None,
+                            snapshot=True, width=width, **kwargs))
+    return buf.getvalue()
+
+
+def test_parked_backend_reads_paused_instead_of_down():
+    out = _grid([_down_row()], pauses={PARKED: {"reason": "training run",
+                                                "since": SINCE}})
+    assert "down" not in out
+    # The Model column caps at 26 characters, so the CELL shows the front of the
+    # string with the grid's own ellipsis — which is the whole reason `render`
+    # also prints the block below (see test_pause_block_carries_the_full_string).
+    assert "paused" in out and "training run" in out
+    assert PARKED in out
+
+
+def test_pause_block_carries_the_full_string():
+    """The contract string survives whole on any terminal that can hold it."""
+    out = _view([_down_row()], width=200,
+                pauses={PARKED: {"reason": "training run", "since": SINCE}})
+    assert f"paused (training run, since {SINCE})" in out
+    assert "node pauses" in out
+    assert "down" not in out
+
+
+def test_an_unparked_unreachable_backend_is_still_down():
+    """The polarity: `paused` is an overlay fact, never a guess from silence."""
+    out = _grid([_down_row()], pauses={ABSENT: {"reason": "r", "since": SINCE}})
+    assert "down" in out
+    assert "paused" not in out
+
+
+def test_serving_table_without_the_overlay_renders_the_old_view():
+    """`pauses=None` is not "go read the disk" — the golden stays hermetic.
+
+    `ios-app/scripts/cluster_monitor_cli_parity.py` feeds committed fixtures
+    through this function and the Swift view-model is pinned to the output, so a
+    default that consulted `~/.hscc` would make a committed golden depend on
+    whether whoever regenerated it had parked a node.
+    """
+    with_overlay = _grid([_down_row()], pauses={})
+    default = _grid([_down_row()])
+    assert default == with_overlay
+    assert "down" in default and "paused" not in default
+
+
+def test_parked_row_keeps_its_error_text():
+    """"Parked" and "could not sample" are both true; one does not delete the other."""
+    out = _grid([_down_row(error="timed out")],
+                pauses={PARKED: {"reason": "r", "since": SINCE}})
+    assert "timed out" in out
+
+
+def test_pause_block_wraps_like_any_other_line_when_the_terminal_is_narrow():
+    """At 70 columns the line does not fit, and Rich folds it — measured, not hoped.
+
+    Pinned so nobody "fixes" it with ``no_wrap=True``: that would TRADE a fold for
+    a truncation, and losing the ``since`` stamp is the worse of the two errors.
+    Nothing is invented or dropped by the fold — the halves are all there.
+    """
+    out = _view([_down_row()], width=70,
+                pauses={PARKED: {"reason": "training run on the long one",
+                                 "since": SINCE}})
+    assert "node pauses" in out
+    assert "paused (training run on the long one, since" in out
+    assert SINCE in out
+    assert f"paused (training run on the long one, since {SINCE})" not in out  # folded
+
+
+def test_pause_block_survives_a_cell_that_ellipsises():
+    """The Model cell clips at its 26-char cap; the block below does not."""
+    out = _view([_down_row()], width=140,
+                pauses={PARKED: {"reason": "training run on the long one",
+                                 "since": SINCE}})
+    assert f"paused (training run on the long one, since {SINCE})" in out
+
+
+def test_render_without_the_overlay_grows_no_block():
+    assert "node pauses" not in _view([_down_row()])
+    assert "node pauses" not in _view([_down_row()], pauses={})
+
+
+def test_monitor_snapshot_caller_actually_passes_the_overlay(monkeypatch):
+    """The wiring, not just the parameter: a forgotten argument is the bug.
+
+    Every live surface must hand the grid an overlay, or the operator sees
+    `down` for a parked node and no test below the function boundary notices.
+    """
+    class FakePoller:
+        proxy_error = None
+
+        def poll(self):
+            return [_down_row()]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cluster_live, "ServingPoller", FakePoller)
+    monkeypatch.setattr(cluster_render, "pause_overlay",
+                        lambda directory=None: {PARKED: {"reason": "training run",
+                                                         "since": SINCE}})
+    buf = io.StringIO()
+    rc = cluster_render.render_monitor(
+        cli_theme.make_console(file=buf, width=200),
+        {"json": {"hosts": [{"host": LIVE, "sample": {}}]}})
+    assert rc == 0
+    assert f"paused (training run, since {SINCE})" in buf.getvalue()
+    assert "down" not in buf.getvalue()
+
+
+def test_live_surface_reads_the_overlay_per_frame(monkeypatch):
+    """`run_live` must read it EACH frame, so a resume shows up on the next one.
+
+    Two frames, deliberately: a hoisted read (once before the loop) also produces
+    exactly one call for one frame, and the bug worth catching is a monitor that
+    keeps saying `paused` for a node the operator already resumed.
+    """
+    calls = []
+
+    def counting_overlay(directory=None):
+        calls.append(directory)
+        return {}
+
+    monkeypatch.setattr(cluster_render, "pause_overlay", counting_overlay)
+
+    class FakeStream:
+        frame = {"hosts": []}
+        error = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    class FakePoller:
+        proxy_error = None
+        polls = 0
+
+        def poll(self):
+            FakePoller.polls += 1
+            if FakePoller.polls > 2:
+                raise KeyboardInterrupt()
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cluster_live, "HostStream", FakeStream)
+    monkeypatch.setattr(cluster_live, "ServingPoller", FakePoller)
+    monkeypatch.setattr(cluster_live, "time",
+                        type("FakeClock", (), {"sleep": staticmethod(lambda s: None),
+                                               "monotonic": time.monotonic}))
+    buf = io.StringIO()
+    assert cluster_live.run_live(cli_theme.make_console(file=buf, width=120),
+                                 interval=5) == 0
+    assert calls == [None, None]   # one read per drawn frame, never one per run
+
+
+# ── the identity rule lives once ──────────────────────────────────────────
+
+@pytest.mark.parametrize("node", [
+    "192.0.2.10", "  192.0.2.10  ", "worker-a", "  WORKER-a ", "WORKER-A",
+])
+def test_pause_for_node_compares_trimmed_and_case_folded(node):
+    """One rule for both spellings of a fleet name: trim, case-fold, no guessing."""
+    overlay = {"192.0.2.10": {"reason": "r", "since": None},
+               "worker-a": {"reason": "r", "since": None}}
+    assert cluster_render.pause_for_node(overlay, node) == "paused (r)"
+
+
+def test_pause_for_node_is_none_for_everything_that_is_not_a_parked_node():
+    overlay = {PARKED: {"reason": "r", "since": None}}
+    assert cluster_render.pause_for_node({}, PARKED) is None
+    assert cluster_render.pause_for_node(overlay, None) is None
+    assert cluster_render.pause_for_node(overlay, "192.0.2.99") is None
+    assert cluster_render.pause_for_node(overlay, "") is None
+    assert cluster_render.pause_for_node({PARKED: "junk"}, PARKED) is None
+
+
+def test_a_answering_backend_is_rendered_exactly_as_before():
+    """Parity for the healthy case: the overlay changes nothing it does not hold."""
+    pauses = {ABSENT: {"reason": "r", "since": SINCE}}
+    assert _grid([_live_row()], pauses=pauses) == _grid([_live_row()])
+    assert "paused" not in _grid([_live_row()], pauses=pauses)
 
 
 # ── the error path must not touch the disk ────────────────────────────────
