@@ -45,12 +45,24 @@ is the one that wins — so call it instead of re-deriving it.
 
 All tmux/ps calls go through module-level seams (``run_tmux`` / ``run_ps``)
 so unit tests never touch a real tmux server or the operator's panes.
+
+THE SOCKET IS RESOLVED, NOT ASSUMED (t_4c5855a6). tmux finds its server socket
+from ``TMUX``/``TMUX_TMPDIR`` and otherwise looks in ``/tmp`` only, and those
+variables are exported by the INTERACTIVE shell rc — so a fresh shell (cron,
+launchd, a non-interactive ssh command) that runs ``hscc orch inject`` aims
+tmux at the wrong socket and every pane vanishes as ``found: none`` while the
+operator's panes sit on the running server's socket. :func:`tmux_socket_args`
+supplies the ``-S <socket>`` argument in exactly that case: it names the socket
+of the tmux server that is actually running here, verified read-only before it
+is used. See that function for the precedence and the refusal rules.
 """
 
 from __future__ import annotations
 
 import ast
+import os
 import re
+import stat
 import subprocess
 import time
 import uuid
@@ -96,8 +108,43 @@ def _under_pytest() -> bool:
     touch a live session). Stubbing repl_inject.run_tmux/run_ps replaces the
     module attribute, so the replaced function runs normally (identity check).
     Same guard style as doctor's run_doctor fleet-check skip."""
-    import os
     return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def _exec_tmux(argv, input_text: str | None = None, timeout: float | None = None,
+               label: str | None = None) -> str:
+    """The ONE place this module execs tmux: ``argv[0]`` is the binary.
+
+    Guarded by the same hermeticity rule as :func:`run_tmux` (see the note on
+    ``TMUX_BIN``): under pytest a real tmux may only be execed once a test has
+    replaced the binary with a fake. A non-zero rc, a timeout or a missing
+    binary is an InjectError of kind ``tmux`` — the caller decides whether that
+    is fatal. Every failure also drops the cached socket resolution: a
+    resolution a real tmux call just rejected must not be reused for the rest
+    of a long-lived daemon's life.
+    """
+    if _under_pytest() and TMUX_BIN == _DEFAULT_TMUX_BIN and run_tmux is _ORIG_RUN_TMUX:
+        raise InjectError(
+            "tmux", "real tmux execution is disabled under pytest "
+                    "(hermeticity guard) — stub repl_inject.run_tmux, or point "
+                    "repl_inject.TMUX_BIN at a fake tmux")
+    label = label or " ".join(list(argv)[1:3])
+    try:
+        p = subprocess.run(list(argv), input=input_text,
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        reset_tmux_socket_cache()
+        raise InjectError("tmux",
+                          f"tmux {label} timed out after {timeout}s")
+    except FileNotFoundError:
+        reset_tmux_socket_cache()
+        raise InjectError("tmux",
+                          f"tmux {label}: no {argv[0]!r} on PATH")
+    if p.returncode != 0:
+        reset_tmux_socket_cache()
+        raise InjectError("tmux",
+                          f"tmux {label} failed: {p.stderr.strip()}")
+    return p.stdout
 
 
 def run_tmux(*args: str, input_text: str | None = None) -> str:
@@ -106,17 +153,13 @@ def run_tmux(*args: str, input_text: str | None = None) -> str:
     Hermeticity guard: under pytest the ORIGINAL seam raises instead of
     executing (a test must stub it explicitly) — no suite run can ever
     discover or type into a live operator pane.
+
+    Every argv is prefixed with :func:`tmux_socket_args`, so ONE resolution
+    decides the server for a whole call sequence: discovery and the
+    ``send-keys`` that follows it can never land on two different servers.
     """
-    if _under_pytest() and run_tmux is _ORIG_RUN_TMUX:
-        raise InjectError(
-            "tmux", "real tmux execution is disabled under pytest "
-                    "(hermeticity guard) — stub repl_inject.run_tmux")
-    p = subprocess.run(["tmux", *args], input=input_text,
-                       capture_output=True, text=True)
-    if p.returncode != 0:
-        raise InjectError("tmux",
-                          f"tmux {' '.join(args[:2])} failed: {p.stderr.strip()}")
-    return p.stdout
+    return _exec_tmux([TMUX_BIN, *tmux_socket_args(), *args],
+                      input_text=input_text)
 
 
 def run_ps(tty: str) -> str:
@@ -135,6 +178,170 @@ def run_ps(tty: str) -> str:
 # Captured after definition: identity check for the hermeticity guards above.
 _ORIG_RUN_TMUX = run_tmux
 _ORIG_RUN_PS = run_ps
+
+
+# --------------------------------------------------------------------------- #
+# WHICH tmux SERVER: the socket resolution (t_4c5855a6)
+#
+# tmux finds its server by ONE rule (man tmux, -L): the socket named `default`
+# in `<TMUX_TMPDIR or /tmp>/tmux-<uid>/`. TMUX_TMPDIR is exported by the
+# INTERACTIVE shell rc, so a fresh shell — cron, launchd, an ssh one-liner, the
+# waker — aims tmux at a directory the running server never used, and every
+# pane vanishes as "found: none" while the operator's REPL sits on the running
+# server's socket. The seam below supplies the `-S <socket>` argument tmux then
+# cannot guess, and it is honoured by EVERY tmux call because every call goes
+# through _exec_tmux/run_tmux.
+# --------------------------------------------------------------------------- #
+
+#: The tmux binary every call execs. A SEAM, not a setting: a test points it at
+#: a fake tmux to exercise the real exec path, and the hermeticity guard reads
+#: a replaced binary as "this test owns its tmux".
+TMUX_BIN = "tmux"
+_DEFAULT_TMUX_BIN = TMUX_BIN
+
+#: tmux's own default socket dir and socket name (man tmux, -L).
+TMUX_DEFAULT_TMPDIR = "/tmp"
+TMUX_DEFAULT_SOCKET_NAME = "default"
+
+#: Private-tmpdir conventions tmux servers are started with here that neither
+#: TMUX_TMPDIR nor /tmp reveals. Measured on the reporting host: the running
+#: server's socket sat under `~/.tmux/tmp/tmux-<uid>/` while `/tmp/tmux-<uid>/`
+#: held only stale test sockets — i.e. tmux's own rule could not have found it.
+TMUX_PRIVATE_TMPDIRS = ("~/.tmux/tmp", "~/.tmux", "~/.local/tmp")
+
+#: Budget for one read-only probe; a wedged server must not hang an inject.
+SOCKET_PROBE_TIMEOUT_S = 5.0
+
+_TMUX_SOCKET: str | None = None
+_TMUX_SOCKET_RESOLVED = False
+
+
+def reset_tmux_socket_cache() -> None:
+    """Forget the resolved socket; the next tmux call discovers again.
+
+    Also what a FAILED tmux call does: a resolution that tmux itself just
+    rejected must not be reused for the rest of a long-lived daemon's life.
+    """
+    global _TMUX_SOCKET, _TMUX_SOCKET_RESOLVED
+    _TMUX_SOCKET = None
+    _TMUX_SOCKET_RESOLVED = False
+
+
+def _is_our_socket(path: str) -> bool:
+    """True for a unix socket this user owns — never another user's server."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return stat.S_ISSOCK(st.st_mode) and st.st_uid == os.getuid()
+
+
+def discover_tmux_sockets(env=None) -> list[str]:
+    """Every plausible tmux server socket on this host, in probe order.
+
+    tmux's own default first, then the two per-user temp dirs a NON-interactive
+    process actually gets (launchd, cron and sshd never source the rc that
+    exports TMUX_TMPDIR), then the private-tmpdir conventions named above.
+    Candidates only: nothing is believed until :func:`probe_socket` says a
+    server answers on it — which is what makes stale socket files (a fixture
+    left one in `/tmp/tmux-<uid>/` on the reporting host) harmless.
+    """
+    env = os.environ if env is None else env
+    bases: list[str] = [TMUX_DEFAULT_TMPDIR]
+    for key in ("TMPDIR", "XDG_RUNTIME_DIR"):
+        v = (env.get(key) or "").strip()
+        if v:
+            bases.append(v)
+    bases.extend(os.path.expanduser(d) for d in TMUX_PRIVATE_TMPDIRS)
+
+    uid_dir = f"tmux-{os.getuid()}"
+    out: list[str] = []
+    seen: set[str] = set()
+    for base in bases:
+        root = os.path.join(base, uid_dir)
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        # tmux's own socket name first, then any -L server's socket.
+        names.sort(key=lambda n: (n != TMUX_DEFAULT_SOCKET_NAME, n))
+        for name in names:
+            path = os.path.join(root, name)
+            if not _is_our_socket(path):
+                continue
+            real = os.path.realpath(path)
+            if real in seen:
+                continue
+            seen.add(real)
+            out.append(path)
+    return out
+
+
+def probe_socket(socket: str) -> bool:
+    """True when a tmux server ANSWERS on ``socket``.
+
+    ``list-sessions`` is the least that can be asked of a server: it creates no
+    session, reads no pane and types nothing — the only thing done to a socket
+    that has not been proven to own panes. Any failure means "not a server hscc
+    may use", including the pytest hermeticity guard (so an unstubbed test run
+    discovers nothing and changes nothing).
+    """
+    try:
+        _exec_tmux([TMUX_BIN, "-S", socket, "list-sessions"],
+                   timeout=SOCKET_PROBE_TIMEOUT_S, label="list-sessions")
+    except InjectError:
+        return False
+    return True
+
+
+def tmux_server_socket(env=None) -> str | None:
+    """The socket of the tmux server running here, or None for "tmux decides".
+
+    None is the right answer twice over. When ``TMUX`` or ``TMUX_TMPDIR`` is
+    set the operator has declared where the server is and tmux reads both
+    itself (measured: ``TMUX`` even outranks ``TMUX_TMPDIR``) — hscc adds no
+    argument at all, so the argv stays byte-identical to the pre-t_4c5855a6
+    behaviour. And when nothing answers, tmux's own "no server running on
+    <path>" is the message the operator should read, not a hscc invention.
+
+    Two live servers with no declared socket is a REFUSAL, not a choice: this
+    module's standing rule is that a wrong target is worse than no target, so
+    the operator is asked to name one.
+    """
+    env = os.environ if env is None else env
+    if (env.get("TMUX") or "").strip():
+        return None
+    if (env.get("TMUX_TMPDIR") or "").strip():
+        return None
+    live = [s for s in discover_tmux_sockets(env) if probe_socket(s)]
+    if len(live) > 1:
+        raise InjectError(
+            "ambiguous",
+            f"{len(live)} live tmux servers ({', '.join(live)}) and TMUX_TMPDIR "
+            "is unset — name the one that holds your panes in TMUX_TMPDIR "
+            "rather than let hscc guess")
+    return live[0] if live else None
+
+
+def tmux_socket_args(env=None) -> tuple[str, ...]:
+    """The `-S <socket>` prefix for EVERY tmux call, or () for tmux's default.
+
+    Resolved once per process (and again after any failed tmux call) so one
+    discovery decides the whole call sequence — the pane listing and the
+    ``send-keys`` that follows it can never straddle two servers.
+
+    Under pytest with the REAL tmux binary this returns () without looking at
+    the filesystem: a test owns its tmux (stub ``run_tmux``, or point
+    ``TMUX_BIN`` at a fake), and a suite run never probes a live socket.
+    """
+    global _TMUX_SOCKET, _TMUX_SOCKET_RESOLVED
+    if _under_pytest() and TMUX_BIN == _DEFAULT_TMUX_BIN:
+        return ()
+    if not _TMUX_SOCKET_RESOLVED:
+        _TMUX_SOCKET = tmux_server_socket(env=env)
+        _TMUX_SOCKET_RESOLVED = True
+    return () if _TMUX_SOCKET is None else ("-S", _TMUX_SOCKET)
+
 
 
 # --------------------------------------------------------------------------- #
@@ -280,7 +487,13 @@ def hermes_panes() -> list[dict]:
         out = run_tmux("list-panes", "-a", "-F",
                        "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"
                        "\t#{pane_tty}")
-    except InjectError:
+    except InjectError as exc:
+        # "no tmux here" is an empty answer, not a crash (a host with no tmux
+        # must not make a waker tick explode). A REFUSAL to pick between two
+        # live servers is not an empty answer: swallowing it is exactly how a
+        # transport problem reappears as the misleading "found: none".
+        if exc.kind == "ambiguous":
+            raise
         return []
     panes = []
     for line in out.splitlines():
