@@ -144,6 +144,46 @@ def _guard_step():
     return hits[0]
 
 
+def test_this_file_never_selects_a_workflow_step_by_position():
+    """The shape that reddened the whole leg is now banned here by construction.
+
+    ``steps[-1]`` was not wrong the day it was written — it was only true while no
+    later step existed. Every such read is a delayed-action defect: it goes off in
+    some other card's PR, on a file that card never touched, in the leg that is the
+    merge queue's own local gate. Re-reading the list by index is therefore not a
+    style preference to be lost again in review.
+
+    Prose is exempt on purpose: this file has to be able to NAME the bug. Comment
+    lines and docstrings are skipped (found via ``ast``, so the exemption is
+    structural rather than a substring guess); an index in real code is not.
+    """
+    lines = Path(__file__).read_text(encoding="utf-8").splitlines()
+    prose: set = set()
+    for node in ast.walk(ast.parse("\n".join(lines))):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            body = getattr(node, "body", [])
+            first = body[0] if body else None
+            if (isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                prose.update(range(first.value.lineno,
+                                   (first.value.end_lineno or first.value.lineno) + 1))
+    # `steps[-1]` and `["steps"][-1]`; the pattern cannot match its own source
+    # (`\D` after `steps` is a backslash, never `[`), so no self-exemption needed.
+    indexer = re.compile(r"steps\D{0,4}\[\s*-?\d")
+    offenders = [
+        f"{n}: {text.strip()}"
+        for n, text in enumerate(lines, 1)
+        if n not in prose and not text.lstrip().startswith("#")
+        and indexer.search(text)
+    ]
+    assert not offenders, (
+        "workflow steps must be reached through _job_steps()/_guard_step() and "
+        f"matched by content, never indexed: {offenders}"
+    )
+
+
 # ── the workflow shape (structural) ─────────────────────────────────────────
 
 def test_workflow_exists_and_is_valid_yaml():
@@ -203,15 +243,63 @@ def test_guard_cannot_run_is_reported_before_the_redactor():
     assert '"$redact_err_rc" -ne 0' in run
 
 
-def test_workflow_needs_no_network_beyond_checkout():
-    """Acceptance: nothing in the job may reach the network."""
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    steps = doc["jobs"]["guard"]["steps"]
-    used = [s["uses"] for s in steps if "uses" in s]
-    assert used == ["actions/checkout@v4"], "only checkout may be an external action"
-    run = " ".join(s.get("run", "") for s in steps)
+def test_guard_lane_needs_no_network_beyond_checkout():
+    """The lane that READS the committed tree must not be able to publish from it.
+
+    This test used to read "nothing in the job may reach the network", and it
+    failed after PR #524 — correctly, as a statement about the whole job: the
+    docs-index lint lane it added needs network (setup-python fetches an
+    interpreter, actions/cache talks to the cache service, the build step runs
+    `pip install -r requirements.txt`). Holding that form red is not a guard, it
+    is a stale claim about a decision main already made.
+
+    What still has to hold — and what this now pins about the guard lane alone —
+    is that the steps which read the tree and report on it have no way out. That
+    is the leak channel this file exists to close: a public job log is one thing,
+    an outbound request carrying the matched address is another. The job-wide
+    half of the old assertion is not deleted, it moves to
+    ``test_the_lint_lane_is_the_only_egress_in_the_guard_job``.
+    """
+    step = _guard_step()
+    assert "uses" not in step, \
+        "the guard step may not fetch an action: its inputs are the checkout " \
+        "and the guard's own two streams, and an action is an egress channel"
     for net in ("curl", "wget", "pip install", "npm ", "apt-get", "gh api"):
-        assert net not in run, f"job would need network: {net}"
+        assert net not in step.get("run", ""), \
+            f"the guard-lane step would need network: {net}"
+
+
+def test_the_lint_lane_is_the_only_egress_in_the_guard_job():
+    """Every byte the job can send out is accounted for, item by item.
+
+    The old whole-job "no network" assertion is replaced by an exact pin rather
+    than dropped: the job's external-action surface is listed in full, so egress
+    added ANYWHERE — a third lane, a bumped action, a lane that gains a `uses` —
+    still reddens this. A reviewer reading a red here is reading "new egress in
+    the address-guard job", which is the question worth asking.
+
+    It also pins lane ORDER, which the old test could not see while the guard
+    step was the job's last one: the lint step is a hard gate (it exits non-zero
+    on an unlisted doc), and a hard step placed BEFORE the guard would abort the
+    job and swallow the leak report — a green-looking job that never scanned.
+    """
+    steps = _job_steps()
+    used = [s["uses"] for s in steps if "uses" in s]
+    assert used == ["actions/checkout@v4", "actions/setup-python@v5",
+                    "actions/cache@v4"], (
+        "the job's external-action surface changed: every entry reaches the "
+        "network, so a new one is new egress and must be reviewed as such (and "
+        "must never be added to the guard lane)"
+    )
+    guard_at = [i for i, s in enumerate(steps)
+                if GUARD_STEP_ANCHOR in s.get("run", "")]
+    lint_at = [i for i, s in enumerate(steps)
+               if LINT_STEP_ANCHOR in s.get("run", "")]
+    assert len(lint_at) == 1, f"expected one lint step, found {len(lint_at)}"
+    assert guard_at[0] < lint_at[0], (
+        "the guard step must precede the hard-failing lint step: a lint failure "
+        "placed first aborts the job before the tree is ever scanned"
+    )
 
 
 # ── end to end: the real command the job runs ───────────────────────────────
