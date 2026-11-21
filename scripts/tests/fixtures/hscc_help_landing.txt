@@ -69,6 +69,7 @@ Utility
   notify <title> <body> | list | ack <id>
       Post, read or acknowledge an HSCC alert-feed entry
                        flags: --level info|action|critical --key <dedupe-key>
+      --node <host> (a paused node's alert is refused at the feed)
                        list: --since <id> --limit <n>; all: --json
                        requires the API: hscc api start
   bootstrap [flags]

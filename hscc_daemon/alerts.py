@@ -39,6 +39,36 @@ THE THREE RULES
    across restarts. ``GET ?since=<id>`` is the apps' paging read: strictly
    greater ids, ascending, bounded by ``limit``.
 
+NODE-PAUSE SUPPRESSION — RULE 4, AND WHY IT IS NOT A RATE LIMIT
+================================================================
+``hscc node pause`` parks one node and edits nothing the cluster is built from
+(``node_pauses.py``), so that node's absence and its units' being down are an
+instruction, not a fault. A node-scoped alert about it must never reach the
+operator's feed — the same contradiction the trigger engine's notify gate closes
+for desktop pages (t_81de1863), closed here for the Needs-me surface, which is
+this file. ``post_alert(node=...)`` therefore refuses BEFORE anything else
+happens: nothing is written, no id is consumed, no dedupe slot is taken and no
+rate stamp is laid down, so the post that follows the resume behaves exactly as
+if the parked one had never been attempted.
+
+That is the difference between this and rule 2. A rate limit is a *delay*
+(``retry_after_s`` says when to ask again) and its slot is real; a parked node
+is not a delay, and consuming a per-key slot for an alert that must never exist
+would silently push the post-resume alert out by ``PER_KEY_MIN_INTERVAL_S``.
+
+* **Explicit scope only.** The caller says which node the alert is about. A
+  title or body that happens to mention an IP is NOT evidence — deciding by
+  string match would make an operator's own wording a safety property.
+* **``covering()``, never ``paused()``** — a tensor-parallel unit stops as one
+  thing, so an alert about the sibling node of a parked span is the same
+  deliberate absence.
+* **Fail toward ALERTING.** A missing or malformed overlay reads as "no pauses"
+  (and ``node_pauses`` WARNs), so a broken file can never mute the feed.
+* **The overlay's root is ``node_pauses``' own.** It is deliberately NOT the
+  alert store's ``hscc_dir``/``$HSCC_HOME``: the pause and its readers resolve
+  through the one module that owns that file, and pinning the two roots apart
+  is exactly the writer/reader split this package keeps removing.
+
 ``None`` IS NOT A VALUE. An alert that was never acknowledged carries
 ``acked: false`` and ``acked_at: null``; clients must not read that as "an
 empty timestamp". The bounded store evicts the oldest alerts by id, period: the
@@ -59,6 +89,8 @@ import os
 import threading
 import time
 from pathlib import Path
+
+from . import node_pauses
 
 try:  # POSIX only; the daemon targets macOS/Linux, but degrade honestly.
     import fcntl
@@ -180,6 +212,57 @@ def _normalise_key(key):
         return None
     key = _clean_text(key, "key", MAX_KEY_CHARS)
     return key or None
+
+
+#: The ``reason`` a post carries when it was refused because its node is parked
+#: (see the NODE-PAUSE SUPPRESSION note in the module docstring). Distinct from
+#: every rate-limit reason: a parked node is not a delay, and it lays down no
+#: slot, so there is nothing to retry against.
+PAUSED_REASON = "paused_node"
+
+
+def _normalise_node(node):
+    """The node an alert is about: a trimmed host string, or ``None`` unscoped.
+
+    Blank is "not scoped", never an error — a caller that had no node to name
+    must behave exactly like a caller that passed nothing. A non-string IS a
+    client error: a list of hosts is not a host, and picking one (or scraping a
+    title for an IP) is the string-matching this seam refuses to do at all.
+    """
+    if node is None:
+        return None
+    if not isinstance(node, str):
+        raise ValueError("node must be a host string")
+    return node.strip() or None
+
+
+def _paused_post(node, key, pauses_directory=None):
+    """The refusal result for a post scoped to a parked node, or ``None``.
+
+    Answers ``None`` (=> proceed to the normal rules) when the node is not
+    covered by the overlay, including when the overlay is missing or
+    unreadable: ``node_pauses`` fails to "no pauses" there and WARNs, so a
+    broken file can never mute the operator's feed. Reads NOTHING of the store
+    — that is the whole point, and the reason this runs before the lock.
+    """
+    pause = node_pauses.covering(node, directory=pauses_directory)
+    if pause is None:
+        return None
+    reason = (pause.get("reason") or "").strip() or None
+    label = f" ({reason})" if reason else ""
+    log.info("alerts: post for node %s not created — node is paused%s (key=%s)",
+             node, label, key)
+    return {
+        "created": False,
+        "deduped": False,
+        "rate_limited": False,
+        "paused": True,
+        "reason": PAUSED_REASON,
+        "alert": None,
+        "retry_after_s": None,
+        "paused_node": node,
+        "paused_reason": reason,
+    }
 
 
 def _empty_state() -> dict:
@@ -366,26 +449,46 @@ def _global_retry_after(state: dict, now: float):
 # --------------------------------------------------------------------------- #
 
 def post_alert(title, body="", level=None, key=None, hscc_dir=None,
-               source=None, now=None) -> dict:
+               source=None, now=None, node=None, pauses_directory=None) -> dict:
     """Create, dedupe or rate-limit one alert.
 
     Returns a dict::
 
         {
           "created": bool, "deduped": bool, "rate_limited": bool,
-          "reason": "created"|"duplicate"|"rate_limited_key"|...,
+          "paused": bool,
+          "reason": "created"|"duplicate"|"rate_limited_key"|
+                    "rate_limited_global"|"paused_node",
           "alert": {...} | None,     # the existing one when deduped
           "retry_after_s": float|None,
         }
 
     ``source`` is accepted for callers that later want per-source reporting;
     it is not part of the public alert shape today (the feed is one stream).
+
+    ``node`` scopes the alert to ONE node (see the NODE-PAUSE SUPPRESSION note
+    in the module docstring): while ``node_pauses`` covers that node the post is
+    refused with ``reason == "paused_node"`` and the feed is not touched at all
+    — no id consumed, no dedupe slot, no rate stamp — so alerting for the same
+    condition resumes normally the moment the pause is cleared. ``node=None``
+    (every existing caller) is unscoped and behaves exactly as before.
+    ``pauses_directory`` is ``node_pauses``' own explicit-root seam, used by
+    tests; the default root is that module's, never ``hscc_dir``.
     """
     title = _clean_text(title, "title", MAX_TITLE_CHARS, required=True)
     body = _clean_text(body, "body", MAX_BODY_CHARS)
     level = normalise_level(level)
     key = _normalise_key(key)
+    node = _normalise_node(node)
     now = _now() if now is None else float(now)
+
+    if node:
+        # BEFORE the lock and before any store read: a parked node must leave no
+        # trace in the feed at all, and a refusal that consumed a dedupe or rate
+        # slot would delay the post-resume alert for a condition that is real.
+        refusal = _paused_post(node, key, pauses_directory)
+        if refusal is not None:
+            return refusal
 
     root = hscc_root(hscc_dir)
     path = store_path(hscc_dir)
@@ -404,6 +507,7 @@ def post_alert(title, body="", level=None, key=None, hscc_dir=None,
                         "created": False,
                         "deduped": True,
                         "rate_limited": False,
+                        "paused": False,
                         "reason": "duplicate",
                         "alert": _public(existing),
                         "retry_after_s": None,
@@ -431,6 +535,7 @@ def post_alert(title, body="", level=None, key=None, hscc_dir=None,
                 "created": False,
                 "deduped": False,
                 "rate_limited": True,
+                "paused": False,
                 "reason": reason,
                 "alert": None,
                 "retry_after_s": round(max(0.0, retry_after or 0.0), 3),
@@ -464,6 +569,7 @@ def post_alert(title, body="", level=None, key=None, hscc_dir=None,
         "created": True,
         "deduped": False,
         "rate_limited": False,
+        "paused": False,
         "reason": "created",
         "alert": _public(alert),
         "retry_after_s": None,
