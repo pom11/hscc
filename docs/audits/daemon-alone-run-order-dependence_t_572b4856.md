@@ -3,8 +3,9 @@
 **Card:** t_572b4856 (opened from t_7c5f5051's review, which found and fixed one
 instance of it). **Status: LOCATED and FIXED** — the enumeration the card asked
 for is §2, the mechanism (which is *not* the one the card hypothesised) is §3,
-the fix and its runtime pin are §5, and §6 is the before/after on both
-interpreters.
+the fix and its runtime pin are §5, §6 is the before/after on both interpreters,
+§7 is the second order dependence the sweep then found *inside this fix*, and §8
+is the final 131-files × 2-interpreters agreement.
 
 ## Question
 
@@ -69,6 +70,11 @@ site + reason text**, because the stamp rule is read off `-rs` and a skip whose
 *reason* changed is a different answer even when the count did not.
 
 ### 2. What differs — the enumeration
+
+This first enumeration was run under the thin sibling; the same sweep on the
+canonical interpreter is §7, and it found five more files (of a different kind,
+in the fix written for what is below). The re-run after both fixes, on both
+interpreters, is §8.
 
 **Status differences: one file in 131.**
 
@@ -248,7 +254,8 @@ not "green" — it is that the leg and the alone run now print **the same answer
 
 | run | pre-fix | post-fix |
 | --- | --- | --- |
-| `hscc_daemon` leg, thin `p313` (3.13.12) | 4024 passed, 23 skipped, rc0, 133.95 s | **4025 passed, 23 skipped, rc0, 132.99 s** (+1 = the new pin; wall time unchanged) |
+| `hscc_daemon` leg, thin `p313` (3.13.12) | 4024 passed, 23 skipped, rc0, 133.95 s | **4026 passed, 24 skipped, rc0, 132.87 s** (2 pins added; +1 passes, +1 skips honestly on the sibling — wall time unchanged) |
+| `hscc_daemon` leg, canonical venv (3.14.10) | 4046 passed, 1 skipped, rc0 | **4049 passed, 1 skipped, rc0, 164.07 s** (both new pins RUN here) |
 | per-file alone vs in-leg, all 7 suspect files | 1 collection error + 6 reason mismatches | **0 and 0** |
 | `test_cli_orch_waker.py` alone | collection ERROR (`No module named 'hscc'`, rc=2) | 18 passed |
 
@@ -256,12 +263,76 @@ Runtime pin: RED on the pre-fix tree under **both** interpreters (thin `p313`
 3.13.12 and canonical venv 3.14.10; file B's assert fires — `hermes_cli` reached
 the next file), GREEN after the fix on both.
 
+### 7. The canonical sweep found a second order dependence — in the fix itself
+
+The thin sweep said "clean", so the honest move was to run the same sweep on the
+canonical interpreter rather than infer it. It exited **1**: five files, **72
+tests**, that pass inside the leg and FAIL alone —
+
+| file | in-leg | alone (pre-fix-of-round-2) |
+| --- | --- | --- |
+| `test_unified_cli.py` | 98 passed | 39 failed |
+| `test_toplevel_cli_help_f5.py` | 60 passed | 16 failed |
+| `test_daemon_singleton.py` | 50 passed | 5 failed |
+| `test_cli.py` | 22 passed | 11 failed |
+| `test_chat_roundtrip_standalone.py` | 11 passed | 1 failed |
+
+and the traceback was not about hermes at all:
+
+```text
+rich/panel.py:237: in __rich_console__ title_text = align_text(
+rich/panel.py:182: in align_text return Text.assemble(
+E   TypeError: Text.append() takes from 2 to 3 positional arguments but 24 were given
+```
+
+Two `rich.Text` classes in one process. Cause: **my own new rule**. The agent tree
+on the canonical runner is `~/.hermes/hermes-agent`, and hermes' venv lives *inside
+it* — `~/.hermes/hermes-agent/venv/lib/python3.14/site-packages`. A rule that
+classifies residue by "is its `__file__` under the agent root" therefore called
+`rich`, `typer`, `pydantic` and `_pytest` itself hermes residue and evicted them
+from `sys.modules` after every test, exactly as it was supposed to evict a leaked
+`hermes_cli`. Verified against the pre-fix tree: `test_daemon_singleton.py` alone
+is 50 passed on `origin/main`, 5 failed on the branch, and the failure is gone when
+the classifier refuses `sys.prefix`.
+
+Nothing about this is visible from the leg: it prints `ALL GREEN` with the bug in
+it on both interpreters. The bug in the fix for "a leg can be green while a file
+fails alone" was caught by the one thing the card asked for — the sweep, run on
+the *other* interpreter too. Two lessons kept together:
+
+* a prefix under a root is not ownership: the tree that *contains* the
+  interpreter's installation must be excluded, and that exclusion is
+  `sys.prefix`/`base_prefix`/`site.getsitepackages()`, not a name list.
+* a test that patches a module global read by an autouse fixture during *its own*
+  teardown poisons the next test's setup — the first cut of this pin did that and
+  produced `Could not obtain a node for scope "Scope.Session"`. The classifier now
+  takes `root`/`interp_roots` as arguments instead.
+
+Pins: `test_the_agent_tree_rule_excludes_a_venv_nested_in_the_tree` (synthetic
+`<tree>/venv/lib/pythonX/site-packages`; the same call with `interp_roots=()`
+asserts the venv path *does* read as residue, so the pin contains its own mutation
+probe) and `test_installed_packages_are_never_reported_as_residue` (live: no module
+resident under `sys.prefix` is ever reported; explicitly `skip`s on a sibling whose
+prefix is outside the tree instead of passing quietly there).
+
+### 8. Final state: alone == in-leg on both interpreters
+
+After both fixes, the full 131-file sweep re-run against a fresh leg on each
+interpreter:
+
+```text
+CANONICAL post-fix (4049p/1s) full 131-file sweep:   files whose ALONE run differs: 0   exit=0
+THIN      post-fix (4026p/24s) full 131-file sweep:  files whose ALONE run differs: 0   exit=0
+```
+
+No collection errors, no non-zero exit, no status difference, no skip-reason
+difference, on either interpreter.
+
 ## What the stamp may claim now
 
 The thin leg's `-rs` output is now a property of the interpreter, not of the file
-order, for every file measured: 131 files swept alone, one collection error found
-and fixed, six reason mismatches found and fixed, zero remaining on both sides.
-Two honest limits:
+order, for every file measured: 131 files swept alone on both interpreters against
+a fresh leg on each, zero differences (§8). Two honest limits:
 
 * The sweep compares the **leg's** order against **alone**. A third order (some
   other subset of files in one process) is not enumerated; what makes it safe is
@@ -279,7 +350,10 @@ Two honest limits:
   of the process. Nothing depends on them any more, but nothing *stops a new file
   from depending on them* either. The only check that catches that class is this
   audit's alone-sweep, which today is a manual 131-process loop; running it as a
-  scheduled gate would be the small durable version.
+  scheduled gate would be the small durable version. It has already paid for
+  itself twice — once for the leg (§2), once for a bug in the code written to fix
+  the leg (§7) — and in both cases the leg itself was green, so nothing else
+  running today would have seen either.
 * `hermes_import.agent_tree_on_path`'s `finally` has a documented "bookkeeping was
   reset under us" branch (`hermes_import.py:109-110`) that leaves the path in
   place if a test replaces `_WINDOWS` mid-window. Not observed in 804 events over
