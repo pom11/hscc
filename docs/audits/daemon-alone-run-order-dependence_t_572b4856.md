@@ -479,6 +479,117 @@ Cost, for the record: one extra interpreter exec per pass (the stamp bridge load
 `cron_watchers.py` by path from the gate's own checkout, not from the tree being
 measured — t_77db1513's rule on the scheduling side), against a ~10-minute pass.
 
+#### 10.1 Where a stamp is written vs. where the doctor reads it (t_06ead443, measured live)
+
+The row above only works if one unstated thing is true: the writer and the reader
+have to be looking at the same directory, and they derive it differently.
+
+* **Writer** — `hscc_daemon/state.py:8`: `STATE_DIR = os.path.expanduser("~/.hscc/state")`,
+  reached through `cron_watchers.state_dir()`. It is the **`HOME` of the process that
+  stamped** — which for a Hermes cron job is cron's `HOME`, not the operator's shell.
+* **Reader** — `doctor.py:2151` passes `hscc_dir=os.environ.get("HSCC_DIR")` down to
+  `cron_watchers.doctor_check`, which turns it into `<hscc_dir>/state`
+  (`cron_watchers.py:487`) — and passes `None` when the variable is unset, in which
+  case `_dirs(None)` falls back to the *same* `state_dir()` the writer used.
+
+So the two meet **by construction** whenever `HSCC_DIR` is unset or equals
+`$HOME/.hscc` — which is every production path, because `bootstrap.sh:17` defaults
+it to exactly `${HSCC_DIR:-$HOME/.hscc}` — and only part company when something
+deliberately relocates it. That "only when deliberately" is no longer an inference.
+
+**Measured, on this host, against a job that is really installed** (2026-11-21).
+Two of the roster's three jobs are live in the `default` profile:
+`hscc-dep-watcher` (`0 8 * * *`) and `hscc-escalate-watcher` (`*/15 * * * *`).
+
+| side | what was read | value |
+|---|---|---|
+| cron scheduler | `hermes -p default cron list --all`, `hscc-escalate-watcher` | Last run `2026-11-21T09:45:11.093627+02:00  ok` |
+| the job's own stamp | `~/.hscc/state/escalate_watcher.json` | `"timestamp": "2026-11-21T07:45:11.054957+00:00"` — the same instant, to the second |
+| the doctor | `python3 hscc-bootstrap/doctor.py`, row `cron watchers (dep_pr/escalate/alone_sweep)` | `escalate_watcher (hscc-escalate-watcher) fresh (876s old, window 2700s)`, `ok=True` — and `fresh (24s old, …)` after the next 15-minute pass |
+
+Provenance of that stamp file is not in doubt: `cw.stamp("escalate_watcher", …)`
+occurs in exactly one non-test place in the tree — `scripts/escalate_watcher_run.py:94`,
+the cron script — and the daemon never writes that stream name, so nothing else on
+the host can have produced it. Its `actions` / `idle` / `fail_limit` fields are that
+script's own `**fields`.
+
+The counterfactual was measured too, because a property that holds *only* while
+nobody sets the variable is worth knowing about. With `HSCC_DIR` pointed at a
+relocated scratch root (the bootstrap sandbox convention), the **same live, healthy
+job** reads back `escalate_watcher: not configured (no stamp; install with
+scripts/install_escalate_watcher.sh if it should run)`. So visibility is genuinely
+contingent on `HSCC_DIR` resolving to `$HOME/.hscc`. It does, on every path a real
+install takes; and where it does not, `not-configured` is the honest answer, because
+that root really has never held a stamp. Two consequences held as advertised: the
+read path took the `directory=` seam rather than mutating `os.environ` (a sandbox
+cannot read the operator's live tree by accident), and no second stamp location was
+introduced for any watcher to choose between.
+
+The `alone_sweep_gate` row shares those same two lines of code — `stamp()` →
+`state_dir()` on the write side, `doctor_check(hscc_dir=…)` → `_dirs()` on the read
+side, with no per-stream path logic anywhere in `cron_watchers.py`. What is
+deliberately **not** claimed here is a live `alone_sweep_gate` stamp: this host has
+no such job (`hermes -p default cron list --all` lists only the two above, no profile
+checked has an `hscc-alone-sweep-gate` job, there is no
+`~/.hermes/scripts/hscc-alone-sweep-gate.sh` wrapper, and the doctor prints
+`alone_sweep_gate: not configured` — correctly).
+
+**The seam is one-directional, and that is the finding.** The round-trip this section
+was going to cite — `stamp(stream, directory=X)` then `doctor_check(hscc_dir=X.parent)`
+— does not work, and measuring it is what proved the card's hypothesis:
+
+```
+stamp(dep_pr_watcher   , directory=<scratch>/state) -> wrote True
+stamp(escalate_watcher , directory=<scratch>/state) -> wrote True
+stamp(alone_sweep_gate , directory=<scratch>/state) -> wrote True
+files actually created under <scratch>:  (none)
+```
+
+`stamp()` and `stamp_failure()` are `def stamp(stream, **fields)` — there is **no
+`directory` parameter to thread**, so the keyword is absorbed into the stamp *payload*
+and the write goes to `state.write_state()`'s HOME-derived `STATE_DIR` anyway,
+**returning `True`**. Every read-side function has the seam (`read_stamp`, `verdict`,
+`_dirs`, `install_marker_path`, `mark_installed`, `remove_stamp` all take
+`directory=None`); neither write-side function does. So the docstring's promise at
+`cron_watchers.py:156` — that threading `directory` through the reads means "a
+redirected read can never split from where writes landed" — is true only because the
+writes have nowhere else to go. The corollary is the hazard: **a relocated `HSCC_DIR`
+is a root no watcher can stamp through the supported API**, so
+`doctor_check(hscc_dir=X)` with `X != $HOME/.hscc` can only ever answer
+`not-configured`, for every stream, however healthy the jobs are. Measured above in
+run B: the escalate job had stamped successfully four minutes earlier and the relocated
+read called it unconfigured. `hermes cron list`-alive and "nobody installed this" are
+therefore one environment variable apart — silently, and with `ok=True`.
+
+Disclosure, because the probe wrote where it was told not to: that experiment left
+three stamps in the operator's **live** `~/.hscc/state/` (all three carried
+`"probe": true` plus the scratch path, which is how they were identified and removed).
+`dep_pr_watcher.json` and `alone_sweep_gate.json` did not exist before and do not exist
+now. `escalate_watcher.json` did exist — the genuine 09:45 pass — and the probe
+overwrote it; it was deleted rather than left carrying fabricated fields, and the real
+`*/15` job re-stamps it on its next tick, so the row self-heals. No other file was
+touched, and `grep '"probe"' ~/.hscc/state/*.json` is empty.
+
+The smallest honest fix is therefore the one this card anticipated, one notch deeper
+than the installer: `stamp()` / `stamp_failure()` need the same `directory` seam the
+reads already have (resolved through `_dirs()`, so one mechanism picks the root for
+both sides) **and** need to reject an unknown keyword instead of `**fields`-swallowing
+it into the payload — a write API that returns `True` having written somewhere else is
+the worst version of a silent failure. That is a behaviour change to the shared writer
+and belongs in its own card with its own tests; it is not done here, and nothing here
+adds a second stamp location.
+
+**What the exercise did find is a different defect than the card expected.** The
+doctor prints `dep_pr_watcher: not configured (no stamp; install with
+scripts/install_dep_watcher.sh if it should run)` for a job that **is** installed,
+`[active]`, and completed `ok` at 08:00 the same morning. Cause: `install_dep_watcher.sh:54`
+*copies* the script into `<bound home>/scripts/`, and the copy on this host predates
+GAP-B-4 stamping (it has no reference to `cron_watchers` at all) while the repo's
+`scripts/dep_pr_watcher.py` stamps on every pass. So a healthy, running watcher reads
+as "nobody installed this" — the exact invisibility class `t_3aadd2c0` (17 failed
+runs) was written about, arriving by deployed-copy drift rather than by a split in the
+stamp path. The doctor's own fix string is the remedy: re-run the installer.
+
 ## What the stamp may claim now
 
 The thin leg's `-rs` output is now a property of the interpreter, not of the file
