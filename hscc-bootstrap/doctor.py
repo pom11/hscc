@@ -31,6 +31,7 @@ alias is safe.
 from __future__ import annotations
 
 import copy
+import inspect
 import os
 import re
 import shutil
@@ -1471,7 +1472,17 @@ def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
                          fix="Deploy the hscc_daemon plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = cw.doctor_check(hscc_dir=hscc_dir)
+        # t_95eb9f15: the live doctor also compares each watcher's DEPLOYED copy
+        # against the repo copy the installer took it from. Opt-in on purpose --
+        # doctor_check reads no host scripts dir unless it is asked to -- and
+        # probed rather than assumed, because the cron_watchers this row loads
+        # may predate the seam (the deployed plugin payload is a release, not
+        # this checkout): a warn-only row must degrade to the stamp read, not
+        # raise out of the whole doctor run.
+        if "check_deployed_copies" in inspect.signature(cw.doctor_check).parameters:
+            res = cw.doctor_check(hscc_dir=hscc_dir, check_deployed_copies=True)
+        else:
+            res = cw.doctor_check(hscc_dir=hscc_dir)
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 
