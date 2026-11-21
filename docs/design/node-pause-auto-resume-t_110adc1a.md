@@ -77,7 +77,28 @@ skipping it.
 1. `resume_host()` extraction + CLI delegation — `test_node_cli.py` green
    unmodified (proves byte-for-byte CLI parity).
 2. `auto_resume_expired` + `expiry_tick` + `check_node_pause_expiry` +
-   stream wiring + `tests/test_node_pause_tick.py`.
+   stream wiring + `tests/test_node_pause_expiry.py`.
 3. changelog fragment + `docs/ops/node-pause.md` (it currently states "nothing
    calls them yet / treat --until as a note, not a timer" — this card makes that
    false) + full suite + PR.
+
+## Delivered
+
+All three slices landed on `wt/t_110adc1a`: the slice-1 refactor, then the tick
+with its wiring, docs and fragment. Two details changed on the way, both in the
+code's favour:
+
+* the test file is `tests/test_node_pause_expiry.py`, not `..._tick.py` — the
+  stream is `node_pause_expiry` and one name across cadence key, state file and
+  verify row is the loop's convention;
+* the pass takes `MAX_RESUMES_PER_TICK` (4) and defers the rest. The card did not
+  ask for it; an unbounded pass would run one 120 s-budget sparkrun control call
+  per expired node, sequentially, inside this stream's thread — enough to gate
+  the stream and let verify's staleness floor cry wolf on a daemon that is
+  actually working. The merge queue's one-PR-per-project-per-tick is the precedent.
+
+Not done here, and carded as follow-up rather than smuggled in: a **doctor row**
+for `node_pause_expiry`. `kanban_enforce` (the 60 s precedent this copied) got one
+with it, and the row is what turns "the stream is stamped but has been stamped red
+for a day" into something `hscc doctor` says out loud. `hscc verify` already
+covers the stream through `PERIODIC_INTERVALS`, so nothing is invisible today.

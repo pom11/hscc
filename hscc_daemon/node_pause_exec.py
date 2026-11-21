@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import json
 
-from . import serving, util
+from . import node_pauses, serving, util
 
 #: Shell-out cap for ONE lifecycle command (a stop, or a --ensure resume).
 #: These are single-host sparkrun control calls, not a fleet sweep, so they sit
@@ -527,7 +527,7 @@ RESUME_DRY_RUN = "dry_run"
 
 
 def resume_host(host, entry, apply=False, directory=None, echo=print,
-                reason=None, run=None):
+                reason=None, run=None, pauses=None, now=None):
     """Restart the units ``entry`` recorded, then end the pause.
 
     This IS the resume policy — ``hscc node resume`` and the daemon's
@@ -539,6 +539,10 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
     fresh objects on every call, so an entry read twice is not the same object,
     and a decision taken across two reads can disagree with the one that picked
     this host. The caller that selected an expired entry passes what it saw.
+    ``pauses`` / ``now`` are that same snapshot and clock, for the span question
+    below; a caller that has none (the CLI) lets this function take one read of its
+    own, so the guard is never optional — it cannot be skipped by forgetting an
+    argument.
 
     ``apply=False`` (the default, the #478 rule) prints every command and mutates
     nothing — including the overlay, so a dry run cannot end a pause.
@@ -594,6 +598,48 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
         echo(f"  {uid}")
     if span_nodes:
         echo(f"  every node this affects: {', '.join(span_nodes)}")
+
+    # Rule 0.5 — a span resumes as ONE thing, or not at all.
+    #
+    # Resuming ``A`` while another pause holds ``B``, which A's span covers, is not
+    # a partial resume: ``resume_cmd`` re-issues the WHOLE declared workload (that
+    # is what a tensor-parallel unit is), so the restart would bring units up on a
+    # node the operator has not released. A verb user can see the fleet and is
+    # naming one host, so refusing is the cheap direction to err in — and a tick
+    # iterating the overlay has neither the sight nor the intent, which is exactly
+    # why the rule sits in the shared policy instead of in the argument parser
+    # where only one of the two callers would ever meet it.
+    #
+    # "Still held" means not merely recorded: an entry whose ``until`` has passed is
+    # due to end, so it cannot also be a reason to hold — otherwise one past-due
+    # record would freeze every span it touches, including the one that could get
+    # the fleet moving again.
+    if pauses is None:
+        pauses = node_pauses.list_pauses(directory)
+    held = []
+    for node in span_nodes:
+        if node == host:
+            continue
+        for other_host, other in pauses.items():
+            if other_host == host or node_pauses.is_expired(other, now):
+                continue
+            if other_host == node or node in (other.get("span_nodes") or []):
+                held.append((node, other_host))
+                break
+    if held:
+        owners = sorted({owner for _node, owner in held})
+        res["error"] = (
+            f"this pause spans {', '.join(sorted(node for node, _o in held))}, "
+            f"which {'another pause' if len(owners) == 1 else 'other pauses'} "
+            f"still hold{'s' if len(owners) == 1 else ''}")
+        echo(f"REFUSED: {res['error']}.")
+        echo("  The recorded restart re-issues the whole declared workload, so "
+             "resuming here would start units on a node that has not been "
+             "released.")
+        echo(f"  Resume {' '.join(owners)} first "
+             f"(hscc node resume {' '.join(owners)} --apply); the pause on "
+             f"{host} stays recorded.")
+        return res
 
     if recorded:
         p = plan(host)
@@ -668,3 +714,261 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
     res["action"] = RESUME_RESUMED
     res["ok"] = True
     return res
+
+
+# ── the daemon's expiry tick: a pause with an `until` is a SCHEDULE ──────────
+#
+# WHY THIS RUNS IN THE DAEMON
+# ---------------------------
+# ``hscc node pause --until 2h`` is a promise about the future, and a promise
+# only a long-lived process can keep. The two alternatives both fail: an
+# operator typing ``hscc node resume`` is a timer that goes on holiday, and an
+# in-memory timer (a ``threading.Timer``, a deadline held in a dict) dies with
+# the daemon — which is the worst possible moment, because a crash or an upgrade
+# cycles the daemon and the watchdog then "heals" the paused unit back to life on
+# top of whatever the node is now doing. So the schedule is the overlay file and
+# the clock is read once per tick: ``until`` comes off disk, the decision is
+# recomputed from scratch, and nothing has to survive a restart because nothing
+# was ever held in memory. (``test_node_pause_expiry`` pins the consequence: this
+# module imports neither ``threading`` nor ``sched`` and never sleeps, so an
+# in-memory timer is not merely avoided here, it is not expressible.)
+#
+# THE IDLE PATH IS FREE
+# ---------------------
+# No pauses is the normal state, so it must not cost a sparkrun call, a serving
+# read or even a file read: ``list_pauses`` short-circuits on ``os.path.exists``
+# and the pass returns before touching ``plan``/``resume_units``/``serving``.
+# Only the stream stamp is written, which every stream in this loop writes on
+# every path — a deliberately idle stream must not read as a dead one to
+# ``hscc verify``'s staleness math (GAP-C-1's rule: inert-but-healthy-looking is
+# the worst read a watcher can have).
+
+#: The daemon's stream name: the key in ``daemon_ops.PERIODIC_INTERVALS``, the
+#: state file ``~/.hscc/state/node_pause_expiry.json``, and the row
+#: ``hscc verify`` reports. One name for all three, like every other stream.
+STREAM_NAME = "node_pause_expiry"
+
+#: Pauses resumed per tick. Each resume is one sparkrun control call with a
+#: ``SPARKRUN_CONTROL_TIMEOUT`` (120 s) budget, run sequentially in THIS stream
+#: thread, so an unbounded pass on a large backlog could gate the stream for
+#: many minutes and let verify's 600 s floor cry wolf on a healthy daemon. Four
+#: per tick (the merge queue's one-PR-per-project-per-tick shape) drains four
+#: nodes a minute, longest-waiting first, and defers the rest visibly.
+MAX_RESUMES_PER_TICK = 4
+
+
+def _due_entries(pauses, now):
+    """``[(host, entry)]`` whose ``until`` has passed, from ONE snapshot.
+
+    :func:`node_pauses.pending_resume` answers the same question and is the right
+    call for a one-shot reader; it is not used here because it does its own
+    ``load()``, and this pass has to decide expiry AND the span question from the
+    same snapshot — the overlay is written by the CLI in another process, so two
+    reads are two different worlds and a guard built on the second one can be
+    reasoning about a pause the first one never saw.
+
+    Longest-waiting first, then host, so the order is reproducible. Deadline
+    order comes from the ``until`` STRING, not a re-parse: every writer in this
+    codebase stores it through ``node_pauses._iso``, which always emits UTC
+    ``+00:00``, so string order IS deadline order. A hand-edited overlay with a
+    different offset could at worst reorder the pass — the SELECTION is
+    :func:`node_pauses.is_expired`, which parses properly.
+    """
+    due = [(host, entry) for host, entry in pauses.items()
+           if node_pauses.is_expired(entry, now)]
+    due.sort(key=lambda row: (row[1]["until"] or "", row[0]))
+    return due
+
+
+def _nodes_still_held(pauses, now):
+    """Every node a NON-expired pause owns: keyed hosts plus their spans.
+
+    The set an expired resume must not touch. ``covering``/``paused_nodes`` would
+    answer "who is parked" over a second read; this answers it over the snapshot
+    the pass already holds, and deliberately skips the expired entries — a pause
+    whose deadline passed is due to end, so it cannot also be a reason to hold.
+    """
+    held = set()
+    for host, entry in pauses.items():
+        if node_pauses.is_expired(entry, now):
+            continue
+        held.add(host)
+        held.update(entry["span_nodes"])
+    return held
+
+
+def auto_resume_expired(now=None, directory=None, apply=True, echo=None,
+                        resume=None, run=None, limit=MAX_RESUMES_PER_TICK):
+    """End every pause whose ``until`` has passed. Reports; never raises.
+
+    One pass:
+
+      1. read the overlay ONCE and take the due list out of that snapshot
+         (:func:`_due_entries`),
+      2. drop a candidate whose span overlaps a pause the operator still holds
+         (see below),
+      3. resume the rest through :func:`resume_host` — the SAME function
+         ``hscc node resume --apply`` runs, so the dry-run gate, the
+         rebuild-or-refuse rule and the clear pairing are shared, not restated.
+
+    THE SPAN GUARD, which the CLI cannot need and a tick must.
+    ``hscc node resume`` refuses a host that only appears in another entry's
+    ``span_nodes`` and points at the owner; a tick iterating the overlay's keyed
+    hosts can never pick one of those up, so that half comes free. The half it
+    CANNOT get from the CLI is the mirror image: an expired pause on ``A`` whose
+    unit also runs on ``B``, where ``B`` has its own still-active pause. The
+    recorded resume re-issues the whole declared workload, so restarting it would
+    walk units onto a node the operator has not given back. Such a candidate is
+    SKIPPED and its pause is kept — retried next tick, and by then the other
+    pause has normally expired too. Skipping is never silent: it is logged,
+    counted in the stamp, and makes the stream red.
+
+    ``expiry_pass`` is deliberately NOT called here, though ``node_pauses``'
+    docstring offers it. It drops every expired entry at once — including one
+    whose restart just failed, which is "the record is cleared because the tick
+    ran": the node would be back in the heal paths with units half up. The clear
+    here is per host and only ever after a restart that succeeded, so a failed
+    resume stays parked and stays retried.
+
+    ``apply=False`` runs the whole pass as a dry run (nothing restarts, nothing
+    clears) — the #478 default, reachable from here for the same reason the verb
+    has it. ``resume``/``run``/``echo`` are the injected seams the executor
+    already uses. Returns ``{"resumed", "kept", "skipped", "deferred",
+    "attempted", "ok", "message"}``.
+    """
+    say = echo or print
+    resumed, kept, skipped, deferred, results = [], [], [], [], []
+
+    # ONE read. Everything below — who is due, and who is still promised to the
+    # operator — is answered from this dict, never from a second one.
+    pauses = node_pauses.list_pauses(directory)
+    due = _due_entries(pauses, now)
+    still_held = _nodes_still_held(pauses, now)
+
+    for host, entry in due:
+        # The candidate's own host is subtracted, so `blocked` can only name
+        # nodes some OTHER pause owns: expired entries are not in `still_held`
+        # at all, so two pauses that are both due never block each other.
+        blocked = sorted((({host} | set(entry["span_nodes"]))
+                          & still_held) - {host})
+        if blocked:
+            why = (f"its span covers {', '.join(blocked)}, which another pause "
+                   "still holds — restarting here would start units on a node "
+                   "the operator has not released")
+            skipped.append((host, why))
+            say(f"SKIP auto-resume {host}: {why}")
+            continue
+        if limit is not None and len(results) >= limit:
+            deferred.append(host)
+            continue
+        res = (resume or resume_host)(
+            host, entry, apply=apply, directory=directory, echo=say,
+            reason=f"daemon auto-resume of expired pause on {host}", run=run,
+            # The SAME snapshot and clock, handed down: the pass must not ask a
+            # second read whether the span is clear after deciding from the first
+            # that this host was due.
+            pauses=pauses, now=now)
+        results.append(res)
+        if res.get("action") == RESUME_RESUMED:
+            resumed.append(host)
+        elif not res.get("ok"):
+            kept.append((host, res.get("error") or "restart refused"))
+            say(f"AUTO-RESUME FAILED for {host}: {res.get('error')}; the pause "
+                f"stays recorded and will be retried next tick")
+
+    ok = not kept and not skipped
+    if kept or skipped:
+        bits = []
+        if kept:
+            bits.append(f"{len(kept)} pause(s) could not be resumed "
+                        f"({', '.join(h for h, _w in kept)})")
+        if skipped:
+            bits.append(f"{len(skipped)} pause(s) held by a spanning pause "
+                        f"({', '.join(h for h, _w in skipped)})")
+        message = "; ".join(bits)
+    elif resumed:
+        message = f"auto-resumed {len(resumed)} expired pause(s): " \
+                  f"{', '.join(resumed)}"
+        if deferred:
+            message += f"; {len(deferred)} deferred to the next tick"
+    else:
+        message = "no expired pauses" if not due else \
+            "nothing resumed (dry run)"
+    return {"ok": ok, "message": message, "attempted": len(results),
+            "resumed": resumed, "kept": kept, "skipped": skipped,
+            "deferred": deferred, "results": results}
+
+
+def expiry_tick(now=None, directory=None, state_dir=None, write=None,
+                echo=None, resume=None, run=None):
+    """One supervised daemon tick: run the expiry pass, stamp the stream.
+
+    The body of :func:`check_node_pause_expiry`, which is the CHECKS-table entry
+    for the ``node_pause_expiry`` stream in ``daemon_ops.PERIODIC_INTERVALS``
+    (60 s, the same class as ``kanban_enforce``: free when there is nothing to
+    do). Four outcomes and ALL of them stamp:
+
+      * no pauses   -> ``ok: True``, zero fleet reads, zero subprocesses;
+      * resumed     -> ``ok: True``, the hosts named;
+      * kept/skipped-> ``ok: False`` with the reason — the schedule the operator
+        set is NOT being honoured, which is exactly the "policy is not being
+        applied" red row ``kanban_enforce`` established. A past-due node silently
+        staying parked is the failure this stream exists to make visible;
+      * raising     -> ``ok: False``, the exception in the message.
+
+    NEVER raises: a node-pause problem must not be able to take a stream down,
+    and a stream that goes dark is indistinguishable from one that died.
+    """
+    if write is None:
+        from .state import write_state as write
+    if now is None:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+    entry = {"ok": True, "message": "no expired pauses", "resumed": [],
+             "kept": [], "skipped": [], "deferred": []}
+    try:
+        report = auto_resume_expired(now=now, directory=directory,
+                                     echo=echo, resume=resume, run=run)
+        entry.update(
+            ok=report["ok"], message=report["message"],
+            resumed=report["resumed"],
+            kept=[h for h, _why in report["kept"]],
+            skipped=[h for h, _why in report["skipped"]],
+            deferred=report["deferred"],
+            # The clock this pass judged against, so a reviewer can tell "nothing
+            # was due" from "the pass ran on a clock that said nothing was due".
+            checked_at=now if isinstance(now, str) else str(now))
+        return entry
+    except Exception as e:  # noqa: BLE001 — the stream must survive anything
+        entry.update(ok=False, message=f"expiry tick failed: {e}")
+        return entry
+    finally:
+        try:
+            if state_dir:
+                write(STREAM_NAME, entry, directory=state_dir)
+            else:
+                write(STREAM_NAME, entry)
+        except Exception:  # pragma: no cover — write_state itself never raises
+            pass
+
+
+def check_node_pause_expiry():
+    """The daemon's ``node_pause_expiry`` stream check (PERIODIC_INTERVALS body).
+
+    The CHECKS-table entry in ``daemon_ops.run_daemon_loop``, so the pass rides
+    the loop's standard per-stream machinery: its own supervised
+    ``_run_supervised_periodic`` thread (a failure is logged and the thread
+    respawned, never able to take another stream down) and the same per-stream
+    staleness math in ``hscc verify``. ``expiry_tick`` stamps on every path; this
+    wrapper only converts the entry to the check-fn truth convention and
+    guarantees a raise cannot escape even if the tick's own guard did.
+    """
+    try:
+        return bool(expiry_tick().get("ok"))
+    except Exception as e:  # pragma: no cover — expiry_tick swallows internally
+        try:
+            from .daemon_ops import log
+            log(f"node-pause-expiry: stream check raised: {e}", "ERROR")
+        except Exception:
+            pass
+        return False

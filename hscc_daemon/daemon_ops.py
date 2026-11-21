@@ -123,6 +123,20 @@ PERIODIC_INTERVALS = {
     # widens this to the usual 600 s floor; the queue ledger, not this thread,
     # is the durable source of truth across restarts.
     "merge_queue": 60,
+    # t_110adc1a: the node-pause EXPIRY tick
+    # (node_pause_exec.check_node_pause_expiry -> expiry_tick ->
+    # auto_resume_expired). 60 s is the kanban_enforce class, and for the same
+    # reason: when nothing is paused the tick costs ZERO subprocesses and no
+    # fleet read — list_pauses() short-circuits on os.path.exists and the pass
+    # returns before it can reach plan()/resume_units() — while a pause whose
+    # --until has passed comes back within a minute. The schedule is the overlay
+    # FILE (~/.hscc/node_pauses.json), recomputed from disk every tick: nothing
+    # is held in memory, so a daemon restart neither forgets a due resume nor
+    # fires one twice. verify's per-stream rule widens it to max(600, 2*60+90) =
+    # the 600 s floor like every other stream, and the tick stamps on every path
+    # (idle, resumed, kept, skipped, raising), so a deliberately idle stream is
+    # never mistaken for a dead one.
+    "node_pause_expiry": 60,
 }
 
 
@@ -727,6 +741,7 @@ def run_daemon_loop():
     from . import orch_waker
     from . import main_wakeups
     from . import kanban_pause
+    from . import node_pause_exec
     from .proxy_stall import check_proxy_stall
     from .stream_silence import check_stream_silence
     from .metrics_history import check_metrics_history
@@ -842,6 +857,15 @@ def run_daemon_loop():
         # other stream; the tick never raises and stamps merge_queue.json on
         # every path, so a disabled queue is visibly alive, not dark.
         "merge_queue": check_merge_queue,
+        # t_110adc1a: the node-pause expiry tick — the seam that makes
+        # `hscc node pause --until 2h` a SCHEDULE instead of a note. Same
+        # supervised-thread machinery as every stream above; the tick body is in
+        # the feature module next to the resume policy it runs
+        # (node_pause_exec.expiry_tick), exactly like kanban_pause.enforce_tick.
+        # It stamps node_pause_expiry.json on every path and never raises, so an
+        # idle overlay is a visibly-healthy stream, and a past-due pause the
+        # daemon could not resume is a red stream rather than a silent skip.
+        "node_pause_expiry": node_pause_exec.check_node_pause_expiry,
     }
 
     # GAP-B-6 (t_2039a319): both cadences come from PERIODIC_INTERVALS — the
