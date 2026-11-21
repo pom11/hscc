@@ -16,8 +16,11 @@ below seals the overlay and the heal ledger itself: without it, a passing
 ``~/.hscc/node_pauses.json`` and the daemon would start skipping a live node.
 """
 
+import ast
 import json
 import os
+import re
+from pathlib import Path
 
 import pytest
 
@@ -258,3 +261,134 @@ class TestDelegationIsTheWholeDesign:
             text = f.read()
         for name in ("node_pause", "node_resume", "node_paused"):
             assert re.search(rf"^\s+- {name}$", text, re.MULTILINE), name
+
+
+# ── the fixture-ordering class that made these tests red ───────────────────
+class TestNoStrikeAccrualBehindAPause:
+    """Guard, not a behaviour test: no fixture in THIS file may expect heal
+    strikes to accrue for a node its own setup has already parked.
+
+    ``heal_breaker.note_heal()`` deliberately accrues NOTHING while the
+    node-pause overlay covers the node — no strike, no ledger write, ``tripped``
+    False (#568; its own docstring, pinned by
+    ``test_heal_breaker_node_pause_t_e6ee7e60.py``). A fixture that seeds the
+    pause BEFORE the strikes therefore builds no slate at all, and every later
+    ``strike_count``/``suspended`` assertion reads a ledger nothing wrote — which
+    is exactly how this file's resume test arrived red on main, twelve minutes
+    behind the breaker change it was written against. Each leg carries its own
+    copy of this guard because the legs are separate pytest processes and cannot
+    import one another.
+
+    It reads THIS file's own source, so the pin travels with the fixtures and
+    needs no production seam, and it fires only where a test DEMANDS a non-empty
+    slate (``strike_count(...) == n`` with n non-zero, ``["count"] == n``, or
+    ``suspended(...) > x``). A test asserting the ABSENCE of accrual for a parked
+    node is the contract rather than a violation, so ``strike_count(...) == 0``
+    stays perfectly legal to write — that is what keeps this guard from ever
+    eating the pin it is standing on.
+
+    Matching is host-keyed, so a fixture may legitimately park one node and keep
+    striking another. A pause seeded with no host argument matches any host
+    rather than nothing.
+    """
+
+    # Leaf names: what parks a node, what earns a strike, what reads the slate.
+    PARKING = ("pause", "seed_pause", "park", "node_pause")
+    ACCRUING = "note_heal"
+    READS = ("strike_count", "suspended")
+
+    @staticmethod
+    def _leaf(call):
+        """``heal_breaker.note_heal`` / ``node_pauses.pause`` -> the last dotted
+        name."""
+        node, leaf = call.func, ""
+        while isinstance(node, ast.Attribute):
+            leaf, node = node.attr, node.value
+        if not leaf and isinstance(node, ast.Name):
+            leaf = node.id
+        return leaf
+
+    @classmethod
+    def _host(cls, call, source):
+        """Source text of the host a call parks or strikes: the first positional
+        argument, else a ``host=`` keyword, else ``"*"``. A pause seeded with
+        neither parks this file's default host, so it has to match any host
+        rather than none."""
+        if call.args:
+            return ast.get_source_segment(source, call.args[0])
+        for kw in call.keywords:
+            if kw.arg == "host":
+                return ast.get_source_segment(source, kw.value)
+        return "*"
+
+    @staticmethod
+    def _same(a, b):
+        """Same host? Compares NAME TOKENS, not substrings, so `W1` is never
+        mistaken for a `W10`/`W12`, while a dict argument such as
+        ``{"host": W1}`` still matches `W1`."""
+        if "*" in (a, b):
+            return True
+        tokens = lambda text: {  # noqa: E731 - tiny local helper, used twice
+            t for t in re.findall(r"\d+\.\d+\.\d+\.\d+|[A-Za-z_]\w*", text)}
+        return bool(tokens(a) & tokens(b))
+
+    @staticmethod
+    def _demands(comparison):
+        """True when the comparison REQUIRES a non-empty slate: ``> x``, ``!= n``,
+        or ``== n`` with a truthy n. ``== 0`` is the suppression contract."""
+        consts = [c.value for c in comparison.comparators
+                  if isinstance(c, ast.Constant)
+                  and isinstance(c.value, (int, float))]
+        if not consts:
+            return False
+        if any(isinstance(op, (ast.Gt, ast.GtE)) for op in comparison.ops):
+            return True
+        if any(isinstance(op, (ast.Lt, ast.LtE)) for op in comparison.ops):
+            return False
+        return (any(isinstance(op, ast.NotEq) for op in comparison.ops)
+                or any(consts))
+
+    def _demanded_hosts(self, fn, source):
+        """Hosts this test demands a non-empty slate for."""
+        out = []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Compare) or not self._demands(node):
+                continue
+            left = node.left
+            if isinstance(left, ast.Call) and self._leaf(left) in self.READS:
+                out.append(self._host(left, source))
+            elif (isinstance(left, ast.Subscript)
+                  and isinstance(left.slice, ast.Constant)
+                  and left.slice.value == "count"
+                  and isinstance(left.value, ast.Call)
+                  and self._leaf(left.value) == self.ACCRUING):
+                out.append(self._host(left.value, source))
+        return out
+
+    def test_no_fixture_accrues_strikes_behind_its_own_pause(self):
+        source = Path(__file__).read_text(encoding="utf-8")
+        bad = []
+        for fn in (n for n in ast.walk(ast.parse(source))
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name.startswith("test_")):
+            calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)]
+            parks = [(self._host(c, source), c.lineno) for c in calls
+                     if self._leaf(c) in self.PARKING]
+            heals = [(self._host(c, source), c.lineno) for c in calls
+                     if self._leaf(c) == self.ACCRUING]
+            if not parks or not heals:
+                continue
+            demanded = self._demanded_hosts(fn, source)
+            for park_host, park_line in parks:
+                for heal_host, heal_line in heals:
+                    if heal_line <= park_line:
+                        continue
+                    if not self._same(park_host, heal_host):
+                        continue
+                    if any(self._same(h, heal_host) for h in demanded):
+                        bad.append(
+                            f"{fn.name}:{park_line} parks the node, then expects "
+                            f"note_heal at line {heal_line} (host {heal_host}) to "
+                            f"accrue — a parked node accrues nothing (#568); "
+                            f"accrue the slate first, then park")
+        assert bad == [], "\n".join(bad)
