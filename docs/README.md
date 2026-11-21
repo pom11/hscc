@@ -110,6 +110,14 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   (`provider: openai` + proxy `base_url`, model id sent verbatim) and `video_gen`
   via the fleet's `openai_compat` plugin — plus the revert. Client-side companion
   to `docs/design/media-serving.md`; no fleet action lives here. **live**
+- `docs/ops/node-pause.md` — the node-pause overlay's operator surface: `hscc node
+  pause|resume|paused` (dry-run by default, `--apply` opt-IN, and the `--span` /
+  `--force` / `--until` rules with the refusal strings quoted from the code), what a
+  pause leaves byte-identical (templates, `serving.json`, the applied-template
+  record, kanban caps, autodown, proxy config), which repair loops skip a parked
+  node (watchdog auto-heal, the heal breaker, autoscale, the autodown wake) and which
+  do not yet (keepalive supervision, `hscc cluster up`), the span rules, the
+  orchestrator-model refusal, and why a past `--until` is not a resume. **live**
 - `docs/ops/orch-waker.md` — the built-in orchestrator waker: the eight wake-worthy
   events, batch/debounce/rate rules, skip rules, `~/.hscc/orch_waker.json` config,
   `hscc orch waker status|enable|disable` verbs, state + audit schemas, the doctor
