@@ -47,6 +47,7 @@ does for every other consumer of that file.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from urllib.parse import urlsplit
 
@@ -101,6 +102,25 @@ def _host_set(value):
     return out
 
 
+def _warn_unreadable(exc):
+    """Say out loud that the overlay could not be read; never raise.
+
+    stderr, never stdout — stdout is ``hscc autoscale --json``'s channel — and
+    if even stderr is unusable, fall to the interpreter's original one. A WARN
+    that itself raises would become the very failure it reports.
+    """
+    message = (f"[autoscale] WARN: pause overlay unreadable "
+               f"({type(exc).__name__}: {exc}); deciding with no paused nodes")
+    for stream in (sys.stderr, sys.__stderr__):
+        if stream is None:  # pythonw / a stripped interpreter has no stderr
+            continue
+        with contextlib.suppress(Exception):
+            # suppress, not except/pass: the loop IS the fallback, and a WARN
+            # must not be able to raise out of a read-only decision.
+            stream.write(message + "\n")
+            return
+
+
 def _overlay_nodes(directory=None):
     """Every node the pause overlay holds (keyed hosts ∪ span members).
 
@@ -109,19 +129,14 @@ def _overlay_nodes(directory=None):
     is its own loud WARN), so the only way to land in the handler below is an
     overlay that cannot be reached at all; there the advisory decision falls
     back to its pre-overlay behaviour rather than 500-ing a read-only route,
-    and says so on stderr (never stdout — stdout is ``--json``'s channel).
+    and :func:`_warn_unreadable` says so.
     """
     try:
         from hscc_daemon import node_pauses
         return _host_set(node_pauses.paused_nodes(directory)) or set()
     except Exception as exc:  # noqa: BLE001 - a decision must not die here
-        try:
-            print(f"[autoscale] WARN: pause overlay unreadable "
-                  f"({type(exc).__name__}: {exc}); deciding with no paused "
-                  f"nodes", file=sys.stderr)
-        except Exception:  # noqa: BLE001 - nor may the warning
-            pass
-        return set()
+        _warn_unreadable(exc)
+    return set()
 
 
 def _snapshot_hosts(throughput):
@@ -208,7 +223,9 @@ def decide_scale(throughput, *, current_workers, min_workers=1, max_workers=8,
     by_node = throughput.get("by_node")
     if held_in_snapshot and isinstance(by_node, dict):
         for endpoint, metrics in by_node.items():
-            if host_of(endpoint) not in held_in_snapshot or not isinstance(metrics, dict):
+            if host_of(endpoint) not in held_in_snapshot:
+                continue
+            if not isinstance(metrics, dict):
                 continue
             waiting = max(0, waiting - (metrics.get("waiting", 0) or 0))
             running = max(0, running - (metrics.get("running", 0) or 0))

@@ -506,6 +506,27 @@ class TestPauseSeam:
         assert result["capacity"] == 2
         assert result["paused_excluded"] == []
 
+    def test_unreadable_overlay_warns_instead_of_500ing(self, monkeypatch, capsys):
+        """An overlay that cannot be read at all is a WARN, not a traceback.
+
+        ``node_pauses.load()`` swallows malformed content itself, so this is
+        the remaining shape: the read exploding. The read-only route must
+        still answer, and must say the pause was not consulted.
+        """
+        from hscc_daemon import node_pauses as np_mod
+
+        def explode(directory=None):
+            raise OSError("overlay unreadable")
+
+        monkeypatch.setattr(np_mod, "paused_nodes", explode)
+        tp = _snapshot({NODE_A: (0, 0), NODE_B: (0, 0)})
+        result = decide_scale(tp, current_workers=2, min_workers=1,
+                              directory="somewhere")
+        assert result["capacity"] == 2
+        assert result["paused_excluded"] == []
+        err = capsys.readouterr().err
+        assert "[autoscale] WARN" in err and "overlay unreadable" in err
+
     def test_overlay_file_is_never_written(self, tmp_path):
         """Autoscale is a reader. A decision that paused a node would be a bug."""
         before = json.dumps(sorted(p.name for p in tmp_path.iterdir()))
