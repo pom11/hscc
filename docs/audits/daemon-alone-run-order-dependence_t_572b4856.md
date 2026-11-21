@@ -328,6 +328,93 @@ THIN      post-fix (4026p/24s) full 131-file sweep:  files whose ALONE run diffe
 No collection errors, no non-zero exit, no status difference, no skip-reason
 difference, on either interpreter.
 
+### 9. The sweep is now a gate, not a document (t_6cd17e1c)
+
+Both findings above had the same shape: the leg printed `ALL GREEN`, and only a
+per-file alone run could see the problem. A measurement nobody re-runs is a
+write-up, so the sweep is now routed:
+
+* **`scripts/alone_sweep_gate.sh`** — the command a reviewer runs. It sweeps the
+  leg with the audit's own tooling (it contains **no** pytest invocation of its
+  own: the argv, the scrub and the enumeration stay single-sourced in
+  `alone_sweep.sh`, because a second implementation is how a gate quietly starts
+  measuring something adjacent), for both stamp interpreters, sequentially, with
+  a verdict written per interpreter and a lock that refuses a concurrent pass —
+  two pytest processes over one checkout trip the port/lock fixtures, and a flake
+  from that reads exactly like an order effect. Exit codes distinguish the three
+  outcomes the CI header insists on: `0` agreement, `1` a file answers alone
+  differently (or its leg is red), `2` **not measured** (no interpreter, broken
+  wiring, lock held) — never green because nothing ran.
+* **`scripts/install_alone_sweep_gate.sh`** — registers it as a daily Hermes cron
+  job (`hscc-alone-sweep-gate`, `30 4 * * *`, `--no-agent`). The installed job is
+  a generated one-line wrapper that bakes the repo path and `exec`s the gate from
+  git, so the nightly measures committed code and a copied script cannot go stale.
+* **`scripts/tests/test_alone_sweep_gate.py`** — the half that stays in the per-PR
+  lane, at milliseconds instead of minutes.
+
+**Why scheduled and not per-PR.** Measured on this host (the same two interpreters
+the stamp uses): the full gate — both interpreters, each with a fresh leg — takes
+**10m23s**: leg 163 s + 131 alone sweeps 166 s on the canonical venv, leg 135 s +
+sweep on the thin sibling. So ~4x the leg's own wall time, on a macOS runner
+(`hscc_daemon` is macOS-only — `select.kqueue` at class scope dies collecting on
+ubuntu; `leg_select.MACOS_LEGS`), which is CI's smallest pool at ~10x the minute
+cost. The wall time is not by itself disqualifying; what settles it is that 131
+processes are 131 chances for an environment hiccup to become a merge blocker, over
+a property that only moves when the daemon or the harness moves. Per-PR it is also
+slower than the suite it guards, which `.github/workflows/pytest-legs.yml` names as
+the criterion for a gate people click through — worse than no gate. The two cheaper
+shapes were rejected for measurable reasons:
+
+* a **subset sweep inside the `scripts` leg** (option (b)) is red-by-environment
+  there — that leg runs on ubuntu, where the daemon leg cannot even be collected,
+  so the guard would `skip()` and report green while measuring nothing, which is
+  the exact hole this card closes. Its reference side is a whole daemon leg
+  (~4 min) anyway, i.e. more than the entire `scripts` leg today. And the at-risk
+  subset is precisely what a bad fix changes: §7's regression surfaced in files no
+  static rule would have flagged.
+* the **full sweep in the enforce lane** (option (c)) buys minutes of lateness on
+  every PR touching the daemon for a property that only changes when *something in
+  the daemon or the harness* changes.
+
+What the CI lane keeps instead is the guarantee that the scheduled gate can still
+go red: the diff tool's teeth are re-measured on fixtures (status change,
+collection error, a file absent from the leg, and the **skip-reason change whose
+tally matches** — the §2 shape, invisible to junit), the alone side is pinned to
+the runner's argv and `SUITE_ENV_UNSET` list (drift there makes every later
+comparison a comparison of two different environments), the enumeration is pinned
+to the dir-wide glob and to the real file count, and the gate is pinned to fail
+closed on all three of its not-measured paths.
+
+**Non-vacuity, measured rather than asserted.** A one-file mutation —
+`import hscc` at module scope in `test_watchdog_gateway_only_breaker_b0811ce0.py`
+(the §2 shape: it resolves in-leg only because `test_api_launchd.py:11` leaves
+`<repo>/hscc_daemon` on `sys.path`) — run through the gate on both interpreters.
+The legs stayed green on both (canonical `4049 passed, 1 skipped`; thin
+`4026 passed, 24 skipped`), and each sweep named exactly one file:
+
+```text
+test_watchdog_gateway_only_breaker_b0811ce0: in-leg (15, 0, 0, 0) | alone (0, 0, 0, 1) | rc=2
+```
+
+→ `GATE RED`, gate exit 1, on **both** interpreters; the mutant reverted, the same
+gate on the reverted tree is `GATE GREEN` / exit 0 with 131/131 alone runs at rc 0
+on both. The cheapest re-check for a reviewer is the 20-second probe pair rather
+than a sweep: `pytest -q test_api_launchd.py test_watchdog_gateway_only_breaker_b0811ce0.py`
+answers `52 passed` while `pytest -q` on the mutant alone answers
+`ModuleNotFoundError: No module named 'hscc'` and rc 2 — the same two commands on
+both interpreters.
+
+**The two module-level `sys.path.insert` sites stay.** `test_api_launchd.py:11`
+and `test_hermes_python.py:16` insert `<repo>/hscc_daemon` and never remove it —
+that is the leak that made the bare `import hscc` in §2 resolve for a *later*
+file. They are not removable at zero cost: each is what lets its own file import
+`api_launchd` / `hermes_python` bare, and the usual replacement (do the insert in
+`conftest.py`) leaks it to **every** file in the process instead of only the ones
+collected after. So the decision is recorded as **the gate is the guard**: what
+stops a new file starting to depend on that residue is the nightly alone sweep,
+and the pin that stops the *gate itself* from quietly shrinking is
+`test_sweep_enumerates_the_whole_leg_dir`.
+
 ## What the stamp may claim now
 
 The thin leg's `-rs` output is now a property of the interpreter, not of the file
@@ -345,15 +432,16 @@ a fresh leg on each, zero differences (§8). Two honest limits:
 
 ## Follow-ups (not done here)
 
-* The two module-level `sys.path.insert(0, <repo>/hscc_daemon)` sites
+* ~~The two module-level `sys.path.insert(0, <repo>/hscc_daemon)` sites
   (`test_api_launchd.py:11`, `test_hermes_python.py:16`) still leak for the rest
-  of the process. Nothing depends on them any more, but nothing *stops a new file
-  from depending on them* either. The only check that catches that class is this
-  audit's alone-sweep, which today is a manual 131-process loop; running it as a
-  scheduled gate would be the small durable version. It has already paid for
-  itself twice — once for the leg (§2), once for a bug in the code written to fix
-  the leg (§7) — and in both cases the leg itself was green, so nothing else
-  running today would have seen either.
+  of the process.~~ **Done in t_6cd17e1c (§9).** The inserts stay — each is what
+  lets its own file import `api_launchd` / `hermes_python` bare — and what stops a
+  new file depending on the residue is the sweep, now routed as a daily job:
+  `scripts/alone_sweep_gate.sh` (+ `scripts/install_alone_sweep_gate.sh`), with
+  the cheap always-on half in `scripts/tests/test_alone_sweep_gate.py`. It has
+  already paid for itself twice — once for the leg (§2), once for a bug in the
+  code written to fix the leg (§7) — and in both cases the leg itself was green,
+  so nothing else running today would have seen either.
 * `hermes_import.agent_tree_on_path`'s `finally` has a documented "bookkeeping was
   reset under us" branch (`hermes_import.py:109-110`) that leaves the path in
   place if a test replaces `_WINDOWS` mid-window. Not observed in 804 events over

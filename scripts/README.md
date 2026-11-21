@@ -281,6 +281,44 @@ both directions — a wrong badge, a fake command, a deleted script and an
 UNLISTED docs file (plus a fence-only reference that must not count) all
 MUST fail the lint.
 
+## Alone-vs-in-leg sweep gate (`alone_sweep_gate.sh`) — nightly, not per-PR
+
+`scripts/run_tests.sh` runs a leg as ONE pytest process over the whole dir, so a
+leg can print `ALL GREEN` while a file inside it FAILS — or skips for a different
+reason — when run by itself. When that happens the leg is answering a question
+about test **order**, and the dual-interpreter stamp's promise ("a FAILED in a
+sibling leg is a regression") is false. It happened twice in `hscc_daemon` and the
+leg was green both times; the measurement, the mechanism and the reasoning are in
+`docs/audits/daemon-alone-run-order-dependence_t_572b4856.md`.
+
+```bash
+scripts/alone_sweep_gate.sh --preflight     # wiring only, runs nothing
+scripts/alone_sweep_gate.sh                 # both stamp interpreters (~11 min here)
+scripts/install_alone_sweep_gate.sh         # daily 04:30 Hermes cron job
+scripts/install_alone_sweep_gate.sh --status
+scripts/install_alone_sweep_gate.sh --uninstall
+```
+
+The gate routes the audit's own tooling (`docs/audits/support/t_572b4856/alone_sweep.sh`
++ its `diff_alone_vs_leg.py`): the leg once through the canonical runner, then
+every one of its test files alone with the same argv and the same env scrub, then
+a diff per nodeid **and** per skip reason. It has no pytest call of its own, so
+the measurement cannot drift from the gate. Exit `0` agreement, `1` a file answers
+alone differently, `2` **not measured** (no interpreter, broken wiring, another
+pass holding the lock) — a pass that measured nothing is never reported green.
+
+**Why a schedule and not the PR lane**: ~131 pytest processes plus a fresh leg,
+and `hscc_daemon` is a macOS-only leg — CI's smallest runner pool at ~10x the
+minute cost — so per-PR it is slower than the suite it guards. The property has
+also only ever been measured on this host's two interpreters; the CI runner's thin
+venv is a third environment nobody has swept, and a blocking gate is worth only
+what its baseline is. The cheap always-on half — the diff tool's teeth on
+fixtures, the argv/scrub drift pins, the "no curated subset" pin and the
+fail-closed pins — runs inside the `scripts` leg in milliseconds
+(`scripts/tests/test_alone_sweep_gate.py`). Reports land under
+`~/.hscc/alone-sweep/` (`latest.txt` + a `verdict.json` per interpreter); liveness
+is that dir plus `hermes cron runs`.
+
 ## Customization
 
 Each script is self-contained shell + hardcoded host IPs / model ids. Cluster topology assumptions live at the top of each script — edit there if your cluster differs.
