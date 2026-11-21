@@ -29,6 +29,47 @@ Alert de-duplication: the strike ledger and the *notification* cooldown are
 separate. Latching must alert exactly once, not once per suppressed tick —
 the 2026-10-08 NAS rule fired 178 macOS notifications in 11 minutes by getting
 that wrong (trigger.py:22).
+
+A PAUSED NODE IS NOT AN OUTAGE (t_e6ee7e60)
+-------------------------------------------
+``hscc node pause`` parks one node on purpose and edits no cluster setting, so a
+parked node's units are simply down with nothing anywhere the repair paths look
+saying "deliberate". This module read that as a fault: every down tick appended
+a strike here, and after HEAL_BREAKER_MAX of them inside the window the breaker
+latched, emitted ``heal_breaker.tripped`` at ``critical`` and pushed a desktop
+notification about a node the operator parked themselves — while leaving that
+node holding a slate of strikes that outlived the pause and kept it unhealable
+after the resume.
+
+``note_heal()`` is the strike/trip decision seam, so the node-pause overlay is
+consulted there and nowhere else: while the overlay holds the node, no strike is
+appended, the ledger is not opened for writing at all, and ``tripped`` is False
+— which means no latch, no event and no notification. The overlay is READ,
+never written; this module still writes exactly one file, its own ledger.
+
+ASK ``covering``, NEVER ``paused``
+
+``node_pauses.paused(host)`` is host-keyed: the other nodes of a
+tensor-parallel unit — stopped as one thing — appear only in the record's
+``span_nodes``. A seam that asked ``paused()`` would keep striking the rest of
+a span the operator parked. ``covering()`` follows ``span_nodes``, which is what
+the parent module pins for every skip seam; the watchdog seam (t_4ecbd9d0) makes
+the same pin, and a test here reddens if ``covering()`` is ever swapped for
+``paused()``.
+
+WHAT IS DELIBERATELY UNCHANGED
+
+``suspended()`` does NOT ask the overlay. It reports the breaker's own timeout,
+and a node already in timeout when it got parked stays in timeout: making it
+answer 0 for a paused node would hand a repair path that never consults the
+overlay a green light ON a parked node — over-suppression, the same class of bug
+as the false page it would remove. Only ACCRUAL is suppressed, so a pause can
+neither trip the breaker nor lengthen a suspension (suppressed ticks write
+nothing, so the oldest strike — what the expiry is computed from — never moves),
+and a pause on one node never disarms the breaker for another. The fail-open
+direction is inherited from ``node_pauses.load()`` (a missing or malformed
+overlay reads as "no pauses", loudly WARNed): a broken overlay file can never
+freeze the fleet's ability to repair itself.
 """
 
 from __future__ import annotations
@@ -36,6 +77,12 @@ from __future__ import annotations
 import json
 import os
 import time
+
+# t_e6ee7e60: the durable node-pause overlay. Stdlib-only and it imports nothing
+# from this package at module level (its daemon_ops import is lazy, inside
+# _warn), so this cannot join the health<->lifecycle cycle — the same argument
+# lifecycle.py makes for the watchdog seam.
+from . import node_pauses
 
 # Durable strike ledger + latch, one file, beside heal-lease.json.
 HEAL_BREAKER_FILE = os.path.expanduser("~/.hscc/heal-breaker.json")
@@ -103,27 +150,71 @@ def _recent(strikes, now, window):
     return out
 
 
-def note_heal(node, now=None, window=None):
+def _pausing(key, directory=None):
+    """The pause entry that parks ``key``, or ``None`` when nothing does.
+
+    ``covering`` (this node, or any span it belongs to), never ``paused`` —
+    see the module docstring; the difference is only visible on the sibling
+    nodes of a tensor-parallel span, and those are exactly the nodes a
+    host-keyed check would go on striking.
+
+    ``directory`` is ``node_pauses``' own overlay-root seam, and the reason the
+    root is a parameter rather than an env var: the CLI writes the overlay and
+    the daemon loop reads it, so a threaded root is one root both processes can
+    agree on. ``None`` is the default ``~/.hscc``, which is what the daemon's
+    callers pass.
+
+    No try/except on purpose: ``node_pauses``' read path is documented never to
+    raise (a missing, unreadable or malformed overlay reads as "no pauses" and
+    WARNs), and this seam inherits that fail-open direction instead of
+    re-deciding it. A guard that could raise into ``check_workers`` would be a
+    worse failure mode than the pause it is looking for.
+    """
+    return node_pauses.covering(key, directory=directory)
+
+
+def note_heal(node, now=None, window=None, directory=None):
     """Record one heal ACTION against `node`. Returns a dict:
 
-        {"tripped": bool, "count": int, "suspended_s": float}
+        {"tripped": bool, "count": int, "suspended_s": float,
+         "paused": bool, "paused_reason": str}
 
     `tripped` is True when this action crossed the threshold, i.e. the caller
     must stop healing this node and raise the operator alert. The threshold is
     read from HEAL_BREAKER_MAX at call time (never passed in), so there is one
     source of truth and tests override it by monkeypatching the constant.
+
+    A node the pause overlay is holding accrues NOTHING: no strike, no ledger
+    write, `tripped` False (module docstring — a pause is not an outage). The
+    two `paused` keys are always present so the caller can log *why* the tick
+    was free without reading the overlay itself. `count` on that path is the
+    existing in-window slate, unchanged, so the caller's log line stays truthful.
+
+    `directory` relocates only the OVERLAY lookup (the test seam); the ledger
+    stays at HEAL_BREAKER_FILE, which is the file the daemon restart reads back.
     """
     now = _now() if now is None else now
     window = HEAL_BREAKER_WINDOW_S if window is None else float(window)
-    data = _load()
     key = str(node or "?")
+    pause = _pausing(key, directory=directory)
+    if pause is not None:
+        # Deliberately no `_save`: the ledger is the durable memory a daemon
+        # restart depends on, and a parked node must not leave a write on every
+        # suppressed tick (its own test asserts the file is never created).
+        return {"tripped": False,
+                "count": len(_recent(_load().get(key), now, window)),
+                "suspended_s": 0.0,
+                "paused": True,
+                "paused_reason": (pause.get("reason") or "")}
+    data = _load()
     strikes = _recent(data.get(key), now, window)
     strikes.append(now)
     data[key] = strikes
     _save(data)
     over = len(strikes) > HEAL_BREAKER_MAX
     return {"tripped": over, "count": len(strikes),
-            "suspended_s": HEAL_BREAKER_SUSPEND_S if over else 0.0}
+            "suspended_s": HEAL_BREAKER_SUSPEND_S if over else 0.0,
+            "paused": False, "paused_reason": ""}
 
 
 def suspended(node, now=None, window=None):
