@@ -256,6 +256,37 @@ class TestSpanDetection:
                         status_reader=reader(status_payload(groups=groups)))
         assert unit_of(plan, "w1")["span"] is True
 
+    def test_launch_record_is_the_only_span_source_for_an_unconfigured_job(
+            self):
+        """The case the serving.json union cannot rescue: a workload no
+        serving.json unit describes, whose second node did not answer the
+        sweep. ``meta.hosts`` — what sparkrun recorded the launch across — is
+        then the ONLY source of the sibling, and losing it hides the blast
+        radius completely."""
+        groups = {}
+        groups.update(group("cid_odd", "/srv/odd.yaml", [W1, W2], 8600,
+                            observed=[W1]))
+        plan = npe.plan(W1, serving_dict=SERVING,
+                        status_reader=reader(status_payload(groups=groups)))
+        u = unit_of(plan, "cid_odd")
+        assert u["serving_match"] is False
+        assert u["span"] is True
+        assert u["nodes"] == [W1, W2]
+        assert u["unverified_nodes"] == [W2]
+        assert plan["span_siblings"] == [W2]
+
+    def test_a_solo_entry_carries_its_recorded_span(self):
+        """``solo_entries`` report one container each, but the job's own record
+        still says how many nodes it was launched across."""
+        entry = solo("cid_pair", W1, "/srv/odd.yaml", 8700)[0]
+        entry["meta"]["hosts"] = [W1, W2]
+        plan = npe.plan(W1, serving_dict=SERVING,
+                        status_reader=reader(status_payload(solo=[entry])))
+        u = unit_of(plan, "cid_pair")
+        assert u["serving_match"] is False
+        assert u["span"] is True
+        assert u["nodes"] == [W1, W2]
+
     def test_span_nodes_are_every_affected_node_including_the_host(self):
         plan = npe.plan(W1, serving_dict=SERVING,
                         status_reader=reader(payload_for_host(W1)))

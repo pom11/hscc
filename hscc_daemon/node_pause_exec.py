@@ -398,9 +398,9 @@ def plan(host, serving_dict=None, status_reader=None):
                      "observed_nodes": [], "port": _as_int(u.get("port")),
                      "recipe": u.get("recipe") or "", "model": u.get("model") or "",
                      "served_model_name": "", "tp": _as_int(u.get("tp"))}
-        record = _unit_record(live_stub, u, host, serving_dict)
-        record["observed"] = False
-        units.append(record)
+        # ``observed_nodes`` empty is what makes the record report
+        # ``observed: False`` — one source for that fact, not a flag on top.
+        units.append(_unit_record(live_stub, u, host, serving_dict))
         seen.add(unit_id)
 
     affected = _hosts_of([n for u in units for n in u["nodes"]])
