@@ -512,6 +512,10 @@ class TestResume:
         # BOTH the pause and that strike — heal_breaker.clear() runs only after a
         # successful restart, so clearing the strike here would be the bug.
         heal_breaker.note_heal(W1)
+        assert heal_breaker.strike_count(W1) == 1, (
+            "the strike must be EARNED before the pause — without this pin "
+            "the test cannot show the slate the failed resume keeps was "
+            "actually accrued pre-pause")
         seed_pause()
         # The pause must be in force at the moment of the resume, or "keeps the
         # pause" would be vacuous.

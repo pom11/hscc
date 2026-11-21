@@ -169,6 +169,10 @@ class TestResumeTool:
         # resume") and that a confirmed resume clears it.
         for _ in range(7):
             heal_breaker.note_heal(W1)
+        assert heal_breaker.strike_count(W1) == 7, (
+            "the slate must be EARNED before the pause — without this pin "
+            "the test cannot show the strikes the resume clears were "
+            "actually accrued pre-pause")
         assert heal_breaker.suspended(W1) > 0.0
         node_pauses.pause(W1, units=["w1", "wspan"], span_nodes=[W1, W2])
         # The pause must still be in force at the moment of the resume, or this
