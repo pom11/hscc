@@ -352,5 +352,208 @@ def test_doctor_honours_hscc_dir_sandbox(tmp_path, monkeypatch):
     assert killed == [4242]
 
 
+# ── THE ROOT, CHOSEN ONCE: HOME's enforcer vs. a decoy HSCC_DIR (t_be690204) ─
+# The kanban-enforce row of the bootstrap doctor took its root from
+# ``os.environ["HSCC_DIR"]`` (``run_doctor`` handed it down as ``hscc_dir``)
+# while BOTH of its writers resolve from HOME: the paused-policy document
+# through ``kanban_pause.STATE_PATH`` and the ``kanban_enforce`` stream stamp
+# through ``state.STATE_DIR``. Measured on the live host at 8eb96984: pointed at
+# an empty directory the row answered "the daemon is not running — nothing
+# enforces the paused-board policy" about a stream that had stamped 52 s ago,
+# and ``fatal=True`` as soon as one pid file sat there. The rule is t_adb66608's
+# (adopted verbatim): the root is the writers', HSCC_DIR is not a relocation.
+#
+# ``_enforcer_home`` rebinds STATE_PATH to conftest's own redirect base
+# (``<tmp_path>/hscc/state/…``) so the canonical root here is the SAME tree
+# ``state.STATE_DIR`` lives in — the production pairing. The file's autouse
+# fixture fences STATE_PATH to a name that must never be read, which is exactly
+# why these pins rebind it deliberately instead of inheriting the fence.
+
+
+@pytest.fixture
+def enforcer_home(tmp_path, monkeypatch):
+    """HOME's ``~/.hscc`` for this test, with the writer's own paths in it."""
+    root = tmp_path / "hscc"
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(kp, "STATE_PATH",
+                        str(root / "state" / "kanban_paused.json"))
+    monkeypatch.delenv("HSCC_DIR", raising=False)
+    return root
+
+
+def _decoy_root(tmp_path):
+    """A real, existing ``~/.hscc``-SHAPED root that nothing writes to."""
+    root = tmp_path / "elsewhere" / ".hscc"
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _seed_enforce_stamp(root, *, age_s=10.0, **fields):
+    """One ``kanban_enforce`` stream stamp at ``root``, in the writer's shape."""
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    (root / "state" / "kanban_enforce.json").write_text(json.dumps(
+        {"ok": True, "last_enforce": 1000.0 - age_s, "timestamp": "x",
+         **fields}))
+
+
+def test_the_enforcers_root_reads_no_environment(enforcer_home, monkeypatch):
+    """``_canonical_root()`` resolves through the writers, full stop.
+
+    Mutation-proof: make it honour ``HSCC_DIR`` and the row reads the empty
+    decoy — the live-host failure this card closes.
+    """
+    decoy = _decoy_root(enforcer_home)
+    monkeypatch.setenv("HSCC_DIR", str(decoy))
+    kp.save_state({}, str(enforcer_home / "state" / "kanban_paused.json"))
+    _seed_enforce_stamp(enforcer_home, age_s=10.0)
+
+    assert kp._canonical_root() == str(enforcer_home)
+    assert kp._canonical_root() != str(decoy)
+
+    res = kp.doctor_check(now=1000.0)          # how run_doctor calls it now
+    assert res["ok"] is True and res["fatal"] is False
+    assert "last enforce 10s ago" in res["detail"]
+    assert "WARN" not in res["detail"]
+
+
+def tmp_path_of(root):
+    """The tmp_path a fixture-derived root sits under (``<tmp>/hscc``)."""
+    return root.parent
+
+
+def test_a_redirect_onto_a_root_that_never_held_the_enforcer_reports_reality(
+        enforcer_home):
+    """THE divergence this card was opened for, as a test.
+
+    A paused board and a stale stamp under HOME's root, a real-but-empty root
+    asked for by name — the live-host shape. Before: "the daemon is not running
+    — nothing enforces … (no boards paused)". Now: the row says the board IS
+    paused, the stream IS stale, and names BOTH roots.
+    """
+    decoy = _decoy_root(enforcer_home)
+    kp.save_state({"low": {"paused_at": 1, "cards": ["c1"]}},
+                  str(enforcer_home / "state" / "kanban_paused.json"))
+    _seed_enforce_stamp(enforcer_home, age_s=250.0)
+
+    res = kp.doctor_check(now=1000.0, hscc_dir=str(decoy))
+    assert res["ok"] is False and res["fatal"] is False
+    assert "1 board(s) paused (low)" in res["detail"]
+    assert "stale: last enforce" in res["detail"]
+    assert "not running" not in res["detail"]
+    assert res["detail"].startswith("WARN:")
+    assert str(decoy) in res["detail"] and str(enforcer_home) in res["detail"]
+
+
+def test_a_pid_at_a_root_the_enforcer_never_wrote_can_never_fire_the_fatal(
+        enforcer_home, monkeypatch):
+    """The latent RED, made measurable — and refused.
+
+    The decoy carries a live pid and no enforcer artefact; HOME has the paused
+    document and no stamp. Pre-fix that pairing is ``fatal=True`` ("never
+    enforced while the daemon runs"), a bootstrap-stopping RED computed from a
+    pid file this feature never wrote. Post-fix the read moves HOME, the fatal
+    is refused, and the decoy's pid is never even signalled.
+    """
+    decoy = _decoy_root(enforcer_home)
+    (decoy / "daemon.pid").write_text("4242")
+    kp.save_state({"low": {"paused_at": 1, "cards": []}},
+                  str(enforcer_home / "state" / "kanban_paused.json"))
+    killed = []
+    monkeypatch.setattr(kp.os, "kill",
+                        lambda pid, sig: killed.append(pid) or None)
+
+    res = kp.doctor_check(now=1000.0, hscc_dir=str(decoy),
+                          _predates_build=lambda: False)
+    assert res["fatal"] is False and res["ok"] is False
+    assert "not running" in res["detail"]
+    assert "1 board(s) paused (low)" in res["detail"]
+    assert res["detail"].startswith("WARN:") and str(decoy) in res["detail"]
+    assert killed == []
+
+
+def test_a_redirect_is_refused_when_the_canonical_root_holds_only_the_stamp(
+        enforcer_home):
+    """The stamp ALONE is enough to prove the enforcer lives at HOME.
+
+    This is the ordinary healthy host: nobody has paused a board, so there is no
+    policy document, but the daemon's enforce loop stamps every tick. A redirect
+    onto an empty root then reads "the daemon is not running — nothing enforces"
+    about a loop that stamped seconds ago, and the fatal branch is one pid file
+    away. The canonical side of the guard therefore has to see the stamp, not
+    only the policy document: a guard that asked only "is there a paused-policy
+    file?" would answer this host by obeying the empty root.
+    """
+    decoy = _decoy_root(enforcer_home)
+    _seed_enforce_stamp(enforcer_home, age_s=10.0)     # no paused-policy document
+
+    res = kp.doctor_check(now=1000.0, hscc_dir=str(decoy))
+    assert res["ok"] is True and res["fatal"] is False
+    assert "no boards paused, last enforce 10s ago" in res["detail"]
+    assert "not running" not in res["detail"]
+    assert res["detail"].startswith("WARN:")
+    assert str(decoy) in res["detail"] and str(enforcer_home) in res["detail"]
+
+
+def test_a_redirect_that_owns_its_own_enforcer_state_is_still_obeyed(
+        enforcer_home):
+    """The guard's negative control — why t_e9b0f048's seam survives it.
+
+    A caller that threaded the SAME root through ``save_state`` and the stamp is
+    a root chosen once: it is obeyed exactly, HOME's stale stamp is NOT what the
+    row reports, and no mismatch WARN is printed.
+    """
+    decoy = _decoy_root(enforcer_home)
+    kp.save_state({"low": {"paused_at": 1, "cards": []}},
+                  str(decoy / "state" / "kanban_paused.json"))
+    _seed_enforce_stamp(decoy, age_s=10.0)
+    _seed_enforce_stamp(enforcer_home, age_s=250.0)
+
+    res = kp.doctor_check(now=1000.0, hscc_dir=str(decoy))
+    assert "WARN" not in res["detail"]
+    assert res["ok"] is True
+    assert "1 board(s) paused (low), last enforce 10s ago" in res["detail"]
+
+
+def test_an_empty_root_everywhere_is_still_an_honest_absence(enforcer_home):
+    """Nothing anywhere, so "the daemon is not running" is the HONEST answer
+    and stays clean (no WARN). A guard that always warned would nag every host
+    that never paused a board — the same cry-wolf failure in the other
+    direction."""
+    decoy = _decoy_root(enforcer_home)
+    res = kp.doctor_check(now=1000.0, hscc_dir=str(decoy))
+    assert res["ok"] is False and res["fatal"] is False
+    assert "not running" in res["detail"] and "no boards paused" in res["detail"]
+    assert "WARN" not in res["detail"]
+
+
+def test_a_redirect_to_the_canonical_root_is_not_a_mismatch(enforcer_home):
+    """The cry-wolf guard on the production default: ``bootstrap.sh`` defaults
+    ``HSCC_DIR`` to ``$HOME/.hscc``, so being handed the same root must be a
+    plain clean read — one comparison, no extra stat, no WARN."""
+    kp.save_state({"low": {"paused_at": 1, "cards": []}},
+                  str(enforcer_home / "state" / "kanban_paused.json"))
+    _seed_enforce_stamp(enforcer_home, age_s=10.0)
+    same = kp.doctor_check(now=1000.0, hscc_dir=str(enforcer_home))
+    plain = kp.doctor_check(now=1000.0)
+    assert "WARN" not in same["detail"] and same["ok"] is True
+    assert same["detail"] == plain["detail"]
+
+
+def test_no_boards_paused_stays_reserved_for_a_document_that_says_so(
+        enforcer_home):
+    """"no boards paused" must still mean "the policy document is empty", never
+    "the caller read a root nothing writes to". HOME holds an empty document and
+    a fresh stamp, the redirect is onto an empty root: the honest phrase
+    survives AND the WARN still names both roots."""
+    decoy = _decoy_root(enforcer_home)
+    kp.save_state({}, str(enforcer_home / "state" / "kanban_paused.json"))
+    _seed_enforce_stamp(enforcer_home, age_s=10.0)
+
+    res = kp.doctor_check(now=1000.0, hscc_dir=str(decoy))
+    assert res["ok"] is True and res["fatal"] is False
+    assert "no boards paused, last enforce 10s ago" in res["detail"]
+    assert res["detail"].startswith("WARN:") and str(decoy) in res["detail"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -147,9 +147,14 @@ def test_row_builder_reports_unverifiable_when_module_missing(tmp_path,
 
 def test_row_builder_uses_the_real_check_outside_pytest(tmp_path, monkeypatch):
     """The human-CLI path: with the pytest branch forced off, the row delegates
-    to orch_waker.doctor_check(hscc_dir=...) — the injected stub proves the
-    delegation AND that the HSCC_DIR pass-through is wired, no real config or
-    state is read."""
+    to orch_waker.doctor_check() — and hands it NO root. The stub proves both
+    halves at once: the delegation happened, and the root the caller named was
+    DELIBERATELY dropped (t_be690204). Passing ``hscc_dir`` here rather than
+    omitting it is the point: the parameter is still accepted — feature rows
+    have one shape — it just cannot reach the check, because every writer of
+    what the waker row reads (its config, its stream stamp, the daemon pid)
+    resolves from HOME and never sees HSCC_DIR.
+    """
     calls = []
 
     def fake_check(hscc_dir=None):
@@ -163,7 +168,8 @@ def test_row_builder_uses_the_real_check_outside_pytest(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "_load_orch_waker", lambda: Waker())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     row = doctor._orch_waker_check_row(None, hscc_dir="/sandbox/.hscc")
-    assert calls == ["/sandbox/.hscc"] and row.detail == "from the real check"
+    assert calls == [None], "the env-derived root must not reach the check"
+    assert row.detail == "from the real check"
 
 
 def test_waker_row_is_in_the_check_list_exactly_once(tmp_path, monkeypatch):
