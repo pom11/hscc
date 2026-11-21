@@ -93,7 +93,11 @@ def test_push_is_main_only():
 
 def test_the_final_gate_has_the_check_name_branch_protection_types():
     jobs = _block_keys("jobs")
-    assert jobs == ["select", "leg", "legs"], (
+    # `alone-sweep` (t_4447d736) is inserted BEFORE `legs` on purpose: the required
+    # check branch protection types stays the last job in the file, and the advisory
+    # baseline never becomes part of it (pinned by
+    # test_the_advisory_sweep_is_not_in_the_required_checks_chain).
+    assert jobs == ["select", "leg", "alone-sweep", "legs"], (
         "branch protection requires the check by name ('pytest-legs / legs'); "
         f"the job set is now {jobs}"
     )
@@ -182,6 +186,62 @@ def test_the_legs_job_does_not_cancel_a_push_to_main():
     assert m and "pull_request" in m.group(1), (
         "cancelling a full-suite run on main destroys the backstop, and a "
         "cancelled check counts against branch protection"
+    )
+
+
+def _sweep_job() -> str:
+    """The `alone-sweep` job block (t_4447d736), up to the required-check job."""
+    text = _text()
+    return text[text.index("  alone-sweep:\n") : text.index("\n  legs:\n    name: legs")]
+
+
+def test_the_advisory_sweep_is_dispatch_gated_and_sequential():
+    """Two properties, both about cost and both easy to lose in a later edit: it
+    must not run unless a human asked (a 131-process sweep on every PR would be
+    clicked through, which is worse than no gate), and it must not run alongside
+    the leg it compares against — the sweep's own rule is one pytest process per
+    file over one checkout."""
+    job = _sweep_job()
+    assert "needs: leg" in job, "without needs the sweep races the leg matrix"
+    assert "workflow_dispatch" in job and "alone_sweep == 'true'" in job
+    assert "\n      alone_sweep:\n" in _text(), "the gate needs its dispatch input"
+    assert "runs-on: macos-latest" in job, "hscc_daemon cannot be collected on ubuntu"
+    assert "timeout-minutes:" in job, "a hung pytest must not burn a macOS runner for 6 h"
+
+
+def test_the_advisory_sweep_measures_the_ci_posture_and_not_a_fourth_one():
+    """The whole point of the job is to answer "is the agreement property green in
+    THE CI environment" — so it must reuse the legs' interpreter, pins, cache key
+    and venv path, and it must delegate the actual measurement to the one script
+    the nightly gate uses (a second implementation is how a gate starts measuring
+    something adjacent)."""
+    job = _sweep_job()
+    assert 'python-version: "3.13"' in job
+    assert "PY: ${{ github.workspace }}/.venv/bin/python" in job
+    assert "-r requirements-ci.txt" in job
+    assert "test-venv-${{ runner.os }}" in job
+    assert "bash docs/audits/support/t_572b4856/alone_sweep.sh" in job
+
+
+def test_the_advisory_sweep_cannot_classify_itself():
+    job = _sweep_job()
+    assert "set +e" in job, "GitHub's bash -e would kill the step before rc=$?"
+    assert 'bash .github/scripts/sweep_verdict.sh "$rc" "$log"' in job, (
+        "the three-way split lives in the tested script, not in YAML"
+    )
+    assert "actions/upload-artifact@v4" in job, (
+        "the diff names files; only the per-file xml and -rs logs hold the reasons"
+    )
+
+
+def test_the_advisory_sweep_is_not_in_the_required_checks_chain():
+    """An advisory baseline that the required verdict job waits on is a blocking
+    gate wearing a warning annotation. The sweep may inform the operator; it must
+    not be able to turn `pytest-legs / legs` red."""
+    legs = _text()[_text().index("\n  legs:\n    name: legs"):]
+    assert "needs: [select, leg]" in legs
+    assert "alone-sweep" not in legs, (
+        "the required check must not depend on the advisory sweep (t_4447d736)"
     )
 
 
