@@ -168,7 +168,10 @@ def test_health_payload_is_a_strict_superset_of_the_old_shape(
         running, token, monkeypatch):
     """iOS decodes ``HealthResponse`` {ok: Bool, checks: [...], speak: String}
     in a gate (ios-app/scripts/connection_probe_check); ok must stay a bool and
-    the three keys must survive. The four new keys are additive."""
+    the three keys must survive. The new keys are additive: the four from
+    t_7babf634 plus ``paused_nodes`` (t_824b617f — the nodes the operator
+    parked on purpose, so a client can tell paused from down without editing
+    the verdict)."""
     health_cache.record({"ok": False, "checks": CHECKS_BAD, "unverified": ["proxy"]})
     monkeypatch.setattr(routes_cluster, "_backing_verify", _never_verify)
 
@@ -177,7 +180,7 @@ def test_health_payload_is_a_strict_superset_of_the_old_shape(
     assert status == 200
     assert {"ok", "checks", "speak"} <= set(payload)
     assert set(payload) == {"ok", "checks", "speak", "age_seconds",
-                            "generated_at", "stale", "source"}
+                            "generated_at", "stale", "source", "paused_nodes"}
     assert isinstance(payload["ok"], bool) and payload["ok"] is False
     assert isinstance(payload["generated_at"], int)
     assert isinstance(payload["age_seconds"], int)
