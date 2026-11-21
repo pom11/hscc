@@ -71,6 +71,7 @@ pairing instead of a legs-green way to lose every liveness stamp on the host
 """
 
 import datetime
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -101,10 +102,25 @@ MISS_FACTOR = 3
 #   firing; ``failing`` = it fired and the sweep said RED (or could not
 #   measure). Both warn; neither is fatal -- a red sweep is a finding about the
 #   test suite, not a broken host.
+#
+# ``deploy`` says how the code reaches <bound home>/scripts, and it is not the
+# same for all three (t_95eb9f15):
+#   ``copy``    the installer ``cp``s the repo file next to the cron binding.
+#               The deployed copy is then a SECOND copy of the code, and nothing
+#               ever compared the two -- a host whose deployed copy predates the
+#               repo's current code runs stale code in silence.
+#   ``wrapper`` the installer generates a one-line wrapper that execs the repo's
+#               file (install_alone_sweep_gate.sh's header; the shape the other
+#               two should move to). There is no second copy, so there is
+#               nothing to drift: the measured code is always the code in git.
+DEPLOY_COPY = "copy"
+DEPLOY_WRAPPER = "wrapper"
+
 WATCHERS = {
     "dep_pr_watcher": {
         "cron_job": "hscc-dep-watcher",
         "script": "dep_pr_watcher.py",
+        "deploy": DEPLOY_COPY,
         "cadence_s": 86400,           # daily (`0 8 * * *`)
         "cadence_env": "HSCC_DEP_WATCHER_CADENCE_S",
         "install_script": "scripts/install_dep_watcher.sh",
@@ -112,6 +128,7 @@ WATCHERS = {
     "escalate_watcher": {
         "cron_job": "hscc-escalate-watcher",
         "script": "escalate_watcher_run.py",
+        "deploy": DEPLOY_COPY,
         "cadence_s": 900,             # every 15 min (`*/15 * * * *`)
         "cadence_env": "HSCC_ESCALATE_CADENCE_S",
         "install_script": "scripts/install_escalate_watcher.sh",
@@ -119,6 +136,10 @@ WATCHERS = {
     "alone_sweep_gate": {
         "cron_job": "hscc-alone-sweep-gate",
         "script": "alone_sweep_gate.sh",
+        # NOT a copy: the job is a generated wrapper (hscc-alone-sweep-gate.sh)
+        # that execs the repo's gate, so comparing a deployed copy makes no
+        # sense here and a "missing copy" must never be inferred.
+        "deploy": DEPLOY_WRAPPER,
         "cadence_s": 86400,           # nightly (`30 4 * * *`)
         "cadence_env": "HSCC_ALONE_SWEEP_CADENCE_S",
         "install_script": "scripts/install_alone_sweep_gate.sh",
@@ -542,15 +563,199 @@ def read_install_marker(stream, directory=None):
     return row if isinstance(row, dict) else None
 
 
-def verdict(stream, *, now=None, state=None, env=None, directory=None):
+# ── deployed-copy drift (t_95eb9f15) ────────────────────────────────────────
+
+def bound_hermes_home(env=None):
+    """The Hermes home a watcher cron job is bound to.
+
+    The installer's own rule, in one place: ``$HERMES_HOME`` when set, else
+    ``~/.hermes`` (``install_dep_watcher.sh`` / ``install_escalate_watcher.sh``
+    / ``install_alone_sweep_gate.sh`` all derive both the copy destination and
+    the cron binding from it -- the t_3aadd2c0 drift rule). Read through an
+    ``env`` seam rather than a mutated environment, like every other read here.
+    """
+    e = os.environ if env is None else env
+    raw = e.get("HERMES_HOME")
+    if raw:
+        return os.path.expanduser(raw)
+    return os.path.join(os.path.expanduser("~"), ".hermes")
+
+
+def hermes_home_candidates(env=None):
+    """Every Hermes home a deployed watcher copy could legitimately live under.
+
+    ``bound_hermes_home()`` first, then the shared ``~/.hermes``. A LIST, not a
+    single home, because the home a *doctor* run sees is not necessarily the
+    home the *installer* ran under: installing from a profile shell writes
+    ``$HERMES_HOME/scripts`` (== that profile's home), installing from a plain
+    shell writes ``~/.hermes/scripts``, and the t_3aadd2c0 incident was exactly
+    this split. A check that consults only the caller's own home reports
+    ``missing-deployed`` for a copy that is sitting one directory away — a false
+    clean, which is worse than no check. (Measured on the live host: with
+    ``HERMES_HOME`` pointing at a profile home, the drifted Sep-29 copy is in the
+    shared ``~/.hermes/scripts``.)
+    """
+    out = [bound_hermes_home(env)]
+    shared = os.path.join(os.path.expanduser("~"), ".hermes")
+    if shared not in out:
+        out.append(shared)
+    return out
+
+
+def checkout_root():
+    """Repo root when this module runs from a checkout, else None.
+
+    The deployed plugin payload (``~/.hermes/plugins/hscc_daemon/``) is NOT a
+    checkout, and its parent has no ``scripts/`` to compare against -- so a
+    watcher stamping through the deployed copy gets ``None`` here and the drift
+    check stays out of the way instead of inventing a repo next to the plugins.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    if os.path.isfile(os.path.join(root, "hscc-bootstrap", "doctor.py")):
+        return root
+    return None
+
+
+def _digest(path):
+    """(sha256-hex, size) for a file, or (None, None) when unreadable."""
+    h = hashlib.sha256()
+    try:
+        size = 0
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                h.update(chunk)
+    except OSError:
+        return None, None
+    return h.hexdigest(), size
+
+
+def deployed_copy_drift(stream, *, hermes_home=None, repo_dir=None, env=None):
+    """Compare a watcher's DEPLOYED copy against the REPO copy it is installed from.
+
+    The ``copy`` installers (``deploy`` == :data:`DEPLOY_COPY`) ``cp`` the repo
+    file into ``<bound home>/scripts/``, which leaves a second copy of the code
+    on the host that nothing ever re-checked. That gap is how a healthy
+    ``hscc-dep-watcher`` read as ``not configured``: the deployed copy predated
+    GAP-B-4 stamping, so the job ran, did its work, left no stamp, and the
+    doctor blamed an operator who had in fact installed it (t_95eb9f15).
+
+    Returns ``{stream, status, deployed, repo, candidates, detail}`` where
+    ``status`` is:
+
+      ``in-sync``          byte-identical -- nothing to say.
+      ``drifted``          both exist and differ -- the deployed copy is stale
+                           code. This is the case that must be said out loud.
+      ``missing-deployed`` nothing under any candidate ``scripts`` dir --
+                           genuinely not installed, which is what
+                           ``not-configured`` means.
+      ``missing-repo``     no repo copy to compare against (this module is not
+                           running from a checkout) -- UNKNOWN, never a warning.
+      ``unreadable``       a copy exists but could not be hashed -- unknown.
+      ``not-a-copy``       the stream deploys as a generated wrapper
+                           (:data:`DEPLOY_WRAPPER`) -- no second copy exists.
+
+    ``hermes_home`` narrows the search to ONE home (the test seam, and what an
+    installer knows its own binding to); without it every home in
+    :func:`hermes_home_candidates` is consulted and ``deployed`` names the copy
+    that mismatched (or the first one found when none does). ``repo_dir`` pins
+    the other side (default: this module's own checkout).
+
+    Never raises, and never warns on its own: :func:`verdict` decides which
+    statuses deserve a WARN (only ``drifted`` does), so an unreadable or
+    absent copy cannot nag an operator about a watcher they never installed.
+    """
+    row = WATCHERS.get(stream)
+    if row is None:
+        raise KeyError(stream)
+    out = {"stream": stream, "status": "unknown", "deployed": None,
+           "repo": None, "candidates": [], "detail": ""}
+
+    if row.get("deploy") != DEPLOY_COPY:
+        out["status"] = "not-a-copy"
+        out["detail"] = (f"{stream}'s cron job is a generated wrapper that execs "
+                         f"the repo's {row['script']} -- there is no deployed "
+                         f"copy that could go stale")
+        return out
+
+    homes = ([os.path.expanduser(hermes_home)] if hermes_home
+             else hermes_home_candidates(env))
+    repo_root = os.path.expanduser(repo_dir) if repo_dir else checkout_root()
+    copies = [os.path.join(h, "scripts", row["script"]) for h in homes]
+    out["candidates"] = copies
+    out["deployed"] = copies[0]
+    existing = [p for p in copies if os.path.isfile(p)]
+
+    if not existing:
+        out["status"] = "missing-deployed"
+        out["detail"] = f"nothing deployed at {' or '.join(copies)}"
+        return out
+
+    if not repo_root:
+        out["status"] = "missing-repo"
+        out["detail"] = (f"no checkout to compare {' or '.join(existing)} against "
+                         f"(this cron_watchers.py is not running from a repo)")
+        return out
+
+    repo = os.path.join(repo_root, "scripts", row["script"])
+    out["repo"] = repo
+    if not os.path.isfile(repo):
+        out["status"] = "missing-repo"
+        out["detail"] = f"no repo copy at {repo} to compare against"
+        return out
+
+    r_hash, r_size = _digest(repo)
+    if r_hash is None:
+        out["status"] = "unreadable"
+        out["detail"] = f"the repo copy {repo} could not be read to be hashed"
+        return out
+
+    stale = None
+    for path in existing:
+        p_hash, p_size = _digest(path)
+        if p_hash is None:
+            # Cannot prove it, so cannot call it stale: fail open.
+            out["status"] = "unreadable"
+            out["detail"] = (f"the deployed copy {path} could not be read to be "
+                             f"hashed")
+            return out
+        if p_hash != r_hash and stale is None:
+            stale = (path, p_hash, p_size)
+    if stale is None:
+        out["deployed"] = existing[0]
+        out["status"] = "in-sync"
+        out["detail"] = (f"deployed copy matches the repo copy ({r_size} B, "
+                         f"{r_hash[:8]})"
+                         + (f" in all {len(existing)} candidate homes"
+                            if len(existing) > 1 else ""))
+        return out
+    deployed, d_hash, d_size = stale
+    out["deployed"] = deployed
+    out["status"] = "drifted"
+    out["detail"] = (f"the deployed copy {deployed} ({d_size} B, {d_hash[:8]}) is "
+                     f"NOT the repo copy {repo} ({r_size} B, {r_hash[:8]}) -- the "
+                     f"job runs stale code; re-run {row['install_script']}")
+    return out
+
+
+def verdict(stream, *, now=None, state=None, env=None, directory=None, copy=None):
     """Liveness verdict for one watcher -- RAW status, no surface-specific ok.
 
-    Returns {stream, status, warn, detail, age_s, window_s} where ``status`` is:
+    Returns {stream, status, warn, detail, age_s, window_s, copy} where
+    ``status`` is:
 
       ``ok``               stamp fresh -- healthy.
       ``not-configured``   no stamp file and no install marker -- the watcher
                            is off. Clean, NOT a warning: an operator who never
                            installed it must not be nagged every doctor run.
+      ``copy-drifted``     no stamp, no marker, but the deployed copy under
+                           ``<bound home>/scripts`` is NOT the repo copy it was
+                           installed from -- the job runs code older than the
+                           stamping it is missing. Warns (t_95eb9f15).
       ``never-ran``        the installer registered the cron job (install
                            marker present) but no pass ever completed -- the
                            17-consecutive-failures incident class. Warns.
@@ -563,6 +768,13 @@ def verdict(stream, *, now=None, state=None, env=None, directory=None):
     repo's ``WARN:`` prefix there, so any surface printing the row reads it as
     a warning.
 
+    ``copy`` is the deployed-copy status (:func:`deployed_copy_drift`) that
+    produced this verdict, or None when no comparison was done. Pass a
+    pre-resolved drift dict in ``copy`` to ask for one; leaving it None keeps
+    this a PURE STAMP READ -- a caller that has not said which Hermes home to
+    read does not get a host filesystem read done on its behalf, which is the
+    same reason ``directory`` is a parameter and not an environment mutation.
+
     Consumers map status onto their own ok convention on purpose: the doctor
     row renders non-healthy as a NON-FATAL failure (ok=False, fatal=False --
     doctor's warning shape) while ``hscc verify`` keeps ok=True with the WARN
@@ -574,21 +786,36 @@ def verdict(stream, *, now=None, state=None, env=None, directory=None):
     window = stale_window_s(stream, env=env)
     if state is None:
         state = read_stamp(stream, directory=directory)
+    copy_status = copy.get("status") if isinstance(copy, dict) else None
+    copy_detail = copy.get("detail") if isinstance(copy, dict) else None
+    # Only a `drifted` copy is ever a warning; an absent, unreadable or
+    # not-a-copy result must never change a verdict (see deployed_copy_drift).
+    drifted = bool(copy_detail) if copy_status == "drifted" else False
 
-    base = {"stream": stream, "age_s": None, "window_s": window}
+    base = {"stream": stream, "age_s": None, "window_s": window,
+            "copy": copy_status}
 
     if state is None:
         # No stamp. Two very different reasons, and conflating them is how the
         # 17-consecutive-failures incident stayed invisible: an installer
         # marker means the job WAS registered, so silence means it never
         # completed a pass (a warning); no marker means it was never installed
-        # (clean, no warning).
+        # (clean, no warning). A third reason exists and used to be invisible:
+        # the job IS installed and IS firing, but the deployed copy predates
+        # stamping, so it cannot report itself (t_95eb9f15) -- that reads
+        # `copy-drifted`, which blames the copy and not the operator.
         if read_install_marker(stream, directory=directory):
-            return {**base, "status": "never-ran", "warn": True,
-                    "detail": (f"WARN: {stream} ({row['cron_job']}) was "
-                               f"installed ({row['install_script']}) but has "
-                               f"never completed a pass -- check "
-                               f"`hermes cron list` for failing runs")}
+            detail = (f"WARN: {stream} ({row['cron_job']}) was "
+                      f"installed ({row['install_script']}) but has "
+                      f"never completed a pass -- check "
+                      f"`hermes cron list` for failing runs")
+            if drifted:
+                detail += f"; and {copy_detail}"
+            return {**base, "status": "never-ran", "warn": True, "detail": detail}
+        if drifted:
+            return {**base, "status": "copy-drifted", "warn": True,
+                    "detail": (f"WARN: {stream} ({row['cron_job']}) has no "
+                               f"liveness stamp and {copy_detail}")}
         return {**base, "status": "not-configured", "warn": False,
                 "detail": (f"{stream}: not configured (no stamp; install with "
                            f"{row['install_script']} if it should run)")}
@@ -620,12 +847,19 @@ def verdict(stream, *, now=None, state=None, env=None, directory=None):
                        f"({int(age)}s old, window {window}s)")}
 
 
-def all_verdicts(*, now=None, env=None, directory=None):
-    """Verdicts for every registered watcher, in stable order."""
-    return [verdict(s, now=now, env=env, directory=directory) for s in STREAMS]
+def all_verdicts(*, now=None, env=None, directory=None, copies=None):
+    """Verdicts for every registered watcher, in stable order.
+
+    ``copies`` is an optional ``{stream: deployed_copy_drift()}`` map threaded
+    into each verdict's ``copy`` seam; leave it out (or leave a stream out of
+    it) for a pure stamp read.
+    """
+    return [verdict(s, now=now, env=env, directory=directory,
+                    copy=(copies or {}).get(s)) for s in STREAMS]
 
 
-def doctor_check(hscc_dir=None, *, now=None, env=None):
+def doctor_check(hscc_dir=None, *, now=None, env=None,
+                 check_deployed_copies=False, hermes_home=None, repo_dir=None):
     """The GAP-B-4 doctor row: are the cron watchers still firing?
 
     The verdict lives with the feature (this module owns the cadence SOT and
@@ -641,14 +875,31 @@ def doctor_check(hscc_dir=None, *, now=None, env=None):
     bug class that took down the live daemon-pid verdict before. Passing the
     directory down keeps read and marker on ONE root, always.
 
-    Warn-only: ``ok`` is False for any stale/failing/never-ran/bad-stamp
-    watcher, but ``fatal`` is ALWAYS False -- an out-of-band Hermes cron job
-    must never hard-stop a bootstrap or flip the doctor's overall verdict.
-    "not configured" is clean ok=True with a plain detail, never a warning.
+    Warn-only: ``ok`` is False for any stale/failing/never-ran/bad-stamp/
+    copy-drifted watcher, but ``fatal`` is ALWAYS False -- an out-of-band Hermes
+    cron job must never hard-stop a bootstrap or flip the doctor's overall
+    verdict. "not configured" is clean ok=True with a plain detail, never a
+    warning.
+
+    ``check_deployed_copies`` is the deployed-copy opt-in (t_95eb9f15): say True
+    and every row also reports whether the copy installed under the bound Hermes
+    home is still the repo copy — the difference between "nobody installed this"
+    and "the install is stale", and the invisible one of the two (its watcher
+    keeps running and looks unconfigured). The default (False) reads NO host
+    scripts dir: the same doctrine as ``hscc_dir`` above, so a caller that has
+    not asked for a host read never gets one done on its behalf.
+    ``hermes_home`` narrows the comparison to one home (and implies True);
+    ``repo_dir`` pins what to compare against (default: this module's own
+    checkout, via :func:`checkout_root`).
     """
     directory = (os.path.join(os.path.expanduser(hscc_dir), "state")
                  if hscc_dir else None)
-    rows = all_verdicts(now=now, env=env, directory=directory)
+    copies = None
+    if check_deployed_copies or hermes_home:
+        copies = {s: deployed_copy_drift(s, hermes_home=hermes_home,
+                                         repo_dir=repo_dir, env=env)
+                  for s in STREAMS}
+    rows = all_verdicts(now=now, env=env, directory=directory, copies=copies)
 
     problems = [r["detail"] for r in rows if r["warn"]
                 or r["status"] not in HEALTHY_STATUSES]
@@ -666,6 +917,15 @@ def doctor_check(hscc_dir=None, *, now=None, env=None):
                           "`scripts/install_alone_sweep_gate.sh --status` prints "
                           "the last verdict on record; the sweep pass itself is "
                           "minutes per interpreter")
+        # A drifted deployed copy has a different (and much cheaper) fix than a
+        # dead cron job: re-run the installer. Say it per stream, or the
+        # operator chases `hermes cron list` for a job that is fine (t_95eb9f15).
+        drift_hint = ""
+        stale = [r["stream"] for r in rows if r.get("copy") == "drifted"]
+        if stale:
+            drift_hint = " -- " + "; ".join(
+                f"{s}'s deployed copy under <bound home>/scripts is STALE, not "
+                f"missing: re-run {WATCHERS[s]['install_script']}" for s in stale)
         return {
             "name": CHECK_NAME, "ok": False, "fatal": False, "rows": rows,
             "detail": "; ".join(problems + notes),
@@ -675,7 +935,7 @@ def doctor_check(hscc_dir=None, *, now=None, env=None):
                     "to prove a pass; reinstall with "
                     + " / ".join(sorted({r['install_script']
                                          for r in WATCHERS.values()}))
-                    + " if a job is gone" + sweep_hint),
+                    + " if a job is gone" + drift_hint + sweep_hint),
         }
     return {"name": CHECK_NAME, "ok": True, "fatal": False, "rows": rows,
             "detail": "; ".join(notes) or "no watchers configured",

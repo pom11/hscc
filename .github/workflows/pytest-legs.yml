@@ -89,6 +89,11 @@ on:
         type: boolean
         required: false
         default: false
+      alone_sweep:
+        description: "After the legs, sweep hscc_daemon alone-vs-in-leg on this runner's own thin venv (advisory)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -227,6 +232,103 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
           bash .github/scripts/leg_verdict.sh "$rc" "$log"
+
+  alone-sweep:
+    name: alone-sweep
+    # ADVISORY baseline of the alone-vs-in-leg agreement on the runner's OWN thin
+    # venv (t_4447d736). The nightly gate on the host that carries both stamp
+    # interpreters measures this property there; the CI venv is a third
+    # environment and had never been swept (audit
+    # docs/audits/daemon-alone-run-order-dependence_t_572b4856.md §11). Dispatch
+    # only and advisory by default: promotion to a gate is that section's step 4,
+    # and its precondition is a green leg on this posture, which §11 shows is not
+    # there yet. A baseline nobody can re-take is a baseline nobody re-takes, which
+    # is why this is a job in the file rather than a command in a comment.
+    #
+    # `needs: leg` is what keeps the sweep's own rule — one pytest process per file
+    # over one checkout, never alongside the leg it compares against. It runs after
+    # the whole matrix, and it is `always()` on purpose: a red leg is exactly the
+    # run whose sweep record you want, and alone_sweep.sh already refuses to call a
+    # verdict over a red leg (it prints the diff, then "the LEG ITSELF is red").
+    needs: leg
+    if: >-
+      ${{ always() && github.event_name == 'workflow_dispatch'
+          && github.event.inputs.alone_sweep == 'true' }}
+    runs-on: macos-latest
+    # The leg this job re-runs measured 205 s on the runner, plus 131 single-file
+    # processes on the same venv. The ceiling turns a hung pytest into a red at 40
+    # minutes instead of a 6-hour burn on CI's most expensive pool.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The SAME interpreter and pins the legs build: this job's whole point is
+          # to measure the CI posture, so it must not introduce a fourth one.
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ci.txt
+
+      - name: Restore the test venv
+        id: venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: test-venv-${{ runner.os }}-${{ runner.arch }}-py313-${{ hashFiles('requirements.txt', 'requirements-ci.txt') }}
+
+      - name: Build the test venv
+        if: steps.venv.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements-ci.txt
+          .venv/bin/python -m pytest --version
+
+      - name: Sweep hscc_daemon alone-vs-in-leg on the CI venv
+        env:
+          PY: ${{ github.workspace }}/.venv/bin/python
+          LEG: hscc_daemon
+          ENFORCE: ${{ vars.HSCC_TESTS_ENFORCE }}
+          FORCED_ENFORCE: ${{ github.event.inputs.enforce }}
+        run: |
+          # Same `bash -e` trap as the leg step: the sweep is EXPECTED to exit 1
+          # when the leg it swept is red, and without `set +e` the verdict script
+          # below would never run.
+          set +e
+          set -uo pipefail
+          out="${RUNNER_TEMP}/alone-sweep"
+          log="${out}/sweep.log"
+          mkdir -p "$out"
+          bash docs/audits/support/t_572b4856/alone_sweep.sh "$PY" "$LEG" "$out" \
+            >"$log" 2>&1
+          rc=$?
+          cat "$log"
+
+          {
+            echo "### alone-vs-in-leg sweep — ${LEG} (CI venv)"
+            echo '```'
+            grep -E "run_tests rc=|^# files swept|^RESULT:|^test_[a-z0-9_]+: in-leg" "$log"
+            echo "alone runs rc 0: $(grep -lx 0 "$out"/rc/*.rc 2>/dev/null | wc -l | tr -d ' ') / $(ls "$out"/rc 2>/dev/null | wc -l | tr -d ' ')"
+            echo '```'
+            echo "_Full record: the \`sweep-${LEG}\` artifact (per-file junit xml, per-file logs, \`inleg.log\`)._"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          bash .github/scripts/sweep_verdict.sh "$rc" "$log"
+
+      - name: Publish the sweep record
+        # Advisory or not, the evidence has to outlive the run: the diff names the
+        # files, but only the xml and the per-file -rs logs hold the reason pairs.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-hscc_daemon
+          path: ${{ runner.temp }}/alone-sweep
+          if-no-files-found: warn
+          retention-days: 14
 
   legs:
     name: legs

@@ -765,3 +765,243 @@ def test_the_loud_refusal_is_a_typeerror_and_names_itself(sandbox):
     assert "directory" in params, (
         "the checkout writer must carry the seam the writers detect")
     assert params["directory"].default is None
+
+
+# ── deployed-copy drift (t_95eb9f15) ────────────────────────────────────────
+#
+# The incident this section pins: `hscc-dep-watcher` was installed, [active] and
+# had run OK at 08:00, yet `python3 hscc-bootstrap/doctor.py` reported
+# `dep_pr_watcher: not configured (no stamp …)` with ok=True and no warn. The
+# job WAS running — from a copy of dep_pr_watcher.py that `install_dep_watcher.sh`
+# had `cp`-ied into <bound home>/scripts and nothing had compared to the repo
+# since (Sep 29, 6416 B, zero references to `cron_watchers`), so it did its work
+# and left no stamp. Nothing in the tree could tell "nobody installed this" from
+# "the install is older than the code it is supposed to run" — the same
+# invisibility as the 17-consecutive-failures incident, arriving by a new route.
+
+DRIFT_SCRIPT = "dep_pr_watcher.py"
+REPO_ROOT = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+
+
+def _homes(tmp_path, *, deployed, repo, script=DRIFT_SCRIPT):
+    """Build a fake bound home + a fake checkout: (hermes_home, repo_dir).
+
+    `deployed` / `repo` are the file contents for ``scripts/<script>`` on each
+    side, None meaning "no file". Both sides are tmp_path trees reached through
+    the explicit seams — nothing here may read or write the operator's
+    ~/.hermes, which is what the hermes_home / repo_dir seams are for.
+    """
+    hermes_home = tmp_path / ".hermes"
+    repo_dir = tmp_path / "checkout"
+    for base, blob in ((hermes_home, deployed), (repo_dir, repo)):
+        d = base / "scripts"
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / script
+        if blob is None:
+            # None means "no file on this side" — and a previous _homes() call
+            # on the same tmp_path may have created one. Absent must be absent.
+            target.unlink(missing_ok=True)
+            continue
+        target.write_text(blob)
+    return hermes_home, repo_dir
+
+
+def _copy(status="drifted"):
+    """A pre-resolved deployed_copy_drift() row, as a caller would pass it."""
+    return {"stream": "dep_pr_watcher", "status": status,
+            "deployed": "/bound/scripts/dep_pr_watcher.py",
+            "repo": "/checkout/scripts/dep_pr_watcher.py",
+            "detail": ("the deployed copy /bound/scripts/dep_pr_watcher.py "
+                       "(6416 B, aaaa) is NOT the repo copy "
+                       "/checkout/scripts/dep_pr_watcher.py (13162 B, bbbb) -- "
+                       "the job runs stale code; re-run "
+                       "scripts/install_dep_watcher.sh")}
+
+
+def test_a_stale_deployed_copy_is_named_as_not_the_repo_copy(tmp_path):
+    hermes_home, repo_dir = _homes(tmp_path, deployed="old code\n",
+                                   repo="new code\n")
+    d = cw.deployed_copy_drift("dep_pr_watcher", hermes_home=str(hermes_home),
+                               repo_dir=str(repo_dir))
+    assert d["status"] == "drifted"
+    assert d["deployed"] == str(hermes_home / "scripts" / DRIFT_SCRIPT)
+    assert d["repo"] == str(repo_dir / "scripts" / DRIFT_SCRIPT)
+    # The sentence must carry the fix, not just the disagreement, and the sizes
+    # so an operator can see which side is the old one.
+    assert "re-run scripts/install_dep_watcher.sh" in d["detail"]
+    assert f"{len('old code\n')} B" in d["detail"]
+    assert f"{len('new code\n')} B" in d["detail"]
+
+
+def test_only_a_proven_mismatch_is_a_drift(tmp_path):
+    """in-sync / missing-deployed / missing-repo are all fail-OPEN. A detector
+    that inferred staleness from a missing comparison would nag every host that
+    never installed a watcher — the false alarm the GAP-B-4 rows forbid."""
+    same = "the same code\n"
+    hermes_home, repo_dir = _homes(tmp_path, deployed=same, repo=same)
+    assert cw.deployed_copy_drift(
+        "dep_pr_watcher", hermes_home=str(hermes_home),
+        repo_dir=str(repo_dir))["status"] == "in-sync"
+    hermes_home, repo_dir = _homes(tmp_path, deployed=None, repo=same)
+    assert cw.deployed_copy_drift(
+        "dep_pr_watcher", hermes_home=str(hermes_home),
+        repo_dir=str(repo_dir))["status"] == "missing-deployed"
+    hermes_home, repo_dir = _homes(tmp_path, deployed=same, repo=None)
+    assert cw.deployed_copy_drift(
+        "dep_pr_watcher", hermes_home=str(hermes_home),
+        repo_dir=str(repo_dir))["status"] == "missing-repo"
+
+
+def test_a_wrapper_stream_has_no_deployed_copy_to_go_stale(tmp_path):
+    """install_alone_sweep_gate.sh generates a one-line wrapper that execs the
+    repo's gate — the shape that cannot drift, and the one the two copying
+    installers should move to. Comparing a copy for that stream is meaningless,
+    so it must answer `not-a-copy` and never `drifted`."""
+    assert cw.WATCHERS["dep_pr_watcher"]["deploy"] == cw.DEPLOY_COPY
+    assert cw.WATCHERS["escalate_watcher"]["deploy"] == cw.DEPLOY_COPY
+    assert cw.WATCHERS["alone_sweep_gate"]["deploy"] == cw.DEPLOY_WRAPPER
+    d = cw.deployed_copy_drift("alone_sweep_gate", hermes_home=str(tmp_path),
+                               repo_dir=str(tmp_path))
+    assert d["status"] == "not-a-copy" and "wrapper" in d["detail"]
+
+
+def test_the_bound_home_resolves_the_way_the_installers_resolve_it(tmp_path,
+                                                                   monkeypatch):
+    """$HERMES_HOME wins (a bound profile home is exactly that case), else
+    ~/.hermes — the t_3aadd2c0 rule, shared with the installers rather than
+    re-derived, and read through an env seam."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert cw.bound_hermes_home() == str(tmp_path / ".hermes")
+    assert cw.bound_hermes_home({}) == str(tmp_path / ".hermes")
+    assert cw.bound_hermes_home({"HERMES_HOME": "/profiles/work"}) == "/profiles/work"
+
+
+def test_the_default_comparison_target_is_this_checkout(sandbox, tmp_path):
+    """No repo_dir passed == compare against the checkout this module runs from
+    (the doctor's own tree). The deployed plugin payload is not a checkout, and
+    a host with nothing deployed gets `missing-deployed`, never `drifted`."""
+    assert cw.checkout_root() == REPO_ROOT
+    d = cw.deployed_copy_drift("dep_pr_watcher",
+                               hermes_home=str(tmp_path / "nothing-here"))
+    assert d["status"] == "missing-deployed" and d["repo"] is None
+
+
+def test_a_drifted_copy_may_no_longer_read_as_not_configured(sandbox):
+    """THE bug, pinned. No stamp + no marker used to mean "nobody installed
+    this"; for a stale deployed copy that was a lie about the operator. It now
+    reads `copy-drifted` and warns."""
+    v = cw.verdict("dep_pr_watcher", now=NOW, copy=_copy())
+    assert v["status"] == "copy-drifted" and v["warn"] is True
+    assert v["copy"] == "drifted"
+    assert v["detail"].startswith("WARN:")
+    assert "re-run scripts/install_dep_watcher.sh" in v["detail"]
+
+
+def test_the_not_configured_rule_stands_when_no_comparison_is_asked(sandbox):
+    """The constraint on this card, pinned as the pair of the test above: the
+    read seam's `not-configured`-when-no-stamp rule is UNCHANGED unless the
+    caller hands in a comparison — and a comparison that found no mismatch
+    (any status but `drifted`) must not change the verdict either."""
+    v = cw.verdict("dep_pr_watcher", now=NOW)
+    assert v["status"] == "not-configured" and v["warn"] is False
+    assert v["copy"] is None and "WARN" not in v["detail"]
+    for st in ("in-sync", "missing-deployed", "missing-repo", "unreadable",
+               "not-a-copy"):
+        v2 = cw.verdict("dep_pr_watcher", now=NOW, copy=_copy(status=st))
+        assert v2["status"] == "not-configured" and v2["warn"] is False, st
+
+
+def test_a_fresh_stamp_outranks_a_drifted_copy(sandbox):
+    """Anti-nag: a watcher whose stamp proves it ran must not warn because the
+    checkout moved ahead. The drift is carried on the row (`copy`), not raised
+    as a fault — otherwise every `git pull` would light up the doctor."""
+    _write_stamp("dep_pr_watcher", age_s=10)
+    v = cw.verdict("dep_pr_watcher", now=NOW, copy=_copy())
+    assert v["status"] == "ok" and v["warn"] is False
+    assert v["copy"] == "drifted"
+
+
+def test_an_installed_never_ran_watcher_names_the_drift_as_the_cause(sandbox):
+    """Marker present keeps its own (stronger) status; the drift rides along as
+    the likely reason, so the fix is the installer and not a cron chase."""
+    cw.mark_installed("dep_pr_watcher", "0 8 * * *")
+    v = cw.verdict("dep_pr_watcher", now=NOW, copy=_copy())
+    assert v["status"] == "never-ran" and v["warn"] is True
+    assert "never completed a pass" in v["detail"]
+    assert "re-run scripts/install_dep_watcher.sh" in v["detail"]
+
+
+def test_doctor_reports_a_stale_install_and_points_at_that_installer(sandbox,
+                                                                      tmp_path):
+    hermes_home, repo_dir = _homes(tmp_path, deployed="old\n", repo="new\n")
+    row = cw.doctor_check(now=NOW, check_deployed_copies=True,
+                          env={"HOME": str(tmp_path)}, repo_dir=str(repo_dir))
+    assert row["ok"] is False and row["fatal"] is False
+    assert "dep_pr_watcher" in row["detail"]
+    assert "NOT the repo copy" in row["detail"]
+    # the fix must say STALE-not-MISSING and name the one installer that fixes
+    # it, or the operator goes hunting through `hermes cron list` for a job
+    # that is fine.
+    assert "STALE, not missing" in row["fix"]
+    assert "scripts/install_dep_watcher.sh" in row["fix"]
+
+
+def test_a_stale_copy_in_the_shared_home_is_found_from_a_profile_shell(tmp_path,
+                                                                        monkeypatch):
+    """The live case, measured while writing this: the drifted copy lives in the
+    SHARED ~/.hermes/scripts, but a doctor run from a profile shell has
+    HERMES_HOME set to that profile's home. Consulting only the caller's own
+    home reported `missing-deployed` — a confident clean verdict about a copy
+    one directory away, which is worse than no check. Both homes get compared."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile-home"))
+    (tmp_path / "profile-home" / "scripts").mkdir(parents=True)
+    hermes_home, repo_dir = _homes(tmp_path, deployed="old code\n",
+                                   repo="new code\n")
+    d = cw.deployed_copy_drift("dep_pr_watcher", repo_dir=str(repo_dir))
+    assert d["status"] == "drifted", d
+    assert d["deployed"] == str(hermes_home / "scripts" / DRIFT_SCRIPT)
+    assert str(tmp_path / "profile-home" / "scripts" / DRIFT_SCRIPT) in d["candidates"]
+    # And the narrow seam is what hides it: same tree, one home only.
+    narrow = cw.deployed_copy_drift("dep_pr_watcher",
+                                    hermes_home=str(tmp_path / "profile-home"),
+                                    repo_dir=str(repo_dir))
+    assert narrow["status"] == "missing-deployed"
+
+
+def test_the_candidate_homes_are_the_bound_home_and_the_shared_one(tmp_path,
+                                                                    monkeypatch):
+    """Two homes, in that order, deduped: the installer's own binding first."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert cw.hermes_home_candidates() == [str(tmp_path / ".hermes")]
+    monkeypatch.setenv("HERMES_HOME", "/profiles/work")
+    assert cw.hermes_home_candidates() == ["/profiles/work",
+                                           str(tmp_path / ".hermes")]
+
+
+def test_doctor_must_not_read_a_host_scripts_dir_it_was_not_given(tmp_path,
+                                                                  monkeypatch):
+    """The doctrine that keeps a sandboxed read off the operator's live tree
+    (t_06ead443), applied to the NEW filesystem read: a redirected `hscc_dir`
+    does not grant permission to resolve the bound home on its own. With a
+    genuinely drifted copy planted at $HOME/.hermes/scripts, the redirected row
+    stays the clean stamp read — and the SAME tree read with an explicit
+    hermes_home does see the drift, so it is the seam that enables the check,
+    never an accident of HOME."""
+    _homes(tmp_path, deployed="old\n", repo="new\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    root = tmp_path / "sandbox-hscc"
+    (root / "state").mkdir(parents=True)
+
+    row = cw.doctor_check(hscc_dir=str(root), now=NOW)
+    assert row["ok"] is True and row["fatal"] is False
+    assert "not configured" in row["detail"] and "WARN" not in row["detail"]
+
+    seen = cw.doctor_check(hscc_dir=str(root), now=NOW,
+                           hermes_home=str(tmp_path / ".hermes"),
+                           repo_dir=str(tmp_path / "checkout"))
+    assert seen["ok"] is False and "NOT the repo copy" in seen["detail"]
