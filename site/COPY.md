@@ -201,6 +201,12 @@ The background watcher that does the checking and the healing.
 - `hscc orch inject` — send a message into a running agent's session.
 - `hscc orch waker` — the built-in orchestrator waker: `status`, `enable`,
   `disable`.
+- `hscc node pause <host>` — park one machine for maintenance. It prints which
+  units it would stop and which other machines a multi-node unit would take
+  down with it, and stops nothing until `--apply` (then `--span` for a
+  multi-node unit, `--force` for a machine serving the orchestrator's own
+  model). `hscc node resume <host>` starts the recorded units back up and
+  clears the pause; `hscc node paused` lists what is parked, read-only.
 
 ### Utility
 

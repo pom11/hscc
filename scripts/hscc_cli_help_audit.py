@@ -316,6 +316,24 @@ def cards_group_verbs() -> tuple:
     return tuple(sorted(verbs))
 
 
+def node_group_verbs() -> tuple:
+    """Every verb ``hscc node`` advertises, from the group's own help table.
+
+    Same derivation as :func:`orch_group_verbs`, and the same reason:
+    ``_NODE_GROUP_ENTRIES`` is the single source for the group listing and the
+    per-verb entries (hscc.py), so a verb advertised but not routed — or routed
+    but not advertised — shows up here as a missing/extra probe rather than
+    silently. The verbs are mutating ones, so the walk also proves their
+    ``--help``/``-h`` intercepts are inert (a trip is a (D) finding).
+    """
+    out = set()
+    for usage, _desc in daemon_hscc._NODE_GROUP_ENTRIES:
+        toks = usage.split()
+        if len(toks) >= 3 and toks[0] == "hscc" and toks[1] == "node":
+            out.add(toks[2].split("|")[0])
+    return tuple(sorted(out))
+
+
 def _orch_router_verbs(tmp: Path, canary: Path) -> tuple[set, str | None]:
     """Ask the cluster engine's ``cmd_orch`` router which verbs it resolves.
 
@@ -436,6 +454,14 @@ def build_surface():
     add("orch-cards", ["cards"], "print", "flag")
     for sub in cards_group_verbs():
         add("orch-cards", ["cards", sub], "print", "flag2")
+
+    # ── node group (print help from _NODE_GROUP_ENTRIES) — t_c28f4f14 added
+    # the group in the same commit it added the walk, so the `hscc node`
+    # router and the per-verb intercepts of two MUTATING verbs are measured
+    # from day one instead of being discovered as a GAP-A-3 blind spot later.
+    add("node", ["node"], "print", "flag")
+    for sub in node_group_verbs():
+        add("node", ["node", sub], "print", "flag2")
 
     # ── project group — flightdeck argparse surface
     add("project", ["project"], "argparse", "flag")
