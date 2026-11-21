@@ -58,9 +58,18 @@ enum ClusterMetricHeat: Equatable {
 
     /// A serving node's GPU is the number an operator watches; a node that did
     /// not answer is not "calm".
+    ///
+    /// A node the operator PARKED is not "hot" either. Its row keeps its
+    /// `error` — the overlay refuses to delete a real diagnostic — so a heat
+    /// verdict that asked `isUp` first would paint a deliberate pause in the
+    /// same alarm colour as a machine that failed. It gets `.unknown`, the
+    /// verdict this enum already uses for "there is no reading to judge",
+    /// because a parked machine genuinely has no load to colour.
     static func node(_ node: FleetNodeLine) -> ClusterMetricHeat {
-        guard node.isUp else { return .hot }
-        return percent(node.gpuPct)
+        guard node.isPaused else {
+            return node.isUp ? percent(node.gpuPct) : .hot
+        }
+        return .unknown
     }
 }
 
@@ -141,6 +150,15 @@ enum ClusterThroughput {
 struct ClusterC1: Equatable {
     let up: Int?
     let total: Int?
+    /// Frame-listed nodes the operator parked. Excluded from every verdict this
+    /// struct can print: a parked machine is neither evidence a fleet is
+    /// answering nor evidence it is failing, so it belongs in neither side of a
+    /// `up/total` sentence or of a colour.
+    let paused: Int?
+    /// Frame-listed nodes that answered AND were not parked — the numerator the
+    /// headline and the tally may use. nil when the read named no frame, which
+    /// is why this is NOT `answered ?? 0` anywhere downstream.
+    let answered: Int?
     let tokPerSec: Double?
     let hottestC: Double?
     let nodes: [ClusterC1Node]
@@ -151,16 +169,31 @@ struct ClusterC1: Equatable {
     let refreshMinutes: Int
     let failed: Bool
 
+    /// The nodes a verdict here may judge: the frame the route listed, minus
+    /// the machines the operator parked. nil when the frame itself is nil, so
+    /// "not told" never becomes "nothing is up".
+    var judged: Int? { total.map { $0 - (paused ?? 0) } }
+
     var headline: String {
-        guard let up, let total else { return failed ? "Offline" : "No data" }
-        if total > 0 && up == 0 { return "Down" }
-        if up == total { return "All up" }
-        return "\(up)/\(total) up"
+        guard let answered, let judged else { return failed ? "Offline" : "No data" }
+        // Every listed node parked: nothing is failing and nothing is serving,
+        // so neither `Down` (an alarm about a choice the operator made) nor
+        // `All up` (a claim about a fleet that is deliberately parked) is true.
+        if judged == 0 { return ClusterC1.pausedHeadline }
+        if answered == 0 { return "Down" }
+        if answered == judged { return "All up" }
+        return "\(answered)/\(judged) up"
     }
 
+    /// The headline when the whole frame is parked. Title Case like the three
+    /// words beside it (`Down`, `All up`, `No data`), and it is the ONLY place
+    /// this fleet-level word is written — the per-node copy is
+    /// `FleetFormat.paused`, and the two must not drift.
+    static let pausedHeadline = "Paused"
+
     var tally: String {
-        guard let up, let total else { return "—" }
-        return "\(up)/\(total)"
+        guard let answered, let judged else { return "—" }
+        return "\(answered)/\(judged)"
     }
 
     var tokText: String {
@@ -238,6 +271,16 @@ struct ClusterC1: Equatable {
     init(_ entry: ClusterEntry) {
         self.up = entry.fleet?.tally.nodesUp
         self.total = entry.fleet?.tally.nodesTotal
+        // Counted from the projected rows, not from the tally's arithmetic: a
+        // parked node keeps its `error`, so the only place that knows both the
+        // tag and the answer for a given machine is the row itself.
+        if let nodes = entry.fleet?.nodes {
+            self.paused = nodes.filter { $0.isPaused }.count
+            self.answered = nodes.filter { $0.isUp && !$0.isPaused }.count
+        } else {
+            self.paused = nil
+            self.answered = nil
+        }
         // No rate with live backends and nothing running is an idle fleet:
         // 0 tok/s. No backend at all stays unknown.
         if let serving = entry.fleet?.serving {
@@ -387,12 +430,23 @@ struct ClusterEntry: TimelineEntry {
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the
     /// tally, not a second state word.
+    ///
+    /// A parked node is in none of those sentences. It is excluded from BOTH
+    /// sides of the comparison — from the numerator because it is not evidence
+    /// a fleet is answering, from the denominator because it is not evidence a
+    /// fleet is failing — and the count comes from the projected rows, never
+    /// from a number this file assumes. When every listed node is parked there
+    /// is nothing left to judge: `.unknown`, the verdict for "no reading", which
+    /// is the colour for "not told" and not the colour for "alarm".
     var heat: ClusterMetricHeat {
-        guard let fleet, let up = fleet.tally.nodesUp, let total = fleet.tally.nodesTotal else {
+        guard let fleet, fleet.tally.nodesUp != nil, fleet.tally.nodesTotal != nil else {
             return .unknown
         }
-        if up == 0 && total > 0 { return .hot }
-        return up == total ? .calm : .warm
+        let judged = fleet.nodes.filter { !$0.isPaused }
+        guard !judged.isEmpty else { return .unknown }
+        let up = judged.filter { $0.isUp }.count
+        if up == 0 { return .hot }
+        return up == judged.count ? .calm : .warm
     }
 
     /// The host rows a CLI-shaped surface (the medium tile) may draw, or nil

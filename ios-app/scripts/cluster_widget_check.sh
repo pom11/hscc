@@ -161,6 +161,42 @@ if [ -s "$TMP/compile.err" ]; then
 fi
 "$TMP/cluster_widget_check" || rc=1
 
+# ---------------------------------------------------------------------------
+# The pause overlay seam (t_983f177e): the copy has ONE owner and the three
+# contract keys are really decoded.
+#
+# The executed half above proves what the phrase says. These two prove it cannot
+# be bypassed: a view that composed its own 'paused (...)' would satisfy every
+# executed assertion (they run on the projection, not on the body), and a wire
+# key declared with a property default compiles, is silently never decoded, and
+# leaves every tile drawing a bare up/down forever.
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "pause-overlay structure"
+
+stray=$(grep -rn 'paused (' Sources/ | grep -v 'Sources/Shared/ClusterNodeTally.swift')
+report "the paused (reason, since) phrase is composed in ONE file" "$stray"
+
+strayWord=$(grep -rn '? "up" : "down"' Sources/ | grep -v 'Sources/Shared/ClusterNodeTally.swift')
+report "no surface composes its own up/down pair" "$strayWord"
+
+defaults=$(grep -nE 'let (status|paused_reason|paused_since): String\? = nil' \
+            Sources/Shared/SharedModels.swift)
+report "no pause key is declared with a property default (the decode trap)" "$defaults"
+
+fail_when_absent "the row word is delegated to FleetFormat.status" "$TALLY" \
+  'FleetFormat.status(node, now: now)'
+fail_when_absent "the tally subtracts parked rows from the down count" "$TALLY" \
+  '!$0.isUp && !$0.isPaused'
+fail_when_absent "the parked row is asked before the up predicate" "$TALLY" \
+  'guard node.isPaused else'
+
+# The gate must not be able to pass without the fixture it names.
+[ -f scripts/model_decode_check/fixtures/v1_cluster_monitor_paused.json ] \
+  && echo "  ok: the paused fixture is committed" \
+  || { echo "FAIL: scripts/model_decode_check/fixtures/v1_cluster_monitor_paused.json missing"; rc=1; }
+
 echo ""
 if [ "$rc" -eq 0 ]; then
   echo "CLUSTER WIDGET CHECK PASSED — C1 lines, native kit, nil-is-not-zero, redaction"
