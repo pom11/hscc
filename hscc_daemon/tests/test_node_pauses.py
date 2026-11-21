@@ -154,9 +154,9 @@ class TestSchemaOnDisk:
     def test_unknown_extra_keys_survive_a_round_trip(self, overlay):
         # A newer writer's field must not be silently eaten by an older reader.
         entry = node_pauses.pause(HOST, directory=overlay)
-        entry["operator"] = "desac"
+        entry["operator"] = "operator-1"
         node_pauses.save({"pauses": {HOST: entry}}, overlay)
-        assert node_pauses.paused(HOST, overlay)["operator"] == "desac"
+        assert node_pauses.paused(HOST, overlay)["operator"] == "operator-1"
 
     def test_save_sorts_and_is_byte_stable(self, overlay):
         node_pauses.pause(PEER, directory=overlay)

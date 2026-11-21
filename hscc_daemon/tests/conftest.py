@@ -263,7 +263,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
             autodown, cli as hscc_cli, daemon_ops, daemon_singleton, desktop,
             health,
             heal_breaker, heal_lease,
-            hscc, lifecycle,
+            hscc, lifecycle, node_pauses,
             serving, state, trigger, update_check, usage,
         )
         def p(sub):
@@ -391,6 +391,14 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # write strikes into the operator's real ~/.hscc and could suspend
             # healing a LIVE node from the test run.
             (heal_breaker, "HEAL_BREAKER_FILE", p("heal-breaker.json")),
+            # node_pauses.py (t_28caea71) — the durable node-pause overlay. Its
+            # default root is one module constant, and every read AND write
+            # resolves through it at CALL time, so an unsealed root would let a
+            # test that forgets the `directory=` seam write a LIVE pause into the
+            # operator's ~/.hscc — where the running daemon's watchdog would then
+            # honour it and stop healing a real node. The seam is the primary
+            # defence (test_node_pauses.py always passes it); this is the seal.
+            (node_pauses, "HSCC_DIR", base),
             # update_check.py (t_a4055572) — the 24h GitHub-release cache. It
             # is the ONE file this module may ever write, and both ambient
             # surfaces (the status notice and the daemon's daily tick) reach

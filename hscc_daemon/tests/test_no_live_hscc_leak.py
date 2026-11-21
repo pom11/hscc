@@ -86,6 +86,15 @@ def test_suite_never_writes_live_hscc(tmp_path):
     _plant(ws, "update-check.json",
            '{"checked_at": "2026-01-01T00:00:00+00:00", '
            '"latest_tag": "v0.0.1"}\n')
+    # node_pauses.json (t_28caea71): the durable node-pause overlay. Planted
+    # with a live-looking pause so the manifest diff catches BOTH leak shapes —
+    # a test that writes the overlay to the real root, and one that overwrites
+    # (or clears) a pause the operator actually has in force.
+    _plant(ws, "node_pauses.json",
+           '{"pauses": {"192.0.2.10": {"reason": "planted", '
+           '"since": "2026-01-01T00:00:00+00:00", "until": null, '
+           '"units": ["planted-unit"], "span_nodes": ["192.0.2.10"], '
+           '"stopped": true}}}\n')
     # serving.json + profile config.yaml — added (t_2985e00b) because
     # serving.update_orchestrator_followers() rewrites orchestrator-tracking
     # profile config.yaml files. The sandbox must plant those so a regression
@@ -119,6 +128,12 @@ def test_suite_never_writes_live_hscc(tmp_path):
         # the sandbox so a regression (e.g. someone rebinds DAEMON_LOCK to a
         # literal ~/.hscc path) shows up as a new planted-tree file.
         "test_daemon_singleton.py",
+        # t_28caea71: the node-pause overlay is a NEW durable file under
+        # ~/.hscc. Its own tests are the only code that writes it, so they are
+        # the ones that must run against the planted tree — a test that dropped
+        # its `directory=` seam would rewrite the planted pause and trip the
+        # manifest diff below.
+        "test_node_pauses.py",
     ]
     paths = [os.path.join(tests_dir, t) for t in targets]
 
