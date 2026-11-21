@@ -109,3 +109,51 @@ def test_static_drift_pins():
     assert 'HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"' in src
     assert 'HERMES_SCRIPTS="$HERMES_HOME/scripts"' in src
     assert 'HERMES_SCRIPTS="$HOME/.hermes/scripts"' not in src
+
+
+# ── --status: the installed-copy drift check (t_95eb9f15) ───────────────────
+#
+# Same shape as install_dep_watcher.sh: the runner is `cp`-ied into the bound
+# home, so a deployed copy can predate the repo while the cron job keeps running
+# it — and its liveness verdict then says nothing useful. --status compares the
+# two copies and says so.
+
+def test_status_compares_the_deployed_copy_with_the_repo_copy(tmp_path):
+    profile_home = tmp_path / "profile"
+    proc, _log = _run(tmp_path, hermes_home=profile_home)
+    assert proc.returncode == 0, proc.stderr
+    installed = profile_home / "scripts" / "escalate_watcher_run.py"
+
+    proc, _log = _run(tmp_path, args=("--status",), hermes_home=profile_home,
+                      log_name="cron_stub_status.log")
+    assert proc.returncode == 0, proc.stderr
+    assert "copy:     in-sync" in proc.stdout, proc.stdout
+    assert "liveness:" in proc.stdout
+    assert str(installed) in proc.stdout
+
+    installed.write_text(installed.read_text() + "\n# the repo moved on\n")
+    proc, _log = _run(tmp_path, args=("--status",), hermes_home=profile_home,
+                      log_name="cron_stub_status2.log")
+    assert proc.returncode == 0, proc.stderr
+    assert "copy:     drifted" in proc.stdout, proc.stdout
+    assert "NOT the repo copy" in proc.stdout
+    assert "re-run scripts/install_escalate_watcher.sh" in proc.stdout
+
+
+def test_status_reports_without_installing_anything(tmp_path):
+    """--status is a read: rc 0 on an uninstalled host, and no cron mutation."""
+    profile_home = tmp_path / "profile"
+    proc, log = _run(tmp_path, args=("--status",), hermes_home=profile_home)
+    assert proc.returncode == 0, proc.stderr
+    assert "NOT REGISTERED" in proc.stdout
+    assert "copy:" in proc.stdout and "liveness:" in proc.stdout
+    assert "cron create" not in log and "cron remove" not in log
+    assert not (profile_home / "scripts" / "escalate_watcher_run.py").exists()
+
+
+def test_unknown_argument_is_refused_rather_than_installing(tmp_path):
+    profile_home = tmp_path / "profile"
+    proc, log = _run(tmp_path, args=("--statys",), hermes_home=profile_home)
+    assert proc.returncode == 2
+    assert "unknown argument" in proc.stderr and "--status" in proc.stderr
+    assert "cron create" not in log
