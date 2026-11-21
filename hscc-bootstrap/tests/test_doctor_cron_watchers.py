@@ -157,14 +157,20 @@ def test_row_reports_unverifiable_when_module_missing(tmp_path, monkeypatch):
     assert "re-run bootstrap" in row.fix
 
 
-def test_row_uses_the_real_check_outside_pytest_and_forwards_hscc_dir(tmp_path,
-                                                                       monkeypatch):
+def test_row_uses_the_real_check_outside_pytest_and_never_a_relocated_root(
+        tmp_path, monkeypatch):
     """The human-CLI/sandbox path: the row delegates to
-    cron_watchers.doctor_check(hscc_dir=..., check_deployed_copies=True) — the
-    stub proves the delegation AND both pass-throughs (the bootstrap sandbox
-    reads the SANDBOX's ~/.hscc root; reading the operator's live tree here is
-    the historical doctor bug). ``check_deployed_copies`` is the deployed-copy
-    seam (t_95eb9f15): on the live host the doctor asks for it, so a stale
+    cron_watchers.doctor_check(check_deployed_copies=True) — the stub proves the
+    delegation AND that it carries NO root (t_adb66608).
+
+    This is the writer/reader half of the HSCC_DIR rule: the watcher ledger is
+    written by Hermes cron jobs and the installers, none of which see
+    ``HSCC_DIR``, so a row that forwarded the ambient root would read a
+    directory nothing can write to and call live watchers "not configured"
+    (audit t_572b4856 §10.1, the measured live-host case). Passing an hscc_dir
+    here and being ignored is the point — a row whose subject has one root is
+    not handed another one. ``check_deployed_copies`` stays the deliberate
+    opt-in (t_95eb9f15): on the live host the doctor asks for it, so a stale
     installed copy reads as stale instead of as "not configured"."""
     calls = []
 
@@ -179,9 +185,27 @@ def test_row_uses_the_real_check_outside_pytest_and_forwards_hscc_dir(tmp_path,
     monkeypatch.setattr(doctor, "_load_cron_watchers", lambda: CW())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     row = doctor._cron_watchers_check_row(None, hscc_dir="/sandbox/.hscc")
-    assert calls == [("/sandbox/.hscc", True)]
+    assert calls == [(None, True)], "the cron row must not be handed a root"
     assert row.detail == "from the real check"
     assert row.ok is True
+
+
+def test_the_cron_row_declares_no_hscc_dir_in_the_registry():
+    """The wiring half of the same rule (t_adb66608), pinned where it is set.
+
+    ``row_kwargs`` is how run_doctor hands a row its context, so a row that
+    declares ("hscc_dir",) will receive os.environ["HSCC_DIR"] no matter what
+    its own function does. The cron row declares NOTHING: the disagreement this
+    card closes cannot be re-wired by editing one call site, and the default
+    ("hscc_dir",) on the dataclass makes an omission loud rather than silent.
+    """
+    spec = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}["cron_watchers"]
+    assert spec.row_kwargs == ()
+    # And the row function still takes the kwarg (every feature row shares the
+    # shape), so the pin above is the only path a root could arrive by.
+    import inspect as _inspect
+    assert "hscc_dir" in _inspect.signature(
+        doctor._cron_watchers_check_row).parameters
 
 
 def test_row_survives_a_cron_watchers_without_the_drift_seam(monkeypatch):
@@ -202,7 +226,7 @@ def test_row_survives_a_cron_watchers_without_the_drift_seam(monkeypatch):
     monkeypatch.setattr(doctor, "_load_cron_watchers", lambda: CW())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     row = doctor._cron_watchers_check_row(None, hscc_dir="/sandbox/.hscc")
-    assert calls == ["/sandbox/.hscc"] and row.detail == "stamp read only"
+    assert calls == [None] and row.detail == "stamp read only"
 
 
 def test_load_cron_watchers_resolves_the_repo_sibling():

@@ -90,6 +90,11 @@ class FeatureCheckRow:
         (the sandboxed ~/.hscc root — the doctor_notifier_mask convention the
         daemon-state rows read) and/or "hermes_home" (the deployed plugin-tree
         root — what the budget-hook row reads). Defaults to ("hscc_dir",).
+        A row may declare ``()`` when its subject's root is not the caller's to
+        choose: the cron-watcher row does, because its ledger is written by
+        Hermes cron jobs and installers that never see HSCC_DIR, so a row
+        handed the ambient root would report a directory nothing can write to
+        as "not configured" (t_adb66608).
     loader
         Name of the doctor-module hook returning the feature's module (or None
         when the module is not deployed next to bootstrap). Ignored when

@@ -1453,11 +1453,20 @@ def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
     Three sources, in order of trust: an injected callable (tests pass a
     fixture-backed lambda), the real :func:`hscc_daemon.cron_watchers.doctor_check`
     (a human CLI run), and the in-suite refusal (pytest with no seam — never a
-    real read of the operator's watcher stamps). ``hscc_dir`` is forwarded to
-    the real check exactly like ``doctor_notifier_mask.check`` takes it, so a
-    sandboxed bootstrap reads the SANDBOX's ~/.hscc root; the check itself is
-    warn-only (fatal=False always) — GAP-B-4 asks for detection, not for a
-    bootstrap that dies over an out-of-band cron job.
+    real read). ``hscc_dir`` is accepted because every feature row's function
+    takes the same shape, and is deliberately NOT forwarded (t_adb66608): the
+    watcher ledger — ``~/.hscc/state/<stream>.json`` plus the install marker
+    beside it — has one root, the canonical state writer's, and the writers
+    (Hermes cron jobs, the installers) never see ``HSCC_DIR``. A row that read
+    wherever the ambient variable pointed was reading a root nothing can write
+    to and reporting live watchers as "not configured" — the live-host
+    measurement in the t_572b4856 audit §10.1. ``cron_watchers.doctor_check``
+    keeps the parameter as a caller-threaded test seam only, and this row's
+    registry entry declares no ``row_kwargs``, so the wiring itself cannot hand
+    a root to a row that must not choose one.
+
+    The check itself is warn-only (fatal=False always) — GAP-B-4 asks for
+    detection, not for a bootstrap that dies over an out-of-band cron job.
     """
     if injected is not None:
         res = injected()
@@ -1472,6 +1481,9 @@ def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
                          fix="Deploy the hscc_daemon plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
+        # No hscc_dir: the ledger's root is the writer's root, not this
+        # process's environment (t_adb66608, above).
+        #
         # t_95eb9f15: the live doctor also compares each watcher's DEPLOYED copy
         # against the repo copy the installer took it from. Opt-in on purpose --
         # doctor_check reads no host scripts dir unless it is asked to -- and
@@ -1480,9 +1492,9 @@ def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
         # this checkout): a warn-only row must degrade to the stamp read, not
         # raise out of the whole doctor run.
         if "check_deployed_copies" in inspect.signature(cw.doctor_check).parameters:
-            res = cw.doctor_check(hscc_dir=hscc_dir, check_deployed_copies=True)
+            res = cw.doctor_check(check_deployed_copies=True)
         else:
-            res = cw.doctor_check(hscc_dir=hscc_dir)
+            res = cw.doctor_check()
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 
@@ -1968,7 +1980,10 @@ def _refused_main_wakeups_check() -> dict:
 # loader/refusal/fallback_name. `row_kwargs` names the per-row context each
 # row function wants: "hscc_dir" (the sandboxed ~/.hscc root, the
 # doctor_notifier_mask convention) or "hermes_home" (the deployed plugin tree,
-# what the budget-hook row reads).
+# what the budget-hook row reads). A row whose subject has a root the CALLER may
+# not choose declares `row_kwargs=()` — the cron-watcher row does, because the
+# ledger it reads is written by processes that never see HSCC_DIR (t_adb66608,
+# note on that entry).
 # ---------------------------------------------------------------------------
 FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # orch-waker W3 (t_2b34b5c7): is the daemon-resident orchestrator waker
@@ -1989,7 +2004,16 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # (fatal=False always).
     doctor_rows.FeatureCheckRow(
         key="cron_watchers", seam_kwarg="_cron_watchers_check",
-        row_fn="_cron_watchers_check_row"),
+        row_fn="_cron_watchers_check_row",
+        # NO row_kwargs — deliberately not even the default "hscc_dir"
+        # (t_adb66608). The watcher ledger has one root, the canonical state
+        # writer's (state.STATE_DIR), and the writers of that ledger (Hermes
+        # cron jobs, the installers) never see HSCC_DIR; a row handed the
+        # ambient root therefore reads a directory nothing can write to and
+        # calls live watchers "not configured" (audit t_572b4856 §10.1).
+        # Declaring no context is what makes the writer/reader split
+        # un-wireable instead of merely unwired today.
+        row_kwargs=()),
     # GAP-F-5 (audit F): is the running daemon loop the process the service
     # manager OWNS? The t_61457fbd incident class (an orphan `hscc start` /
     # TCC-blind bootstrap loop with PPID 1) keeps stream state fresh, so every
