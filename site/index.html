@@ -309,6 +309,7 @@
 <li><code>hscc main</code><span class="say">the main orchestrator (<code>general</code> by default): bring its pane up, see whether it is busy, and edit the wake-up schedule the watcher fires into it.</span></li>
 <li><code>hscc orch inject</code><span class="say">send a message into a running agent's session.</span></li>
 <li><code>hscc orch waker</code><span class="say">the built-in orchestrator waker: <code>status</code>, <code>enable</code>, <code>disable</code>.</span></li>
+<li><code>hscc node pause &lt;host&gt;</code><span class="say">park one machine for maintenance. It prints which units it would stop and which other machines a multi-node unit would take down with it, and stops nothing until <code>--apply</code> (then <code>--span</code> for a multi-node unit, <code>--force</code> for a machine serving the orchestrator's own model). <code>hscc node resume &amp;lt;host&amp;gt;</code> starts the recorded units back up and clears the pause; <code>hscc node paused</code> lists what is parked, read-only.</span></li>
 </ul>
 </div>
 <div class="cmdgroup">
