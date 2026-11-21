@@ -269,9 +269,18 @@ The overlay does carry the primitives a daemon-driven auto-resume needs
 
 ## Where else the pause shows up
 
-The paused set is also projected onto the fleet read routes; `docs/API.md` is the
-authority for that payload and this doc deliberately does not restate it. Whatever
-those routes show, they only ever *read* the overlay — `hscc node pause` and
-`hscc node resume` remain the only ways a pause appears or goes away. `hscc node
-paused` is the same answer without the HTTP layer, and without needing the fleet to
-be reachable.
+A parked node is a choice, not a fault, and the fleet read routes now say so:
+`GET /v1/cluster/monitor` tags the parked host and serving rows with
+`{status: "paused", paused_reason, paused_since}` and states the parked set top-level as
+`paused_nodes`, and `GET /v1/health` carries the same `paused_nodes` list while leaving
+its `ok` / `checks` verdict exactly as the checks produced it — naming the pause without
+softening the signal. `docs/API.md` is the authority for those payloads; this page does
+not restate their schemas.
+
+Two properties hold across every reader of the overlay, HTTP or CLI:
+
+- the overlay is read **per request**, not frozen into a cached snapshot, so a resume
+  shows up on the next poll;
+- the visibility layer only ever **reads**. `hscc node pause` and `hscc node resume` are
+  the only ways a pause appears or goes away, and `hscc node paused` is the same answer
+  without the HTTP layer and without needing the fleet to be reachable.
