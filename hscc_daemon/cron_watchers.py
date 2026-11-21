@@ -39,9 +39,10 @@ The watchers are NOT moved into the daemon here -- that is a separate decision
 
 Cadence source of truth lives HERE (``WATCHERS``), mirroring the installer
 defaults. A watcher whose schedule is customised via env
-(``HSCC_DEP_WATCHER_SCHEDULE`` / ``HSCC_ESCALATE_SCHEDULE``) should point the
-staleness window at the real cadence with ``HSCC_DEP_WATCHER_CADENCE_S`` /
-``HSCC_ESCALATE_CADENCE_S`` (seconds) so a custom schedule is not judged
+(``HSCC_DEP_WATCHER_SCHEDULE`` / ``HSCC_ESCALATE_SCHEDULE`` /
+``HSCC_ALONE_SWEEP_SCHEDULE``) should point the staleness window at the real
+cadence with ``HSCC_DEP_WATCHER_CADENCE_S`` / ``HSCC_ESCALATE_CADENCE_S`` /
+``HSCC_ALONE_SWEEP_CADENCE_S`` (seconds) so a custom schedule is not judged
 against the installer default.
 
 Stdlib-only (same rule as the daemon's ``state.py``, which this module loads
