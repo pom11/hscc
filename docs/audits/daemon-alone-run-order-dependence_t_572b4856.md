@@ -566,9 +566,10 @@ three stamps in the operator's **live** `~/.hscc/state/` (all three carried
 `"probe": true` plus the scratch path, which is how they were identified and removed).
 `dep_pr_watcher.json` and `alone_sweep_gate.json` did not exist before and do not exist
 now. `escalate_watcher.json` did exist — the genuine 09:45 pass — and the probe
-overwrote it; it was deleted rather than left carrying fabricated fields, and the real
-`*/15` job re-stamps it on its next tick, so the row self-heals. No other file was
-touched, and `grep '"probe"' ~/.hscc/state/*.json` is empty.
+overwrote it; it was deleted rather than left carrying fabricated fields, and the
+real `*/15` job re-stamped it at `10:15:11.057565+00:00`, in the watcher's own
+222-byte schema and with no `probe` key, so the row self-healed on schedule. No other
+file was touched, and `grep '"probe"' ~/.hscc/state/*.json` is empty.
 
 The smallest honest fix is therefore the one this card anticipated, one notch deeper
 than the installer: `stamp()` / `stamp_failure()` need the same `directory` seam the
