@@ -28,7 +28,11 @@ What counts as a second posture (each caught by its own test below):
   * a file that imports the REAL ``hermes_state`` (so it builds a real
     ``SessionDB``) without importing the owner — the inverse drift: an ungated
     real-DB case does not skip on the thin sibling, it goes RED, which the
-    runner's stamp rule calls a regression.
+    runner's stamp rule calls a regression;
+  * the same drift one capability over: a file that imports the REAL
+    ``hermes_cli`` (so it reaches a real hermes symbol) without either seam —
+    the owner, or a synthetic module it installs in ``sys.modules`` itself.
+    #504 shipped exactly that shape and the leg was red on the thin sibling.
 
 Scope decisions (stated, not hidden):
 
@@ -46,6 +50,13 @@ Scope decisions (stated, not hidden):
     ``hscc-roles/tests/hermes_gap.py`` plus that leg's own guard
     ``hscc-roles/tests/test_hermes_gap_single_posture.py``. So the two legs share
     an idiom and an owner list, not a sweep.
+  * The ``hermes_cli`` rule matches IMPORT STATEMENTS (``ast.Import`` /
+    ``ast.ImportFrom``), which is the shape every real offender has had — the
+    owner's own probe and the line #504 shipped. A dynamic
+    ``importlib.import_module`` reach would slip past it; no file under this
+    leg uses ``importlib`` at all (measured with a grep over the swept set), so
+    the rule stays the plain AST one instead of a text search that fires on
+    every docstring that names the module.
   * ``routes_orchestrator.py`` imports ``hermes_state`` in PRODUCTION code and
     is out of scope: production code must not skip, it must answer honestly.
 
@@ -92,6 +103,8 @@ CAPABILITY_REASONS = (
 
 #: The real session-DB module (assembled: this file sweeps for it).
 REAL_STATE_DB = "".join(("hermes", "_state"))
+#: The real hermes CLI package (assembled for the same reason).
+REAL_CLI = "".join(("hermes", "_cli"))
 #: The owner's module name, as it appears in an import statement.
 OWNER_MODULE = "".join(("hermes", "_gap"))
 
@@ -117,6 +130,65 @@ def _imports_of(tree):
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 yield (alias.name, "")
+
+
+def _reaches_real_hermes_cli(tree):
+    """The ``hermes_cli``-rooted names a file imports (module-level or not).
+
+    ``import hermes_cli`` and ``from hermes_cli.profiles import x`` both count:
+    each one needs the real package to be importable in THIS interpreter, which
+    is the question the thin sibling answers with ``ModuleNotFoundError``.
+    """
+    return [(mod, name) for mod, name in _imports_of(tree)
+            if mod == REAL_CLI or mod.startswith(REAL_CLI + ".")]
+
+
+def _callee_name(func):
+    """``monkeypatch.setitem`` and a bare ``setitem`` both answer ``setitem``."""
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+def _is_sys_modules(node):
+    return ast.unparse(node) == "sys.modules"
+
+
+def _names_real_cli_key(node):
+    """A string literal in ``node`` that IS the CLI package or one of its parts."""
+    return any(isinstance(c, ast.Constant) and isinstance(c.value, str)
+               and (c.value == REAL_CLI or c.value.startswith(REAL_CLI + "."))
+               for c in ast.walk(node))
+
+
+def _installs_synthetic_cli(tree):
+    """Whether the file puts its OWN fake ``hermes_cli`` into ``sys.modules``.
+
+    The leg's ``fake_hermes`` idiom (``test_profile_root.py``: a
+    ``types.ModuleType`` plus ``monkeypatch.setitem(sys.modules, <pkg>, mod)``,
+    and since t_c51c87d7 the shape the #504 case uses). Behind it a
+    ``from hermes_cli import ...`` resolves to the fake on EVERY interpreter, so
+    the case runs on the thin sibling instead of being gated away.
+
+    A key built from a VARIABLE earns nothing: a seam a reader cannot read is
+    not a seam. That is stricter than the file has to be, and it is the
+    direction that keeps this rule from crediting an unrelated ``setitem``.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            keys = (node.args[1:3] if _callee_name(node.func) == "setitem"
+                    and node.args and _is_sys_modules(node.args[0]) else [])
+            if any(_names_real_cli_key(k) for k in keys):
+                return True
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (isinstance(target, ast.Subscript)
+                        and _is_sys_modules(target.value)
+                        and _names_real_cli_key(target.slice)):
+                    return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -240,6 +312,102 @@ def test_every_file_that_touches_a_real_hermes_state_db_gates_through_owner():
         "these files build a real hermes_state.SessionDB without the shared "
         f"gate (they will FAIL, not skip, on a thin interpreter): "
         f"{offenders} — import the probe from {OWNER}")
+
+
+def test_every_file_that_reaches_real_hermes_cli_carries_the_seam():
+    """The same inverse drift, one capability over: a bare ``hermes_cli`` import.
+
+    ``hermes_state`` has the rule above. ``hermes_cli`` had nothing, and #504
+    shipped ``from hermes_cli import profiles`` at TEST level with no gate
+    (``git show 28e34018 -- hscc-api/tests/test_send_working_indicator.py``):
+    the thin sibling has no ``hermes_cli``, so that case went
+    ``ModuleNotFoundError`` — RED, not skipped, which is the one thing that
+    spends the leg's "a FAILED in a sibling leg is a regression" property.
+    t_c51c87d7 made that case hermetic; this rule is what stops the shape
+    coming back through a different file.
+
+    TWO seams satisfy it, because the leg sanctions both routes:
+
+      * the owner — a file that imports ``hermes_gap`` can call
+        ``require_hermes_profile_library()`` and skip honestly;
+      * a synthetic module the file installs itself (the ``fake_hermes``
+        idiom), which makes the import resolve to a fake on EVERY interpreter,
+        so the case RUNS on the thin sibling instead of being gated away — the
+        route t_c51c87d7 took precisely so the assertion stays live.
+
+    Per-file and coarse, exactly like the rule above: an owner import proves the
+    file CAN ask, not that every case does. The drift this catches is the file
+    that never learned either route exists. ``test_profile_root.py`` is green
+    here by the second route (it injects the fake); ``test_routes_sessions`` and
+    ``test_routes_activity`` patch the ``_backing_open_profile_db`` seam instead
+    and never reach a CLI import at all, so they are correctly absent rather
+    than exempted — the same shape the rule above documents for its stand-ins.
+    """
+    offenders = []
+    for rel in _tracked_py_files():
+        if rel == OWNER:
+            continue
+        tree = ast.parse((REPO / rel).read_text())
+        reached = sorted({mod for mod, _ in _reaches_real_hermes_cli(tree)})
+        has_gate = any(mod == OWNER_MODULE for mod, _ in _imports_of(tree))
+        if reached and not (has_gate or _installs_synthetic_cli(tree)):
+            offenders.append(f"{rel}: imports {reached}")
+    assert not offenders, (
+        "these files import the real hermes CLI with neither the shared gate "
+        "nor a synthetic module (they will FAIL, not skip, on a thin "
+        "interpreter):\n" + "\n".join(offenders) +
+        f"\n— import the probe from {OWNER}, or inject a fake {REAL_CLI} into "
+        "sys.modules the way test_profile_root.py does")
+
+
+def test_the_cli_rule_fires_on_the_shape_it_polices():
+    """Anti-vacuity for the rule above, on source strings rather than on hope.
+
+    A sweep whose predicate can never be TRUE is worse than no sweep: it reads
+    as coverage on every future leg. So BOTH halves are exercised on synthetic
+    sources — including the exact line #504 shipped — and the seam predicate is
+    checked in each direction, so an unrelated ``setitem`` cannot quietly become
+    a seam. The final assertion is the same anti-vacuity the file runs on the
+    state-DB sweep: if the owner stops reaching the real package, the capability
+    is gone and the rule should be deleted, not left green on an empty set.
+
+    Deliberately not gated by anything: it touches no interpreter, only
+    ``ast.parse``.
+    """
+    cli = REAL_CLI
+    offender = ast.parse(f"from {cli} import profiles as profiles_mod\n")
+    assert [mod for mod, _ in _reaches_real_hermes_cli(offender)] == [cli]
+    assert not _installs_synthetic_cli(offender), (
+        "the bare #504 import is EXEMPT — the CLI rule is vacuously green")
+
+    gated = ast.parse(f"from {OWNER_MODULE} import require_hermes_profile_library\n"
+                      f"from {cli}.profiles import get_profile_dir\n")
+    assert _reaches_real_hermes_cli(gated), (
+        "a gated file no longer counts as reaching the real CLI, so the rule "
+        "would police nothing worth policing")
+    assert any(mod == OWNER_MODULE for mod, _ in _imports_of(gated))
+
+    injected = ast.parse(
+        f"monkeypatch.setitem(sys.modules, '{cli}', pkg)\n"
+        f"monkeypatch.setitem(sys.modules, '{cli}.profiles', mod)\n")
+    assert _installs_synthetic_cli(injected), (
+        "the fake_hermes idiom — the route t_c51c87d7 took — is not credited "
+        "as a seam")
+
+    direct = ast.parse(f"sys.modules['{cli}'] = pkg\n")
+    assert _installs_synthetic_cli(direct), (
+        "a direct sys.modules write is not credited as a seam")
+
+    unrelated = ast.parse(
+        "monkeypatch.setitem(sys.modules, 'routes_orchestrator', ro)\n")
+    assert not _installs_synthetic_cli(unrelated), (
+        "any setitem at all counts as a seam — the rule would credit a file "
+        "that injects something else entirely")
+
+    owner = ast.parse((REPO / OWNER).read_text())
+    assert _reaches_real_hermes_cli(owner), (
+        f"{OWNER} no longer imports the real CLI package itself, so the "
+        "capability this rule polices has no owner left to compare against")
 
 
 # --------------------------------------------------------------------------- #
