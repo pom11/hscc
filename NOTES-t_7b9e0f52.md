@@ -81,4 +81,10 @@ run — they are state-sealed per test, so no ordering dependence.
     tests; the wall-clock inflation is host contention — three concurrent
     suites on this Mac, zero test-side changes.)
   * alone: **54 passed** / **15 passed** (re-measured with the pins in).
-  * full suite `bash scripts/run_tests.sh`: (filled in when measured).
+  * full suite `bash scripts/run_tests.sh` at head `3bc5af3e`: **ALL GREEN,
+    12/12 legs** (✓ hscc-bootstrap, hscc-commands, hscc-roles, hscc-cluster,
+    hscc-project, hscc_daemon, sparkrun-hermes, hscc-api, memori_byodb,
+    scripts, .github/scripts, comfyui-sparkrun). The two pre-existing
+    `test_api_cli_help` in-leg flakes from the first pass did not recur in
+    this run; suite wall-clock ~25 min under host contention (three
+    concurrent suites on this Mac).
