@@ -505,17 +505,30 @@ def real_root(tmp_path, monkeypatch):
         restore_planted(evicted)
 
 
-_THIN_BOARD_FILE = '''
-"""One nested test that asks ``real_root`` for a board root in the t_dd814180
-posture: the library resolves, and the first call into it cannot import.
+# ── t_dd814180: the thin-leg red, pinned on EVERY interpreter ──────────────── #
+#
+# A regression guard cannot require a particular host, and pytest 9 refuses a
+# direct fixture call, so the shape is driven NESTED — its own process, the real
+# ``real_root``, a library injected through the production seam
+# (``autodown._load_kanban_db_or_default``, the way ``test_kanban_cli.py:320-322``
+# injects it). Nested is also the only way to observe the thing the card measures:
+# what pytest itself reports at SETUP. Same harness as
+# ``test_hermes_cli_import_isolation._run_nested``.
 
-Injected through the production seam (``autodown._load_kanban_db_or_default``),
-the way ``test_kanban_cli.py:320-322`` injects it, at SESSION scope so it is in
-place before the fixture under test resolves its lib. Nothing here is planted
-under a temp root as a ``hermes_cli`` module, so the shared plant predicate has
-nothing to see and no sibling file can be poisoned by this run.
+_THIN_BOARD_FILE = '''
+"""One nested test that asks ``real_root`` for a board root it cannot be given.
+
+Two postures, chosen by ``HSCC_T_DD814180_RAISES``: the library resolving and
+then not being able to IMPORT (the §11 thin venv — a SKIP is the right answer),
+and the library resolving and the board refusing to OPEN (a red is the right
+answer). The injection sits at MODULE scope so it is in place before the fixture
+under test resolves its lib. Nothing here is planted under a temp root as a
+``hermes_cli`` module, so the shared plant predicate has nothing to see and no
+sibling file can be poisoned by this run.
 """
+import os
 import pathlib
+import sqlite3
 import tempfile
 
 import pytest
@@ -523,8 +536,13 @@ import pytest
 from hscc_daemon.tests.test_board_pin import real_root  # noqa: F401 (fixture)
 
 
-class _ResolvesButCannotRun:
-    """What the §11 CI-faithful venv actually presents: importable, uncallable."""
+class _LibWhoseFirstCallRaises:
+    """What the §11 CI-faithful venv presents: importable, uncallable.
+
+    ``init_db`` is the fixture's first real call (through ``_seed_board``) and the
+    one that reaches hermes' lazy ``from hermes_state import ...`` at
+    ``hermes_cli/kanban_db_connect.py:766``.
+    """
 
     def kanban_db_path(self, board=None):
         return (pathlib.Path(tempfile.gettempdir()) / "t-dd814180-probe"
@@ -534,15 +552,21 @@ class _ResolvesButCannotRun:
         raise AssertionError("never reached -- init_db is the first call")
 
     def init_db(self, path):
+        # Which failure this posture presents: an ImportError (this interpreter
+        # cannot resolve hermes' lazily-imported siblings -> a SKIP is right) or a
+        # sqlite error (hermes is here and the board genuinely will not open -> a
+        # red is right). See the two tests that drive this file.
+        if os.environ.get("HSCC_T_DD814180_RAISES") == "sqlite":
+            raise sqlite3.OperationalError("attempt to write a readonly database")
         raise ModuleNotFoundError("No module named 'hermes_state'",
                                   name="hermes_state")
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="module", autouse=True)
 def _thin_posture():
     mp = pytest.MonkeyPatch()
     mp.setattr("hscc_daemon.autodown._load_kanban_db_or_default",
-               lambda: _ResolvesButCannotRun())
+               lambda: _LibWhoseFirstCallRaises())
     yield
     mp.undo()
 
@@ -553,7 +577,31 @@ def test_the_pair_skips_instead_of_erroring(real_root):
 '''
 
 
-def test_real_root_skips_rather_than_errors_when_hermes_cannot_open_a_board(tmp_path):
+def _run_thin_posture(tmp_path, raises):
+    """Run the nested one-test file with the injected failure ``raises``.
+
+    Returns ``(returncode, output)`` — what pytest itself reports at SETUP is the
+    whole question, and only a nested process can show it. A worker shell's board
+    pins are cleared so they cannot steer the run (t_7e343e04).
+    """
+    name = "test_thin_board_posture.py"
+    (tmp_path / name).write_text(_THIN_BOARD_FILE)
+    env = dict(os.environ)
+    env["HSCC_T_DD814180_RAISES"] = raises
+    repo = str(pathlib.Path(__file__).resolve().parents[2])
+    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_HOME",
+                "HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT",
+                "PYTEST_CURRENT_TEST"):
+        env.pop(key, None)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider",
+         "-p", "hscc_daemon.tests.conftest", name],
+        env=env, cwd=str(tmp_path), capture_output=True, text=True, timeout=300)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def test_real_root_skips_rather_than_errors_when_hermes_cannot_import(tmp_path):
     """t_dd814180: the thin-leg red, pinned on EVERY interpreter.
 
     The posture that made the leg red is the CI-faithful venv of
@@ -578,28 +626,32 @@ def test_real_root_skips_rather_than_errors_when_hermes_cannot_open_a_board(tmp_
     * the nested test did not PASS (its body fails on purpose), so the pin cannot
       be green for the wrong reason on a host where the injection missed.
     """
-    name = "test_thin_board_posture.py"
-    (tmp_path / name).write_text(_THIN_BOARD_FILE)
-    env = dict(os.environ)
-    repo = str(pathlib.Path(__file__).resolve().parents[2])
-    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
-    # A worker shell's board pins must not steer the nested run (t_7e343e04).
-    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_HOME",
-                "HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT",
-                "PYTEST_CURRENT_TEST"):
-        env.pop(key, None)
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider",
-         "-p", "hscc_daemon.tests.conftest", name],
-        env=env, cwd=str(tmp_path), capture_output=True, text=True, timeout=300)
-    out = proc.stdout + proc.stderr
-    assert proc.returncode == 0, (
-        f"the thin posture did not SKIP (rc {proc.returncode}):\n{out}")
+    rc, out = _run_thin_posture(tmp_path, "import")
+    assert rc == 0, (
+        f"the thin posture did not SKIP (rc {rc}):\n{out}")
     assert "1 skipped" in out, out
     assert "hermes_state" in out, f"the skip must name what was missing:\n{out}"
     assert "CANNOT open a board" in out and "not importable" not in out, (
         "the 'here but unusable' posture and the 'no hermes here' posture "
         f"collapsed onto one skip reason:\n{out}")
+
+
+def test_real_root_still_errors_when_the_board_call_fails_for_a_real_reason(
+        tmp_path):
+    """The narrowness of the new clause is the other half of the guard.
+
+    An ``ImportError`` out of ``init_db`` is a fact about the interpreter and may
+    be skipped; a sqlite failure is a board that will not open and may NOT. Widen
+    that ``except`` to a bare ``Exception`` and this goes red — which is exactly
+    the line GAP-D-1 draws between an honest skip and the silent-green shape the
+    whole t_3aadd2c0 line of work exists to kill, and the reason the fixture
+    catches one exception type rather than "whatever goes wrong".
+    """
+    rc, out = _run_thin_posture(tmp_path, "sqlite")
+    assert rc != 0, f"a real board failure was skipped away:\n{out}"
+    assert "1 error" in out, f"expected a setup ERROR, got:\n{out}"
+    assert "readonly" in out, f"the real cause must still reach the reader:\n{out}"
+    assert "CANNOT open a board" not in out, out
 
 
 def _seed(kb, slug, task_id, title):
