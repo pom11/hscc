@@ -75,7 +75,8 @@ no new backend routes.
 
 The menu bar app carries no notifications: it polls no alert feed and asks for
 no notification permission (operator decision 2026-11-19). The cluster alert
-feed and its APNs sender remain backend features; neither app surfaces them.
+feed remains a backend feature that neither app surfaces; there is no APNs
+sender and no device registration, so there is nothing to configure.
 
 `/v1/cluster/monitor` exposes no tokens-per-second field in the shared model,
 so the app does not invent one.

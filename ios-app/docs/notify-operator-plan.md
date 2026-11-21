@@ -19,7 +19,11 @@ What was removed on the app side:
   authorization request, and the Alerts section/badge in the menu bar
   dropdown.
 
-The backend alert feed (`hscc notify`, `POST/GET /v1/alerts`), the device
-roster (`/v1/devices`) and the APNs sender remain server-side features; the
-apps do not consume them. This document is kept only as the record of the
+The backend alert feed (`hscc notify`, `POST/GET /v1/alerts`) remains a
+server-side feature. The device roster and the APNs sender do not: `3073e15c`
+deleted `hscc_daemon/devices.py`, `hscc_daemon/apns.py` and the `/v1/devices`
+routes on the same date, and
+`hscc-api/tests/test_contract_swift_routes.py` fails if either route is ever
+registered again. Nothing in the push design described below survives on
+either side of the wire. This document is kept only as the record of the
 dropped design, not as a plan of record.
