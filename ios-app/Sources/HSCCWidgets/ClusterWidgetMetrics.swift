@@ -58,9 +58,18 @@ enum ClusterMetricHeat: Equatable {
 
     /// A serving node's GPU is the number an operator watches; a node that did
     /// not answer is not "calm".
+    ///
+    /// A node the operator PARKED is not "hot" either. Its row keeps its
+    /// `error` — the overlay refuses to delete a real diagnostic — so a heat
+    /// verdict that asked `isUp` first would paint a deliberate pause in the
+    /// same alarm colour as a machine that failed. It gets `.unknown`, the
+    /// verdict this enum already uses for "there is no reading to judge",
+    /// because a parked machine genuinely has no load to colour.
     static func node(_ node: FleetNodeLine) -> ClusterMetricHeat {
-        guard node.isUp else { return .hot }
-        return percent(node.gpuPct)
+        guard node.isPaused else {
+            return node.isUp ? percent(node.gpuPct) : .hot
+        }
+        return .unknown
     }
 }
 
@@ -387,12 +396,23 @@ struct ClusterEntry: TimelineEntry {
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the
     /// tally, not a second state word.
+    ///
+    /// A parked node is in none of those sentences. It is excluded from BOTH
+    /// sides of the comparison — from the numerator because it is not evidence
+    /// a fleet is answering, from the denominator because it is not evidence a
+    /// fleet is failing — and the count comes from the projected rows, never
+    /// from a number this file assumes. When every listed node is parked there
+    /// is nothing left to judge: `.unknown`, the verdict for "no reading", which
+    /// is the colour for "not told" and not the colour for "alarm".
     var heat: ClusterMetricHeat {
-        guard let fleet, let up = fleet.tally.nodesUp, let total = fleet.tally.nodesTotal else {
+        guard let fleet, fleet.tally.nodesUp != nil, fleet.tally.nodesTotal != nil else {
             return .unknown
         }
-        if up == 0 && total > 0 { return .hot }
-        return up == total ? .calm : .warm
+        let judged = fleet.nodes.filter { !$0.isPaused }
+        guard !judged.isEmpty else { return .unknown }
+        let up = judged.filter { $0.isUp }.count
+        if up == 0 { return .hot }
+        return up == judged.count ? .calm : .warm
     }
 
     /// The host rows a CLI-shaped surface (the medium tile) may draw, or nil
