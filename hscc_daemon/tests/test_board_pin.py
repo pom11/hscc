@@ -26,12 +26,13 @@ the fixture boards are created while no fence marker is set.
 import os
 import pathlib
 import sqlite3
+import subprocess
 import sys
 import tempfile
 
 import pytest
 
-from hscc_daemon import board_pin
+from hscc_daemon import board_pin, hermes_import
 
 # The ONE "is this a planted fake?" rule, shared with conftest and test_autodown
 # (t_b62da70c) — see the comment above ``_real_kanban_db`` for what this file
@@ -413,9 +414,13 @@ def real_root(tmp_path, monkeypatch):
     """A hermetic multi-board root via ``HERMES_KANBAN_HOME`` + real hermes.
 
     A real ``pytest.skip`` (GAP-D-1) when hermes_cli cannot be imported in this
-    interpreter, or when the name cannot be made real even after the planted
-    stubs are evicted — so the unit family still runs on a bare venv and a skip
-    always says why.
+    interpreter, when the name cannot be made real even after the planted stubs
+    are evicted, OR when it resolves but this interpreter cannot run it — the
+    three postures are skipped for three different stated reasons, so ``-rs``
+    tells "no hermes here" from "hermes here but unusable here" and the unit
+    family still runs on a bare venv. The third one is t_dd814180: the name
+    resolving says the tree was importable for one import, not that the calls
+    below can resolve what they import, so the probe is a call, not an import.
 
     Everything goes through ``kb`` — the module autodown resolved — and NEVER
     through a direct ``import hermes_cli.<submodule>``: importing a real hermes
@@ -448,6 +453,40 @@ def real_root(tmp_path, monkeypatch):
             for slug in ("alpha", "beta"):
                 _seed_board(kb, root, slug)
             _seed_board(kb, root, "")           # the legacy flat ``default``
+        except ImportError as exc:
+            # CAPABILITY probe, and this call IS the probe (t_dd814180). It is the
+            # first real thing the fixture asks of hermes and the same call the two
+            # bodies go on to make, so it cannot answer a weaker question than the
+            # body does — which is what GAP-D-1 asks of a skip and what the old
+            # predicate ("the name imported") did not.
+            #
+            # ``ImportError`` here has exactly one meaning: the name resolved inside
+            # autodown's bounded window, and hermes' own ``connect()`` now wants a
+            # TOP-LEVEL sibling that only the tree on ``sys.path`` can supply —
+            # ``hermes_cli/kanban_db_connect.py:645`` (``hermes_state_wal``),
+            # ``:723`` (``agent.delegation_context``), ``:766`` (``hermes_state``).
+            # A loaded package resolves ``hermes_cli.*`` through its own ``__path__``
+            # and nothing else, so every interpreter that does not PERMANENTLY hold
+            # the agent tree on its path imports the library fine and still cannot
+            # open a board. Measured on the §11 CI-faithful venv: 2 errors at setup,
+            # ``ModuleNotFoundError: No module named 'hermes_state'``.
+            #
+            # Deliberately NOT caught: anything else. A sqlite/OS failure here is a
+            # real red worth seeing; an import failure is a fact about the
+            # interpreter. And deliberately NOT fixed by widening the window —
+            # t_2be3b04e pins it bounded, and pre-importing one sibling name would
+            # not help: three of them are wanted, and ``agent.*`` is the deferred
+            # ``os.execv`` launch chain run_tests.sh:100-122 documents.
+            pytest.skip(
+                "real hermes_cli resolves here but CANNOT open a board in this "
+                f"interpreter: {type(exc).__name__}: {exc} — hermes' connect() "
+                "imports its top-level siblings (hermes_state, hermes_state_wal, "
+                "agent.delegation_context) lazily at call time, so it needs the "
+                f"agent tree {hermes_import.resolve_agent_tree()!r} to stay on "
+                "sys.path; autodown's import window is bounded on purpose "
+                "(t_2be3b04e), so only an interpreter that already carries the "
+                "tree on its path — Hermes' own venv — runs this pair "
+                "(t_dd814180)")
         except AttributeError as exc:
             # Coherence probe, not a swallowed failure. Once a sibling file has
             # planted a stub ``hermes_cli.kanban_db`` in this process, evicting
@@ -464,6 +503,103 @@ def real_root(tmp_path, monkeypatch):
         yield root, kb
     finally:
         restore_planted(evicted)
+
+
+_THIN_BOARD_FILE = '''
+"""One nested test that asks ``real_root`` for a board root in the t_dd814180
+posture: the library resolves, and the first call into it cannot import.
+
+Injected through the production seam (``autodown._load_kanban_db_or_default``),
+the way ``test_kanban_cli.py:320-322`` injects it, at SESSION scope so it is in
+place before the fixture under test resolves its lib. Nothing here is planted
+under a temp root as a ``hermes_cli`` module, so the shared plant predicate has
+nothing to see and no sibling file can be poisoned by this run.
+"""
+import pathlib
+import tempfile
+
+import pytest
+
+from hscc_daemon.tests.test_board_pin import real_root  # noqa: F401 (fixture)
+
+
+class _ResolvesButCannotRun:
+    """What the §11 CI-faithful venv actually presents: importable, uncallable."""
+
+    def kanban_db_path(self, board=None):
+        return (pathlib.Path(tempfile.gettempdir()) / "t-dd814180-probe"
+                / (board or "default") / "kanban.db")
+
+    def create_board(self, *a, **k):
+        raise AssertionError("never reached -- init_db is the first call")
+
+    def init_db(self, path):
+        raise ModuleNotFoundError("No module named 'hermes_state'",
+                                  name="hermes_state")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _thin_posture():
+    mp = pytest.MonkeyPatch()
+    mp.setattr("hscc_daemon.autodown._load_kanban_db_or_default",
+               lambda: _ResolvesButCannotRun())
+    yield
+    mp.undo()
+
+
+def test_the_pair_skips_instead_of_erroring(real_root):
+    pytest.fail("real_root yielded a board root, so the injected ImportError "
+                "never reached the fixture and this pin proved nothing")
+'''
+
+
+def test_real_root_skips_rather_than_errors_when_hermes_cannot_open_a_board(tmp_path):
+    """t_dd814180: the thin-leg red, pinned on EVERY interpreter.
+
+    The posture that made the leg red is the CI-faithful venv of
+    ``docs/audits/daemon-alone-run-order-dependence_t_572b4856.md`` §11: the name
+    resolves, ``kb.init_db`` raises ``ModuleNotFoundError: No module named
+    'hermes_state'`` (``hermes_cli/kanban_db_connect.py:766`` — a top-level
+    sibling imported at CALL time, after autodown's bounded window closed), and
+    both ``real_hermes*`` tests ERROR at setup: ``4048 passed, 10 skipped, 2
+    errors``, ``✗ hscc_daemon``. No host can be required for a regression guard
+    and pytest 9 refuses a direct fixture call, so the shape runs nested in its
+    own process — which is also the only way to observe the thing the card
+    actually measures: a SETUP SKIP, not a setup error, as pytest itself reports
+    it. Same nested harness as ``test_hermes_cli_import_isolation._run_nested``.
+
+    Four assertions, because "a skip happened" is not the fix:
+
+    * rc 0 — an error at setup exits 1, which is the bug;
+    * the reason NAMES the missing module, so ``-rs`` says what was absent;
+    * the reason is the *unusable* one and not the *not-importable* one — the
+      sweep diffs skip reasons, and a reason that moves between postures is an
+      answer change, so the two must stay tellable apart forever;
+    * the nested test did not PASS (its body fails on purpose), so the pin cannot
+      be green for the wrong reason on a host where the injection missed.
+    """
+    name = "test_thin_board_posture.py"
+    (tmp_path / name).write_text(_THIN_BOARD_FILE)
+    env = dict(os.environ)
+    repo = str(pathlib.Path(__file__).resolve().parents[2])
+    env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
+    # A worker shell's board pins must not steer the nested run (t_7e343e04).
+    for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_HOME",
+                "HERMES_KANBAN_TASK", "HERMES_DELEGATED_CHILD_CONTEXT",
+                "PYTEST_CURRENT_TEST"):
+        env.pop(key, None)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider",
+         "-p", "hscc_daemon.tests.conftest", name],
+        env=env, cwd=str(tmp_path), capture_output=True, text=True, timeout=300)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, (
+        f"the thin posture did not SKIP (rc {proc.returncode}):\n{out}")
+    assert "1 skipped" in out, out
+    assert "hermes_state" in out, f"the skip must name what was missing:\n{out}"
+    assert "CANNOT open a board" in out and "not importable" not in out, (
+        "the 'here but unusable' posture and the 'no hermes here' posture "
+        f"collapsed onto one skip reason:\n{out}")
 
 
 def _seed(kb, slug, task_id, title):
