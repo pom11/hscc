@@ -204,9 +204,12 @@ TMUX_DEFAULT_TMPDIR = "/tmp"
 TMUX_DEFAULT_SOCKET_NAME = "default"
 
 #: Private-tmpdir conventions tmux servers are started with here that neither
-#: TMUX_TMPDIR nor /tmp reveals. Measured on the reporting host: the running
-#: server's socket sat under `~/.tmux/tmp/tmux-<uid>/` while `/tmp/tmux-<uid>/`
-#: held only stale test sockets — i.e. tmux's own rule could not have found it.
+#: TMUX_TMPDIR nor /tmp reveals. Measured on the reporting host (tmux 3.8): the
+#: live server's socket was `~/.tmux/tmp/tmux-<uid>/default`, and
+#: `tmux ls` from a shell with no TMUX_TMPDIR failed with
+#: `error connecting to /private/tmp/tmux-<uid>/default (No such file or
+#: directory)` — where `/tmp/tmux-<uid>/` held only a STALE socket file. So a
+#: fix that scanned tmux's own default directory would have found nothing.
 TMUX_PRIVATE_TMPDIRS = ("~/.tmux/tmp", "~/.tmux", "~/.local/tmp")
 
 #: Budget for one read-only probe; a wedged server must not hang an inject.
