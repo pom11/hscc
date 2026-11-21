@@ -1,8 +1,28 @@
 # t_1f8e89c9 — fix red tests: strike the node BEFORE pausing it
 
+## Framing correction (operator, mid-run)
+Main CI is GREEN at `354f4570` — this is NOT main-red. The three failures reproduce on
+THIS Mac (alone AND in-leg) but not on the CI runner. So the card body's "main is red"
+is true on this host only. `t_d7a2680f` and `t_df0c837c` are parked/closed duplicates —
+this card is the only one for the defect.
+
+## Discriminator (settles WHICH commit is correct)
+Because CI is green, "12/12 locally" cannot by itself prove I fixed a test bug rather
+than papered over a host difference. So I ran the discriminator probe (operator's
+suggestion) in a clean worktree at `354f4570`, overlay sealed to tmp, default constants
+(`HEAL_BREAKER_MAX=6`, no env override):
+- strike BEFORE any pause → `strike_count` accrues (1).
+- pause, then `note_heal(W1)` → `covering(W1)` returns a RECORD, `note_heal` returns
+  `paused=True`, `strike_count` delta = 0.
+Verdict: the suppression IS #568's pause guard (hypothesis 1), on this host. The card's
+mechanism is correct here — reordering the setup is the right fix, not a symptom patch.
+What I could NOT reproduce locally is the CI runner's green with the same content (no
+CI-runner access from here); I flag that divergence honestly below rather than claim it
+resolved. It does not change the fix: the reordered assertions are true in BOTH postures.
+
 ## State
-Branch `wt/t_1f8e89c9`, base `08441f22` (origin/main tip, which is above `c28f3b2c`/
-`de02ac9e`). Measured red at this base (matches the card exactly):
+Branch `wt/t_1f8e89c9`, base `354f4570` (origin/main tip; docs-only `#570` above the card
+base `08441f22`). Measured red at the base (matches the card exactly):
 
 - `hscc-cluster/tests/test_node_pause_tools.py::TestResumeTool::test_confirmed_resume_clears_pause_and_strikes`
   → `assert heal_breaker.suspended(W1) > 0.0` gets `0.0` (1 failed, 14 passed)
