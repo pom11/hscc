@@ -497,10 +497,12 @@ def doctor_check(hscc_dir=None, *, now=None, env=None):
         # (t_13a70290; the cadence is the gate header's own routing decision).
         sweep_hint = ""
         if any(r["stream"] == "alone_sweep_gate" for r in rows if r["warn"]):
-            sweep_hint = (" -- for alone_sweep_gate, `scripts/alone_sweep_gate.sh "
-                          "--preflight` checks the wiring in seconds and "
+            sweep_hint = (" -- for alone_sweep_gate, start cheap: "
+                          "`scripts/alone_sweep_gate.sh --preflight` checks the "
+                          "wiring in seconds and "
                           "`scripts/install_alone_sweep_gate.sh --status` prints "
-                          "the last verdict on record; the pass itself is ~25 min")
+                          "the last verdict on record; the sweep pass itself is "
+                          "minutes per interpreter")
         return {
             "name": CHECK_NAME, "ok": False, "fatal": False, "rows": rows,
             "detail": "; ".join(problems + notes),
