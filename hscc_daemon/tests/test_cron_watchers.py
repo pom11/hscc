@@ -36,6 +36,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.delenv("HSCC_DIR", raising=False)
     monkeypatch.delenv("HSCC_DEP_WATCHER_CADENCE_S", raising=False)
     monkeypatch.delenv("HSCC_ESCALATE_CADENCE_S", raising=False)
+    monkeypatch.delenv("HSCC_ALONE_SWEEP_CADENCE_S", raising=False)
     return tmp_path
 
 
@@ -58,10 +59,28 @@ def test_windows_are_at_least_3x_cadence():
 
 
 def test_cadences_match_the_installer_defaults():
-    """dep watcher daily (0 8 * * *), escalate watcher */15 — drift here
-    silently re-times the warn window, so pin both."""
+    """Every row must equal its installer's baked schedule, or the warn window
+    silently re-times itself. Read the installers, do not trust these numbers."""
     assert cw.cadence_s("dep_pr_watcher") == 86400
     assert cw.cadence_s("escalate_watcher") == 900
+    assert cw.cadence_s("alone_sweep_gate") == 86400
+
+
+def test_row_installer_paths_exist_and_name_the_real_cron_jobs():
+    """The doctor prints ``install_script`` as the fix and ``cron_job`` as the
+    thing to look for in `hermes cron list` — a stale name in this roster sends
+    an operator to a file or a job that does not exist."""
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    installers = {}
+    for stream, row in cw.WATCHERS.items():
+        path = os.path.join(repo, row["install_script"])
+        assert os.path.isfile(path), f"{stream}: no installer at {row['install_script']}"
+        text = open(path, encoding="utf-8").read()
+        assert row["cron_job"] in text, (
+            f"{stream}: installer {row['install_script']} never names "
+            f"{row['cron_job']} — the doctor would point at a job it cannot find")
+        installers[stream] = path
+    assert len(installers) == len(cw.WATCHERS)
 
 
 def test_cadence_env_override(sandbox, monkeypatch):
@@ -291,3 +310,109 @@ def test_live_watcher_stamps_carry_their_own_verdict(sandbox):
     # it against real now (a fixed NOW here would age-judge it wrong).
     v = cw.verdict("escalate_watcher")
     assert v["status"] == "ok" and v["age_s"] is not None
+
+
+# ── the alone-sweep gate row: LIVENESS, with the verdict riding along ───────
+# t_13a70290 decided the sweep nightly belongs in this roster. What had to be
+# settled first is what the row MEANS: the gate produces a verdict (GREEN / RED /
+# NOT MEASURED), and the failure the card refuses to accept is a red sweep
+# reading as "watcher alive and well". So the row stays a liveness row — stale /
+# never-ran still mean "the cron job is not firing" — and a pass that was not
+# clean stamps ok=False, which reads `failing`: warned, and worded so nobody can
+# mistake it for a dead job.
+
+def test_a_green_sweep_pass_is_ok_and_carries_the_gate_fields(sandbox):
+    """A pass that swept and found nothing to fix advances the stamp — the
+    idle-pass rule of GAP-B-4, in the shape this gate has."""
+    assert cw.stamp("alone_sweep_gate", gate_rc=0, verdict="green",
+                    interpreters=2, head="abc1234") is True
+    v = cw.verdict("alone_sweep_gate", now=NOW)
+    assert v["status"] == "ok" and v["warn"] is False
+    assert "WARN" not in v["detail"] and "hscc-alone-sweep-gate" in v["detail"]
+    stamp = cw.read_stamp("alone_sweep_gate") or {}
+    assert stamp.get("verdict") == "green" and stamp.get("interpreters") == 2
+    assert stamp.get("head") == "abc1234" and stamp.get("ok") is True
+
+
+def test_a_red_sweep_never_reads_healthy(sandbox):
+    """THE constraint: RED must not look like a fresh, healthy stamp."""
+    assert cw.stamp_failure(
+        "alone_sweep_gate",
+        "GATE RED: at least one file answers alone differently than inside "
+        "the leg", verdict="red", gate_rc=1, head="abc1234") is True
+    v = cw.verdict("alone_sweep_gate", now=NOW)
+    assert v["status"] == "failing" and v["warn"] is True
+    assert v["detail"].startswith("WARN:")
+    assert "GATE RED" in v["detail"], (
+        "the warn line must name the verdict, not just 'the pass failed'")
+    # the stamp MOVED (the job fired) — this is not the dead-job verdict
+    assert v["age_s"] is not None and v["age_s"] < v["window_s"]
+    assert cw.read_stamp("alone_sweep_gate")["verdict"] == "red"
+
+
+def test_a_dead_nightly_and_a_red_nightly_read_differently(sandbox):
+    """The two sentences the row must keep apart: 'stopped firing' vs
+    'fired, and the sweep was red'. Both warn; neither may be confused."""
+    _write_stamp("alone_sweep_gate", age_s=4 * 86400)
+    dead = cw.verdict("alone_sweep_gate", now=NOW)
+    cw.stamp_failure("alone_sweep_gate", "GATE RED: one file differs",
+                     verdict="red")
+    red = cw.verdict("alone_sweep_gate", now=NOW)
+    assert dead["status"] == "stale" and red["status"] == "failing"
+    assert dead["warn"] and red["warn"]
+    assert "not firing" in dead["detail"] and "GATE RED" in red["detail"]
+
+
+def test_a_pass_mid_flight_does_not_false_warn(sandbox):
+    """The cadence window has to absorb the pass itself: the stamp is written at
+    the END of a ~25 min pass, so the previous pass can legitimately be
+    ~24h + pass-length old while this one is still running."""
+    _write_stamp("alone_sweep_gate", age_s=86400 + 1800)
+    v = cw.verdict("alone_sweep_gate", now=NOW)
+    assert v["status"] == "ok" and v["warn"] is False
+    assert v["window_s"] == 3 * 86400
+
+
+def test_installed_but_never_swept_warns_the_same_way(sandbox):
+    """The t_3aadd2c0 shape, this job: the installer registered the cron job, so
+    a report dir with nothing in it is a failing nightly, not an absent one."""
+    assert cw.mark_installed("alone_sweep_gate", "30 4 * * *") is True
+    v = cw.verdict("alone_sweep_gate", now=NOW)
+    assert v["status"] == "never-ran" and v["warn"] is True
+    assert "install_alone_sweep_gate.sh" in v["detail"]
+    assert cw.mark_removed("alone_sweep_gate") is True
+    assert cw.verdict("alone_sweep_gate", now=NOW)["status"] == "not-configured"
+
+
+def test_cadence_env_override_for_a_custom_sweep_schedule(sandbox, monkeypatch):
+    """An operator who moves the nightly (HSCC_ALONE_SWEEP_SCHEDULE) must be
+    able to move the window with it, or a weekly pass is stale by Wednesday."""
+    monkeypatch.setenv("HSCC_ALONE_SWEEP_CADENCE_S", "604800")
+    assert cw.cadence_s("alone_sweep_gate") == 604800
+    assert cw.stale_window_s("alone_sweep_gate") == 3 * 604800
+
+
+def test_doctor_row_covers_the_sweep_gate_without_going_fatal(sandbox):
+    """A red sweep is a finding about the test suite, never a broken host:
+    warn-shape in the doctor row, and the fix offers the seconds-cheap
+    preflight rather than a 25-minute re-run."""
+    cw.stamp_failure("alone_sweep_gate", "GATE RED: one file differs",
+                     verdict="red")
+    row = cw.doctor_check(now=NOW)
+    assert row["ok"] is False and row["fatal"] is False
+    assert row["name"] == cw.CHECK_NAME
+    assert "alone_sweep_gate" in row["detail"]
+    assert "--preflight" in row["fix"]
+
+
+def test_a_red_sweep_stamp_never_turns_verify_red(sandbox):
+    """Negative control on the exclusion: the sweep stamp is a doctor-row
+    subject, so neither its age (daily, vs the flat 600s stream window) nor its
+    ok=False may fail the cluster smoke test."""
+    from hscc_daemon import verify
+    cw.stamp_failure("alone_sweep_gate", "GATE RED: one file differs",
+                     verdict="red")
+    _write_stamp("dep_pr_watcher", age_s=2 * 86400)
+    r = verify.check_daemon_streams(state_dir=state.STATE_DIR)
+    assert r["ok"] is True
+    assert "excluded" in r["detail"]

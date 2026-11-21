@@ -39,7 +39,7 @@ import doctor_rows
 
 CHECK_NAMES = [
     "orch-waker (orchestrator waker)",
-    "cron watchers (dep_pr/escalate)",
+    "cron watchers (dep_pr/escalate/alone_sweep)",
     "daemon supervision (service manager owns the pid)",
     "kanban enforce (paused-board hold)",
     "kanban current board (main orchestrator)",

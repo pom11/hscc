@@ -7,11 +7,12 @@ Two layers, same shape as test_doctor_orch_waker.py:
    silent vanishing of the check.
 
 2. The SEAM inside run_doctor(): the check's real targets are
-   ~/.hscc/state/dep_pr_watcher.json, ~/.hscc/state/escalate_watcher.json and
-   the install marker beside them — the OPERATOR's live tree when this suite
-   runs from a dispatched worker. Inside a pytest process the verdict must be
-   injected (``_cron_watchers_check``) or the row renders as a refusal naming
-   the seam; it must never read the operator's watcher stamps.
+   ~/.hscc/state/dep_pr_watcher.json, ~/.hscc/state/escalate_watcher.json,
+   ~/.hscc/state/alone_sweep_gate.json and the install marker beside them — the
+   OPERATOR's live tree when this suite runs from a dispatched worker. Inside a
+   pytest process the verdict must be injected (``_cron_watchers_check``) or the
+   row renders as a refusal naming the seam; it must never read the operator's
+   watcher stamps.
 
 The verdicts themselves (ok / stale-warn / not-configured / never-ran) are
 pinned against the real cron_watchers.doctor_check in
@@ -25,7 +26,7 @@ import sys
 
 import doctor
 
-CHECK_NAME = "cron watchers (dep_pr/escalate)"
+CHECK_NAME = "cron watchers (dep_pr/escalate/alone_sweep)"
 
 FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["192.0.2.1"]}])
 

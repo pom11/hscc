@@ -1,14 +1,24 @@
 """Liveness stamps + staleness verdicts for the Hermes-cron watchers.
 
-Audit B / GAP-B-4: the two watchers that live OUTSIDE the daemon --
-``scripts/dep_pr_watcher.py`` (Hermes cron job ``hscc-dep-watcher``, daily) and
+Audit B / GAP-B-4: the watchers that live OUTSIDE the daemon --
+``scripts/dep_pr_watcher.py`` (Hermes cron job ``hscc-dep-watcher``, daily),
 ``scripts/escalate_watcher_run.py`` (Hermes cron job ``hscc-escalate-watcher``,
-*/15) -- leave no trace when they run and no gap at all when they stop running.
-Both are ``--no-agent`` jobs whose only record is Hermes' own run history, so a
-job that stops firing is discovered only when a dep-bump PR goes unverified for
-days. That exact failure already happened once: the dep-watcher failed 17
-consecutive daily runs before anyone looked (t_3aadd2c0, recorded in
+*/15) and ``scripts/alone_sweep_gate.sh`` (Hermes cron job
+``hscc-alone-sweep-gate``, nightly) -- leave no trace when they run and no gap
+at all when they stop running. All are ``--no-agent`` jobs whose only record is
+Hermes' own run history (plus files in a report dir nobody reads by default), so
+a job that stops firing is discovered only when something downstream goes
+unverified for days. That exact failure already happened once: the dep-watcher
+failed 17 consecutive daily runs before anyone looked (t_3aadd2c0, recorded in
 ``scripts/install_dep_watcher.sh``).
+
+Two meanings, kept apart on purpose (t_13a70290): every row is a **liveness**
+row -- "did this job fire?" -- and the verdict is only what the stamp *carries*.
+A watcher that produces a verdict (the alone-sweep gate prints GREEN / RED / NOT
+MEASURED) stamps through :func:`stamp_failure` when its pass was not clean, so
+the row goes ``failing`` (warn) instead of ``ok``: a red sweep can never read as
+"watcher alive and well". ``stale`` / ``never-ran`` still mean "the job is not
+firing", which is a different sentence and prints differently.
 
 Fix shape deliberately copied from the daemon streams, not invented:
 
@@ -61,6 +71,20 @@ MISS_FACTOR = 3
 # cron job name the installer registers, ``cadence_s`` the installer default
 # schedule in seconds, ``cadence_env`` the env override for the cadence (see
 # the module docstring), ``install_script`` how to (re)install it.
+#
+# WHAT EACH ROW MEANS, per watcher, because the third one is different from the
+# first two:
+#   dep_pr_watcher / escalate_watcher -- pure liveness. Their verdict is their
+#   own work product (cards created, escalations acted on) and lives elsewhere;
+#   the row only says the job fired.
+#   alone_sweep_gate -- liveness, WITH the gate's verdict riding in the stamp.
+#   The gate's whole point is a verdict (GREEN / RED / NOT MEASURED) that
+#   otherwise lives in a report dir nothing reads, so a pass that was not clean
+#   stamps ok=False (:func:`stamp_failure`) and the row reads ``failing``, not
+#   ``ok``. Reading the row: ``stale`` / ``never-ran`` = the nightly has stopped
+#   firing; ``failing`` = it fired and the sweep said RED (or could not
+#   measure). Both warn; neither is fatal -- a red sweep is a finding about the
+#   test suite, not a broken host.
 WATCHERS = {
     "dep_pr_watcher": {
         "cron_job": "hscc-dep-watcher",
@@ -76,6 +100,13 @@ WATCHERS = {
         "cadence_env": "HSCC_ESCALATE_CADENCE_S",
         "install_script": "scripts/install_escalate_watcher.sh",
     },
+    "alone_sweep_gate": {
+        "cron_job": "hscc-alone-sweep-gate",
+        "script": "alone_sweep_gate.sh",
+        "cadence_s": 86400,           # nightly (`30 4 * * *`)
+        "cadence_env": "HSCC_ALONE_SWEEP_CADENCE_S",
+        "install_script": "scripts/install_alone_sweep_gate.sh",
+    },
 }
 
 # Names in stable rendering order.
@@ -84,10 +115,13 @@ STREAMS = tuple(WATCHERS)
 # Statuses that mean "nothing to warn about".
 HEALTHY_STATUSES = ("ok", "not-configured")
 
-#: Name of the doctor row this module owns. A fallback for doctor.py lives
-#: next to its other _*_CHECK_NAME constants so the row still prints when this
-#: module cannot be imported at all (same honesty rule as the notifier mask).
-CHECK_NAME = "cron watchers (dep_pr/escalate)"
+#: Name of the doctor row this module owns, enumerating every stream in
+#: ``WATCHERS`` -- an operator scanning doctor output has to be able to see that
+#: the sweep nightly is in here (t_13a70290 was filed because it was not). A
+#: fallback for doctor.py lives next to its other _*_CHECK_NAME constants so the
+#: row still prints when this module cannot be imported at all (same honesty
+#: rule as the notifier mask); test_doctor_row_registry.py pins the name list.
+CHECK_NAME = "cron watchers (dep_pr/escalate/alone_sweep)"
 
 #: Install marker file name, kept ONE LEVEL ABOVE the stamp dir (see
 #: :func:`install_marker_path`).
@@ -203,12 +237,18 @@ def stamp(stream, **fields):
         return False
 
 
-def stamp_failure(stream, error):
+def stamp_failure(stream, error, **fields):
     """Record a pass that raised: the stamp MOVES, ok=False carries the fault.
 
     A watcher that crashes mid-pass is the single most important thing to
     notice, and "crashed" must not look like "never ran" -- so this writes too,
     with ok=False and the error text. Returns True when the stamp landed.
+
+    ``**fields`` ride along like they do on :func:`stamp` (t_13a70290): a
+    verdict-producing watcher wants the failed pass to carry the same shape as a
+    clean one, so the gate stamps ``verdict="red"`` plus the head it measured and
+    the report dir, and the doctor's ``failing`` line names what the operator has
+    to go read.
     """
     row = WATCHERS.get(stream)
     if row is None:
@@ -220,6 +260,7 @@ def stamp_failure(stream, error):
             "watcher": stream,
             "cron_job": row["cron_job"],
             "error": str(error)[:400],
+            **fields,
         })
         return True
     except Exception:
@@ -429,6 +470,15 @@ def doctor_check(hscc_dir=None, *, now=None, env=None):
     notes = [r["detail"] for r in rows if not r["warn"]
              and r["status"] in HEALTHY_STATUSES]
     if problems:
+        # Cheap-first: the sweep pass is ~25 min per pair, so the fix that fits
+        # in a terminal session is the preflight + --status, not a re-run
+        # (t_13a70290; the cadence is the gate header's own routing decision).
+        sweep_hint = ""
+        if any(r["stream"] == "alone_sweep_gate" for r in rows if r["warn"]):
+            sweep_hint = (" -- for alone_sweep_gate, `scripts/alone_sweep_gate.sh "
+                          "--preflight` checks the wiring in seconds and "
+                          "`scripts/install_alone_sweep_gate.sh --status` prints "
+                          "the last verdict on record; the pass itself is ~25 min")
         return {
             "name": CHECK_NAME, "ok": False, "fatal": False, "rows": rows,
             "detail": "; ".join(problems + notes),
@@ -438,7 +488,7 @@ def doctor_check(hscc_dir=None, *, now=None, env=None):
                     "to prove a pass; reinstall with "
                     + " / ".join(sorted({r['install_script']
                                          for r in WATCHERS.values()}))
-                    + " if a job is gone"),
+                    + " if a job is gone" + sweep_hint),
         }
     return {"name": CHECK_NAME, "ok": True, "fatal": False, "rows": rows,
             "detail": "; ".join(notes) or "no watchers configured",
