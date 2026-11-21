@@ -436,6 +436,13 @@ def _get_help_text():
         # is live, so it is advertised on the primary surface too.
         *_entry("orch waker status|enable|disable",
                 "The built-in orchestrator waker (daemon-resident)"),
+        # node group (t_c28f4f14): dispatched at main() and listed in
+        # COMMAND_HELP, so the primary banner names it too (F5 surface-honesty
+        # rule, t_88d896f3). `--apply` is called out because the default is a
+        # dry run, and an operator who does not know that reads "pause" as
+        # already done.
+        *_entry("node pause <host> [flags]",
+                "Park one node; dry-run by default until --apply"),
     ])
 
     util = _section("Utility", [
@@ -609,6 +616,17 @@ COMMAND_HELP = {
             "  (the daemon-resident orchestrator waker; status also\n"
             "  takes [--json])\n"
             "  Usage: hscc orch <subcommand> [args]",
+    # node group (card t_c28f4f14): the operator surface for the node-pause
+    # overlay. Every line authored <=76 for the same (B)-gate reason as
+    # orch/main above (only the FIRST line gets _handle_help's 2-space
+    # prefix). Wording note: --apply OPTS IN here — the opposite polarity from
+    # `hscc cluster up|down [--dry-run]`, whose wording must not be copied.
+    "node": "Node pause commands (park one machine for maintenance).\n"
+            "  Subcommands: pause <host>  resume <host>  paused\n"
+            "  pause/resume are DRY-RUN by default: they print the units\n"
+            "  they would stop or restart and change nothing until --apply.\n"
+            "  paused is read-only and never touches the fleet.\n"
+            "  Usage: hscc node <subcommand> [args]",
     # main group (M4/M5): the main orchestrator's own tmux pane + the daemon's
     # wake-up schedule. Lines authored <=76 for the same (B)-gate reason.
     "main": "The main orchestrator's pane and wake-ups.\n"
@@ -677,9 +695,9 @@ TOP_LEVEL_COMMANDS = (
     "start", "stop", "status", "check", "watch", "triggers", "notify",
     "plist", "install", "uninstall", "log", "bootstrap", "update",
     "cluster", "template", "profiles", "project", "api", "autodown",
-    "kanban", "cards", "orch", "main", "verify", "stats", "throughput",
-    "autoscale", "escalate", "start-daemon", "heal-clear", "heal-status",
-    "merge-queue",
+    "kanban", "cards", "orch", "main", "node", "verify", "stats",
+    "throughput", "autoscale", "escalate", "start-daemon", "heal-clear",
+    "heal-status", "merge-queue",
 )
 
 # ── template group help surface (t_9032f96b) ───────────────────────────────
@@ -1275,6 +1293,472 @@ def _handle_cluster():
         "info": cluster_render.render_info,
     }[sub]
     return renderer(console, result)
+
+
+# ── node group surface (card t_c28f4f14) ───────────────────────────────────
+# `hscc node pause|resume|paused` — the operator surface for the node-pause
+# overlay (hscc_daemon/node_pauses.py) and its sparkrun-only executor
+# (hscc_daemon/node_pause_exec.py). A paused node is skipped by the heal and
+# keepalive paths, so this is how a machine gets parked for maintenance without
+# the daemon walking units back onto it.
+#
+# Dry-run default (the #478 rule, which the executor also implements): `pause`
+# and `resume` print the units they would stop or restart and change NOTHING
+# until `--apply`; `paused` is read-only always. NOTE the polarity: `--apply`
+# OPTS IN here, the opposite of `hscc cluster up|down [--dry-run]` above, so
+# that surface's wording deliberately does not transfer to these entries.
+#
+# Help is intercepted INSIDE _handle_node, on the RAW tail, before any import,
+# status read or state write — the B6/B10/B12 rule the cluster/orch/kanban
+# surfaces follow (`-h` must never reach a verb that stops live workloads).
+#
+# `--theme` is NOT accepted here, unlike the cluster group: these verbs render
+# plain text, so a palette would select nothing, and silently dropping the
+# token is worse than refusing it (the parser's refusal names it).
+_NODE_VERBS = ("pause", "resume", "paused")
+
+_NODE_GROUP_ENTRIES = [
+    ("hscc node pause <host> [flags]",
+     "Park one node: stop the sparkrun units on it and record a durable pause "
+     "the heal paths skip. DRY-RUN by default — prints every unit and every "
+     "node it would stop, stops nothing. Flags: [--reason <text>] "
+     "[--until <duration>] [--span] [--force] [--apply]."),
+    ("hscc node resume <host> [--apply]",
+     "Restart the units the pause recorded (sparkrun --ensure, the same "
+     "recipe and flags), then clear the pause and that node's heal strikes. "
+     "DRY-RUN by default — pass --apply to restart."),
+    ("hscc node paused [--json]",
+     "Every paused node with its units, reason, since and until. Read-only: "
+     "reads the overlay file, never the fleet."),
+]
+
+_NODE_SUBCOMMAND_HELP = {
+    "pause": {
+        "usage": "hscc node pause <host> [flags]",
+        "desc": ("Park <host>: enumerate its sparkrun units, stop them, then "
+                 "record the pause. DRY-RUN by default — prints what would "
+                 "stop and writes nothing; --apply is what stops and records. "
+                 "Flags: --reason <text> (recorded on the pause), --until "
+                 "<duration> (90m, 2h, 1d3h, 45 = seconds, or an ISO "
+                 "timestamp; open-ended without it), --span (accept stopping "
+                 "a multi-node unit across every node it spans), --force "
+                 "(pause a node serving the orchestrator model, which the "
+                 "verb otherwise refuses), --apply (do it)."),
+    },
+    "resume": {
+        "usage": "hscc node resume <host> [--apply]",
+        "desc": ("Restart the units recorded by the pause of <host>, through "
+                 "sparkrun's --ensure path, so the same recipe and flags "
+                 "re-issue the same workload instead of launching a "
+                 "duplicate. DRY-RUN by default — prints the commands and "
+                 "changes nothing; --apply restarts, then clears the pause and "
+                 "that node's heal strikes. A unit whose launch recipe cannot "
+                 "be rebuilt is refused and the pause is kept."),
+    },
+    "paused": {
+        "usage": "hscc node paused [--json]",
+        "desc": ("Every node the pause overlay holds: host, the units it "
+                 "stopped, reason, since, until, and the span it covers. "
+                 "Read-only — this reads ~/.hscc/node_pauses.json and nothing "
+                 "on the fleet, so it works with sparkrun unreachable. --json "
+                 "prints the same records as one machine-readable object."),
+    },
+}
+
+
+def _node_entry_lines(sub, width=None):
+    """Render one node-verb help entry (usage line + wrapped description,
+    continuation indented — the cluster/template two-line layout)."""
+    if width is None:
+        width = _cluster_help_width()
+    entry = _NODE_SUBCOMMAND_HELP[sub]
+    lines = [f"  {entry['usage']}"]
+    lines.extend(textwrap.wrap(entry["desc"], width=width,
+                               initial_indent=" " * _CLUSTER_HELP_INDENT,
+                               subsequent_indent=" " * _CLUSTER_HELP_INDENT))
+    return lines
+
+
+def _print_node_verb_usage(sub):
+    """`hscc node <verb> --help`: usage + description. Prints text only — no
+    executor import, no status read, no sparkrun call."""
+    print(f"Usage: {_NODE_SUBCOMMAND_HELP[sub]['usage']}")
+    print()
+    for line in _node_entry_lines(sub)[1:]:
+        print(line)
+
+
+def _print_node_group_help():
+    """`hscc node` / `hscc node --help`: the group listing. Text only."""
+    width = _cluster_help_width()
+    print("Node pause commands:")
+    print()
+    for cmd, desc in _NODE_GROUP_ENTRIES:
+        for line in _cluster_group_entry_lines(cmd, desc, width):
+            print(line)
+
+
+#: Per-verb switches and value flags. Anything else is refused (see
+#: _parse_node_args): these are mutating verbs on a live fleet, and a flag the
+#: parser did not understand must never be read as "the operator did not ask".
+_NODE_FLAGS = {
+    "pause": {"switches": ("--span", "--force", "--apply"),
+              "values": ("--reason", "--until")},
+    "resume": {"switches": ("--apply",), "values": ()},
+    "paused": {"switches": ("--json",), "values": ()},
+}
+
+
+def _parse_node_args(verb, argv):
+    """``(positional, opts, error)`` for one node verb's argv.
+
+    Hand-rolled like the rest of this file (no argparse: a subparser would
+    print its own usage on stderr and exit, which is the surface the help
+    intercepts above own). Unknown flag -> error, never a silent drop.
+    """
+    spec = _NODE_FLAGS[verb]
+    opts = {f: False for f in spec["switches"]}
+    opts.update({f: None for f in spec["values"]})
+    positional, i = [], 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in spec["switches"]:
+            opts[tok] = True
+            i += 1
+            continue
+        if tok in spec["values"]:
+            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                return [], opts, f"{tok} needs a value"
+            opts[tok] = argv[i + 1]
+            i += 2
+            continue
+        name, eq, val = tok.partition("=")
+        if eq and name in spec["values"]:
+            opts[name] = val
+            i += 1
+            continue
+        if tok == "--theme":
+            return [], opts, ("--theme selects a palette for the themed "
+                              "views; these verbs print plain text, so it "
+                              "would do nothing here")
+        if tok.startswith("-"):
+            return [], opts, f"unknown flag: {tok}"
+        positional.append(tok)
+        i += 1
+    return positional, opts, None
+
+
+def _node_paused(argv):
+    """`hscc node paused [--json]` — the overlay, printed.
+
+    Imports only node_pauses: no executor, no serving read, no sparkrun, so a
+    paused-node list is readable while the fleet is unreachable.
+    """
+    from hscc_daemon import node_pauses
+
+    _pos, opts, err = _parse_node_args("paused", argv)
+    if err:
+        print(f"error: {err}")
+        _print_node_verb_usage("paused")
+        return 1
+    pauses = node_pauses.list_pauses()
+    if opts["--json"]:
+        rows = []
+        for host in sorted(pauses):
+            row = {"host": host}
+            row.update(pauses[host])
+            rows.append(row)
+        print(json.dumps({"count": len(rows), "pauses": rows}, indent=2,
+                         sort_keys=True))
+        return 0
+    if not pauses:
+        print("No paused nodes — every node is healable.")
+        return 0
+    for host in sorted(pauses):
+        entry = pauses[host]
+        units = ", ".join(entry["units"]) or "(none recorded)"
+        stopped = ("confirmed down" if entry["stopped"] else
+                   "not confirmed down (pause recorded before the stop "
+                   "finished)")
+        print(f"{host}")
+        print(f"  units:   {units}")
+        print(f"  stopped: {stopped}")
+        print(f"  reason:  {entry['reason'] or '(none given)'}")
+        print(f"  since:   {entry['since'] or '(unknown)'}")
+        until = entry["until"]
+        if not until:
+            print("  until:   open-ended (only 'hscc node resume' ends it)")
+        elif node_pauses.is_expired(entry):
+            print(f"  until:   {until} — PAST DUE; resume it "
+                  f"(hscc node resume {host} --apply)")
+        else:
+            print(f"  until:   {until}")
+        if entry["span_nodes"]:
+            span = ", ".join(n for n in entry["span_nodes"] if n != host)
+            print(f"  span:    {host}" + (f" + {span}" if span else ""))
+    return 0
+
+
+def _node_pause(argv):
+    """`hscc node pause <host> [flags]` — plan, refuse, then stop + record.
+
+    Order is the contract: the plan is read from the executor (the only
+    sanctioned reader of fleet facts), refusals print WHY and change nothing,
+    and the overlay is written only AFTER the stop has been attempted — the
+    pause record's `stopped` flag is what tells a reader whether the units are
+    confirmed down or merely promised to the operator.
+    """
+    from hscc_daemon import node_pause_exec, node_pauses
+
+    positional, opts, err = _parse_node_args("pause", argv)
+    if err:
+        print(f"error: {err}")
+        _print_node_verb_usage("pause")
+        return 1
+    if len(positional) != 1:
+        print(f"error: pause needs exactly one host, got "
+              f"{positional or 'none'}")
+        _print_node_verb_usage("pause")
+        return 1
+    host = positional[0].strip()
+    apply = opts["--apply"]
+
+    until_iso = None
+    if opts["--until"] is not None:
+        # node_pauses.parse_until degrades an unparseable value to
+        # open-ended — for the overlay that is the safe direction, for a CLI
+        # flag it is a typo silently parking a node forever. Check here.
+        until_iso = node_pauses.parse_until(opts["--until"])
+        if until_iso is None:
+            print(f"error: --until {opts['--until']!r} is not a duration "
+                  f"(90m, 2h, 1d3h, 45 = seconds) or an ISO timestamp.")
+            print("Refusing to record a pause whose deadline cannot be read.")
+            return 1
+
+    p = node_pause_exec.plan(host)
+    if not p.get("ok"):
+        print(f"error: cannot enumerate the units on {host}: {p.get('error')}")
+        print("Nothing stopped and nothing recorded.")
+        return 1
+    units = p["units"]
+    span_units = p["span_units"]
+    affected = p["span_nodes"]
+
+    print(f"{host}: {len(units)} unit(s) on this node"
+          f"{' — dry run, nothing stopped' if not apply else ''}")
+    for u in units:
+        flags = f"port {u['port']}" if u.get("port") else "port ?"
+        if u.get("tp"):
+            flags += f" tp={u['tp']}"
+        print(f"  {u['unit_id']:<16} {u['kind']:<12} "
+              f"{', '.join(u['nodes'])}  ({flags})")
+        if not u["observed"]:
+            print(f"    not in the latest sweep — stopping it is a no-op if "
+                  f"it is already down")
+        if u.get("resume_blocked"):
+            print(f"    cannot be resumed later: {u['resume_blocked']}")
+    if len(affected) > 1:
+        print(f"  every node this affects: {', '.join(affected)}")
+
+    # ── refusals: each prints WHY, and none of them touches the fleet ──────
+    if p.get("serves_orchestrator_model") and not opts["--force"]:
+        # This one refuses a DRY RUN too, unlike the --span guard below: the
+        # card states it as a refusal of the verb, the plan is already printed
+        # above it so nothing is hidden, and the flag can be True from
+        # "the serving config was unreadable" — a dry run is exactly when the
+        # operator wants to hear that this node is not safe to park.
+        evidence = (p.get("orchestrator_evidence")
+                    or "no evidence recorded with the plan")
+        print(f"REFUSED: {host} serves the orchestrator model.")
+        print(f"  why: {evidence}")
+        print("  Pausing it parks the model every agent in this fleet talks "
+              "to.")
+        print("  Pass --force to pause it anyway.")
+        print("Nothing stopped and nothing recorded.")
+        return 1
+    if span_units and apply and not opts["--span"]:
+        # The opt-in guards the STOP, not the reading of the plan: a dry run
+        # mutates nothing, so refusing it would make the verb unusable for
+        # previewing exactly the blast radius --span exists to accept.
+        siblings = [n for n in affected if n != host]
+        others = (", ".join(siblings) if siblings
+                  else "(no sibling recorded)")
+        print(f"REFUSED: {host} hosts multi-node unit(s): "
+              f"{', '.join(span_units)}.")
+        print("  A span unit stops as a whole, so stopping it here also stops "
+              f"it on: {others}")
+        print("  Pass --span to accept that, together with --apply.")
+        print("Nothing stopped and nothing recorded.")
+        return 1
+    if opts["--span"] and not apply:
+        # --apply is what the span guard requires; --span alone mutates
+        # nothing, so it warns rather than refuses (the direction that could
+        # hurt the fleet is a stop nobody opted into).
+        print("note: --span without --apply still stops nothing "
+              "(dry-run is the default).")
+    if opts["--force"] and not p.get("serves_orchestrator_model"):
+        print("note: --force given, but this host is not flagged as serving "
+              "the orchestrator model.")
+
+    if not units:
+        print("  nothing to stop on this node")
+        if not apply:
+            print("Dry run: nothing changed. Re-run with --apply to record "
+                  "the pause.")
+            return 0
+    elif not apply:
+        print("Dry run: nothing stopped and nothing recorded. Re-run with "
+              "--apply to stop these units and record the pause.")
+        return 0
+
+    # ── apply: stop first, record second (see the module docstring) ────────
+    res = node_pause_exec.stop_units(units, apply=True)
+    recorded = [u["unit_id"] for u in units]
+    try:
+        node_pauses.pause(host, reason=opts["--reason"] or "",
+                          until=until_iso, units=recorded,
+                          span_nodes=affected, stopped=bool(res["ok"]))
+    except OSError as e:
+        # The units are down but nobody knows the node is parked: the heal
+        # paths will walk units back onto it. Say so, do not claim success.
+        print(f"error: the units were stopped but the pause did not reach "
+              f"disk ({e}).")
+        print(f"  {node_pauses.overlay_path()} is NOT updated — re-run "
+              f"'hscc node pause {host} --apply' before leaving this node.")
+        return 1
+    print(f"paused {host}: {len(recorded)} unit(s), overlay at "
+          f"{node_pauses.overlay_path()}")
+    if not res["ok"]:
+        print(f"WARNING: at least one unit did not stop cleanly — the pause "
+              f"is recorded with stopped=False.")
+        return 1
+    return 0
+
+
+def _node_resume(argv):
+    """`hscc node resume <host> [--apply]` — restart, then clear.
+
+    The overlay stores unit IDS (node_pauses keeps the entry to six typed
+    keys), so the launch commands are rebuilt by the executor's `plan()` from
+    serving.json — the same source the keepalive relaunch reads. A recorded
+    unit that no longer has a rebuildable command is REFUSED and the pause is
+    kept: clearing it would leave a node nobody remembers how to start.
+    """
+    from hscc_daemon import heal_breaker, node_pause_exec, node_pauses
+
+    positional, opts, err = _parse_node_args("resume", argv)
+    if err:
+        print(f"error: {err}")
+        _print_node_verb_usage("resume")
+        return 1
+    if len(positional) != 1:
+        print(f"error: resume needs exactly one host, got "
+              f"{positional or 'none'}")
+        _print_node_verb_usage("resume")
+        return 1
+    host = positional[0].strip()
+    apply = opts["--apply"]
+
+    # ONE snapshot for both questions. node_pauses.load() normalises into fresh
+    # objects every call, so `paused()` + `covering()` would compare two
+    # different reads and could disagree mid-flight; the owner of a span is
+    # read from the same dict that answered "is this host keyed".
+    pauses = node_pauses.list_pauses()
+    entry = pauses.get(host)
+    if entry is None:
+        owners = sorted(h for h, e in pauses.items()
+                        if host in e["span_nodes"])
+        if owners:
+            print(f"{host} is not paused itself — it is inside the span of "
+                  f"the pause on {', '.join(owners)}.")
+            print("  The span stops and starts as one unit: resume the owner, "
+                  "not this node.")
+            return 1
+        print(f"{host} is not paused. Nothing to resume.")
+        return 0
+
+    recorded = entry["units"]
+    print(f"{host}: pause recorded {len(recorded)} unit(s)"
+          f"{' — dry run, nothing restarted' if not apply else ''}")
+    for uid in recorded:
+        print(f"  {uid}")
+    if entry["span_nodes"]:
+        print(f"  every node this affects: {', '.join(entry['span_nodes'])}")
+
+    if recorded:
+        p = node_pause_exec.plan(host)
+        if not p.get("ok"):
+            print(f"error: cannot rebuild the launch commands for {host}: "
+                  f"{p.get('error')}")
+            print("The pause stays recorded; nothing was restarted.")
+            return 1
+        by_id = {}
+        for unit in p["units"]:
+            by_id.setdefault(unit["unit_id"], unit)
+        missing = [uid for uid in recorded if uid not in by_id]
+        if missing:
+            print(f"REFUSED: no launch command can be rebuilt for "
+                  f"{', '.join(missing)}.")
+            print("  Nothing is known about how those units were started, so "
+                  "resuming them would guess a command.")
+            print(f"  The pause on {host} stays recorded. Start the unit by "
+                  f"hand (hscc cluster up / hscc template apply) and then "
+                  f"clear the pause.")
+            return 1
+        units = [by_id[uid] for uid in recorded]
+        res = node_pause_exec.resume_units(units, apply=apply)
+        if not apply:
+            print("Dry run: nothing restarted. Re-run with --apply.")
+            return 0
+        if not res["ok"]:
+            print(f"error: at least one unit failed to restart on {host}.")
+            print(f"  The pause stays recorded — the heal paths must not "
+                  f"resume this node while its units are half up.")
+            return 1
+    elif not apply:
+        print("  the pause recorded no units, so there is nothing to restart")
+        print("Dry run: nothing changed. Re-run with --apply to clear it.")
+        return 0
+
+    # Restarted (or nothing to restart): end the pause, then the strikes —
+    # same order as the daemon's expiry pass, which resumes before it clears.
+    node_pauses.clear(host)
+    print(f"pause for {host} cleared.")
+    cleared = heal_breaker.clear(host, reason=f"hscc node resume {host}")
+    if cleared:
+        heal_breaker.reset_alert(host)
+        print(f"Cleared heal strikes for {host} — healing resumes now.")
+    else:
+        print(f"No strikes recorded for {host} (nothing to clear).")
+    return 0
+
+
+def _handle_node(argv):
+    """Route `hscc node <verb>` — help first, then the three verbs.
+
+    Shape follows _handle_orch / _handle_cluster: help loads nothing and
+    shells out nothing; the executor is imported by the verbs that need it,
+    so `hscc node paused` and every help path never touch the fleet.
+    """
+    raw_tail = list(argv)
+    if not raw_tail or raw_tail[0] in ("--help", "-h"):
+        _print_node_group_help()
+        return 0
+    sub = raw_tail[0]
+    if sub not in _NODE_VERBS:
+        print(f"Error: unknown node subcommand: {sub}")
+        print(f"Valid subcommands: {', '.join(_NODE_VERBS)}")
+        return 1
+    # A help token ANYWHERE in the verb's tail is help (raw slice, before any
+    # state read) — the B10 class: `node pause <host> --help` must not stop.
+    if _help_token_index(raw_tail) is not None:
+        _print_node_verb_usage(sub)
+        return 0
+    if sub == "paused":
+        return _node_paused(raw_tail[1:])
+    if sub == "pause":
+        return _node_pause(raw_tail[1:])
+    return _node_resume(raw_tail[1:])
 
 
 # ── orch group surface (card t_5da7fd56) ───────────────────────────────────
@@ -2272,6 +2756,16 @@ def main():
     if cmd == "main":
         from hscc_daemon.main_cli import cmd_main
         rc = cmd_main(args[1:])
+        sys.exit(rc)
+
+    # 'node' group (t_c28f4f14) — the node-pause overlay verbs. Help is
+    # intercepted INSIDE _handle_node, before any executor import or status
+    # read, so `hscc node pause <host> --help` can never reach a verb that
+    # stops live workloads (the B6/B10 rule the cluster/orch groups follow).
+    # Deliberately after the `main` branch and before the DAEMON_COMMANDS help
+    # intercept below: TOP_LEVEL_COMMANDS lists `node` in dispatch order.
+    if cmd == "node":
+        rc = _handle_node(args[1:])
         sys.exit(rc)
 
     # Per-command help for the daemon verbs (t_5132deb3: the branch used to
