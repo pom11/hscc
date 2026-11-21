@@ -105,14 +105,16 @@ def main(argv: list[str] | None = None) -> int:
 
     backup = None
     conn = sqlite3.connect(str(db), timeout=30)
-    if args.apply:
-        # sqlite's online backup, not a file copy: the gateway may hold the DB
-        # open, and a copied file would miss what still sits in its -wal.
-        backup = db.with_name(f"{db.name}.bak-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
-        with sqlite3.connect(str(backup)) as dest:
-            conn.backup(dest)
     try:
-        report = backfill(conn, embed, args.model, apply=args.apply, all_rows=args.all)
+        report = backfill(conn, embed, args.model, apply=False, all_rows=args.all)
+        if args.apply and report["to_embed"]:
+            # sqlite's online backup, not a file copy: the gateway may hold the
+            # DB open, and a copied file would miss what still sits in its -wal.
+            # Only when there is something to write, so a repeated run is cheap.
+            backup = db.with_name(f"{db.name}.bak-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+            with sqlite3.connect(str(backup)) as dest:
+                conn.backup(dest)
+            report = backfill(conn, embed, args.model, apply=True, all_rows=args.all)
     finally:
         conn.close()
     report["db"] = str(db)
