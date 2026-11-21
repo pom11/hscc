@@ -45,6 +45,7 @@ CHECK_NAMES = [
     "kanban current board (main orchestrator)",
     "main wakeups (daemon-owned schedule)",
     "worker budget hook ([budget] note)",
+    "node pauses (operator overlay)",
 ]
 
 FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["192.0.2.1"]}])
@@ -89,7 +90,7 @@ def test_registry_exists_and_covers_the_feature_rows():
     keys = [r.key for r in doctor.FEATURE_CHECK_ROWS]
     assert keys == ["orch_waker", "cron_watchers", "supervision",
                     "kanban_enforce", "main_board", "main_wakeups",
-                    "budget_hook"], "registry order is row order"
+                    "budget_hook", "node_pauses"], "registry order is row order"
 
 
 def test_every_registry_entry_is_well_formed():
@@ -125,7 +126,8 @@ def test_registry_seam_names_match_the_run_doctor_signature():
     registered = set(doctor._FEATURE_SEAM_NAMES)
     assert declared <= registered
     assert registered - declared == {"_main_board_check",
-                                     "_main_wakeups_check"}
+                                     "_main_wakeups_check",
+                                     "_node_pauses_check"}
     assert "_main_board_check" not in declared, \
         "a new row must not add a keyword to run_doctor()'s signature"
 

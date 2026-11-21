@@ -562,6 +562,194 @@ expect("c1", "a failed monitor read is offline and dimmed",
        c1EntryWithFailure.c1.failed && c1EntryWithFailure.c1.stale.isOffline
         && c1EntryWithFailure.c1.stale.isDimmed)
 
+// ---------------------------------------------------------------------------
+// 8 — the pause overlay (t_824b617f / t_983f177e): a parked node is a choice,
+//     not a fault, and it must read as one on every family.
+//
+// The fixture is the committed up-state capture with three rows changed:
+// .011 parked with an error it keeps (the overlay refuses to delete a real
+// diagnostic) plus a reason and a since; .012 parked with an empty reason and a
+// null since; .013 genuinely down and untagged. The top-level paused_nodes set
+// names .011 again (a de-duplication case) and .099, a span partner the frame
+// never listed at all.
+// ---------------------------------------------------------------------------
+
+let pauseGroup = "pause"
+let pauseData = requireData("v1_cluster_monitor_paused.json")
+guard let pausedResponse = try? JSONDecoder().decode(MonitorResponse.self, from: pauseData),
+      let pausedFleet = FleetProjection(projecting: pausedResponse) else {
+    print("FATAL: the committed v1_cluster_monitor_paused.json did not decode + project")
+    exit(2)
+}
+
+/// The instant every age assertion is measured against: exactly 3 h after the
+/// fixture's paused_since, whose epoch (2026-11-21T10:00:00+00:00) is written
+/// here as a number on purpose. Deriving now from FleetFormat's own parser
+/// would make the parse self-verifying, and a parser that reads the wrong
+/// instant would then agree with itself.
+let pauseNow = Date(timeIntervalSince1970: 1795255200 + 3 * 3600)
+
+func row(_ fleet: FleetProjection, _ index: Int) -> FleetNodeLine? {
+    fleet.nodes.indices.contains(index) ? fleet.nodes[index] : nil
+}
+
+let pNodes = pausedFleet.nodes
+// `MonitorNode.shortTail` is "." + the last octet as written, so .11/.13 — the
+// app-wide rule this gate has always pinned, restated here because a parked
+// row has no sample and therefore no hostname to fall back on.
+expect(pauseGroup, "fixture shape: 4 rows in route order",
+       pNodes.map { $0.label } == [".11", "node-2", ".13", "node-4"])
+
+// --- the decode, both halves. Declaring a wire key WITHOUT a property default
+// is what makes these load-bearing: `let status: String? = nil` compiles, is
+// silently never decoded, and every tile would draw a bare up/down forever.
+expect(pauseGroup, "top-level paused_nodes decodes as 2 entries",
+       pausedResponse.paused_nodes?.count == 2)
+expect(pauseGroup, "a tagged row carries all three contract keys",
+       pausedResponse.json?.hosts.first?.status == PauseContract.status
+       && pausedResponse.json?.hosts.first?.paused_reason == "training run"
+       && pausedResponse.json?.hosts.first?.paused_since == "2026-11-21T10:00:00+00:00")
+expect(pauseGroup, "an untagged row keeps status nil (nil means not parked)",
+       pNodes.indices.contains(2) && row(pausedFleet, 2)?.isPaused == false)
+expect(pauseGroup, "the pause literal and key list have one owner",
+       PauseContract.status == "paused"
+       && PauseContract.rowKeys == ["status", "paused_reason", "paused_since"])
+// The trap the parent card named: `workloads[].containers[].status` is a
+// DIFFERENT key with a different owner, and a container that happens to report
+// "paused" must not park the node. The model declares no container keys at all,
+// so the only way this can fire is the row-level tag.
+let containerPaused = """
+{"json":{"hosts":[{"host":"192.0.2.20","error":null,"sample":null,"used_slots":null,\
+"free_slots":null,"workloads":[{"workload_id":"w1",\
+"containers":[{"name":"c","status":"paused"}]}]}]},"speak":""}
+"""
+let containerPausedResponse = try? JSONDecoder().decode(MonitorResponse.self,
+                                                        from: Data(containerPaused.utf8))
+expect(pauseGroup, "a CONTAINER status of paused is not a node pause (different key)",
+       containerPausedResponse?.json?.hosts.first?.isPaused == false
+       && containerPausedResponse?.json?.hosts.first?.status == nil
+       && FleetProjection(projecting: containerPausedResponse)?.tally.nodesPaused == 0)
+expect(pauseGroup, "the row-level tag is read even while its container says Up",
+       pausedResponse.json?.hosts.first?.status == "paused"
+       && pausedResponse.json?.hosts.first?.isPaused == true)
+
+// --- the per-node word. This is the card's deliverable: paused, not down.
+expect(pauseGroup, "parked with reason and since reads paused (reason, since)",
+       row(pausedFleet, 0).map { FleetFormat.status($0, now: pauseNow) }
+       == "paused (training run, 3h ago)")
+expect(pauseGroup, "parked with an empty reason and a null since reads bare paused",
+       row(pausedFleet, 1).map { FleetFormat.status($0, now: pauseNow) } == "paused")
+expect(pauseGroup, "an untagged errored row still reads down",
+       row(pausedFleet, 2).map { FleetFormat.status($0, now: pauseNow) } == "down")
+expect(pauseGroup, "an answering row still reads up",
+       row(pausedFleet, 3).map { FleetFormat.status($0, now: pauseNow) } == "up")
+expect(pauseGroup, "a parked row is paused even though it carries an error",
+       row(pausedFleet, 0)?.isPaused == true && row(pausedFleet, 0)?.isUp == false)
+expect(pauseGroup, "no parked row ever draws the word down",
+       pausedFleet.text(for: .large, now: pauseNow).rows.prefix(2)
+           .allSatisfy { $0.detail?.contains("paused") == true
+                          && $0.detail?.contains("down") == false })
+
+// --- the tally: the parked set leaves the down count and gets its own.
+expect(pauseGroup, "nodesDown subtracts the parked row that errored (only .13)",
+       pausedFleet.tally.nodesDown == 1 && pausedFleet.tally.downLabels == [".13"])
+expect(pauseGroup, "nodesPaused counts tagged rows PLUS the node the frame omitted",
+       pausedFleet.tally.nodesPaused == 3)
+expect(pauseGroup, "nodesUp and nodesTotal stay the route's own numbers",
+       pausedFleet.tally.nodesUp == 2 && pausedFleet.tally.nodesTotal == 4)
+expect(pauseGroup, "pausedLabels are display labels, never the pause record's host string",
+       pausedFleet.tally.pausedLabels == [".11", "node-2", ".99"])
+expect(pauseGroup, "no parked label appears in downLabels",
+       Set(pausedFleet.tally.pausedLabels).isDisjoint(with: pausedFleet.tally.downLabels))
+
+// --- the parked list: two halves of the payload, one entry per machine.
+expect(pauseGroup, "the parked list de-duplicates a node tagged AND named top-level",
+       pausedFleet.paused.count == 3
+       && pausedFleet.paused.filter { $0.key == "192.0.2.11" }.count == 1)
+expect(pauseGroup, "the node the frame never listed is still in the parked list",
+       pausedFleet.paused.last?.label == ".99"
+       && pausedFleet.paused.last?.reason == "spanned with node-1")
+expect(pauseGroup, "the top-level entry keeps the frame row's truer label when both exist",
+       pausedFleet.paused.first?.label == ".11")
+expect(pauseGroup, "the parked list draws no address anywhere (§7)",
+       pausedFleet.paused.allSatisfy { !$0.label.contains("192.0.2.") })
+
+// --- the alert styling is gone, both the per-node heat and the headline.
+expect(pauseGroup, "a parked node's heat is unknown, never hot",
+       row(pausedFleet, 0).map { ClusterMetricHeat.node($0) } == .unknown)
+expect(pauseGroup, "a genuinely down node keeps the hot verdict",
+       row(pausedFleet, 2).map { ClusterMetricHeat.node($0) } == .hot)
+
+func entryFor(_ hosts: [MonitorNode]) -> ClusterEntry {
+    ClusterEntry(date: pauseNow,
+                 fleet: FleetProjection(projecting: MonitorResponse(
+                     json: MonitorPayload(timestamp: nil, hosts: hosts),
+                     speak: "")),
+                 configured: true, paused: false)
+}
+func c1For(_ hosts: [MonitorNode]) -> ClusterC1 { entryFor(hosts).c1 }
+
+let parkedOnly = MonitorNode(host: "192.0.2.11", error: "collect failed", sample: nil,
+                             status: PauseContract.status, paused_reason: "training run",
+                             paused_since: "2026-11-21T10:00:00+00:00")
+let liveUp = MonitorNode(host: "192.0.2.12", error: nil,
+                         sample: MonitorSample(hostname: "node-2"),
+                         workloads: nil)
+expect(pauseGroup, "one parked and one answering node is calm, not warm",
+       entryFor([parkedOnly, liveUp]).heat == .calm)
+expect(pauseGroup, "a fleet with nothing but parked nodes is not Down",
+       c1For([parkedOnly]).headline == ClusterC1.pausedHeadline)
+expect(pauseGroup, "a fleet with nothing but parked nodes is not an alarm colour",
+       entryFor([parkedOnly]).heat == .unknown)
+expect(pauseGroup, "the headline judges only the non-parked frame (1/2 up)",
+       c1For([parkedOnly, row0Down(), liveUp]).headline == "1/2 up")
+expect(pauseGroup, "an all-answering fleet still reads All up",
+       c1For([liveUp]).headline == "All up" && c1For([liveUp]).tally == "1/1")
+
+func row0Down() -> MonitorNode {
+    MonitorNode(host: "192.0.2.13", error: "ssh timeout", sample: nil, workloads: nil)
+}
+
+// --- the ISO-8601 reader, against every shape the route can send.
+// `datetime.isoformat()` is second precision with an offset; a record written
+// from a float timestamp carries microseconds; a Z suffix is the same instant.
+let isoGroup = "pause-iso"
+func since(_ raw: String?, _ offset: TimeInterval) -> String? {
+    FleetFormat.sinceText(raw, now: Date(timeIntervalSince1970: 1795255200 + offset))
+}
+expect(isoGroup, "second precision with an offset", since("2026-11-21T10:00:00+00:00", 3 * 3600) == "3h ago")
+expect(isoGroup, "microsecond precision", since("2026-11-21T10:00:00.123456+00:00", 3 * 3600) == "3h ago")
+expect(isoGroup, "three hours minus a fraction is 3h ago, never 2h ago",
+       since("2026-11-21T10:00:00+00:00", 3 * 3600 - 0.4) == "3h ago")
+expect(isoGroup, "two hours fifty-nine minutes is 2h ago — it has not been three",
+       since("2026-11-21T10:00:00+00:00", 3 * 3600 - 61) == "2h ago")
+expect(isoGroup, "59 minutes is minutes, 60 is an hour",
+       since("2026-11-21T10:00:00+00:00", 59 * 60) == "59m ago"
+       && since("2026-11-21T10:00:00+00:00", 60 * 60) == "1h ago"
+       && since("2026-11-21T10:00:00+00:00", 24 * 3600) == "1d ago")
+expect(isoGroup, "a Z suffix is the same instant", since("2026-11-21T10:00:00Z", 45 * 60) == "45m ago")
+expect(isoGroup, "under a minute is just now", since("2026-11-21T10:00:00+00:00", 20) == "just now")
+expect(isoGroup, "a future since is just now, never a negative age",
+       since("2026-11-21T10:00:00+00:00", -3600) == "just now")
+expect(isoGroup, "two days is days", since("2026-11-21T10:00:00+00:00", 49 * 3600) == "2d ago")
+expect(isoGroup, "unparseable text is drawn verbatim, never dropped",
+       since("sometime last tuesday", 3600) == "sometime last tuesday")
+expect(isoGroup, "nil since is nil, which draws a bare paused", since(nil, 3600) == nil)
+expect(isoGroup, "an empty since is nil", since("   ", 3600) == nil)
+expect(isoGroup, "the copy degrades to the shorter truth",
+       FleetFormat.paused(reason: "training run", since: nil) == "paused (training run)"
+       && FleetFormat.paused(reason: nil, since: "2026-11-21T10:00:00+00:00", now: pauseNow) == "paused (3h ago)"
+       && FleetFormat.paused(reason: "", since: nil) == "paused")
+expect(isoGroup, "the identity rule is trim and case-fold only, like the server's",
+       PauseContract.nodeKey("  Node-3 ") == "node-3"
+       && PauseContract.nodeKey("192.0.2.13") == "192.0.2.13")
+// The word drawn and the value read are written by two different owners — the
+// display copy must not silently follow a server rename — so the one thing that
+// must never drift is that they still AGREE. A drift here is the widget
+// rendering a word the route never sent.
+expect(isoGroup, "the display word and the wire value still agree",
+       FleetFormat.pausedWord == PauseContract.status)
+
 print("")
 if failures.isEmpty {
     // Only the shell owns the gate's PASSED verdict: this binary sees the

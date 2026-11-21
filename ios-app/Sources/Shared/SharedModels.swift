@@ -411,6 +411,18 @@ struct MonitorResponse: Codable, Speakable {
     let serving_error: String?
     /// Why the proxy route map could not be refreshed. Nil on a clean poll.
     let serving_proxy_error: String?
+    /// The nodes the operator parked with `hscc node pause` (t_824b617f).
+    ///
+    /// A top-level list and NOT only the annotated rows, because sparkrun does
+    /// not list a machine whose workloads are stopped: a parked host can be
+    /// missing from the frame entirely, and an absent row is a row there is
+    /// nothing to tag. This is the authoritative "these nodes are parked, by
+    /// choice, since then" set, independent of what the sample reached.
+    ///
+    /// Declared WITHOUT a default on the property (a stored property with an
+    /// initial value is silently never decoded); the default is on the INIT
+    /// parameter, so the pre-existing call sites compile untouched.
+    let paused_nodes: [PausedNodeEntry]?
     let speak: String
 
     init(success: Bool? = nil,
@@ -419,6 +431,7 @@ struct MonitorResponse: Codable, Speakable {
          serving: [ServingRow]? = nil,
          serving_error: String? = nil,
          serving_proxy_error: String? = nil,
+         paused_nodes: [PausedNodeEntry]? = nil,
          speak: String) {
         self.success = success
         self.error = error
@@ -426,6 +439,7 @@ struct MonitorResponse: Codable, Speakable {
         self.serving = serving
         self.serving_error = serving_error
         self.serving_proxy_error = serving_proxy_error
+        self.paused_nodes = paused_nodes
         self.speak = speak
     }
 
@@ -474,6 +488,57 @@ struct ServingRow: Codable, Identifiable {
     }
 }
 
+/// The pause overlay's wire contract (t_824b617f), named once so a status
+/// literal cannot be spelled three ways across the app, the widgets and the
+/// gates. The server holds the matching constants in
+/// `hscc-api/routes_cluster.py` (`PAUSE_STATUS`, `PAUSE_ROW_KEYS`) and its
+/// `test_routes_cluster_node_pause.py` pins the same three names: renaming one
+/// there is a breaking change for shipped bundles, not a refactor, and the
+/// widget side stops tagging with it.
+enum PauseContract {
+    /// The only value `status` carries for a parked node. Strict equality — any
+    /// other value is not a pause this build knows about, and guessing would
+    /// paint a node as parked because a future server said something else.
+    static let status = "paused"
+
+    /// The three keys a parked row gains. Declared so a decode gate can assert
+    /// the model carries all three instead of a transcription of them.
+    static let rowKeys = ["status", "paused_reason", "paused_since"]
+
+    /// The route's node identity for a pause record: trim and case-fold, and
+    /// nothing else. This MIRRORS the server's `_node_key` on purpose — no
+    /// address normalisation, no hostname suffix stripping — because guessing
+    /// that `node-3` means `192.0.2.13` would invent a pause nobody made.
+    static func nodeKey(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
+/// One entry of the payload's top-level `paused_nodes` list: a node the
+/// operator parked, whether or not the monitor frame reached it.
+///
+/// `node` is the pause record's own identity — the host string the operator
+/// passed to `hscc node pause`. It is NEVER drawn: §7 allows only
+/// `MonitorNode.displayLabel`'s `.NNN` tail or a reported hostname, so every
+/// surface labels these nodes through `FleetPausedNode`, which re-derives the
+/// label with the app-wide rule.
+struct PausedNodeEntry: Codable, Equatable {
+    let node: String?
+    let status: String?
+    let paused_reason: String?
+    let paused_since: String?
+
+    /// Whether this entry is a pause (as opposed to a list an older or a
+    /// half-written payload put something else in).
+    var isPaused: Bool { status == PauseContract.status }
+
+    /// The route's identity for this node, or nil when it names none.
+    var key: String? {
+        guard let node, !PauseContract.nodeKey(node).isEmpty else { return nil }
+        return PauseContract.nodeKey(node)
+    }
+}
+
 /// The nested `json` payload of /v1/cluster/monitor.
 struct MonitorPayload: Codable {
     let timestamp: Double?
@@ -495,8 +560,64 @@ struct MonitorNode: Codable, Identifiable {
     /// have made every model count read `nil` while still compiling. Call sites
     /// that build placeholder nodes pass it explicitly.
     let workloads: [MonitorWorkload]?
+    /// The pause overlay's verdict for this node (t_824b617f): the literal
+    /// `"paused"` when the operator parked it, otherwise the key is ABSENT.
+    ///
+    /// This is the row's pause state and NOT its container state — the
+    /// container status lives at `workloads[].containers[].status`, a different
+    /// key with a different owner. It is also not optional-by-style: nil here
+    /// means "the route did not tag this row", which the overlay emits as
+    /// simply no key, so nil and absent are the same fact.
+    ///
+    /// Declared WITHOUT a default on the property (the decode trap again); the
+    /// defaults live on the INIT parameters below, so a caller that knew only
+    /// the pre-pause keys still compiles.
+    let status: String?
+    /// Why the operator parked it. The route guarantees a string and sends `""`
+    /// when the pause record carried no reason — an empty reason is silence,
+    /// not a reason, and `FleetFormat.paused` treats it that way.
+    let paused_reason: String?
+    /// The instant the pause began, as an ISO-8601 string, or nil when the
+    /// record did not carry one. Nil renders a bare `paused`, never a `—`.
+    let paused_since: String?
 
     var id: String { host }
+
+    /// Whether this row belongs to a node the operator parked.
+    ///
+    /// EVERY surface asks this BEFORE it derives `down` from `error` or from a
+    /// missing sample (the parent route's contract, t_824b617f): the overlay
+    /// deliberately keeps a parked row's `error` — "could not sample this host"
+    /// may still be true, and parking a machine is no reason to lose a real
+    /// diagnostic. A consumer that reads `error` first paints a parked
+    /// machine as a broken one, which faults the operator's own action twice.
+    var isPaused: Bool { status == PauseContract.status }
+
+    /// Explicit memberwise init. The synthesized one now demands the three
+    /// pause keys, which would break every pre-pause call site — the two
+    /// placeholder builders in `ClusterWidgetMetrics.sampleFleet` and the
+    /// widget gate's `main.swift` — so the init is written out and the new keys
+    /// APPEND with nil defaults. Declaration order of the pre-existing five is
+    /// unchanged, because Swift requires init arguments in declaration order.
+    init(host: String,
+         error: String? = nil,
+         sample: MonitorSample? = nil,
+         used_slots: Int? = nil,
+         free_slots: Int? = nil,
+         workloads: [MonitorWorkload]? = nil,
+         status: String? = nil,
+         paused_reason: String? = nil,
+         paused_since: String? = nil) {
+        self.host = host
+        self.error = error
+        self.sample = sample
+        self.used_slots = used_slots
+        self.free_slots = free_slots
+        self.workloads = workloads
+        self.status = status
+        self.paused_reason = paused_reason
+        self.paused_since = paused_since
+    }
 
     /// Whether to count this host as UP. The honest reading of the wire: the
     /// route lists every host it tried to sample and puts the failure in

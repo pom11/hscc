@@ -21,6 +21,16 @@ CONTRACT NOTES
   rate-limited post is not a failure — the feed did what it promised — so the
   caller must branch on ``created`` / ``deduped`` / ``rate_limited``, not on
   the status alone. ``retry_after_s`` is present only when rate-limited.
+* **``node`` is an optional scope, and a paused node answers 200 ``paused``.**
+  A caller may name the one node an alert is about (``{"node": "host"}``); the
+  store refuses it while ``hscc node pause`` holds that host, and this route
+  reports that as 200 with ``paused: true``, ``reason: "paused_node"`` and
+  ``paused_node``/``paused_reason`` — not 201, because nothing was created.
+  Nothing is stored and no dedupe or rate slot is consumed, so the post that
+  follows the resume is created immediately. A non-string ``node`` is a 400: a
+  list of hosts is not a host, and guessing which one is the string-matching
+  this seam refuses. An absent or blank ``node`` is unscoped and behaves
+  exactly as before.
 * **The alert shape is stable.** ``id`` is a monotonic integer, ``ts`` is
   UTC ``...Z``, ``level`` is one of ``info|action|critical``, ``acked`` is a
   boolean and ``acked_at`` is null until acknowledged. ``key`` is the dedupe
@@ -87,13 +97,17 @@ def _parse_body(body):
 # --------------------------------------------------------------------------- #
 
 def handle_post_alert(server, ctx, query, body):
-    """Create one alert (or report why it was deduplicated/rate-limited)."""
+    """Create one alert (or report why it was deduplicated/rate-limited/paused)."""
     body = _parse_body(body)
 
     title = body.get("title")
     text = body.get("body", "")
     level = body.get("level")
     key = body.get("key")
+    # Optional node scope (t_81de1863): "this alert is about THIS node". The
+    # store does the pause decision; this route only carries the word and
+    # reports the outcome honestly (200 + paused, not 201 + created).
+    node = body.get("node")
 
     try:
         result = _backing_alerts().post_alert(
@@ -102,6 +116,7 @@ def handle_post_alert(server, ctx, query, body):
             level=level,
             key=key,
             hscc_dir=_store_dir(ctx),
+            node=node,
         )
     except ValueError as exc:
         raise _bad_request(str(exc), "The alert was not accepted.") from exc
@@ -110,6 +125,11 @@ def handle_post_alert(server, ctx, query, body):
     if result.get("created"):
         status = 201
         speak = f"Alert {alert.get('id')} posted."
+    elif result.get("paused"):
+        status = 200
+        reason = result.get("paused_reason")
+        speak = (f"Alert not posted: node {result.get('paused_node')} is "
+                 f"paused{f' ({reason})' if reason else ''}.")
     elif result.get("deduped"):
         status = 200
         speak = f"Alert {alert.get('id')} is unchanged; nothing new to send."
@@ -122,10 +142,14 @@ def handle_post_alert(server, ctx, query, body):
         "created": bool(result.get("created")),
         "deduped": bool(result.get("deduped")),
         "rate_limited": bool(result.get("rate_limited")),
+        "paused": bool(result.get("paused")),
         "reason": result.get("reason"),
         "retry_after_s": result.get("retry_after_s"),
         "speak": speak,
     }
+    if result.get("paused"):
+        payload["paused_node"] = result.get("paused_node")
+        payload["paused_reason"] = result.get("paused_reason")
     return status, payload
 
 

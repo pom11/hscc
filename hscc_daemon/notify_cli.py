@@ -66,14 +66,14 @@ REQUEST_TIMEOUT_S = 10
 
 USAGE = (
     'Usage: hscc notify "<title>" "<body>" [--level info|action|critical] '
-    "[--key <dedupe-key>] [--json]\n"
+    "[--key <dedupe-key>] [--node <host>] [--json]\n"
     "       hscc notify list [--since <id>] [--limit <n>] [--json]\n"
     "       hscc notify ack <id> [--json]"
 )
 
 #: Flags that take a value. Anything else flag-shaped is a usage error, never
 #: a silently ignored token (a typo must not post the wrong alert).
-_VALUE_FLAGS = ("--level", "--key", "--api", "--since", "--limit")
+_VALUE_FLAGS = ("--level", "--key", "--node", "--api", "--since", "--limit")
 
 
 class NotifyError(Exception):
@@ -118,6 +118,7 @@ def parse_notify_args(argv):
         "body": "",
         "level": DEFAULT_LEVEL,
         "key": None,
+        "node": None,
         "api": None,
         "json": False,
         "help": False,
@@ -165,6 +166,8 @@ def parse_notify_args(argv):
             return None, "hscc notify list takes flags only (see --help)"
         if opts["key"] is not None:
             return None, "--key does not apply to 'hscc notify list'"
+        if opts["node"] is not None:
+            return None, "--node does not apply to 'hscc notify list'"
         if opts["level"] != DEFAULT_LEVEL:
             return None, "--level does not apply to 'hscc notify list'"
         try:
@@ -183,6 +186,8 @@ def parse_notify_args(argv):
             return None, "usage: hscc notify ack <id>"
         if opts["key"] is not None:
             return None, "--key does not apply to 'hscc notify ack'"
+        if opts["node"] is not None:
+            return None, "--node does not apply to 'hscc notify ack'"
         if opts["level"] != DEFAULT_LEVEL:
             return None, "--level does not apply to 'hscc notify ack'"
         try:
@@ -353,6 +358,10 @@ def post_alert(opts, hscc_dir=None):
     }
     if opts.get("key"):
         payload["key"] = opts["key"]
+    if opts.get("node"):
+        # "This alert is ABOUT this node" — the store refuses it while the
+        # node-pause overlay holds that host (hscc_daemon.alerts, rule 4).
+        payload["node"] = opts["node"]
     return _call(opts, hscc_dir, "/v1/alerts", payload=payload)
 
 
@@ -389,6 +398,15 @@ def _summary(payload):
         return f"alert {ident} posted ({level})" + (f" key={key}" if key else "")
     if payload.get("deduped"):
         return f"alert {alert.get('id')} unchanged (deduped)"
+    if payload.get("paused"):
+        # Not an error and not a delay: the node is parked on purpose, so the
+        # feed refused it and nothing was consumed. Exit stays 0 like the other
+        # suppressions, but the sentence says WHY — an operator who sees
+        # "rate_limited" here would go looking for a rate limit.
+        host = payload.get("paused_node") or "?"
+        reason = payload.get("paused_reason")
+        return (f"alert not posted (node {host} is paused"
+                + (f": {reason})" if reason else ")"))
     retry = payload.get("retry_after_s")
     wait = f", retry in {float(retry):.0f}s" if retry is not None else ""
     return f"alert suppressed ({payload.get('reason', 'rate_limited')}{wait})"
@@ -447,8 +465,11 @@ def main(argv, out=None, err=None):
         print(
             "\nPosts one alert to the HSCC alert feed (POST /v1/alerts). A keyed\n"
             "alert is deduplicated until its content changes or it is acknowledged;\n"
-            "per-key and global rate limits apply. Flags: --level, --key, --json,\n"
-            "--api <url>.\n"
+            "per-key and global rate limits apply. Flags: --level, --key, --node,\n"
+            "--json, --api <url>.\n"
+            "'--node <host>' scopes the alert to one node: while 'hscc node pause'\n"
+            "holds that host the post is refused and nothing is stored, so a parked\n"
+            "node cannot raise a Needs-me item about being parked.\n"
             "'hscc notify list' reads the feed newest first (--since <id>,\n"
             "--limit <n>); 'hscc notify ack <id>' marks one alert seen.",
             file=out,

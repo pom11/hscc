@@ -1973,6 +1973,52 @@ def _refused_main_wakeups_check() -> dict:
                    "operator's wake-ups or panes."}
 
 
+#: Fallback for the check name when the feature module cannot be imported at
+#: all — same trick as ``_MAIN_BOARD_CHECK_NAME`` so the row still prints. The
+#: authoritative spelling lives in the feature module
+#: (``doctor_node_pauses.CHECK_NAME``); the two are pinned equal by
+#: tests/test_doctor_node_pauses.py.
+_NODE_PAUSES_CHECK_NAME = "node pauses (operator overlay)"
+
+
+def _load_doctor_node_pauses():
+    """Import the node-pause feature module (2.17.3, t_ba1fec3e).
+
+    The verdict lives next to the reader it wraps —
+    ``hscc-bootstrap/doctor_node_pauses.py`` owns what counts as a malformed
+    overlay (it listens to ``node_pauses``' own warnings instead of
+    re-implementing the overlay's validation) and the wording that separates an
+    operator's parked node from a broken one. doctor only adapts the result to
+    its five Check fields. Returns None when the module is not deployed next to
+    bootstrap, and the row reports itself unverifiable rather than vanishing.
+    """
+    try:
+        import doctor_node_pauses
+        return doctor_node_pauses
+    except Exception:  # noqa: BLE001 - any import failure means "not deployed"
+        return None
+
+
+def _refused_node_pauses_check() -> dict:
+    """In-suite stand-in for the node-pause check when no seam was injected.
+
+    The row's real target is ``~/.hscc/node_pauses.json`` — the OPERATOR's
+    overlay, whose contents would decide what the suite asserts. Same fence
+    shape as ``_refused_kanban_enforce_check``: an ERROR naming the missing
+    seam, never a silent pass and never a real read. The feature module applies
+    the identical fence to its own default-root path
+    (:func:`doctor_node_pauses.doctor_check` with ``directory=None``), so a
+    caller cannot walk past it by skipping the registry.
+    """
+    return {"name": _NODE_PAUSES_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "node-pause check refused inside a pytest process — "
+                      "inject _node_pauses_check",
+            "fix": "Call doctor_node_pauses.doctor_check(directory=<tmp "
+                   "overlay root>) for the real read path, or pass "
+                   "_node_pauses_check=lambda: {...} to pin the row's "
+                   "routing; a suite must never read the operator's overlay."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -2119,6 +2165,32 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     doctor_rows.FeatureCheckRow(
         key="budget_hook", seam_kwarg="_budget_hook_check",
         row_fn="_budget_hook_check_row", row_kwargs=("hermes_home",)),
+    # 2.17.3 (t_ba1fec3e): is a node parked ON PURPOSE, and can the record that
+    # says so still be read? Every repair path skips a parked node and the fleet
+    # views read it `paused` (#560 overlay, #569 API, t_480cee2d cluster views),
+    # but doctor — the one surface an operator runs to ask "why is this machine
+    # not serving" — said nothing. A pause is an operator DECISION, so the row is
+    # INFO (ok=True: host, reason, since, until) and never WARN, never FAIL: a
+    # doctor that calls `hscc node pause` a fault trains the operator to ignore
+    # it, and a FATAL here would hard-stop bootstrap over a parked worker. The
+    # one loud posture is a file the reader cannot trust (node_pauses.load
+    # answers "no pauses" for a corrupt overlay, which is safe for a repair path
+    # and dangerous for a report) — WARN, fatal=False.
+    # NO row_kwargs, same reason as cron_watchers / kanban_enforce above
+    # (t_adb66608, t_be690204): node_pauses has no HSCC_DIR override — its
+    # default root is HOME's ~/.hscc, resolved at import, and that IS the root
+    # `hscc node pause` writes. A root handed in from the environment would be a
+    # directory no pause can ever reach, read back as "nothing is parked". The
+    # row takes a root only from an explicit ``directory=`` caller.
+    doctor_rows.FeatureCheckRow(
+        key="node_pauses", seam_kwarg="_node_pauses_check", row_kwargs=(),
+        loader="_load_doctor_node_pauses",
+        refusal="_refused_node_pauses_check",
+        fallback_name="_NODE_PAUSES_CHECK_NAME",
+        missing_detail="hscc-bootstrap/doctor_node_pauses.py not importable — "
+                       "parked nodes cannot be told apart from broken ones",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
 ]
 
 #: The seam keywords the registry owns. run_doctor() validates its
