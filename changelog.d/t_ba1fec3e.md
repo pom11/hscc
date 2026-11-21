@@ -30,7 +30,7 @@ task: t_ba1fec3e
 kind: Verified
 task: t_ba1fec3e
 
-- `hscc-bootstrap/tests/test_doctor_node_pauses.py` — 19 tests, green under the
+- `hscc-bootstrap/tests/test_doctor_node_pauses.py` — 20 tests, green under the
   runner's interpreter (`~/.hermes/hermes-agent/venv/bin/python`) at `f0c09370`, each
   reading a real overlay file under a temp root through the overlay module's own
   `directory=` seam, TEST-NET-1 hosts only. The three postures are pinned

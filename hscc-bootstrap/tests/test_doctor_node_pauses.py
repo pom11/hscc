@@ -31,10 +31,12 @@ here can touch the fleet or the operator's state.
 
 import json
 import os
+import types
 from datetime import datetime, timezone
 
 import doctor
 import doctor_node_pauses as dnp
+import doctor_rows
 
 FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["192.0.2.1"]}])
 
@@ -355,6 +357,31 @@ def test_the_fallback_name_matches_the_feature_module():
     """A registry `fallback_name` is a STRING naming a module constant, so the
     two spellings of one check name can only be pinned by comparing them."""
     assert doctor._NODE_PAUSES_CHECK_NAME == dnp.CHECK_NAME
+
+
+def test_the_row_is_unverifiable_when_its_module_is_missing(monkeypatch):
+    """A registry entry whose loader returns None must print ITS OWN
+    UNVERIFIABLE row: the `missing_detail` / `missing_fix` strings on the entry
+    are otherwise decoration nobody ever reaches, and a missing feature module
+    must never render as absence-of-output.
+
+    ``build_row``'s loader branch is the non-pytest branch, so this reaches it
+    the way test_doctor_row_registry.py does — a module view whose OWN
+    ``sys.modules`` has no pytest, not a global delitem that would break the
+    running session.
+    """
+    spec = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}["node_pauses"]
+    monkeypatch.setattr(doctor, "_load_doctor_node_pauses", lambda: None)
+    outside = types.SimpleNamespace()
+    outside.__dict__.update(vars(doctor))          # AFTER the patch, not before
+    outside.sys = types.SimpleNamespace(modules={})
+
+    row = doctor_rows.build_row(outside, spec, None)
+
+    assert row.name == dnp.CHECK_NAME
+    assert row.ok is False and row.fatal is False
+    assert row.detail == spec.missing_detail, "the entry's own text must be used"
+    assert row.fix == spec.missing_fix
 
 
 def test_the_row_names_the_core_when_it_cannot_be_read(tmp_path, monkeypatch):
