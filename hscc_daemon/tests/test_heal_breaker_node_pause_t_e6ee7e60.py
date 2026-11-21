@@ -255,6 +255,31 @@ class TestTheBreakerIsNotDisarmedByAPause:
         assert heal_breaker.suspended(
             PAUSED_NODE, now=base + window + 1) == 0.0
 
+    def test_the_suspension_still_holds_when_the_pause_is_at_the_default_root(
+            self, ledger, tmp_hfcc_dir, small_threshold):
+        """The daemon's own configuration, and the only one ``suspended()`` can
+        see: it takes no ``directory`` (deliberately — it reads the ledger, not
+        the overlay), so this is the test that catches someone "hardening" it to
+        answer 0 while a pause is in force. A parked node that was already in
+        timeout must STILL report the timeout: a repair path that never consults
+        the overlay would otherwise walk straight up to a parked node and heal
+        it, and the breaker would look armed while it was gutted."""
+        root = str(tmp_hfcc_dir)
+        assert os.path.realpath(node_pauses.HSCC_DIR) == os.path.realpath(root), (
+            "conftest's node_pauses.HSCC_DIR seal moved; refusing to write a "
+            "pause anywhere but the per-test tmp root")
+        base = 1_000_000.0
+        for i in range(small_threshold + 1):
+            heal_breaker.note_heal(PAUSED_NODE, now=base + i)
+        assert heal_breaker.suspended(PAUSED_NODE, now=base) > 0
+        park(PAUSED_NODE, root, reason="training run")
+        # Parked at the root the daemon reads: still in timeout, same slate.
+        assert heal_breaker.suspended(PAUSED_NODE, now=base) > 0
+        assert heal_breaker.strike_count(PAUSED_NODE, now=base) == (
+            small_threshold + 1)
+        # And the tick is still free — suppression and truthfulness at once.
+        assert heal_breaker.note_heal(PAUSED_NODE, now=base)["tripped"] is False
+
     def test_the_operator_can_clear_a_parked_node_and_the_clear_sticks(
             self, ledger, overlay, small_threshold):
         """``hscc heal-clear`` on a parked node: no strikes are held, and the

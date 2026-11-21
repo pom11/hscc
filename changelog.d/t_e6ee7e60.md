@@ -33,16 +33,21 @@ task: t_e6ee7e60
 kind: Verified
 task: t_e6ee7e60
 
-* 19 new tests in `hscc_daemon/tests/test_heal_breaker_node_pause_t_e6ee7e60.py`
+* 20 new tests in `hscc_daemon/tests/test_heal_breaker_node_pause_t_e6ee7e60.py`
   pin both directions — a parked node accrues nothing, never trips and never
   pages; an unparked node still accrues, trips and pages exactly as before —
   including the span-sibling case where `paused()` and `covering()` disagree and
   the behaviour must follow `covering()`, the real-caller path through
   `check_workers()`, and the fail-open half on a malformed overlay. All
   documentation-range hosts (192.0.2.0/24) and a per-test temp overlay root
-  passed through `node_pauses`' own `directory=` seam; the two tests that use
-  the default root guard-assert that it is the conftest-sealed tmp root before
+  passed through `node_pauses`' own `directory=` seam; the tests that use the
+  default root guard-assert that it is the conftest-sealed tmp root before
   writing to it. No node, sparkrun, ssh or real `~/.hscc` touched.
-* Mutation-probed on a throwaway worktree: deleting the pause check reddens the
-  accrual tests, and swapping `covering()` for `paused()` reddens the
-  span-sibling pin — so the seam is not decoration.
+* Mutation-probed on a throwaway worktree at the landing sha, one mutant at a
+  time: deleting the pause check reddens 13 tests; swapping `covering()` for
+  `paused()` reddens exactly the span-sibling pin; adding a ledger write on the
+  suppressed path reddens exactly the no-write pin; and making `suspended()`
+  answer 0 for a paused node reddens exactly the suspension pin — that last
+  mutant survived the first 19 tests, which is why test 20
+  (`test_the_suspension_still_holds_when_the_pause_is_at_the_default_root`)
+  exists. The seam is not decoration and neither is the refusal to over-suppress.
