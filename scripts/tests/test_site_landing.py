@@ -768,7 +768,54 @@ def test_fixture_is_the_repos_own_help(repo_help_groups):
         f"repo help says: {repo_help_groups}")
 
 
-def test_installed_cli_agrees_when_it_is_this_tree(repo_help_groups):
+def _real_home() -> str:
+    """The account's real home, independent of what ``HOME`` currently says.
+
+    The leg's autouse fixture replaces ``HOME`` with a sandbox before any test
+    body runs (scripts/tests/conftest.py), so ``HOME`` and anything derived
+    from it — including ``Path.home()`` — is the sandbox by the time we get
+    here. ``pwd`` answers for the uid, which the fixture cannot lie about.
+    """
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError):        # Windows, or an unmapped uid
+        return os.path.expanduser("~")
+
+
+def _installed_cli_env(home_root: Path) -> dict:
+    """The environment the INSTALLED ``hscc`` is spawned with by the oracle.
+
+    The leg's autouse fixture sandboxes ``HOME`` so a watcher stamp can never
+    reach the operator's live ``~/.hscc/state``. That is right for the rest of
+    the leg, but the installed console script locates its payload *through*
+    ``HOME``: ``hscc_cli/__init__.py`` probes ``Path.home()/".hermes"/"plugins"``
+    (and ``~/dev/hscc`` as the fallback) before ``from hscc_daemon.hscc import
+    main``. Point ``HOME`` at an empty directory and every candidate misses, so
+    the child dies inside its own import, before argparse runs. Measured at
+    8eb96984 on this host, same binary, ``HOME`` the only variable: rc=0 / 4819
+    chars with the real home, rc=1 / ``ModuleNotFoundError: No module named
+    'hscc_daemon'`` with a sandbox — which is exactly why ``hscc --help`` looks
+    healthy from a plain shell and reds only from inside pytest.
+
+    So the child keeps a sandbox ``HOME`` — the leg's hermeticity guarantee is
+    not traded away — with only the payload directory linked in, so what
+    actually runs is the real installed bottle. A ``HOME`` write by the child
+    still lands under ``home_root``; measured, three ``--help`` runs under
+    exactly this environment created zero files there.
+    """
+    env = dict(os.environ)
+    real_plugins = Path(_real_home()) / ".hermes" / "plugins"
+    cli_home = home_root / "cli-home"
+    (cli_home / ".hermes").mkdir(parents=True, exist_ok=True)
+    link = cli_home / ".hermes" / "plugins"
+    if real_plugins.is_dir() and not link.is_symlink():
+        link.symlink_to(real_plugins)
+    env["HOME"] = str(cli_home)
+    return env
+
+
+def test_installed_cli_agrees_when_it_is_this_tree(repo_help_groups, tmp_path):
     """The bottle is a lagging artifact — so it is only an oracle at all when
     it renders exactly what this tree renders.
 
@@ -776,12 +823,18 @@ def test_installed_cli_agrees_when_it_is_this_tree(repo_help_groups):
     while both were stale (see the block above). Now the three must agree, and
     when the installed CLI is demonstrably not this tree the test says which
     one it is instead of quietly green-lighting a two-stale comparison.
+
+    The spawn uses ``_installed_cli_env`` — an environment in which the
+    installed script can resolve its payload — because the leg's HOME sandbox
+    otherwise kills the CLI's own import and the oracle reports a crash it
+    cannot attribute. What is COMPARED is untouched by that: still the
+    installed CLI's help against this tree's help.
     """
     import gen_site_commands as g
 
     if shutil.which("hscc") is None:
         pytest.skip("hscc is not installed on this host")
-    live = _parse(g.fetch_help(None))
+    live = _parse(g.fetch_help(None, env=_installed_cli_env(tmp_path)))
     if live != repo_help_groups:
         n_live = sum(len(x["sigs"]) for x in live)
         n_repo = sum(len(x["sigs"]) for x in repo_help_groups)
@@ -791,6 +844,79 @@ def test_installed_cli_agrees_when_it_is_this_tree(repo_help_groups):
             "bottle cannot gate main. The fixture's oracle is the repo's own "
             "help, pinned by test_fixture_is_the_repos_own_help")
     assert _parse(HELP_FIXTURE.read_text(encoding="utf-8")) == live
+
+
+def test_oracle_child_home_is_still_a_sandbox(tmp_path):
+    """The fix's own guard: recovering the payload must not cost hermeticity.
+
+    The tempting simplification is to hand the child the operator's real
+    ``HOME`` so the CLI "just works". That re-opens the exact write path the
+    leg's conftest exists to close, and it would pass every other test in the
+    file. So pin that the oracle's child ``HOME`` is under ``tmp_path`` and is
+    not the real home, and that the payload dir is reached by a link rather
+    than by an unwritten ``HOME``.
+    """
+    env = _installed_cli_env(tmp_path)
+    child_home = Path(env["HOME"])
+    assert child_home == tmp_path / "cli-home"
+    assert child_home.is_dir()
+    assert str(child_home) != _real_home()
+    assert child_home.is_relative_to(tmp_path), (
+        "the oracle's child HOME escaped the leg's tmp root — it is writing "
+        "somewhere the leg does not own")
+    link = child_home / ".hermes" / "plugins"
+    real_plugins = Path(_real_home()) / ".hermes" / "plugins"
+    if real_plugins.is_dir():
+        assert link.is_symlink() and link.resolve() == real_plugins.resolve(), (
+            "the installed CLI resolves its payload through HOME; without the "
+            "link the oracle dies in its own import and reports a crash "
+            "instead of a comparison")
+
+
+def test_fetch_help_names_the_module_that_failed(tmp_path, monkeypatch):
+    """The diagnosability pin: the cause has to survive the handback.
+
+    ``fetch_help`` used to cut the child's stderr at 200 characters. A Python
+    traceback puts the decisive line LAST, so the cut landed mid-frame and the
+    red read `exited 1: Traceback ... File ".../venv/lib/python"` — with the
+    failing module never named, which is precisely how the red this card fixed
+    stayed unattributed for a gate run. Drives the real function with a fake
+    ``hscc`` on PATH whose stderr is shaped like the real one: frames first,
+    the exception last, comfortably past the old cut.
+    """
+    import gen_site_commands as g
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    traceback = (
+        "Traceback (most recent call last):\n"
+        '  File "/opt/hscc/venv/bin/hscc", line 4, in <module>\n'
+        "    from hscc_cli import main\n"
+        '  File "/opt/hscc/venv/lib/python3.14/site-packages/hscc_cli/'
+        '__init__.py", line 75, in <module>\n'
+        "    from hscc_daemon.hscc import main\n"
+        '  File "/opt/hscc/venv/lib/python3.14/site-packages/hscc_daemon/'
+        'hscc.py", line 12, in <module>\n'
+        "    import hscc_daemon.state\n"
+        "ModuleNotFoundError: No module named 'hscc_daemon'"
+    )
+    # Past the 200-char cut by construction, so a reintroduced cap cannot
+    # pass this test while looking long enough.
+    assert len(traceback) > 200
+    (bindir / "hscc.stderr").write_text(traceback + "\n", encoding="utf-8")
+    fake = bindir / "hscc"
+    fake.write_text('#!/bin/sh\ncat "$0.stderr" >&2\nexit 1\n', encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(SystemExit) as exc:
+        g.fetch_help(None)
+    msg = str(exc.value)
+    assert "ModuleNotFoundError: No module named 'hscc_daemon'" in msg, (
+        f"the handback lost the cause: {msg!r}")
+    assert msg.index("ModuleNotFoundError") > 200, (
+        "the cause is only reachable past the old cut — if this moved below "
+        "200 the fake stopped exercising the truncation")
 
 
 
