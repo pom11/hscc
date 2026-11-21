@@ -91,8 +91,8 @@ healable.`
 
 Per host it prints the units, whether the stop was confirmed, the reason, `since`,
 `until`, and the span. `--json` prints `{"count": N, "pauses": [ … ]}` with one
-object per host carrying the overlay's own keys (`host`, `units`, `reason`,
-`since`, `until`, `span_nodes`, `stopped`).
+object per host: `host` plus the overlay's entry keys (`units`, `reason`, `since`,
+`until`, `span_nodes`, `stopped`).
 
 ### Exit codes
 
@@ -180,7 +180,10 @@ Practical rule until those land: a pause keeps a node down against auto-heal, th
 breaker, autoscale and the autodown wake. Do not rely on it across a `hscc cluster
 up`, a reboot of a node holding keepalive units, or a keepalive tick on a unit that
 autodown would not have restored — if you need the node *stayed* down across those,
-bring the fleet down deliberately or tear the unit's declaration down instead.
+bring the fleet down deliberately or tear the unit's declaration down instead. Both
+seams are tracked as follow-up work (`t_0f0a433f` for the keepalive loop,
+`t_f17b1ae3` for `hscc cluster up` and the paths that call it); when one lands, its
+bullet moves to the table above.
 
 ## Span rules
 
@@ -215,16 +218,17 @@ talks to — is refused unless you pass `--force`:
 
 ```
 REFUSED: 192.0.2.11 serves the orchestrator model.
-  why: serving config: orchestrator unit(s) orch-1 declare 192.0.2.11
+  why: serving config: orchestrator unit(s) ['orch-1'] declare 192.0.2.11
   Pausing it parks the model every agent in this fleet talks to.
   Pass --force to pause it anyway.
 Nothing stopped and nothing recorded.
 ```
 
-The `why:` line is the evidence the plan actually read (unit ids and the source
-that said so — the serving config's orchestrator units, corroborated by the live
-served-model alias), never a hardcoded model name. The flag **fails closed**: if
-the status read or the serving config is unavailable, the host is treated as
+The `why:` line is the evidence the plan actually read — the serving config's
+orchestrator unit ids, or the live workload that advertises the orchestrator alias —
+never a name the CLI made up. The flag **fails closed**: when the status read or the
+serving config is unavailable the evidence line reads `serving config unavailable —
+cannot rule out this host serving the orchestrator model`, and the host is treated as
 serving the orchestrator model, because refusing is the cheap direction to err in.
 That asymmetry is deliberate: unlike the `--span` guard, this one refuses a dry run
 too, because "I cannot prove this node is safe to park" is exactly what a dry run

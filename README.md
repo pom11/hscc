@@ -203,6 +203,7 @@ Anything else — no cache, a cache older than 24 h, a cached "up to date" — p
 | watch per-node / per-model live load | `hscc cluster monitor --live` |
 | look back at the stored series, not just the present | `hscc cluster history --window 6h` |
 | see throughput + queue depth, get scaling advice | `hscc throughput` · `hscc autoscale` |
+| take one node out of the fleet for a while | `hscc node pause <host>` — dry-run first; `hscc node paused` to see what is parked |
 | review + merge a finished card | `hscc project review <card>` |
 | see why a card is stuck / un-stick it | `hscc kanban blocked [--recover <id>]` |
 | preview what would be escalated | `hscc escalate` (dry-run) |
