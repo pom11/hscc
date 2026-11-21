@@ -587,6 +587,155 @@ def test_status_prints_the_doctor_verdict_for_this_stream(tmp_path):
     assert "never completed a pass" in status.stdout
 
 
+# ── --status must see the wrapper shape's OWN failure mode (t_4765bb59) ─────
+# The nightly runs a generated wrapper that bakes an ABSOLUTE checkout path at
+# install time. That is what makes it drift-proof against `git pull` and it is
+# also the one thing that can still break it: move or rename the checkout and the
+# wrapper stays exactly where cron binds it, so the 04:30 tick dies on `exec`
+# while `--status` — which only checked that the wrapper FILE existed — printed a
+# clean answer. `install_dep_watcher.sh` (t_accbc5da) answers this with a
+# `# HSCC-TARGET:` marker and a MISSING / NOT GENERATED / runs / DANGLING ladder;
+# these pins hold this installer to the same four states and the same marker.
+
+def _installable_checkout(tmp_path, name="checkout"):
+    """A tree the installer's preflight accepts, with the REAL gate inside it.
+
+    Everything --status says about the target has to come from THIS tree, not from
+    the test's own checkout, so the test can move the checkout out from under an
+    installed wrapper and --status has nothing else it could be reporting.
+    """
+    repo = tmp_path / name
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copy2(INSTALLER, str(repo / "scripts" / "install_alone_sweep_gate.sh"))
+    shutil.copy2(GATE, str(repo / "scripts" / "alone_sweep_gate.sh"))
+    (repo / "scripts" / "run_tests.sh").write_text("#!/bin/sh\nexit 0\n")
+    support = repo / "docs" / "audits" / "support" / "t_572b4856"
+    support.mkdir(parents=True)
+    stub = support / "alone_sweep.sh"
+    stub.write_text("#!/bin/bash\nexit 0\n")
+    stub.chmod(0o755)
+    return repo
+
+
+def _run_from(repo, tmp_path, *args, hermes_home=None):
+    """Run <repo>/scripts/install_alone_sweep_gate.sh with HOME + HERMES_HOME pinned."""
+    home, log = _stub_hermes(tmp_path)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    env.pop("HSCC_ALONE_SWEEP_OUT", None)
+    if hermes_home is None:
+        env.pop("HERMES_HOME", None)
+    else:
+        env["HERMES_HOME"] = str(hermes_home)
+    proc = _run(["bash", str(repo / "scripts" / "install_alone_sweep_gate.sh"), *args],
+                env=env, cwd=str(tmp_path), timeout=60)
+    return proc, (log.read_text() if log.exists() else ""), home
+
+
+def _wrapper_line(status_stdout, needle):
+    return [l for l in status_stdout.splitlines() if needle in l]
+
+
+def test_generated_wrapper_marks_the_target_the_watchers_mark(tmp_path):
+    """The marker must name what cron actually runs, or the ladder reports on a
+    path the job never touches."""
+    repo = _installable_checkout(tmp_path)
+    profile = tmp_path / "profile"
+    proc, _log, _home = _run_from(repo, tmp_path, hermes_home=profile)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    wrapper = profile / "scripts" / "hscc-alone-sweep-gate.sh"
+    text = wrapper.read_text()
+    marker = re.findall(r"^# HSCC-TARGET: (.*)$", text, re.M)
+    assert marker, f"no HSCC-TARGET marker in the generated wrapper:\n{text}"
+    assert marker[-1] == str(repo / "scripts" / "alone_sweep_gate.sh"), \
+        f"the marker names {marker[-1]!r}, not the gate the wrapper execs"
+    # The marker and the exec line are two spellings of one fact; if they can
+    # disagree, --status can print a clean verdict about a path cron never runs.
+    exec_target = shlex.split([l for l in text.splitlines()
+                               if l.startswith("exec ")][0])[1]
+    assert marker[-1] == exec_target, "the marker drifted from what the wrapper execs"
+    # Measured on the first draft of the marker comment: the heredoc that writes this
+    # file is EXPANDED, so a backtick or $(...) in prose added to it runs at install
+    # time and silently interpolates nothing into the wrapper the job boots.
+    assert "`" not in text, \
+        f"a backtick in the generated wrapper ran at install time:\n{text}"
+
+
+def test_status_reports_what_the_wrapper_runs_and_warns_DANGLING(tmp_path):
+    """The card's item 2, pinned end to end in a PROFILE shell.
+
+    Install from a checkout bound to a profile home, then move that checkout. The
+    wrapper is untouched and still bound by name, so this is exactly the state a
+    nightly dies in — and --status is the one command an operator runs first.
+    """
+    repo = _installable_checkout(tmp_path)
+    profile = tmp_path / "profile"
+    proc, _log, _home = _run_from(repo, tmp_path, hermes_home=profile)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    status, _l, _h = _run_from(repo, tmp_path, "--status", hermes_home=profile)
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert _wrapper_line(status.stdout, "runs " + str(repo / "scripts" / "alone_sweep_gate.sh")), \
+        f"--status never printed the baked target:\n{status.stdout}"
+    assert "DANGLING" not in status.stdout
+
+    moved = tmp_path / "checkout-moved"
+    repo.rename(moved)
+    status, _l, _h = _run_from(moved, tmp_path, "--status", hermes_home=profile)
+    assert status.returncode == 0, \
+        f"a moved checkout must be a STATUS LINE, not a crash:\n{status.stdout}{status.stderr}"
+    assert "DANGLING" in status.stdout, (
+        f"--status called a dead wrapper clean:\n{status.stdout}")
+    assert str(repo / "scripts" / "alone_sweep_gate.sh") in status.stdout, \
+        "the warning must name the path that went missing, not just that something did"
+
+
+def test_status_resolves_a_wrapper_generated_before_the_target_marker(tmp_path):
+    """Transition window: a host whose wrapper predates the marker still has a real
+    baked target in its `exec` line. Falling back to it is the difference between
+    telling that operator their checkout moved and telling them a lie about a file
+    this installer did write (same reasoning t_accbc5da kept the `copy:` line for).
+    """
+    repo = _installable_checkout(tmp_path)
+    proc, _log, home = _run_from(repo, tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    wrapper = home / ".hermes" / "scripts" / "hscc-alone-sweep-gate.sh"
+    text = wrapper.read_text()
+    wrapper.write_text("\n".join(l for l in text.splitlines()
+                                 if not l.startswith("# HSCC-TARGET:")) + "\n")
+
+    status, _l, _h = _run_from(repo, tmp_path, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "NOT GENERATED" not in status.stdout, \
+        f"a wrapper this installer wrote was reported as foreign:\n{status.stdout}"
+    assert "runs " + str(repo / "scripts" / "alone_sweep_gate.sh") in status.stdout, status.stdout
+
+    moved = tmp_path / "checkout-moved"
+    repo.rename(moved)
+    status, _l, _h = _run_from(moved, tmp_path, "--status")
+    assert "DANGLING" in status.stdout, \
+        f"a pre-marker wrapper with a dead target read as clean:\n{status.stdout}"
+
+
+def test_status_says_NOT_GENERATED_when_the_wrapper_is_not_ours(tmp_path):
+    """A hand-placed file under the wrapper's name is the case the ladder must NOT
+    guess about: no marker and no exec line means this installer cannot say what
+    runs, and inventing a verdict is worse than saying so (t_95eb9f15's fail-open
+    rule — a check that cannot run must not read as an absent problem)."""
+    repo = _installable_checkout(tmp_path)
+    proc, _log, home = _run_from(repo, tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    wrapper = home / ".hermes" / "scripts" / "hscc-alone-sweep-gate.sh"
+    wrapper.write_text("#!/bin/bash\necho hand-placed by an operator\n")
+
+    status, _l, _h = _run_from(repo, tmp_path, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "NOT GENERATED" in status.stdout, status.stdout
+    assert "DANGLING" not in status.stdout, \
+        "cannot claim a path dangles when no path was ever read"
+
+
 def test_schedule_is_nightly_and_not_a_second_of_the_suite():
     """The routing decision, pinned: this job is scheduled, so a wrong cadence is
     a wrong gate. Daily, and overridable — never per-PR (see the gate header)."""

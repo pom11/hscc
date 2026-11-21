@@ -322,7 +322,10 @@ is not left to that dir: every non-preflight pass stamps
 bootstrap doctor (`hscc-bootstrap/doctor.py`) warns on its `cron watchers` row when
 the job stops firing **or** fires and comes back `GATE RED` — the row is liveness,
 and the verdict rides inside the stamp. `scripts/install_alone_sweep_gate.sh` with
-`--status` prints that same verdict line; `hermes cron runs` keeps the per-run record.
+`--status` prints that same verdict line, **and** the path the wrapper actually runs —
+`runs <gate>`, or `DANGLING` when the checkout it was baked from has moved (the wrapper
+is bound by name, so a moved checkout otherwise looks untouched here and dies at 04:30).
+`hermes cron runs` keeps the per-run record.
 
 The **CI posture is a separate environment and is swept separately** (t_4447d736): the
 nightly above runs on the host that carries both stamp interpreters, while
