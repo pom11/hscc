@@ -123,7 +123,7 @@ def test_parse_response_strips_markdown_fence():
     assert parsed[0]["content"] == "project uses sqlite"
 
 
-def test_parse_response_skips_invalid_and_falls_back():
+def test_parse_response_skips_invalid_facts_and_stores_nothing_unparseable():
     aug = LocalLLMAugmentation()
     # One valid, one missing object -> only the valid survives.
     parsed = aug._parse_response(
@@ -133,10 +133,21 @@ def test_parse_response_skips_invalid_and_falls_back():
     assert len(parsed) == 1
     assert parsed[0]["content"] == "a is x"
 
-    # Invalid JSON -> fallback single fact.
-    parsed = aug._parse_response("not json at all")
-    assert len(parsed) == 1
-    assert parsed[0]["metadata"].get("fallback") is True
+    # No fact list -> nothing stored (the old "Extraction: <reply>" fallback
+    # filled memory with model reasoning).
+    assert aug._parse_response("not json at all") == []
+    assert aug._parse_response("We need answer user's request: extract facts...") == []
+
+
+def test_parse_response_finds_the_list_after_reasoning_or_in_an_open_fence():
+    aug = LocalLLMAugmentation()
+    fact = '{"subject": "hscc", "predicate": "uses", "object": "kanban", "confidence": 0.9}'
+    after_reasoning = f"We need to extract facts. Output:\n[{fact}]\nDone."
+    assert [m["content"] for m in aug._parse_response(after_reasoning)] == ["hscc uses kanban"]
+    open_fence = f"```json\n[{fact}]\n"
+    assert [m["content"] for m in aug._parse_response(open_fence)] == ["hscc uses kanban"]
+    bad_confidence = '[{"subject": "a", "predicate": "is", "object": "b", "confidence": "high"}]'
+    assert aug._parse_response(bad_confidence)[0]["metadata"]["confidence"] == 0.8
 
 
 def _run(coro):
