@@ -160,14 +160,16 @@ def test_row_reports_unverifiable_when_module_missing(tmp_path, monkeypatch):
 def test_row_uses_the_real_check_outside_pytest_and_forwards_hscc_dir(tmp_path,
                                                                        monkeypatch):
     """The human-CLI/sandbox path: the row delegates to
-    cron_watchers.doctor_check(hscc_dir=...) — the stub proves the delegation
-    AND the HSCC_DIR pass-through (the bootstrap sandbox reads the SANDBOX's
-    ~/.hscc root; reading the operator's live tree here is the historical
-    doctor bug)."""
+    cron_watchers.doctor_check(hscc_dir=..., check_deployed_copies=True) — the
+    stub proves the delegation AND both pass-throughs (the bootstrap sandbox
+    reads the SANDBOX's ~/.hscc root; reading the operator's live tree here is
+    the historical doctor bug). ``check_deployed_copies`` is the deployed-copy
+    seam (t_95eb9f15): on the live host the doctor asks for it, so a stale
+    installed copy reads as stale instead of as "not configured"."""
     calls = []
 
-    def fake_check(hscc_dir=None):
-        calls.append(hscc_dir)
+    def fake_check(hscc_dir=None, check_deployed_copies=False):
+        calls.append((hscc_dir, check_deployed_copies))
         return {"name": CHECK_NAME, "ok": True, "fatal": False,
                 "detail": "from the real check", "fix": ""}
 
@@ -177,8 +179,30 @@ def test_row_uses_the_real_check_outside_pytest_and_forwards_hscc_dir(tmp_path,
     monkeypatch.setattr(doctor, "_load_cron_watchers", lambda: CW())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     row = doctor._cron_watchers_check_row(None, hscc_dir="/sandbox/.hscc")
-    assert calls == ["/sandbox/.hscc"] and row.detail == "from the real check"
+    assert calls == [("/sandbox/.hscc", True)]
+    assert row.detail == "from the real check"
     assert row.ok is True
+
+
+def test_row_survives_a_cron_watchers_without_the_drift_seam(monkeypatch):
+    """An OLDER deployed cron_watchers takes no check_deployed_copies (the
+    deployed plugin payload is a release, not this checkout). The row must fall
+    back to the stamp read rather than crash the doctor — a missing feature is
+    allowed, an exception in a warn-only row is not."""
+    calls = []
+
+    def fake_check(hscc_dir=None):          # old signature: one seam only
+        calls.append(hscc_dir)
+        return {"name": CHECK_NAME, "ok": True, "fatal": False,
+                "detail": "stamp read only", "fix": ""}
+
+    class CW:
+        doctor_check = staticmethod(fake_check)   # no check_deployed_copies
+
+    monkeypatch.setattr(doctor, "_load_cron_watchers", lambda: CW())
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    row = doctor._cron_watchers_check_row(None, hscc_dir="/sandbox/.hscc")
+    assert calls == ["/sandbox/.hscc"] and row.detail == "stamp read only"
 
 
 def test_load_cron_watchers_resolves_the_repo_sibling():
