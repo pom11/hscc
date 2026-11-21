@@ -337,11 +337,23 @@ def test_every_file_that_reaches_real_hermes_cli_carries_the_seam():
 
     Per-file and coarse, exactly like the rule above: an owner import proves the
     file CAN ask, not that every case does. The drift this catches is the file
-    that never learned either route exists. ``test_profile_root.py`` is green
-    here by the second route (it injects the fake); ``test_routes_sessions`` and
-    ``test_routes_activity`` patch the ``_backing_open_profile_db`` seam instead
-    and never reach a CLI import at all, so they are correctly absent rather
-    than exempted — the same shape the rule above documents for its stand-ins.
+    that never learned either route exists.
+
+    And nothing is caught TODAY. Measured with these very predicates, the only
+    file in the swept set that reaches a real CLI import is the owner's own
+    probe, which the sweep excludes — the antecedent is EMPTY, and keeping it
+    empty is the whole job now that t_c51c87d7 has removed the last offender.
+    So ``test_profile_root.py`` and ``test_send_working_indicator.py`` are green
+    because they perform NO CLI import at all — each installs the fake (that is
+    how its own cases reach a CLI symbol) and the first also imports the owner —
+    NOT because a seam credited them; ``test_routes_sessions`` and
+    ``test_routes_activity`` reach neither route. Correctly absent rather than
+    exempted, the same shape the rule above documents for its ``_FakeSessionDB``
+    stand-ins. An empty antecedent stays honest only while the predicates still
+    have referents to match: the owner route is pinned by
+    ``test_the_sweep_sweeps_the_owner_and_the_gated_files``, the fake route by
+    the assertion below, and the offender shape itself by
+    ``test_the_cli_rule_fires_on_the_shape_it_polices``.
     """
     offenders = []
     for rel in _tracked_py_files():
@@ -358,6 +370,19 @@ def test_every_file_that_reaches_real_hermes_cli_carries_the_seam():
         "interpreter):\n" + "\n".join(offenders) +
         f"\n— import the probe from {OWNER}, or inject a fake {REAL_CLI} into "
         "sys.modules the way test_profile_root.py does")
+
+    # The antecedent above is empty, which makes the SECOND seam the half of
+    # this rule nothing currently needs — so pin that it still has a live
+    # REFERENT: test_profile_root.py and test_send_working_indicator.py install
+    # the fake today. If this fires, either the leg has standardised on the
+    # owner (then that half of the seam, and the paragraph above describing it,
+    # both go) or the fake_hermes idiom has been dropped — which is precisely
+    # the #504 shape waiting for the next author who needs a CLI symbol.
+    assert any(_installs_synthetic_cli(ast.parse((REPO / rel).read_text()))
+               for rel in _tracked_py_files() if rel != OWNER), (
+        f"no file under the sweep installs a synthetic {REAL_CLI} any more — "
+        "the second seam route has no referent left, so this rule is claiming a "
+        "route that nothing in the leg uses")
 
 
 def test_the_cli_rule_fires_on_the_shape_it_polices():
