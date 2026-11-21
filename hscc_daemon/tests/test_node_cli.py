@@ -713,3 +713,85 @@ class TestNoStrikeAccrualBehindAPause:
                             f"accrue — a parked node accrues nothing (#568); "
                             f"accrue the slate first, then park")
         assert bad == [], "\n".join(bad)
+
+
+# ── one resume policy, two callers (card t_110adc1a) ────────────────────────
+class TestResumePolicyIsShared:
+    """`hscc node resume` and the daemon's expiry tick must run the SAME code.
+
+    The tick resumes what the operator scheduled, so any policy the verb holds
+    that the tick lacks (or the other way round) is a node that comes back under
+    one caller and stays parked under the other. Both were therefore pointed at
+    :func:`node_pause_exec.resume_host`, and these tests are what keep that
+    arrangement from quietly decaying back into two copies:
+
+    * the behavioural one drives the verb with the executor's policy replaced, so
+      if the verb ever resumes for itself again the fake never fires and the test
+      goes red — and it pins the exit-code mapping (``ok`` → rc) in both
+      directions, which is the only thing the verb still decides;
+    * the source one reads the verb's own body and refuses to let the resume
+      primitives come back into it.
+    """
+
+    def test_the_verb_calls_the_executors_resume_policy(self, fleet,
+                                                        monkeypatch):
+        seen = []
+
+        def fake_resume(host, entry, **kw):
+            seen.append((host, dict(entry), kw))
+            return {"ok": True, "action": npe.RESUME_RESUMED}
+
+        monkeypatch.setattr(npe, "resume_host", fake_resume)
+        seed_pause()
+        rc, out = run(["resume", W1, "--apply"])
+        assert rc == 0, out
+        assert len(seen) == 1, seen
+        host, entry, kw = seen[0]
+        assert host == W1
+        assert entry["units"] == ["w1", "wspan"], (
+            "the verb hands over the overlay entry it selected, not a re-read")
+        assert kw == {"apply": True}, (
+            "--apply is how the verb says 'do it'; the tick passes apply too")
+        assert fleet.calls == [], (
+            "the verb no longer restarts anything by itself — resume_host does")
+
+    def test_a_dry_run_ask_is_passed_through_as_apply_false(self, fleet,
+                                                           monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            npe, "resume_host",
+            lambda host, entry, **kw: seen.append(kw) or {
+                "ok": True, "action": npe.RESUME_DRY_RUN})
+        seed_pause()
+        rc, out = run(["resume", W1])
+        assert rc == 0, out
+        assert seen == [{"apply": False}], seen
+
+    def test_a_kept_pause_exits_nonzero(self, fleet, monkeypatch):
+        """The verb's whole remaining decision is ok → exit code, so pin both
+        directions: a kept pause (restart failed / refused) must be a red rc, or
+        a script that parks and resumes would believe a failed restart."""
+        monkeypatch.setattr(
+            npe, "resume_host",
+            lambda host, entry, **kw: {"ok": False,
+                                       "action": npe.RESUME_KEPT})
+        seed_pause()
+        rc, out = run(["resume", W1, "--apply"])
+        assert rc == 1, out
+
+    def test_the_policy_primitives_are_not_in_the_verb(self):
+        """Source pin: the verb owns argument grammar, the span-owner answer and
+        the exit code — nothing else. If ``resume_units`` / ``heal_breaker.clear``
+        / ``node_pauses.clear`` show up in its body again, someone re-inlined the
+        policy and the daemon tick is now running a different one."""
+        import inspect
+        body = ast.parse(inspect.getsource(unified._node_resume))
+        banned = {"resume_units", "stop_units", "plan", "clear",
+                  "reset_alert", "resume_host"}
+        called = {node.func.attr for node in ast.walk(body)
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)
+                  and node.func.attr in banned}
+        assert called == {"resume_host"}, (
+            f"_node_resume calls {sorted(called)}; only resume_host belongs "
+            f"there — the rest is policy and lives in node_pause_exec")

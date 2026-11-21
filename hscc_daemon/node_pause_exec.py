@@ -496,3 +496,175 @@ def resume_units(units, apply=False, run=None, echo=print):
     """
     return _run_units(units, apply, "resume_cmd", "resume",
                       run or util.run_cmd, echo)
+
+
+# ── the resume policy (ONE implementation for the CLI and the daemon tick) ──
+#
+# WHY THE TICK CALLS A FUNCTION INSTEAD OF THE CLI VERB
+# -----------------------------------------------------
+# ``hscc-cluster/node_pause_tools.py`` reuses ``hscc node resume`` by calling it
+# in-process under ``contextlib.redirect_stdout`` and reporting the bytes — the
+# parent card's deliberate decision ("no second policy, no agent-only path around
+# dry-run"), and correct for a single-shot agent turn. A daemon stream thread
+# cannot copy that trick: ``redirect_stdout`` rebinds a PROCESS GLOBAL, so for
+# the window of one resume it would steal the prints of the ~14 other supervised
+# stream threads into this tick's buffer — and the tick's own lines would then
+# land wherever the next thread's print went. A tick needs a return value it can
+# log and stamp, not text it has to re-parse.
+#
+# So the policy lives HERE and both callers pass an ``echo``: the CLI's is
+# ``print`` (its bytes, order and exit codes are exactly what they were — the
+# verb is now a thin parser + this function), the tick's is the daemon log. One
+# copy of the refuse-and-keep rules, two surfaces, and no print-capture racing
+# other threads.
+
+#: ``action`` values :func:`resume_host` returns. Three, deliberately: a tick
+#: that cannot tell "nothing was due" from "the restart failed" cannot stamp a
+#: truthful stream.
+RESUME_RESUMED = "resumed"
+RESUME_KEPT = "kept"
+RESUME_DRY_RUN = "dry_run"
+
+
+def resume_host(host, entry, apply=False, directory=None, echo=print,
+                reason=None, run=None):
+    """Restart the units ``entry`` recorded, then end the pause.
+
+    This IS the resume policy — ``hscc node resume`` and the daemon's
+    expiry tick both run it, so the dry-run gate, the rebuild-or-refuse rule and
+    the clear pairing cannot drift apart between an operator and the daemon.
+
+    ``entry`` comes from the CALLER's own :func:`node_pauses.list_pauses`
+    snapshot and is never re-read here: ``node_pauses.load()`` normalises into
+    fresh objects on every call, so an entry read twice is not the same object,
+    and a decision taken across two reads can disagree with the one that picked
+    this host. The caller that selected an expired entry passes what it saw.
+
+    ``apply=False`` (the default, the #478 rule) prints every command and mutates
+    nothing — including the overlay, so a dry run cannot end a pause.
+
+    The order is the contract:
+
+      1. rebuild the launch argv. The overlay stores unit IDS, not commands
+         (``node_pauses._normalize_entry`` flattens ``units`` to strings), so
+         :func:`plan` re-derives them from ``serving.json`` through the same
+         builder the keepalive relaunch uses.
+      2. restart via :func:`resume_units` — sparkrun's ``--ensure`` path, never a
+         hand-composed ``sparkrun run`` (a crafted argv derives a different
+         intent id and launches a PARALLEL DUPLICATE of a live unit).
+      3. ONLY after a clean restart: clear the pause, then that node's heal
+         strikes (``clear`` + ``reset_alert``, the same pairing
+         ``hscc heal-clear`` does — clearing the ledger without resetting the
+         stamp silences the node forever).
+
+    Every failure path KEEPS the pause and prints why: the record is what makes
+    the heal, keepalive, ``cluster up``, autoscale and autodown paths skip this
+    node, so losing it because a resume was *attempted* would walk units back onto
+    a half-started machine. A kept pause is simply retried by the next call.
+
+    Returns ``{"host", "ok", "action", "error", "pause_cleared",
+    "strikes_cleared", "restarts"}``::
+
+        RESUME_DRY_RUN  ok=True   would restart; nothing changed
+        RESUME_RESUMED  ok=True   restart clean; pause ended, strikes cleared
+        RESUME_KEPT     ok=False  refused or failed; pause still on disk
+
+    ``ok`` is "this call would exit 0" — the CLI maps it straight to its exit
+    code, the tick logs a WARN when it is False. ``error`` is a one-liner for a
+    log row; the human-readable detail is already in ``echo``'s output.
+    """
+    from . import heal_breaker, node_pauses
+
+    host = str(host or "").strip()
+    recorded = list((entry or {}).get("units") or [])
+    span_nodes = list((entry or {}).get("span_nodes") or [])
+    res = {
+        "host": host,
+        "ok": False,
+        "action": RESUME_KEPT,
+        "error": None,
+        "pause_cleared": False,
+        "strikes_cleared": False,
+        "restarts": None,
+    }
+
+    echo(f"{host}: pause recorded {len(recorded)} unit(s)"
+         f"{' — dry run, nothing restarted' if not apply else ''}")
+    for uid in recorded:
+        echo(f"  {uid}")
+    if span_nodes:
+        echo(f"  every node this affects: {', '.join(span_nodes)}")
+
+    if recorded:
+        p = plan(host)
+        if not p.get("ok"):
+            res["error"] = (f"cannot rebuild the launch commands for {host}: "
+                            f"{p.get('error')}")
+            echo(f"error: {res['error']}")
+            echo("The pause stays recorded; nothing was restarted.")
+            return res
+        by_id = {}
+        for unit in p["units"]:
+            by_id.setdefault(unit["unit_id"], unit)
+        missing = [uid for uid in recorded if uid not in by_id]
+        if missing:
+            res["error"] = ("no launch command can be rebuilt for "
+                            f"{', '.join(missing)}")
+            echo(f"REFUSED: {res['error']}.")
+            echo("  Nothing is known about how those units were started, so "
+                 "resuming them would guess a command.")
+            echo(f"  The pause on {host} stays recorded. Start the unit by "
+                 f"hand (hscc cluster up / hscc template apply) and then "
+                 f"clear the pause.")
+            return res
+        units = [by_id[uid] for uid in recorded]
+        out = resume_units(units, apply=apply, run=run, echo=echo)
+        res["restarts"] = out["units"]
+        if not apply:
+            res["action"] = RESUME_DRY_RUN
+            res["ok"] = True
+            echo("Dry run: nothing restarted. Re-run with --apply.")
+            return res
+        if not out["ok"]:
+            res["error"] = f"at least one unit failed to restart on {host}"
+            echo(f"error: {res['error']}.")
+            echo("  The pause stays recorded — the heal paths must not "
+                 "resume this node while its units are half up.")
+            return res
+    elif not apply:
+        res["action"] = RESUME_DRY_RUN
+        res["ok"] = True
+        echo("  the pause recorded no units, so there is nothing to restart")
+        echo("Dry run: nothing changed. Re-run with --apply to clear it.")
+        return res
+
+    # Restarted (or nothing to restart): end the pause, THEN the strikes — the
+    # order is what makes a crash between the two safe: a cleared node with old
+    # strikes is a node that heals normally, a cleared strike with the pause
+    # still on disk is a node the heal paths would still skip.
+    try:
+        node_pauses.clear(host, directory=directory)
+    except OSError as e:
+        # The units are up and the overlay still says the node is parked: every
+        # repair path will keep skipping a machine that is back in service. The
+        # pause really is still there, so this is a kept result, not a resumed
+        # one — say so instead of printing a clear nobody can read.
+        res["error"] = (f"the units were restarted but the pause did not "
+                        f"reach disk ({e})")
+        echo(f"error: {res['error']}.")
+        echo(f"  {node_pauses.overlay_path(directory)} still holds "
+             f"{host} — clear it with 'hscc node resume {host} --apply' "
+             f"once the overlay is writable again.")
+        return res
+    res["pause_cleared"] = True
+    echo(f"pause for {host} cleared.")
+    if heal_breaker.clear(
+            host, reason=reason or f"hscc node resume {host}"):
+        heal_breaker.reset_alert(host)
+        res["strikes_cleared"] = True
+        echo(f"Cleared heal strikes for {host} — healing resumes now.")
+    else:
+        echo(f"No strikes recorded for {host} (nothing to clear).")
+    res["action"] = RESUME_RESUMED
+    res["ok"] = True
+    return res
