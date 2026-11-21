@@ -591,6 +591,124 @@ as "nobody installed this" — the exact invisibility class `t_3aadd2c0` (17 fai
 runs) was written about, arriving by deployed-copy drift rather than by a split in the
 stamp path. The doctor's own fix string is the remedy: re-run the installer.
 
+### 11. The CI posture is a third environment — swept, and not promotable yet (t_4447d736)
+
+t_6cd17e1c routed the nightly by two measured reasons and one **unmeasured** one, and
+the unmeasured one was load-bearing: §8 established `alone == in-leg` on this host's
+two interpreters, and the CI venv — CPython 3.13 + `requirements-ci.txt` on a macOS
+runner, no hermes, different `site-packages`, different `PYTHONPATH` — is a third
+environment where nobody had ever run the sweep. This section measures it. The answer
+is not "green" and not "the sweep found an order effect"; it is that **the agreement
+property does hold on the third environment, and the sweep still cannot be promoted
+there, because the leg underneath it is red for two reasons that are each invisible
+from the other posture.**
+
+**The two thin postures are not proxies for each other.** A CI-faithful venv built
+here exactly the way `.github/workflows/pytest-legs.yml` builds it (`python3.13 -m
+venv`, `pip install -r requirements-ci.txt`; `hermes`/`hermes_cli` **absent** from
+`site-packages`, pydantic/ruamel present) is *not* the runner, and the difference is
+one fact the venv recipe does not contain: `autodown._HERMES_AGENT_PATH` defaults to
+`~/.hermes/hermes-agent` (`autodown.py:787`) and `_load_kanban_db_or_default` puts it
+on `sys.path` whenever that directory exists (`autodown.py:874-885`). That directory
+exists on any host with a Hermes checkout and nowhere on a runner. So "hermes is not
+installed" does **not** mean "hermes is not importable": in the local thin venv the
+real `hermes_cli` resolves, on the runner it cannot.
+
+**Posture A — the CI-faithful venv on this host, tree `2b044516`.**
+`alone_sweep.sh <thin venv python> hscc_daemon`, one checkout, sequential:
+
+```
+in-leg reference   4049 passed, 9 skipped, 2 errors in 149.29s   run_tests rc=1
+alone sweeps       131 files swept, 130 rc 0, 1 rc 1
+diff               files whose ALONE run differs from the leg: 1
+                   test_board_pin: in-leg (18, 0, 0, 2) | alone (18, 0, 0, 2) | rc=1
+                   0 status changes · 0 skip-reason differences
+RESULT             the LEG ITSELF is red — fix that before reading the diff.
+```
+
+Read that carefully, because the headline number is the one that matters: **131 files
+swept, zero order effects and zero skip-reason divergence** (9 `-rs` reason lines on
+each side, matching). The single file the diff names is named *only* by its non-zero
+rc — its per-nodeid tally is identical on both sides and no reason string moved. So
+nothing in `requirements-ci.txt`'s dependency set breaks the property §8 established;
+the third environment agrees with the first two on the thing the gate actually asserts.
+
+**Posture B — the runner itself, `leg hscc_daemon` on run 44884690833 @ `2b044516`:**
+`1 failed, 4031 passed, 28 skipped in 204.91s`, reported **green** because
+`HSCC_TESTS_ENFORCE` is unset. Two different host-state seams make the two postures
+red, and neither is an order effect:
+
+1. **On the runner** — `TestCmdKanban.test_listing_json_valid`,
+   `IndexError: list index out of range` at `hscc_daemon/tests/test_kanban_cli.py:326`.
+   The test monkeypatches `ad._load_kanban_db_or_default` and nothing else
+   (`test_kanban_cli.py:320-322`), but `cmd_kanban(["stale","--json"])` narrows through
+   `_enum_board_names(..., registered_only=True)` → `allowed, err =
+   registered_board_names()` → `boards = [b for b in boards if (b if b else "default")
+   in allowed]` (`autodown.py:407-412`), and `registered_board_names` reads the
+   flightdeck **project registry** — `~/.flightdeck/registry.yaml`, or
+   `$FLIGHTDECK_REGISTRY` (`autodown.py:335-373`). A missing registry is
+   `(set(), None)`, not an error, so on a machine with no registry the fake `hscc`
+   board is filtered out and `data["tasks"]` is empty. Measured here, both halves:
+   with the operator's registry `1 passed`; with
+   `FLIGHTDECK_REGISTRY=/tmp/does-not-exist-registry.yaml` the same `IndexError` on
+   the same line the runner printed. **The test passes on this host because it reads
+   the operator's registered projects.** The hermetic fix is one line and has
+   in-repo precedent — `test_kanban_blocked.py:279,344` and `test_kanban_live.py:166,177`
+   already `monkeypatch.setattr(autodown, "registered_board_names", ...)` for exactly
+   this reason. It is **not** done here: this card owns the measurement, and per its
+   own constraint a red is named, not excluded.
+2. **On any host that has the Hermes tree** — `test_board_pin`'s `real_root` fixture,
+   2 **errors at setup** (the `real_hermes*` pair). Measured on the stamp's own thin
+   sibling, `HSCC_TEST_PY=~/miniconda3/envs/p313/bin/python HSCC_TEST_LEGS=hscc_daemon
+   bash scripts/run_tests.sh` → **`4048 passed, 10 skipped, 2 errors in 140.59s`,
+   `✗ hscc_daemon (pytest exit 1)`** — i.e. the thin leg of the dual-interpreter stamp
+   is red on `main` today, where §8's baseline for it was `4026 passed, 24 skipped`
+   green: the hermes-capability probe widened coverage (22 tests that used to skip now
+   take the real path) and two of the newly-live ones error. It does **not** occur on
+   the runner, where the same two tests skip (`real hermes_cli.kanban_db is
+   not importable in this interpreter: Hermes agent source not found at
+   '/Users/runner/.hermes/hermes-agent'`). Mechanism: the fixture takes the *real*
+   path (the name resolves, so it never reaches its own `pytest.skip`), calls
+   `kb.init_db()` → `connect()` → and `hermes_cli/kanban_db_connect.py:766` imports
+   the top-level `hermes_state` **lazily, at call time** — after autodown's bounded
+   `agent_tree_on_path` window has closed. `autodown.py:863-867` asserts the returned
+   module "needs no path to stay usable, because a loaded package resolves its
+   submodules through its own `__path__`": true for `hermes_cli.*`, false for a
+   *sibling top-level* module imported inside a method. In the canonical Hermes venv
+   the tree root is permanently on `sys.path`, which is why only the canonical
+   posture has ever been green here.
+
+**What the sweep structurally cannot see, and a promotion must not assume.** The
+runner prints **28** `-rs` reason lines; the thin venv on this host prints **9**. Same
+131 files, same leg, same committed code — the difference is entirely which seams are
+present. `alone_sweep.sh` compares alone-vs-in-leg *within* one posture; it is not a
+posture-vs-posture diff, so a `GATE GREEN` on the nightly host says nothing about the
+runner's skip profile, and "a FAILED in a sibling leg is a regression" is only as
+true as the posture being compared. The skip-reason half of the diff is the reason the
+tool has teeth (§2); it is not a cross-machine comparison instrument, and should not
+be advertised as one.
+
+**What this licenses.** Not a blocking gate on the CI posture. The obstacle is not
+the sweep — it is two host-state seams that keep the leg underneath it from being
+green in both postures, and `alone_sweep.sh` already refuses to render an agreement
+verdict on a red leg (`exit 1` after printing the diff, `alone_sweep.sh:61-66`), which
+is exactly the right behaviour to keep. In order:
+
+1. pin `registered_board_names` in `test_listing_json_valid` (one line, precedent
+   above) — until then the runner's leg is red and any sweep there exits 1;
+2. make `real_root` *skip* rather than error when `hermes_cli` resolves but the agent
+   tree is not usable — a fixture whose skip predicate is "the name imported" is
+   answering a weaker question than "this environment can run it" (GAP-D-1's own
+   standard);
+3. re-take this baseline **on the runner** with the dispatch instrument
+   (`.github/workflows/pytest-legs.yml`, `alone-sweep` input), a few times;
+4. only then promote, and the smallest promotion is the one t_6cd17e1c proposed —
+   a `needs: leg` sweep step gated by `HSCC_TESTS_ENFORCE`, not a new leg.
+
+Steps 1 and 2 are each their own card with their own tests; neither is done here.
+Step 3 is why the instrument is in the workflow rather than in a comment: a baseline
+that has to be re-derived by hand each time is a baseline nobody re-takes.
+
 ## What the stamp may claim now
 
 The thin leg's `-rs` output is now a property of the interpreter, not of the file
