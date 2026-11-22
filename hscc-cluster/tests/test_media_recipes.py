@@ -31,7 +31,10 @@ crash, not a warning, and sparkrun never strips or appends flags for recipes
 with an explicit ``command:`` (runtimes/sglang.py:371-384).
 Every source-backed check is SKIPPED with a loud reason when the source is not
 available, so the suite stays green on CI boxes without a sparkrun checkout or
-the cached upstream fixture.
+the cached upstream fixture. "Loud" is load-bearing: the reason names the FILE it
+looked for, every path it tried, and the pin (``SPARKRUN_SRC`` /
+``SGLANG_SA_FIXTURE``) that would supply it — see the block comment at the locator
+for why a reason that merely echoes a ``~``-derived path is not a reason (t_2b2a6c3b).
 """
 
 import os
@@ -254,19 +257,99 @@ def _repos_of(doc):
 
 
 # ── cross-checks against sparkrun / upstream SOURCE (skipped without it) ─────
+#
+# HOW these cases find a sparkrun checkout (t_2b2a6c3b). They used to freeze
+# ``SPARKRUN_SRC`` at module-import time from ``os.environ`` falling through to
+# ``Path.home()/sparkrun/src/sparkrun``. Two problems, one measurement: under the
+# roster-wide HOME seal (and on CI, which has no checkout at all) ``~`` moves, so
+# both cases turned into a skip whose reason named ``<sealed-home>/sparkrun/…`` —
+# a path that never existed on any machine, readable as "the harness moved my
+# HOME" rather than "this machine has no sparkrun checkout". The fix is a SEAM:
+#
+#   * ``SPARKRUN_SRC`` is the documented pin and, when set, it is the ANSWER —
+#     nothing else is consulted, so a machine that declares its checkout keeps
+#     running these cases no matter where HOME points, and its skip reason is
+#     HOME-independent by construction.
+#   * with no pin, candidates are a checkout beside this repo (derived from
+#     ``__file__``, so HOME cannot move it) and then the workstation default
+#     under the login home, tried in order.
+#   * ``SGLANG_SA_FIXTURE`` is the matching pin for the two upstream-parser cases:
+#     the path of a cached v0.5.22 ``server_args.py``. Unset (or not a file) is a
+#     skip that says which, on every machine that has not cached it — CI included.
+#   * resolution happens at CALL time, not import: a value read at import is a
+#     collection-time answer, and the leg's own doctrine (``hermes_gap.py``) is
+#     that the answer must be computed per call. ``test_sparkrun_checkout_seam.py``
+#     pins all of the above.
+#
+# This is NOT a fifth ``hermes_gap.py`` capability, deliberately: that module
+# answers "can THIS interpreter import hermes" and its guard asserts every
+# capability probes a hermes-rooted module (test_hermes_gap_single_posture.py:
+# ``_hermes_imports(modules) == set(modules)``). "Is a sparkrun source checkout on
+# this disk" is a different question with a different fix (set the pin), so it
+# stays here rather than breaking that invariant.
 
-SPARKRUN_SRC = Path(os.environ.get("SPARKRUN_SRC", str(Path.home() / "sparkrun" / "src" / "sparkrun")))
-SA_FIXTURE = Path(os.environ.get("SGLANG_SA_FIXTURE", ""))  # cached v0.5.22 diffusion arg parser, if any
+#: The documented seam. Read at CALL time (see above) — never cached at import.
+SPARKRUN_PIN = "SPARKRUN_SRC"
+
+#: Cached v0.5.22 diffusion arg-parser file, if the operator has one. Also read at
+#: call time; ``SA_FIXTURE`` below is the documented seam for it.
+SA_FIXTURE_PIN = "SGLANG_SA_FIXTURE"
+
+
+def _sparkrun_candidates():
+    """``[(why, path)]``, best first — see the block comment for the order.
+
+    An explicit ``SPARKRUN_SRC`` short-circuits the list: a pin is the operator's
+    answer, not a hint, and consulting ``~`` after a pin misses the point of the
+    seam (and re-put a home path into the skip reason, which is what a reader has
+    to be able to rule out).
+    """
+    pinned = os.environ.get(SPARKRUN_PIN)
+    if pinned:
+        return [(f"{SPARKRUN_PIN} pin", Path(pinned))]
+    return [("sibling checkout beside this repo", REPO.parent / "sparkrun" / "src" / "sparkrun"),
+            ("workstation default under the login home",
+             Path.home() / "sparkrun" / "src" / "sparkrun")]
+
+
+def _sparkrun_src_or_skip(needed):
+    """The sparkrun source dir that has *needed* (a path relative to ``src/sparkrun``).
+
+    Skipping is the honest answer for a machine with no checkout — CI has none, and
+    the authoritative gate stays the operator-side ``sparkrun recipe validate`` —
+    but the reason has to let a reader *rule out* a harness artefact, so it names
+    the file it looked for, every path it tried and why, and the pin that fixes it.
+    """
+    tried = []
+    for why, cand in _sparkrun_candidates():
+        if (cand / needed).is_file():
+            return cand
+        tried.append(f"{cand} [{why}]")
+    pytest.skip(
+        f"no sparkrun checkout: {needed} not found at any candidate "
+        f"({' | '.join(tried)}). This is a source-of-truth cross-check, so a "
+        f"machine without the checkout skips by right; set {SPARKRUN_PIN}=<path "
+        f"to sparkrun source, the dir holding {needed}> to run it here.")
+
+
+def _sa_fixture_or_skip():
+    """The cached v0.5.22 diffusion arg-parser file, or a loud skip.
+
+    Call-time for the same reason as ``_sparkrun_src_or_skip``: an env value
+    frozen at import is a collection-time answer about a file another process may
+    place later.
+    """
+    pinned = os.environ.get(SA_FIXTURE_PIN)
+    if pinned and Path(pinned).is_file():
+        return Path(pinned)
+    pytest.skip(f"v0.5.22 diffusion arg-parser fixture not cached "
+                f"({SA_FIXTURE_PIN} unset or not a file)")
+
 
 #: One diffusion image across the whole media tier (single pre-pull, §5
 #: headroom math identical unit-to-unit). Diverging is possible, but only via
 #: a deliberate edit HERE plus a design-doc note — not silently in one yaml.
 EXPECTED_DIFFUSION_IMAGE = "lmsysorg/sglang@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
-
-
-def _skip_unless(cond, reason):
-    if not cond:
-        pytest.skip(reason)
 
 
 def test_media_units_share_one_digest():
@@ -279,9 +362,9 @@ def test_media_units_share_one_digest():
 def test_hf_cache_root_matches_sparkrun_runtime_base():
     """/cache/huggingface is sparkrun's OWN default cache root (runtimes/base.py);
     our output-path scratch dir nests under a mount that exists by right."""
-    _skip_unless(SPARKRUN_SRC.is_dir(), f"no sparkrun checkout at {SPARKRUN_SRC}")
-    src = (SPARKRUN_SRC / "runtimes" / "base.py").read_text()
-    assert '"/cache/huggingface"' in src, \
+    src = _sparkrun_src_or_skip("runtimes/base.py")
+    text = (src / "runtimes" / "base.py").read_text()
+    assert '"/cache/huggingface"' in text, \
         "sparkrun's default HF cache root changed — media scratch paths need review"
 
 
@@ -291,11 +374,12 @@ def test_fraction_key_is_known_so_defaults_stay_warning_free():
     logs an 'unmapped config key' warning against the §5 budget knob
     (core/launcher.py's report_unmapped_config_keys counts a key consumed when
     the runtime's flag map lists it)."""
-    _skip_unless(SPARKRUN_SRC.is_dir(), f"no sparkrun checkout at {SPARKRUN_SRC}")
-    src = (SPARKRUN_SRC / "runtimes" / "sglang.py").read_text()
-    assert '"gpu_memory_utilization": "--mem-fraction-static"' in src, \
+    src = _sparkrun_src_or_skip("runtimes/sglang.py")
+    text = (src / "runtimes" / "sglang.py").read_text()
+    assert '"gpu_memory_utilization": "--mem-fraction-static"' in text, \
         ("sparkrun's sglang flag map changed for gpu_memory_utilization — the media "
          "recipes' claim that the key stays 'known' (no unmapped-key warning) needs review")
+
 
 
 def test_diffusion_cli_accepts_every_flag_the_recipes_use():
@@ -312,9 +396,7 @@ def test_diffusion_cli_accepts_every_flag_the_recipes_use():
         ``--<component>-weights-path`` alias suffixes. A flag matching those
         prefixes/suffixes is accepted WITHOUT being an add_argument.
     """
-    _skip_unless(SA_FIXTURE.is_file(),
-                 "v0.5.22 diffusion arg-parser fixture not cached (SGLANG_SA_FIXTURE)")
-    fixture = SA_FIXTURE.read_text()
+    fixture = _sa_fixture_or_skip().read_text()
 
     defined = set(re.findall(r'add_argument\(\s*"--([\w][\w-]*)"', fixture))
     # dynamic-map prefixes, spelled in the _extract_* classmethods
@@ -356,9 +438,7 @@ def test_diffusion_parser_is_recorded_as_strict():
     """The invariant the fraction rule above rests on: unknown args are FATAL
     on the diffusion parser. If upstream ever softens that, this test fails
     and the defaults-only fraction rule gets revisited deliberately."""
-    _skip_unless(SA_FIXTURE.is_file(),
-                 "v0.5.22 diffusion arg-parser fixture not cached (SGLANG_SA_FIXTURE)")
-    assert "unrecognized arguments" in SA_FIXTURE.read_text(), \
+    assert "unrecognized arguments" in _sa_fixture_or_skip().read_text(), \
         "diffusion parser strictness changed upstream — re-check the fraction rule"
 
 
