@@ -125,8 +125,12 @@ struct DashboardHistory {
 struct DashboardSnapshot {
     var configured = true
     var clusterState: ClusterState = .unknown
-    var nodesUp: Int?
-    var nodesTotal: Int?
+    /// The fleet's `answered/judged` pair, parked machines excluded from BOTH
+    /// sides — `FleetVerdict`, the same projection the C1 widget's headline and
+    /// tally count. The menu bar title, the dropdown's `nodes up` metric and the
+    /// tile's own fleet line are all this one number; the route's raw
+    /// `nodesUp`/`nodesTotal` counted a parked machine as a machine that failed.
+    var fleetVerdict: FleetVerdict = .noAnswer
     var modelCount: Int?
     var running: CardsRunningProjection?
     var boardTotals: BoardTotals?
@@ -194,8 +198,10 @@ struct DashboardSnapshot {
             guard let count else { return nil }
             return "\(count) run"
         case .clusterNodes:
-            guard let nodesUp, let nodesTotal else { return nil }
-            return "\(nodesUp)/\(nodesTotal)"
+            // The shared verdict, so the title can never disagree with the
+            // widget's tally about what a parked machine counts as.
+            guard fleetVerdict.answered != nil, fleetVerdict.judged != nil else { return nil }
+            return fleetVerdict.tallyText
         case .fleetGpu:
             return fleetStats.gpuLoadTitle()
         case .hottestTemp:
@@ -292,9 +298,10 @@ final class DashboardMonitor: ObservableObject {
         case .clusterNodes, .fleetGpu, .hottestTemp:
             switch await client.clusterMonitor() {
             case .success(let monitor):
-                let tally = ClusterNodeTally.project(monitor)
-                next.nodesUp = tally.nodesUp
-                next.nodesTotal = tally.nodesTotal
+                // Parked machines leave both sides of the title's fraction: the
+                // verdict is `FleetVerdict`'s, shared with the C1 tile.
+                next.fleetVerdict = FleetVerdict(
+                    rows: FleetProjection(projecting: monitor)?.nodes)
                 let view = ClusterMonitorViewModel.project(monitor)
                 next.fleetStats = MenuBarFleet.Stats.project(view)
                 next.menuBarDataAt = Date()
@@ -340,9 +347,10 @@ final class DashboardMonitor: ObservableObject {
 
         switch await client.clusterMonitor() {
         case .success(let monitor):
-            let tally = ClusterNodeTally.project(monitor)
-            next.nodesUp = tally.nodesUp
-            next.nodesTotal = tally.nodesTotal
+            // Parked machines leave both sides of the fraction the dropdown's
+            // `nodes up` metric and the title both print.
+            next.fleetVerdict = FleetVerdict(
+                rows: FleetProjection(projecting: monitor)?.nodes)
             if let hosts = monitor.json?.hosts, !hosts.isEmpty {
                 let ids = Set(hosts.flatMap { $0.workloads ?? [] }.compactMap { $0.cluster_id })
                 next.modelCount = ids.count
