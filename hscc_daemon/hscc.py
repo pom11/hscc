@@ -1345,8 +1345,10 @@ _NODE_SUBCOMMAND_HELP = {
                  "<duration> (90m, 2h, 1d3h, 45 = seconds, or an ISO "
                  "timestamp; open-ended without it), --span (accept stopping "
                  "a multi-node unit across every node it spans), --force "
-                 "(pause a node serving the orchestrator model, which the "
-                 "verb otherwise refuses), --apply (do it)."),
+                 "(override the orchestrator guard: the applied template's "
+                 "declared orchestrator node, or a pause that would leave no "
+                 "healthy unit serving the orchestrator model), --apply "
+                 "(do it)."),
     },
     "resume": {
         "usage": "hscc node resume <host> [--apply]",

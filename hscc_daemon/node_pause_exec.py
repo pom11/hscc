@@ -416,9 +416,12 @@ def orchestrator_pause_guard(host, plan=None, serving_dict=None,
     ``remaining_units``, plus ``declared_node`` / ``note`` for the record.
     """
     host = (host or "").strip()
-    if serving_dict is None:
-        serving_dict = serving.load_serving()
     if plan is None:
+        # Only this path reads anything: with a plan handed in, the guard works
+        # from the sweep and the config verdict the caller already has, so one
+        # pause never sweeps the fleet (or re-reads serving.json) twice.
+        if serving_dict is None:
+            serving_dict = serving.load_serving()
         plan = _plan_enumerate(host, serving_dict=serving_dict,
                                status_reader=status_reader)
     if paused is None:
@@ -449,8 +452,10 @@ def orchestrator_pause_guard(host, plan=None, serving_dict=None,
                            "orchestrator server down, and the fleet could not be "
                            "read to rule that out" % (plan.get("error"),))
         return out
-    if serving_dict is None:
-        # The plan flagged this fail-closed too; keep the same answer.
+    if not plan.get("serving_config_ok", serving_dict is not None):
+        # The plan already answered this fail-closed (its flag is True from
+        # "the config was unreadable"); the guard repeats the verdict rather than
+        # re-reading the config and possibly disagreeing with the plan above it.
         _refuse(REASON_UNREADABLE, plan.get("orchestrator_evidence")
                 or "serving config unavailable", "serves the orchestrator model.")
         return out
@@ -478,6 +483,10 @@ def orchestrator_pause_guard(host, plan=None, serving_dict=None,
     affected.add(host)
     alias_units = plan.get("orchestrator_alias_units")
     if alias_units is None:
+        # Only a caller that built the plan dict by hand lands here; the normal
+        # path got the fleet-wide view out of the one sweep the plan made.
+        if serving_dict is None:
+            serving_dict = serving.load_serving()
         alias_units = orchestrator_alias_units(
             serving_dict, _live_entries((status_reader or
                                          fetch_cluster_status)()))
@@ -636,6 +645,11 @@ def plan(host, serving_dict=None, status_reader=None):
         "unreachable_hosts": [],
         "serves_orchestrator_model": False,
         "orchestrator_evidence": "",
+        # Whether the config the flag was computed from was actually readable.
+        # The guard reads THIS instead of loading serving.json a second time: one
+        # pause, one read of each source, and the guard can never answer from a
+        # config that changed between the two reads.
+        "serving_config_ok": isinstance(serving_dict, dict),
     }
     if error:
         # Fail closed on the orchestrator flag too: no read means no proof.

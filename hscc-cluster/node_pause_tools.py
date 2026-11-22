@@ -4,11 +4,14 @@ Parity with `hscc node pause|resume|paused`, and deliberately NO second
 implementation: every handler here calls the unified CLI's own verb function
 in-process and reports what it printed. The reasons are the fleet's own rules:
 
-  * one source of truth for the safety policy. The orchestrator refusal, the
+  * one source of truth for the safety policy. The orchestrator guard, the
     ``--span`` opt-in, "stop the units BEFORE recording the overlay", and the
-    "keep the pause when a restart fails" rule all live in ``hscc_daemon.hscc``.
-    Copying them here would make the agent a second policy to keep in sync —
-    and the copy is the one nobody tests against the fleet.
+    "keep the pause when a restart fails" rule all live behind the unified CLI
+    (the orchestrator guard itself lives one level down, in the executor's
+    ``orchestrator_pause_guard`` — ONE function, so the verb and this surface
+    cannot disagree). Copying them here would make the
+    agent a second policy to keep in sync — and the copy is the one nobody tests
+    against the fleet.
   * no agent-only escape hatch from the #478 dry-run rule. There is literally
     no other path to the executor from this plugin, so a tool call cannot
     mutate what the CLI would refuse to mutate.
@@ -48,8 +51,14 @@ NODE_PAUSE_SCHEMA = {
                                 "unit across EVERY node it spans. Required "
                                 "with confirm when the node hosts such a unit."},
         "force": {"type": "boolean", "default": False,
-                  "description": "Park a node serving the ORCHESTRATOR model, "
-                                 "which is otherwise refused."},
+                  "description": "Override the orchestrator guard: park the "
+                                 "applied template's declared orchestrator "
+                                 "node, or park a node whose pause would "
+                                 "leave no healthy unit serving the "
+                                 "orchestrator model. Both are refused "
+                                 "without this. Any other node is allowed "
+                                 "either way, with a note naming the replicas "
+                                 "that keep serving the alias."},
         "confirm": {"type": "boolean", "default": False,
                     "description": "Execute. Without it this is a DRY RUN: the "
                                    "plan is returned, nothing stops."},

@@ -398,40 +398,49 @@ POOL_NODES = (POOL_A, POOL_B, POOL_C, POOL_D)
 POOL_RECIPE = "/srv/recipes/pool.yaml"
 POOL_MODEL = "meta-llm/Pool-8B"
 #: Both aliases on one unit — what a uniform-pool replica actually advertises.
+#: ``hscc-cluster/templates/4node/flash-next-all.yaml`` says it outright:
+#: "every unit advertises BOTH ``orchestrator-model`` AND ``worker-model``, so
+#: each alias load-balances across ALL FOUR units and nothing cares which node
+#: is nominally the orchestrator".
 POOL_SERVED = f"{POOL_MODEL} worker-model orchestrator-model"
+#: A uniform pool gives every unit a DISTINCT port (8000..8003) so proxy
+#: discovery does not collapse the replicas into one backend — the fixture
+#: carries that shape rather than four units sharing :8000.
+POOL_PORTS = tuple(8000 + i for i in range(len(POOL_NODES)))
 
 POOL_SERVING = {
-    "port": 8000,
+    "port": POOL_PORTS[0],
     "uniform_pool": True,
     "units": [{"id": f"pool-{i}",
                "role": "orchestrator" if i == 0 else "worker",
-               "nodes": [h], "port": 8000, "recipe": POOL_RECIPE,
+               "nodes": [h], "port": p, "recipe": POOL_RECIPE,
                "model": POOL_MODEL, "tp": 1}
-              for i, h in enumerate(POOL_NODES)],
+              for i, (h, p) in enumerate(zip(POOL_NODES, POOL_PORTS))],
 }
 
 
 def pool_payload(down=()):
     """One sweep of the pool; ``down`` hosts are absent from it entirely."""
     groups = {}
-    for i, h in enumerate(POOL_NODES):
+    for i, (h, p) in enumerate(zip(POOL_NODES, POOL_PORTS)):
         if h in down:
             continue
-        groups.update(_group(f"cid_pool_{i}", POOL_RECIPE, [h], 8000,
+        groups.update(_group(f"cid_pool_{i}", POOL_RECIPE, [h], p,
                              model=POOL_MODEL, served=POOL_SERVED))
     return {"groups": groups, "solo_entries": [], "errors": {},
             "idle_hosts": [], "preparing_hosts": [], "pending_ops": [],
             "total_containers": 0, "host_count": 0}
 
 
-def write_applied_state(tmp_path, node, template="pool-8b-v4"):
+def write_applied_state(tmp_path, node, template="4node-flash-next-all"):
     """The applied-template record at the path the SANCTIONED reader uses.
 
     The conftest redirects ``~/.hscc`` to this test's tmp dir, so writing the
     real file here makes ``declaration_agreement.load_applied_state`` — the one
     reader the guard is allowed to use — find a real record. Nothing is patched
     on the reader itself, which is the point: a guard that re-parsed the file by
-    hand would pass a patched-seam test and fail on a real apply.
+    hand would pass a patched-seam test and fail on a real apply. The template
+    name is the one the operator's live dry-run was refused on.
     """
     path = tmp_path / "hscc" / "applied_template.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -493,7 +502,7 @@ class TestUniformPoolOrchestratorGuard:
         assert "declared orchestrator node" in out, out
         # The WHY cites the record the reader actually read, not a model name.
         assert "orchestrator_node=" in out and POOL_A in out, out
-        assert "pool-8b-v4" in out, "the refusal names the applied template"
+        assert "4node-flash-next-all" in out, "the refusal names the applied template"
         assert pool.calls == []
         assert node_pauses.paused(POOL_A) is None
 
