@@ -517,6 +517,12 @@ def test_restart_one_stops_only_target_recipe(monkeypatch, tmp_path):
     # the raw tilde must never reach the subprocess — sparkrun does not expand it
     assert "~/r/27b.yaml" not in stop_call
     assert stop_call.count(expanded) == 1  # exactly one recipe named: the target
+    # and the target is read from THIS unit: a unit declaring a different recipe
+    # must land a different path, so a hardcoded target cannot pass this case
+    calls.clear()
+    cmdlib.restart_one(dict(unit, id="w2", recipe="~/other/70b.yaml",
+                            nodes=["192.0.2.3"]))
+    assert calls[0][2] == str(home / "other" / "70b.yaml")
 
 
 def test_restart_one_uses_unit_port(monkeypatch):
