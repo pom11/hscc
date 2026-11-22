@@ -1408,3 +1408,88 @@ class TestOrchestratorGuardIsShared:
         assert not offending, (
             f"the verb strings {offending}; the refusal wording belongs to the "
             "guard so both entry points say the same thing")
+
+
+# ── ONE eligibility check, both entry points (card t_7416d66c / t_f7528cdc) ─
+class TestEligibilityCheckIsShared:
+    """`hscc node pause` owns NO eligibility decision of its own.
+
+    :func:`node_pause_exec.pause_eligibility` is the only answer to "may this
+    node park?", and both entry points reach it — the verb calls it and prints
+    its lines, the agent tool inherits the same verdict by calling the verb.
+    The behavioural refusal tests above prove the rule IS applied; this source
+    pin is what stops the verb from growing a SECOND copy of it, which is
+    exactly how #561/#567 shipped (each consumer decided span for itself, and
+    the two answers drifted).
+
+    The teeth have to read the source because a duplicated rule is invisible to
+    every behavioural test: delete the call and the refusal tests go red, but
+    ADD a copy and the verb still prints the shared verdict, so the fleet keeps
+    working while the tool and the CLI answer differently.
+    """
+
+    def test_the_verb_holds_no_eligibility_policy_of_its_own(self):
+        """Source pin: the verb asks the check and prints its lines.
+
+        Three bans, one per way a copy sneaks in: the executor's own
+        primitives, a comparison over the facts those primitives read, and
+        refusal prose worded here instead of there.
+        """
+        import inspect
+        body = ast.parse(inspect.getsource(unified._node_pause))
+        called = {n.func.attr for n in ast.walk(body)
+                  if isinstance(n, ast.Call) and isinstance(n.func,
+                                                            ast.Attribute)}
+        assert "pause_eligibility" in called, \
+            "the verb no longer asks the shared check — pause_eligibility is " \
+            "now dead code and the agent tool is running a rule nobody else " \
+            "applies"
+        # The executor's evidence (`_hosts_of` / `_as_int` / `_multi_node_units`)
+        # and the vocabulary of its verdict (the REASON_* tokens). A verb that
+        # reaches either is reading the facts to decide, not printing a verdict.
+        banned = {"_multi_node_units", "_hosts_of", "_as_int",
+                  "REASON_MULTI_NODE", "REASON_ZERO_UNITS",
+                  "REASON_PLAN_UNREADABLE"}
+        reached = called | {n.attr for n in ast.walk(body)
+                            if isinstance(n, ast.Attribute)}
+        assert not (reached & banned), (
+            f"_node_pause reaches {sorted(reached & banned)}; the node set and "
+            "tp are the executor's evidence and the refusal reasons are its "
+            "verdict — all of it lives in node_pause_exec")
+        # The shape a duplicated rule takes: a comparison over the very facts
+        # pause_eligibility reads. Counting units or affected nodes to PRINT a
+        # plan is fine (`len(affected) > 1` above survives it); comparing the
+        # node set or tp to decide is the eligibility test itself.
+        for node in ast.walk(body):
+            if not isinstance(node, ast.Compare):
+                continue
+            mentioned = set()
+            for operand in (node.left, *node.comparators):
+                for sub in ast.walk(operand):
+                    if isinstance(sub, ast.Attribute):
+                        mentioned.add(sub.attr)
+                    elif isinstance(sub, ast.Name):
+                        mentioned.add(sub.id)
+                    elif (isinstance(sub, ast.Constant)
+                          and isinstance(sub.value, str)):
+                        mentioned.add(sub.value)
+            offending = mentioned & {"nodes", "tp"}
+            assert not offending, (
+                f"_node_pause compares {sorted(offending)} in "
+                f"{ast.unparse(node)!r}; that is the eligibility test and it "
+                "lives in node_pause_exec.pause_eligibility — print the "
+                "verdict's lines instead of re-deriving it")
+        doc = ast.get_docstring(body) or ""
+        # Comments are not in the AST, so this scans the strings the verb could
+        # print or compare against — prose about the delegation is welcome.
+        said = [n.value for n in ast.walk(body)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and n.value != doc]
+        # One sentence per refusal, in one place, so both entry points say the
+        # same thing — the same scan the orchestrator pin runs for `orchestrator`.
+        owned = ("multi-node", "single-node", "nothing to pause", "spans",
+                 "this node alone", "eligib", "No flag overrides")
+        worded = [s for s in said if any(w in s for w in owned)]
+        assert not worded, (
+            f"the verb strings {worded}; the eligibility refusal is worded by "
+            "pause_eligibility so the CLI and the agent tool cannot drift")
