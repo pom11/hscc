@@ -224,6 +224,148 @@ def test_relative_and_temp_paths_are_clean():
 
 
 # --------------------------------------------------------------------------- #
+# rule 3 — an expression-built home path (t_4e405e3a)
+# --------------------------------------------------------------------------- #
+#
+# The literal-only rules are blind to the shape that five ``hscc-bootstrap``
+# modules actually used: ``REAL_VENV_PY = Path.home() / ".hermes" / ... `` handed
+# to ``subprocess.run([str(REAL_VENV_PY), ...])``. It is not an ``ast.Constant``,
+# so rule 2 cannot see it, and it reads the machine exactly as hard.
+
+def test_argv0_built_from_path_home_is_a_violation():
+    """The exact shape the card measured — argv0 assembled from ``Path.home()``."""
+    src = '''
+        import subprocess
+        from pathlib import Path
+        subprocess.run([str(Path.home() / ".hermes" / "venv" / "bin" / "python"),
+                        "-m", "hscc_daemon.hscc"])
+        '''
+    assert _kinds(src) == [guard.KIND_HOME_EXPRESSION]
+
+
+def test_expanduser_in_an_argv_element_is_a_violation():
+    src = '''
+        import subprocess, os.path
+        subprocess.run(["bash", os.path.expanduser("~/scripts/run.sh")])
+        '''
+    assert _kinds(src) == [guard.KIND_HOME_EXPRESSION]
+
+
+def test_expandvars_in_cwd_is_a_violation():
+    """``$HOME`` expanded by the test is the same read as ``~`` expanded by it."""
+    src = '''
+        import subprocess, os.path
+        subprocess.run(["bash", "x.sh"], cwd=os.path.expandvars("$HOME/dev"))
+        '''
+    assert _kinds(src) == [guard.KIND_HOME_EXPRESSION]
+
+
+def test_home_expression_reached_through_a_module_constant_names_its_line():
+    """The five-module shape, with the origin the developer has to edit."""
+    src = '''
+        import subprocess
+        from pathlib import Path
+        REAL_VENV_PY = Path.home() / ".hermes" / "venv" / "bin" / "python"
+        subprocess.run([str(REAL_VENV_PY), "-m", "pkg"])
+        '''
+    viols = _scan(src)
+    assert [v.kind for v in viols] == [guard.KIND_HOME_EXPRESSION]
+    # blank line 1 from the dedent, so: 2 import, 3 import, 4 constant, 5 spawn.
+    assert viols[0].lineno == 5
+    assert viols[0].origin == "sample.py:4"
+
+
+def test_wrappers_and_modifiers_do_not_hide_the_head():
+    """``str()``, ``os.path.join()``, an f-string and ``.parent`` are not cloaks."""
+    wrapped = '''
+        import subprocess, os.path
+        from pathlib import Path
+        subprocess.run([os.path.join(Path.home(), "venv", "bin", "python"), "x"])
+        '''
+    fstring = '''
+        import subprocess
+        from pathlib import Path
+        subprocess.run([f"{Path.home()}/bin/python", "x"])
+        '''
+    parented = '''
+        import subprocess
+        from pathlib import Path
+        subprocess.run([str(Path.home().parent / "srv" / "py"), "x"])
+        '''
+    for name, src in (("join", wrapped), ("f-string", fstring),
+                      ("parent", parented)):
+        assert _kinds(src) == [guard.KIND_HOME_EXPRESSION], name
+
+
+def test_an_aliased_pathlib_name_is_not_an_escape_hatch():
+    src = '''
+        import subprocess
+        from pathlib import Path as P
+        subprocess.run([str(P.home() / "venv" / "bin" / "python"), "x"])
+        '''
+    assert _kinds(src) == [guard.KIND_HOME_EXPRESSION]
+
+
+def test_a_cwd_built_from_home_is_a_violation_even_when_argv0_is_clean():
+    src = '''
+        import subprocess, sys, os.path
+        subprocess.run([sys.executable, "cli.py"], cwd=os.path.expanduser("~"))
+        '''
+    assert _kinds(src) == [guard.KIND_HOME_EXPRESSION]
+
+
+def test_the_sanctioned_owner_call_is_clean():
+    """The rule is a BAN ON SPELLING THE HOME, not a ban on the integration tier.
+
+    ``hscc-bootstrap``'s 25 real-install cases ask the leg's capability owner for
+    the interpreter; that call has no home-read head, so it passes — which is why
+    the rule needs no exemption list and no file-name allow-list.
+    """
+    src = '''
+        import subprocess
+        import hermes_gap
+        subprocess.run([hermes_gap.real_install_interpreter(), "-m", "pkg"],
+                       cwd=str(hermes_gap.real_install_checkout()))
+        '''
+    assert _kinds(src) == []
+
+
+def test_an_unrelated_home_method_and_env_read_are_clean():
+    """``.home()`` on a non-``Path`` name is not the same read, and a bare
+    ``os.environ["HOME"]`` is a stated limit rather than a silent miss."""
+    src = '''
+        import subprocess, os
+        subprocess.run([site.home(), "x"], cwd=os.environ["HOME"])
+        '''
+    assert _kinds(src) == []
+
+
+def test_a_home_expression_that_never_reaches_a_spawn_is_clean():
+    """Fixture data still wins: the same expression as a constant or a log line
+    is data, and reddening it is how a guard gets deleted."""
+    src = '''
+        import subprocess
+        from pathlib import Path
+        REAL_VENV_PY = Path.home() / ".hermes" / "venv" / "bin" / "python"
+        print(REAL_VENV_PY)
+        assert str(REAL_VENV_PY).endswith("python")
+        subprocess.run([sys.executable, "x"])
+        '''
+    assert _kinds(src) == []
+
+
+def test_the_report_offers_the_rule_3_remedy():
+    text = guard.report(_scan('''
+        import subprocess
+        from pathlib import Path
+        subprocess.run([str(Path.home() / "venv" / "bin" / "python"), "x"])
+        ''', rel="tests/test_x.py"), "hscc-bootstrap", 63)
+    assert "expression-built-home-path" in text
+    assert "Path.home()" in text
+    assert "capability owner" in text
+
+
+# --------------------------------------------------------------------------- #
 # the false-positive arm — the same strings as DATA are not machine reads
 # --------------------------------------------------------------------------- #
 

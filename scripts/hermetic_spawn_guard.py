@@ -20,7 +20,7 @@ version, hermes absence, terminal width) because the trigger is a **source
 literal**. Nothing but a structural sweep of the test bodies can see them, and
 nothing but a sweep keeps them from re-appearing in the next test someone adds.
 
-WHAT IT BANS (exactly the two shapes, and only inside a spawn call):
+WHAT IT BANS (exactly the three shapes, and only inside a spawn call):
 
   1. ``path-resolved-interpreter`` — a ``subprocess.{run,Popen,check_output,
      check_call}`` call whose argv[0] is a string constant ``"python"`` or
@@ -28,6 +28,14 @@ WHAT IT BANS (exactly the two shapes, and only inside a spawn call):
   2. ``home-prefixed-path`` — a string constant used as that call's ``cwd=`` or
      as one of its argv elements (the script path) that is rooted in a user
      home. Require a path derived from ``__file__`` / ``tmp_path``.
+  3. ``expression-built-home-path`` — the same argument position filled by an
+     *expression* whose head is ``Path.home()``, ``os.path.expanduser`` or
+     ``os.path.expandvars`` (through ``str(...)`` / ``os.path.join(...)`` /
+     ``f"..."`` / a module-level constant, and through ``.parent`` /
+     ``.resolve()``). Not a ``str`` constant, so rule 2 cannot see it, and it
+     reads the machine just as hard. t_bb057914's class of fault re-appears the
+     moment someone writes ``Path.home() / "x"`` instead of typing the literal,
+     which is exactly what five ``hscc-bootstrap`` modules had done.
 
 WHY AN AST SWEEP AND NOT A SUBSTRING BAN. ``hscc-project/tests/test_registry.py``
 and ``test_kanban.py`` deliberately embed home-prefixed paths as *path-parsing
@@ -51,9 +59,21 @@ LIMITS, STATED RATHER THAN IMPLIED. The sweep is single-module and
 single-level: it resolves an argv/cwd passed through a *local* name bound to a
 string/list literal in the same function or module body (the common
 ``cmd = [...]`` then ``subprocess.run(cmd)`` shape), and it does not
-inter-procedurally follow a helper defined elsewhere. An expression-built path
-(``os.path.join(HOME, "x")``) is not a string constant and is not flagged — it
-is the subject of a follow-up card, not of this one.
+inter-procedurally follow a helper defined elsewhere. What it DOES follow, since
+t_4e405e3a, is an **expression-built** home path — ``str(Path.home() / ".hermes"
+/ "venv" / "bin" / "python")`` and ``os.path.expanduser("~/x")`` read the machine
+exactly as a literal does, so they are banned by shape (rule 3) rather than by
+constant. Still not policed, as stated limits and not oversights:
+``os.environ["HOME"]``, a home path that arrives through a function parameter or
+an imported helper, and ``cmds[0]`` subscript calls.
+
+WHAT THE BAN DOES NOT DO IS FORBID AN INTEGRATION TIER. A case that genuinely
+must run against the real install (``hscc-bootstrap`` has 25) asks the leg's own
+capability owner for the path — ``hermes_gap.real_install_interpreter()`` — and
+that call has no home-read head, so it passes rule 3 *because it is the sanctioned
+shape*, not because it is whitelisted. The machine read then lives in one named
+file per leg, which is what makes it countable; five private ``skipif``-gated
+constants in one leg is the shape rule 3 exists to make impossible.
 
 Used by every leg's ``tests/test_hermetic_subprocess_spawn.py`` (one file per
 leg dir, sweeping its own dir only, matching the ``test_hermes_gap_single_posture
@@ -89,6 +109,18 @@ HOME_SHAPED_ROOTS = ("/Users/", "/home/")
 
 KIND_INTERPRETER = "path-resolved-interpreter"
 KIND_HOME_PATH = "home-prefixed-path"
+KIND_HOME_EXPRESSION = "expression-built-home-path"
+
+#: The heads of an expression that mean "resolve against THIS machine's home".
+#: ``expanduser``/``expandvars`` are ``os.path``'s; ``home`` is ``Path``'s, and
+#: only reached through a name that actually spells ``pathlib``/``Path`` (see
+#: ``_pathlib_bindings``) so an unrelated ``.home()`` method cannot be caught by
+#: accident. A bare ``expanduser(...)`` counts, because
+#: ``from os.path import expanduser`` is the same read — the same reasoning that
+#: makes an aliased ``subprocess.run`` a spawn.
+EXPANDER_HEADS = frozenset({"expanduser", "expandvars"})
+HOME_METHOD = "home"
+DEFAULT_PATHLIB_ROOTS = frozenset({"Path", "pathlib"})
 
 
 class Violation:
@@ -263,6 +295,133 @@ def _resolve_text(node, bindings, _seen=frozenset()):
 
 
 # --------------------------------------------------------------------------- #
+# rule 3 — an expression-built home path
+# --------------------------------------------------------------------------- #
+
+def _pathlib_bindings(tree):
+    """Names in this module that spell ``pathlib`` / ``pathlib.Path``.
+
+    An import alias is not an escape hatch here either: ``from pathlib import
+    Path as P`` then ``P.home()`` is the same read as ``Path.home()``, so the
+    aliases are collected and matched, exactly as ``_spawn_bindings`` does for
+    ``import subprocess as sp``.
+    """
+    roots = set(DEFAULT_PATHLIB_ROOTS)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "pathlib" or alias.name.startswith("pathlib."):
+                    roots.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "pathlib" and not node.level:
+                for alias in node.names:
+                    if alias.name == "Path":
+                        roots.add(alias.asname or alias.name)
+    return frozenset(roots)
+
+
+def _callee_spelling(call):
+    """Dotted spelling of a call's callee, or ``''`` when it is not a name chain.
+
+    Hand-assembled rather than ``ast.unparse`` because it is asked for on every
+    call node in a leg and must not depend on the unparser's spacing.
+    """
+    parts = []
+    node = call.func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def home_expression(node, bindings, pathlib_roots=DEFAULT_PATHLIB_ROOTS,
+                    _seen=frozenset()):
+    """Return ``(spelling, origin_line)`` for a home read at the head of *node*.
+
+    ``origin_line`` is the line of the constant the head was reached *through*
+    (``REAL_VENV_PY = Path.home() / ...`` on line N, used on line M), so the
+    message names both, the same way the literal rules do.
+
+    Only the HEAD is examined, because that is what decides whether the value
+    depends on the machine: ``str(...)`` and ``os.path.join(...)`` and an
+    f-string are wrappers, ``.parent``/``.resolve()`` are modifiers, and a
+    ``BinOp``/``List`` merely composes. A name is followed through the module's
+    own literal bindings, which is why a module-level constant is not an escape.
+    """
+    if isinstance(node, ast.Name):
+        if node.id in _seen:
+            return None
+        _seen = _seen | {node.id}
+        for literal, assign_line in bindings.get(node.id, ()):
+            if literal is node:
+                continue          # a self-referential binding cannot recurse
+            found = home_expression(literal, bindings, pathlib_roots, _seen)
+            if found:
+                return (found[0], assign_line)
+        return None
+    if isinstance(node, ast.Call):
+        spelling = _callee_spelling(node)
+        if spelling:
+            root = spelling.split(".")[0]
+            leaf = spelling.rsplit(".", 1)[-1]
+            if leaf in EXPANDER_HEADS:
+                return (spelling, None)
+            if leaf == HOME_METHOD and root in pathlib_roots:
+                return (spelling, None)
+        for arg in node.args:
+            found = home_expression(arg, bindings, pathlib_roots, _seen)
+            if found:
+                return found
+        for keyword in node.keywords:
+            found = home_expression(keyword.value, bindings, pathlib_roots, _seen)
+            if found:
+                return found
+        return None
+    if isinstance(node, ast.Attribute):
+        return home_expression(node.value, bindings, pathlib_roots, _seen)
+    if isinstance(node, ast.BinOp):
+        return (home_expression(node.left, bindings, pathlib_roots, _seen)
+                or home_expression(node.right, bindings, pathlib_roots, _seen))
+    if isinstance(node, (ast.JoinedStr, ast.FormattedValue)):
+        # ``f"{Path.home()}/bin/python"`` is a JoinedStr holding a FormattedValue
+        # holding the call — stopping at the f-string would be a one-character
+        # cloak over the same machine read.
+        values = (node.values if isinstance(node, ast.JoinedStr)
+                  else (node.value, node.format_spec))
+        for value in values:
+            if value is None:
+                continue
+            found = home_expression(value, bindings, pathlib_roots, _seen)
+            if found:
+                return found
+        return None
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        for element in node.elts:
+            found = home_expression(element, bindings, pathlib_roots, _seen)
+            if found:
+                return found
+        return None
+    if isinstance(node, ast.Starred):
+        return home_expression(node.value, bindings, pathlib_roots, _seen)
+    return None
+
+
+def _home_expression_violation(rel, role, found, report_node):
+    spelling, origin_line = found
+    return Violation(
+        rel, getattr(report_node, "lineno", 0), KIND_HOME_EXPRESSION,
+        "%s argument is built from %s — a machine path expressed as an "
+        "expression is the same read as the literal, and no rule about string "
+        "constants can see it. Derive it from __file__ / tmp_path, or ask the "
+        "leg's capability owner when the case really is 'run against the real "
+        "install'" % (role, spelling),
+        ("%s:%d" % (rel, origin_line)) if origin_line else None)
+
+
+# --------------------------------------------------------------------------- #
 # the sweep
 # --------------------------------------------------------------------------- #
 
@@ -326,6 +485,7 @@ def scan_source(text, rel="<source>", bindings=None):
     """
     tree = ast.parse(text, filename=rel)
     module_names, func_names = _spawn_bindings(tree)
+    pathlib_roots = _pathlib_bindings(tree)
     if bindings is None:
         bindings = _literal_bindings(tree)
     found = []
@@ -335,6 +495,12 @@ def scan_source(text, rel="<source>", bindings=None):
                 node, module_names, func_names):
             continue
         for role, value in _argv_nodes(node):
+            # Rule 3 first and independently: an expression-built home path is
+            # not a str constant, so neither literal rule below can see it, and
+            # a value can be banned twice over for two different reasons.
+            head = home_expression(value, bindings, pathlib_roots)
+            if head is not None:
+                found.append(_home_expression_violation(rel, role, head, value))
             if role != "argv":
                 for text_value, report, origin_line in _resolve_text(
                         value, bindings):
@@ -422,7 +588,10 @@ def report(violations, leg_label, scanned):
         "argv0 'python'/'python3' is a PATH lookup (the runner's base "
         "interpreter has no project deps) and a home-prefixed cwd/script "
         "exists only on the machine that owns it. Use sys.executable and a "
-        "path derived from __file__ or tmp_path.",
+        "path derived from __file__ or tmp_path. A Path.home()/expanduser/"
+        "expandvars *expression* in the same position is the same read; if the "
+        "case really is 'run against the real install', ask the leg's "
+        "capability owner for the path instead of spelling the home.",
     ]
     lines.extend("  " + str(v) for v in violations)
     return "\n".join(lines)
