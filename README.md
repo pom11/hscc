@@ -230,6 +230,23 @@ hscc autodown wake · cancel · disable      # wake now / abort teardown / disar
 
 It never tears down while kanban work is running/ready/in-review, while an agent is busy, or if any signal can't be verified. Cron-conflict classification, messages-while-down behaviour, and the full never-do list: [docs/design/idle-autodown.md](docs/design/idle-autodown.md).
 
+## Pausing a node
+
+`hscc node pause` takes **one** node out of the fleet for a while — to hand a whole box to a training run, then put it back — without touching any cluster setting. The heal, keepalive, autoscale and fleet-up paths read the pause record and leave that node alone until it ends.
+
+```
+hscc node pause <host> [--reason <text>] [--until 2h]     # dry-run: prints the unit it would stop, stops nothing
+hscc node pause <host> --apply       # do it — stop first, then record the pause
+hscc node resume <host> --apply      # restart exactly what was running, clear the pause + that node's heal strikes
+hscc node paused [--json]            # what is parked — reads the record, so it works with the fleet unreachable
+```
+
+`--apply` is what mutates: `pause` and `resume` plan and print without it, and `paused` is read-only always. A pause stops exactly one model on exactly one node — a single unit that runs nowhere else. Anything wider is refused outright, nothing stopped and nothing recorded: a node hosting two or more units (the refusal lists them), a unit that also runs on other nodes (the refusal names them), or a node with nothing to pause. Those refusals have no override, because the blast radius is someone else's workload. `--until <duration>` (`90m`, `2h`, `1d3h`, or an ISO timestamp) records a deadline the daemon's expiry tick honours, so the node comes back even if you do not; the schedule lives in the overlay rather than in memory, because an in-memory timer dies in exactly the crash that also restarts the watchdog.
+
+The orchestrator-node guard is the one refusal `--force` unlocks, and it refuses on two grounds only: the host is the applied template's declared `orchestrator_node`, or the pause would leave zero healthy units serving the orchestrator alias. A uniform pool is otherwise pausable — every replica advertises that alias on purpose — and says so with a `stays served by N other node(s)` note.
+
+And the promise: the templates, `serving.json`, the applied-template record, kanban caps, autodown and proxy config stay byte-identical while a node is parked. A pause is a separate durable overlay (`~/.hscc/node_pauses.json`) the repair paths consult, never an edit to what the cluster is built from — which is why resume can rebuild the exact launch command. Full reference: [docs/ops/node-pause.md](docs/ops/node-pause.md).
+
 ## The fleet
 
 Work flows through native Hermes kanban: the main orchestrator (or a project's own orchestrator) decomposes an idea into a dependency-ordered task graph; role-specialized workers run in their own git worktrees (27 role specs today — `ls hscc-roles/roles/`); a reviewer agent gates code onto an integration branch (main stays human-gated); an escalation watcher reassigns repeatedly-failing tasks and only then pings you. The autonomy flag (`~/.hscc/autonomy`) governs hands-off runs. Roles, SOUL layering, review loop, escalation detail: [docs/FLEET.md](docs/FLEET.md).
