@@ -157,6 +157,72 @@ if [ -n "${HOME:-}" ]; then
   mkdir -p "$FASTEMBED_CACHE_DIR" 2>/dev/null || true
 fi
 
+# ━━━ roster-wide HOME seal for every leg (t_2b2a6c3b) ━━━━━━━━━━━━━━━━━━━━━━━
+# WHY. A leg that resolves a default path through ``~`` reads the OPERATOR's
+# machine, passes locally, and is red (or silently skipped) on a CI runner whose
+# HOME is empty. That class hid #593 and then produced this card's two measured
+# deltas: `hscc-project` red (`UnknownProjectError: unknown project 'hscc'`,
+# #593's resolver reached from a test) and `hscc-cluster`'s two source
+# cross-checks turning into SKIPS whose reason named `<sealed-home>/sparkrun/…`.
+# `hscc-roles` is sealed in its own conftest (PR #595, `ca2aa8d2`) — necessary but
+# not sufficient: the seal belongs in the runner because ONLY the runner reaches
+# every leg child (the same argument that puts the kanban-pin scrub and
+# HSCC_SKIP_COMPACT_PROBE here rather than in a fixture), and because the other
+# eleven legs have no seal of their own.
+#
+# WHY HERE IN THE FILE. Two lines above derive a value from HOME — `PY` from
+# `${HSCC_TEST_PY:-$HOME/.hermes/…}` and the FASTEMBED_CACHE_DIR block — so the
+# seal goes AFTER both and before any leg child is spawned: the runner keeps the
+# values it needs, every leg and every child a leg spawns sees one HOME.
+#
+# WHY /tmp AND WHY IT IS REFUSED INSIDE THE LOGIN HOME. The empty home is created
+# under `/tmp` explicitly, not `$TMPDIR` (macOS puts TMPDIR under /var/folders/…,
+# and a second answer to "where does a CI-shaped home live" is how an earlier
+# roster run lied: a HOME containing the token `/Users` keeps a
+# `'/Users' in argv[2]`-style escape hatch green). A home inside the login home is
+# refused outright — hermes resolves a home under `~/.hermes` back to the live
+# root (t_d39c720e), so a "sealed" home there is not sealed and would read as one.
+#
+# WHY THE RUNNER PRINTS THE PATH. A roster log has to prove its own posture: the
+# `sealed HOME=` line is what makes a `1164 passed, 5 skipped` line attributable
+# to the seal rather than to whatever else the machine looked like.
+#
+# The seal is a posture, not a sandbox: `HSCC_TEST_NO_SEAL=1` restores the
+# operator's HOME in one env var (a developer debugging a HOME-dependent case
+# should not have to edit the runner), and the pin test runs both arms.
+SUITE_REAL_HOME="${HOME:-}"
+if [ "${HSCC_TEST_NO_SEAL:-0}" = "1" ]; then
+  echo "HOME seal: DISABLED (HSCC_TEST_NO_SEAL=1) — legs run with the operator's HOME"
+else
+  SUITE_HOME="$(mktemp -d /tmp/hscc-suite-home-XXXXXX 2>/dev/null || true)"
+  if [ -z "$SUITE_HOME" ] || [ ! -d "$SUITE_HOME" ]; then
+    # Fail CLOSED: running the roster unsealed while claiming otherwise is the
+    # worse outcome, so an inability to seal stops the run before leg 1.
+    echo "run_tests.sh: cannot create the sealed HOME under /tmp — refusing to run the roster unsealed" >&2
+    exit 3
+  fi
+  case "$SUITE_HOME" in
+    "$SUITE_REAL_HOME"/*)
+      echo "run_tests.sh: refusing a sealed HOME inside the login home: $SUITE_HOME" >&2
+      exit 3 ;;
+  esac
+  export HOME="$SUITE_HOME"
+  export USERPROFILE="$SUITE_HOME"   # pathlib/expanduser readers on a Windows host
+  echo "HOME seal: HOME=USERPROFILE=$SUITE_HOME (empty dir under /tmp; HSCC_TEST_NO_SEAL=1 opts out)"
+  # Declared, not discovered. `hscc-cluster`'s two source cross-checks compare the
+  # staged media recipes against sparkrun SOURCE, which a deployed plugin dir
+  # cannot import and CI does not have; their seam is `SPARKRUN_SRC`
+  # (t_2b2a6c3b, PR #604). Declaring the machine's own checkout keeps that
+  # coverage running under the seal instead of retiring it as a skip — and the
+  # runner exports ONLY that path, never the operator's home, so the seal stays a
+  # seal. An operator's own `SPARKRUN_SRC` always wins (``${VAR:-}`` test below).
+  if [ -z "${SPARKRUN_SRC:-}" ] && [ -n "$SUITE_REAL_HOME" ] &&
+     [ -d "$SUITE_REAL_HOME/sparkrun/src/sparkrun" ]; then
+    export SPARKRUN_SRC="$SUITE_REAL_HOME/sparkrun/src/sparkrun"
+    echo "HOME seal: declared SPARKRUN_SRC=$SPARKRUN_SRC (this machine's sparkrun checkout)"
+  fi
+fi
+
 # ── leg heartbeat: make "slow" readable as distinct from "stopped" ──────────
 # Every leg's consumer reads a REDIRECTED file, and pytest's -q band carries no
 # elapsed time anywhere, while its [ NN%] is a test-COUNT percent printed once
