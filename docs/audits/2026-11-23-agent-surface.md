@@ -70,8 +70,8 @@ from memory.
 | CLI group subcommands | 10 groups, 48 leaves | per-group tables: `_CLUSTER_SUBCOMMAND_HELP` (hscc.py:838) + `CLUSTER_SUBCOMMANDS` (hscc.py:669) = 9, `TEMPLATE_SUBCOMMANDS` (hscc.py:671) = 5, `autodown_cli.py:28` = 5, `kanban_cli.py:34` + `blocked` in `kanban_blocked.py` = 7, `api_cli.py:43` = 5, `main_cli.py:35` = 3 (+4 `wakeups` sub-subcommands), `merge_queue_cli.py:77` = 8, `_NODE_SUBCOMMAND_HELP` (hscc.py:1345) = 3, `cards_live.py` `monitor` = 1, `hscc-cluster/hscc.py:1174-1176` `inject`+`waker` = 2 | each module's `VALID_SUBCOMMANDS` / help table |
 | agent tools (`hscc-cluster`) | **26** | `hscc-cluster/__init__.py:31-131` (7 lists) | `grep -c '(", S\.' …` or count the tuples |
 | slash commands (`hscc-commands`) | **12** | `hscc-commands/__init__.py:852-913` `register_command` calls | `grep -c register_command` |
-| API routes (`hscc-api`) | **89 HTTP + 1 WS** | `api_server.py:608 ROUTES` + `routes_cluster.load():1725-1736` (12 in a loop) + `routes_ws.py:813` | regex-sweep `(METHOD, re.compile("…"))` triples across `hscc-api/*.py` incl. the `load()` table, then dedupe on `(method, path)` — 89 unique pairs, 56 GET / 32 POST / 1 PATCH |
-| bundled skills | **12 dirs / 13 names** | `hscc-skills/hscc.py:59-83` `BUNDLED_SKILLS` | `ls install/hscc-skills` |
+| API routes (`hscc-api`) | **96 HTTP + 1 WS** | `api_server.py:608 ROUTES` (ping) + the 22 `routes_*.py` modules' `ROUTES.append` sites + `routes_cluster.load():1725-1736` (12 entries in a loop) + `routes_ws.py:813` | regex-sweep `(METHOD, re.compile("…"))` triples across `hscc-api/*.py` incl. the `load()` table, then dedupe on `(method, path)` — 96 unique pairs (62 GET / 33 POST / 1 PATCH), **zero** duplicate pairs |
+| bundled skills | **12 listed names; 13 dirs on disk** | `hscc-skills/hscc.py:59-83` `BUNDLED_SKILLS` (12 names) vs `ls install/hscc-skills` (13 dirs — `hscc-lessons` is on disk but unlisted, so never installed; `hscc-master-knowledge` is the mirror case, installed in the default home but unbundled) — F12 | `ls install/hscc-skills` vs the list |
 
 `hscc project <verb>` is a 6th, *delegated* surface: it forwards to the flightdeck CLI
 (`hscc-project/flightdeck/commands/`, ~25 commands, each with its own flags). It is
@@ -168,7 +168,7 @@ other door. That is a coherent design — it just is not written down anywhere.
 
 | CLI verb | agent tool | slash | API route | bundled skill | verdict |
 |---|---|---|---|---|---|
-| `orch inject <profile> "<msg>" [--mode] [--pane] [--dry-run]` | ✅ adjacent-only: `orch_message` (queue-only, refuses non-`*-orch`) | ⚠ `/orch-restart` shares the `orch-` prefix but **restarts the orchestrator vLLM** | ⚠ `POST /v1/orchestrator/chat` is a *different* capability (a chat turn with id + stop) | ✖ MISSING | 🔒 CLI-only is right for inject (it steers a live tmux pane); the agent path is `orch_message`. **F7 naming trap**: four different things named "orch" |
+| `orch inject <profile> "<msg>" [--mode] [--pane] [--dry-run]` | ✅ adjacent-only: `orch_message` (queue-only; refuses worker profiles and `default`, admits a `*-orch` peer **or** the configured main orchestrator, whose name it resolves through `hscc-roles/main_orch.py` — the same resolver `hscc main status` reads) | ⚠ `/orch-restart` shares the `orch-` prefix but **restarts the orchestrator vLLM** | ⚠ `POST /v1/orchestrator/chat` is a *different* capability (a chat turn with id + stop) | ✖ MISSING | 🔒 CLI-only is right for inject (it steers a live tmux pane); the agent path is `orch_message`. **F7 naming trap**: four different things named "orch" |
 | `orch waker status\|enable\|disable` | ✖ | ✖ | ✖ | ✖ MISSING (the *curated profile* skill has `references/orch-waker-wake-dedupe.md`; the bundled copy does not) | 🔒 for enable/disable (it changes when the operator wakes); `status` is a legit read candidate — D9 |
 | `main start` | ✖ | ✖ | ✖ | ✖ MISSING | 🔒 spawns a tmux pane running the operator's orchestrator — an agent must not be able to spawn or re-attach it |
 | `main status [--json]` | ✖ | ✖ | ✖ | ✖ MISSING | card named it CLI-only; **it is a pure read** — recommend route for the dashboard (D9), not a tool |
@@ -240,7 +240,7 @@ holds no local state, so it cannot be stale.
 | `list_templates` | template dir (repo/bundled) | repo | low |
 | `preview_template` | templates + live cluster diff | — | low |
 | `apply_template` | writes `applied_template.json` | `cluster-guard.py`, `node_pause_exec`, `verify.py`, `declaration_agreement.py`, `hscc-commands/cmdlib.py` all **read** it | low for the writer, but see F1: five readers |
-| `orch_message` | `~/.hscc/cluster.json` (rate-limit config) + `~/.hscc/state/orch_messages.jsonl` (audit) | env override `HSCC_ORCH_MSG_MAX_PER_HOUR` | none — audit log is append-only; config env-resolved at call time (`orch_message.py:149-153`) |
+| `orch_message` | `~/.hscc/cluster.json` (rate-limit config) + `~/.hscc/state/orch_messages.jsonl` (audit) + the main-orchestrator identity **resolved** through `hscc-roles/main_orch.py`, never hardcoded | env override `HSCC_ORCH_MSG_MAX_PER_HOUR` | none — audit log is append-only; config env-resolved at call time (`orch_message.py:149-153`); the one non-`*-orch` name it will accept comes from the same resolver `hscc main status` reads, so a renamed main needs no edit here (S1 pattern) |
 
 **Grouped state files** (who owns each — one owner per file is the invariant):
 
@@ -268,8 +268,11 @@ holds no local state, so it cannot be stale.
 **S1 — the good pattern.** `node_pause` / `node_resume` / `node_paused` call the
 unified CLI's own verb functions (`hscc-cluster/node_pause_tools.py:31`: "These call
 the unified CLI's own verb functions — there is no second implementation to fall out
-of step"). Same for `routes_ops._backing_cluster_up/down` → `eng.cmd_cluster_up/down`.
-This is the pattern the rest of the surface should follow; say so in the tool docs.
+of step"). Same for `routes_ops._backing_cluster_up/down` → `eng.cmd_cluster_up/down`,
+and — for an *identity* rather than an operation — `orch_message` resolves the one
+main-orchestrator name it will accept through `hscc-roles/main_orch.py`, the same
+module `hscc main status` reads, instead of hardcoding a profile name. This is the
+pattern the rest of the surface should follow; say so in the tool docs.
 
 **S2 — `/cluster-down` re-implements fleet down.** `hscc-commands/__init__.py:467-510`
 runs its own parallel `sparkrun stop` per node instead of
