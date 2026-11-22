@@ -875,15 +875,16 @@ class TestStopPathIsCooperative:
         making the stop cooperative must not quietly turn "stopped" into "still
         claims a server" while the teardown runs.
 
-        It moved out of the handler in the same commit as the fix, and this pin
-        moved with it on purpose rather than being loosened: the handler may not
-        do this work itself (see
-        `test_the_handler_holds_nothing_the_serving_thread_holds`), so the
-        bookkeeping lives in the helper thread the handler hands the stop to. The
-        invariant the card set — a stop must still mark the pid file stopped — is
-        unchanged; only the function that owns it is.
+        It lives in `_serve`'s `finally:` — the block a cooperative stop always
+        reaches — and that is where this pin looks. It does NOT live in the
+        handler, and must not: the handler may not call anything at all (see
+        `test_the_handler_holds_nothing_the_serving_thread_holds`), and the
+        `finally:` already wrote this file before the card existed. The invariant
+        the card set — a stop must still mark the pid file stopped — is unchanged;
+        only the function that owns it is, and it owns it for every exit path
+        rather than only the signalled one.
         """
-        body = self._body(api_cli._request_stop)
+        body = self._body(api_cli._serve)
         assert self._calls(body, "write_stopped"), (
             "nothing in the stop path marks the pid file stopped: a stop that "
             "takes a moment to tear the sidecar down would leave the pid file "
@@ -903,11 +904,15 @@ class TestStopPathIsCooperative:
         `test_a_signal_landing_inside_a_log_write_still_stops` reaches that state;
         this pin is what keeps a third operation from being added back.
 
-        So the body is allowed exactly two statements: set the stop flag, and
-        start a thread. Nothing else — no logging, no pid-file write, no
-        `server.shutdown()` — and the flag is deliberately not a
-        `threading.Event`, whose `set()` / `is_set()` take a lock the serving
-        loop holds on every pass.
+        So the body is allowed one call — `_stop_requested.set()` — plus the
+        plain module write that records which signal arrived. Nothing else: no
+        logging, no pid-file write, no `server.shutdown()`, and no
+        `threading.Thread(...).start()` either (this fix used that for one commit,
+        to move the log line off the handler; starting a thread takes threading's
+        bookkeeping locks and then waits for the new thread to report itself
+        started, so the handler is no longer bounded by the work it delegated).
+        The flag is deliberately not a `threading.Event` either, whose `set()` /
+        `is_set()` take a lock the serving loop holds on every pass.
         """
         body = self._body(api_cli._sigterm_handler)
         # `_body` parses the function's own source, so the module it lands in has
@@ -929,27 +934,6 @@ class TestStopPathIsCooperative:
                     and isinstance(node.func.value, ast.Name)
                     and node.func.value.id == "_stop_requested")
 
-        def _is_thread_start(node):
-            return (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "start"
-                    and isinstance(node.func.value, ast.Call)
-                    and isinstance(node.func.value.func, ast.Attribute)
-                    and node.func.value.func.attr == "Thread")
-
-        def _thread_target_name(node):
-            """The `target=` name of `threading.Thread(target=f, ...).start()`."""
-            func = node.func if isinstance(node, ast.Call) else None
-            if not isinstance(func, ast.Attribute):
-                return None
-            inner = func.value
-            if not isinstance(inner, ast.Call):
-                return None
-            for kw in inner.keywords:
-                if kw.arg == "target" and isinstance(kw.value, ast.Name):
-                    return kw.value.id
-            return None
-
         def _callee(calls):
             """Readable names for a failure message, without assuming the shape."""
             names = []
@@ -964,29 +948,30 @@ class TestStopPathIsCooperative:
             return names
 
         calls = [n.value for n in stmts if isinstance(n, ast.Expr)]
-        assert len(calls) == len(stmts) == 2, (
-            f"_sigterm_handler is {len(stmts)} statement(s) "
-            f"({[type(n).__name__ for n in stmts]}); the body is exactly two "
-            "calls — set the stop flag, then hand the rest to a helper thread. A "
-            "handler runs on the thread it interrupts, so any call that blocks or "
-            "takes a lock (`daemon_ops.log`, `write_stopped`, "
-            "`server.shutdown()`) can wait on a lock that thread already holds: "
-            "the stop is lost and the sidecar is orphaned — the defect measured "
-            "at t_56552ecc")
         flag = [c for c in calls if _is_flag_set(c)]
-        starts = [c for c in calls if _is_thread_start(c)]
-        assert len(flag) == 1 and len(starts) == 1, (
-            "the two calls must be `_stop_requested.set()` and starting one "
-            f"helper thread, not {_callee(calls)}: "
-            "the flag is the only thing a stop can be before a server exists, and "
-            "everything else (the log line, the pid-file bookkeeping, "
-            "`shutdown()`) belongs on the thread")
-        targets = {_thread_target_name(s) for s in starts}
-        assert targets == {"_request_stop"}, (
-            f"the helper thread runs {sorted(map(str, targets))}, not "
-            "`_request_stop` — the "
-            "bookkeeping pin above would then be inspecting a function the stop "
-            "path never calls")
+        assert len(calls) == len(flag) == 1, (
+            f"_sigterm_handler makes {len(calls)} call(s) ({_callee(calls)}); the "
+            "body is allowed exactly one — `_stop_requested.set()`. A handler runs "
+            "on the thread it interrupts, so any call can wait on a lock that "
+            "thread already holds, and a handler that never returns loses the stop "
+            "outright: no flag, no return from `_serve`, no sidecar teardown, and "
+            "`hscc api stop` escalating to the SIGKILL that skips the teardown as "
+            "well. Measured three ways at t_56552ecc — `daemon_ops.log` "
+            "(`daemon_ops._handlers_lock`), `threading.Thread(...).start()` "
+            "(threading's bookkeeping, plus waiting for the thread it just made), "
+            "and `threading.Event` (below)")
+        assert all(isinstance(n, (ast.Global, ast.Assign, ast.Expr))
+                   for n in stmts), (
+            f"_sigterm_handler contains "
+            f"{[type(n).__name__ for n in stmts]}; only the record of which signal "
+            "arrived and the flag write are allowed, and both are plain writes")
+        stray = [t.id for n in stmts if isinstance(n, ast.Assign)
+                 for t in n.targets
+                 if isinstance(t, ast.Name) and t.id != "_last_signal"]
+        assert not stray, (
+            f"_sigterm_handler writes {stray}; the only module state a handler may "
+            "touch is `_last_signal` (a plain write) and the flag — anything else "
+            "is state some other thread is holding a lock over")
         assert not isinstance(api_cli._stop_requested, threading.Event), (
             "`_stop_requested` is a threading.Event again: Event.set()/is_set() "
             "take the event's internal lock, and the serving loop calls is_set() "
