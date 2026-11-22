@@ -239,6 +239,24 @@ else
       fi
     done
   fi
+  # The homebrew TAP checkout, third instance of the same rule. `scripts`'
+  # formula-drift guard reads it through `bump_formula.py`'s documented seam
+  # (`--tap`, else $HSCC_TAP_DIR, else ~/dev/homebrew-hscc — scripts/bump_formula.py:529),
+  # so under a seal it loses its default and FOUR cases retire: measured at 96a9f38a,
+  # `HSCC_TEST_LEGS=scripts` went 601 passed / 5 skipped -> 598 passed / 8 skipped with
+  # the reason naming the two candidates it looked at and "Set HSCC_TAP_DIR to a
+  # pom11/homebrew-hscc checkout to arm this guard". Declaring the machine's own tap
+  # re-arms the guard; a host without one still skips honestly (and the guard does not
+  # clone — a repo test that needs the network to satisfy itself is not a guard).
+  if [ -z "${HSCC_TAP_DIR:-}" ] && [ -n "$SUITE_REAL_HOME" ]; then
+    for _tap_candidate in "$SUITE_REAL_HOME/dev/homebrew-hscc" "$SUITE_REAL_HOME/.cache/hscc/taps/homebrew-hscc"; do
+      if [ -f "$_tap_candidate/Formula/hscc.rb" ]; then
+        export HSCC_TAP_DIR="$_tap_candidate"
+        echo "HOME seal: declared HSCC_TAP_DIR=$HSCC_TAP_DIR (this machine's tap checkout)"
+        break
+      fi
+    done
+  fi
 fi
 
 # ── leg heartbeat: make "slow" readable as distinct from "stopped" ──────────
