@@ -19,7 +19,8 @@ shape it could have fired on was a parked host. So on 2026-11-22 — node paused
 at ~19:53-19:55Z, first client failure at 19:58Z — the daemon could not answer
 "does the live router still point at that paused host?", and that question is
 the one alternative explanation the audit could not exclude
-(``docs/audits/2026-11-22-proxy-connection-error.md`` §3.2/§4.3).
+(``docs/audits/2026-11-22-proxy-connection-error.md`` §3.2/§4.3, PR #634 — the
+record of that outage).
 
 WHAT THIS FILE PINS
 -------------------
