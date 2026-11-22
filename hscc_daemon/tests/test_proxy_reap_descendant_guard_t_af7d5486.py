@@ -234,6 +234,24 @@ def test_reap_still_refuses_an_unrecognised_cmdline(monkeypatch):
     assert any("refusing to kill" in m for m in reaper.messages())
 
 
+def test_reap_still_reaps_the_orphan_the_repair_itself_creates(monkeypatch):
+    """CONTROL for refusal #1, and the reason it is safe to refuse.
+
+    `_proxy_repair_orphan` runs `sparkrun proxy stop` BEFORE reaping, and for
+    `uvx litellm` the stop signals the wrapper (sparkrun's hollow tracked PID)
+    while the child keeps the socket — the hollow-PID shape
+    :func:`_proxy_kill_hollow_tracked` documents. The orphan is then reparented
+    to the root, so its chain COMPLETES without the tracked PID: proven foreign
+    even though it is the very same process the tick refused to touch a moment
+    earlier, while its wrapper was alive. Without this, "do not kill the child"
+    would quietly mean "the repair can never free the port".
+    """
+    reaper = Reaper(monkeypatch, listener=(CHILD_PID, LITELLM_CMD),
+                    parents={CHILD_PID: LAUNCHD_PID})   # wrapper gone, reparented
+    assert health._reap_orphan_proxy_listener(WRAPPER_PID) is True
+    assert reaper.killed and reaper.killed[0] == (CHILD_PID, signal.SIGTERM)
+
+
 def test_reap_still_refuses_the_tracked_pid_itself(monkeypatch):
     """Non-regression on the guard the fix widens: the tracked PID is still
     left to sparkrun, and still described as the tracked PID."""
