@@ -273,6 +273,9 @@ def test_home_expression_reached_through_a_module_constant_names_its_line():
     # blank line 1 from the dedent, so: 2 import, 3 import, 4 constant, 5 spawn.
     assert viols[0].lineno == 5
     assert viols[0].origin == "sample.py:4"
+    # The message names the CONSTANT, not just the head: a developer reading the
+    # failure has to know which definition to edit.
+    assert "via REAL_VENV_PY" in viols[0].detail, viols[0].detail
 
 
 def test_wrappers_and_modifiers_do_not_hide_the_head():

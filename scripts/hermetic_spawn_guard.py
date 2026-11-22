@@ -338,12 +338,14 @@ def _callee_spelling(call):
 
 
 def home_expression(node, bindings, pathlib_roots=DEFAULT_PATHLIB_ROOTS,
-                    _seen=frozenset()):
-    """Return ``(spelling, origin_line)`` for a home read at the head of *node*.
+                    _seen=frozenset(), _via=None):
+    """Return ``(spelling, origin_line, via_name)`` for a home read at the head.
 
     ``origin_line`` is the line of the constant the head was reached *through*
-    (``REAL_VENV_PY = Path.home() / ...`` on line N, used on line M), so the
-    message names both, the same way the literal rules do.
+    (``REAL_VENV_PY = Path.home() / ...`` on line N, used on line M) and
+    ``via_name`` is that constant's name, so the message can point at the
+    definition a developer has to edit rather than only at the spawn — the same
+    two-place report the literal rules give.
 
     Only the HEAD is examined, because that is what decides whether the value
     depends on the machine: ``str(...)`` and ``os.path.join(...)`` and an
@@ -358,9 +360,10 @@ def home_expression(node, bindings, pathlib_roots=DEFAULT_PATHLIB_ROOTS,
         for literal, assign_line in bindings.get(node.id, ()):
             if literal is node:
                 continue          # a self-referential binding cannot recurse
-            found = home_expression(literal, bindings, pathlib_roots, _seen)
+            found = home_expression(literal, bindings, pathlib_roots, _seen,
+                                    _via=node.id)
             if found:
-                return (found[0], assign_line)
+                return (found[0], assign_line, node.id)
         return None
     if isinstance(node, ast.Call):
         spelling = _callee_spelling(node)
@@ -368,23 +371,24 @@ def home_expression(node, bindings, pathlib_roots=DEFAULT_PATHLIB_ROOTS,
             root = spelling.split(".")[0]
             leaf = spelling.rsplit(".", 1)[-1]
             if leaf in EXPANDER_HEADS:
-                return (spelling, None)
+                return (spelling, None, _via)
             if leaf == HOME_METHOD and root in pathlib_roots:
-                return (spelling, None)
+                return (spelling, None, _via)
         for arg in node.args:
-            found = home_expression(arg, bindings, pathlib_roots, _seen)
+            found = home_expression(arg, bindings, pathlib_roots, _seen, _via)
             if found:
                 return found
         for keyword in node.keywords:
-            found = home_expression(keyword.value, bindings, pathlib_roots, _seen)
+            found = home_expression(keyword.value, bindings, pathlib_roots,
+                                    _seen, _via)
             if found:
                 return found
         return None
     if isinstance(node, ast.Attribute):
-        return home_expression(node.value, bindings, pathlib_roots, _seen)
+        return home_expression(node.value, bindings, pathlib_roots, _seen, _via)
     if isinstance(node, ast.BinOp):
-        return (home_expression(node.left, bindings, pathlib_roots, _seen)
-                or home_expression(node.right, bindings, pathlib_roots, _seen))
+        return (home_expression(node.left, bindings, pathlib_roots, _seen, _via)
+                or home_expression(node.right, bindings, pathlib_roots, _seen, _via))
     if isinstance(node, (ast.JoinedStr, ast.FormattedValue)):
         # ``f"{Path.home()}/bin/python"`` is a JoinedStr holding a FormattedValue
         # holding the call — stopping at the f-string would be a one-character
@@ -394,30 +398,30 @@ def home_expression(node, bindings, pathlib_roots=DEFAULT_PATHLIB_ROOTS,
         for value in values:
             if value is None:
                 continue
-            found = home_expression(value, bindings, pathlib_roots, _seen)
+            found = home_expression(value, bindings, pathlib_roots, _seen, _via)
             if found:
                 return found
         return None
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         for element in node.elts:
-            found = home_expression(element, bindings, pathlib_roots, _seen)
+            found = home_expression(element, bindings, pathlib_roots, _seen, _via)
             if found:
                 return found
         return None
     if isinstance(node, ast.Starred):
-        return home_expression(node.value, bindings, pathlib_roots, _seen)
+        return home_expression(node.value, bindings, pathlib_roots, _seen, _via)
     return None
 
 
 def _home_expression_violation(rel, role, found, report_node):
-    spelling, origin_line = found
+    spelling, origin_line, via = found
     return Violation(
         rel, getattr(report_node, "lineno", 0), KIND_HOME_EXPRESSION,
-        "%s argument is built from %s — a machine path expressed as an "
+        "%s argument is built from %s%s — a machine path expressed as an "
         "expression is the same read as the literal, and no rule about string "
         "constants can see it. Derive it from __file__ / tmp_path, or ask the "
         "leg's capability owner when the case really is 'run against the real "
-        "install'" % (role, spelling),
+        "install'" % (role, spelling, (" (via %s)" % via) if via else ""),
         ("%s:%d" % (rel, origin_line)) if origin_line else None)
 
 
