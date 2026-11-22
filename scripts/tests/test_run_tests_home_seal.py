@@ -269,3 +269,31 @@ def test_agent_source_declared_only_when_the_tree_is_there(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "HERMES_AGENT_PATH" not in r.stdout, (
         "a declared path that does not exist turns an honest skip into a crash")
+
+
+def test_tap_checkout_declared_from_the_documented_seam(tmp_path):
+    """Third instance of the rule: `HSCC_TAP_DIR` (scripts/bump_formula.py:529).
+
+    The `scripts` leg's formula-drift guard resolves its tap through
+    `--tap | $HSCC_TAP_DIR | ~/dev/homebrew-hscc`, so a seal retires FOUR cases unless
+    the runner declares the machine's tap. Measured at 96a9f38a: 601 passed/5 skipped ->
+    598 passed/8 skipped, reason `Set HSCC_TAP_DIR to a pom11/homebrew-hscc checkout`.
+    """
+    home = _home(tmp_path)
+    (home / "dev" / "homebrew-hscc" / "Formula").mkdir(parents=True)
+    (home / "dev" / "homebrew-hscc" / "Formula" / "hscc.rb").write_text("class Hscc < Formula\nend\n")
+    r = _run(_block(), _env(tmp_path), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert f"HSCC_TAP_DIR={home}/dev/homebrew-hscc" in r.stdout
+
+    # Operator's value wins; and a bare home must not get a phantom tap dir.
+    mine = tmp_path / "my-tap"
+    mine.mkdir()
+    r = _run(_block(), _env(tmp_path, HSCC_TAP_DIR=str(mine)), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "HSCC_TAP_DIR" not in r.stdout
+    r = _run(_block(), _env(tmp_path / "bare"), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "HSCC_TAP_DIR" not in r.stdout, (
+        "declaring a tap that is not there would turn the guard's honest 'unreachable' "
+        "skip into a FileNotFoundError in a test that is supposed to guard a formula")
