@@ -10,7 +10,112 @@ import urllib.error
 import urllib.parse
 
 
-def run_cmd(args, timeout=30, as_json=False, shell=False, env=None):
+def _ready_says_go(ready):
+    """Call a readiness probe, turning ANY exception into "not ready".
+
+    A probe asks a live endpoint; an endpoint that refuses, times out or answers
+    garbage is exactly the "not up yet" answer the caller must keep waiting
+    through. A probe that raises must never abort a launch that is in flight.
+    """
+    try:
+        return bool(ready())
+    except Exception:
+        return False
+
+
+def run_cmd_until_ready(args, ready, timeout=120, poll=2.0, env=None,
+                        verified_by="health probe"):
+    """Run ``args`` with a BOUNDED wait that can end EARLY because the workload
+    it starts became reachable.
+
+    Why this exists (t_09708c17, the reported live resume): ``sparkrun run
+    --no-follow --ensure`` is a CLIENT, and a client can wedge on a child ssh
+    session long after the container it launched is up and serving — the
+    operator's manual launch sat 40 minutes on a machine whose model was
+    answering in 10. Treating
+    "the client returned" as the success signal therefore reports a FAILURE for
+    a restart that worked, and a resume that reports failure keeps the node
+    parked. Here the success signal is the unit itself: as soon as ``ready()``
+    says the workload answers, the client is cut loose and the result says so.
+
+    The wait is bounded in BOTH directions — never a silent hang, never an
+    unbounded kill-loop:
+
+      * the child exits on its own  -> ``run_cmd``'s shape, ``detached`` False
+        (a clean ``--ensure`` no-op still reads as a normal success);
+      * ``ready()`` turns true      -> SIGTERM the CLIENT only, ``ok`` True with
+        ``detached``/``verified_by`` set, so the caller can say plainly that the
+        health probe is what proved the restart, not the client;
+      * the deadline passes first   -> SIGTERM the client, ``ok`` False with
+        ``timed_out``/``detached`` set and the same "timed out after Ns" text
+        ``run_cmd`` has always returned for a timeout.
+
+    Only the CLIENT is ever terminated: its own children (the ssh session
+    driving the launch) are left alone, which is what keeps a cut-loose launch
+    from losing the container it is still bringing up. stdout/stderr go to
+    temporary FILES, not pipes — a client we are not draining can otherwise
+    fill a 64 KB pipe and block in write() forever.
+    """
+    import tempfile
+    import time
+
+    run_env = None
+    if env:
+        run_env = os.environ.copy()
+        run_env.update(env)
+    deadline = time.monotonic() + timeout
+    detached = timed_out = False
+    code = None
+    with tempfile.TemporaryFile("w+") as out_f, \
+            tempfile.TemporaryFile("w+") as err_f:
+        try:
+            proc = subprocess.Popen(args, stdout=out_f, stderr=err_f,
+                                    text=True, env=run_env)
+        except Exception as e:
+            return {"ok": False, "output": f"Command failed: {e}",
+                    "stderr": "", "detached": False}
+        while True:
+            code = proc.poll()
+            if code is not None:
+                break
+            if _ready_says_go(ready):
+                detached = True
+                break
+            if time.monotonic() >= deadline:
+                detached = timed_out = True
+                break
+            time.sleep(poll)
+        if detached:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            code = proc.returncode
+        out_f.seek(0)
+        err_f.seek(0)
+        stdout, stderr = out_f.read().strip(), err_f.read().strip()
+
+    seconds = int(timeout)
+    if not detached:
+        if code == 0:
+            return {"ok": True, "output": stdout, "stderr": stderr,
+                    "detached": False}
+        folded = "\n".join(p for p in (stdout, stderr) if p)
+        return {"ok": False, "output": folded, "stderr": stderr,
+                "detached": False}
+    if timed_out:
+        return {"ok": False, "output": f"Command timed out after {seconds}s",
+                "stderr": stderr, "detached": True, "timed_out": True}
+    note = (f"launch client did not exit within {seconds}s and was cut loose; "
+            f"restart verified by the {verified_by}")
+    return {"ok": True, "output": note, "stderr": stderr, "detached": True,
+            "timed_out": False, "verified_by": verified_by}
+
+
+def run_cmd(args, timeout=30, as_json=False, shell=False, env=None,
+            ready=None, poll=2.0):
     """Run a command and return structured output.
 
     On a non-zero exit, ``output`` folds stdout AND stderr together so the
@@ -38,10 +143,22 @@ def run_cmd(args, timeout=30, as_json=False, shell=False, env=None):
     and the subprocess fails loudly the way it does today — never a silent
     no-op. ``shell=True`` strings are not rewritten (the argv rewrite would be
     a string-inspection game; those callers are informational paths).
+
+    ``ready`` (t_09708c17) turns this into a BOUNDED wait that can end EARLY:
+    give it a zero-arg callable that says whether the workload the command
+    starts has come up, and the child is cut loose (client only) the moment it
+    does, with ``ok`` true and ``detached``/``verified_by`` set — the shape a
+    wedged ``sparkrun run`` client needs so a restart that WORKED is not
+    reported as a failure. ``None`` (every other caller in the daemon) keeps
+    this function byte-identical to what it has always been: one
+    ``subprocess.run`` with a hard timeout.
     """
     if not shell:
         from . import sparkrun_bin
         args = sparkrun_bin.exec_argv(args)
+    if ready is not None:
+        return run_cmd_until_ready(args, ready, timeout=timeout, poll=poll,
+                                   env=env)
     try:
         run_env = None
         if env:
