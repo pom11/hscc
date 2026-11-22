@@ -1710,6 +1710,28 @@ def _host_of(hostport):
     return str(hostport).rsplit(":", 1)[0]
 
 
+def _proxy_backend_drift_sets(live_backends, healthy_backends,
+                              fleet_hostports, paused_nodes=()):
+    """(missing, dead, expected_absent) — the ONE copy of the live-vs-healthy set math.
+
+    Split out of :func:`_proxy_backend_drift` so a caller that must CLASSIFY a
+    drift (check_proxy's re-attach routing, t_f4ee3ce6) can ask the same
+    question the verdict asks, instead of re-deriving it and drifting apart from
+    it. The sets are the verdict's inputs, not a second opinion.
+    """
+    if not live_backends:
+        return set(), set(), set()
+    parked = {str(h) for h in (paused_nodes or ()) if h}
+    scoped_fleet = set(fleet_hostports)
+    live_in_fleet = {b for b in live_backends if b in scoped_fleet}
+    expected_absent = {hp for hp in (scoped_fleet | set(healthy_backends)
+                                     | live_in_fleet)
+                       if _host_of(hp) in parked}
+    missing = set(healthy_backends) - live_in_fleet - expected_absent
+    dead = (live_in_fleet - set(healthy_backends)) - expected_absent
+    return missing, dead, expected_absent
+
+
 def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports,
                          paused_nodes=()):
     """(healthy, reason) — does the RUNNING proxy route to what is actually up?
@@ -1737,14 +1759,8 @@ def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports,
     """
     if not live_backends:
         return True, "no live backends to compare (catalogue check owns that)"
-    parked = {str(h) for h in (paused_nodes or ()) if h}
-    scoped_fleet = set(fleet_hostports)
-    live_in_fleet = {b for b in live_backends if b in scoped_fleet}
-    expected_absent = {hp for hp in (scoped_fleet | set(healthy_backends)
-                                     | live_in_fleet)
-                       if _host_of(hp) in parked}
-    missing = set(healthy_backends) - live_in_fleet - expected_absent
-    dead = (live_in_fleet - set(healthy_backends)) - expected_absent
+    missing, dead, expected_absent = _proxy_backend_drift_sets(
+        live_backends, healthy_backends, fleet_hostports, paused_nodes)
     note = (f" [{len(expected_absent)} backend(s) on paused node(s) "
             f"expected-absent]") if expected_absent else ""
     if missing:
@@ -1948,6 +1964,194 @@ def _proxy_repair_orphan(relaunch_hosts):
             "verified": verified, "output": res.get("output", ""),
             # NOTHING listening on the port = :4000 refuses every connection.
             # The caller must not put that behind the normal cooldown.
+            "proxy_down": owner is None}
+
+
+# ── Who owns :4000, in sparkrun's own terms (t_f4ee3ce6) ────────────────────
+#
+# WHY THIS EXISTS. `_proxy_repair_orphan` (stop + cmdline-vetted reap + start)
+# is the right tool for ONE shape: a listener sparkrun does not track. It was
+# made the ONLY backend-drift repair, and that is what puts a ~15 s refusal
+# window on every resumed node — measured 2026-11-22 20:02:21.3Z → 20:02:35.8Z
+# (14.6 s) for a single `hscc node resume`. A resume re-attach IS backend drift
+# (the resumed unit is healthy, the live router has no backend for it), so the
+# tick stopped a serving LB, reaped nothing, and ran a full `proxy start` —
+# whose fleet discovery sweep executes AFTER the port is already dead (the
+# FAILED line's own output begins with `Discovering inference endpoints...`).
+#
+# `sparkrun proxy start --restart` needs none of that. In sparkrun's own
+# `api/proxy/_ops.py::start()` the order is _discover → prepare_config(write=False)
+# → [stop only here] → prepare_config(write=True) → launch: the discovery sweep
+# and the config render happen WHILE THE OLD GATEWAY STILL SERVES, and the
+# listener is broken at the last possible moment. There is no supported way to
+# add a backend without any restart at all — litellm's runtime /model/new needs
+# a DB (`plugins/litellm/engine.py::apply_desired_state`: "Applying a change
+# therefore means rewriting the config and restarting the process"), and `proxy
+# sync` and the 30 s auto-discover sweep land in the same restart. So the
+# sanctioned make-before-break ordering is the fix hscc can actually ship, and
+# the residual stop→bind window is sparkrun's to close.
+#
+# THE IDENTITY CHECK. sparkrun launches the gateway through `uv tool uvx`, so
+# its state record is the WRAPPER pid and the process holding :4000 is its
+# litellm CHILD (measured 2026-11-22: port owner 15706, sparkrun tracked 15701
+# — one gateway, two processes). Demanding `owner == tracked` therefore called
+# every successful drift repair a failure: a false ERROR, a fed
+# PROXY_RELAUNCH_MAX_CONSECUTIVE streak, and an operator paged about a repair
+# that worked (the very next check tick was green). Trust is now earned the same
+# way for both processes, and a FOREIGN listener is still never trusted — the
+# F4 orphan posture is unchanged.
+
+#: How far up the parent chain a listener may be walked to find sparkrun's
+#: tracked PID. `uv tool uvx` → python → uvicorn is 2-3 hops; the bound exists
+#: so a malformed process table can never make this loop.
+PROXY_TRACKED_TREE_DEPTH = 6
+
+#: Identity kinds that prove the listener IS this host's sparkrun gateway.
+PROXY_TRUSTED_KINDS = ("tracked", "child", "stale")
+
+#: Kinds whose live listener is sparkrun's own gateway, so the drift can be
+#: applied by sparkrun itself rather than by stopping the proxy by hand.
+PROXY_ADOPTABLE_KINDS = ("tracked", "child")
+
+
+def _proc_ppid(pid):
+    """Parent PID of `pid`, or None. Seam for the gateway identity check."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+        return int(out) if out.isdigit() else None
+    except Exception:
+        return None
+
+
+def _proc_alive(pid):
+    """True when `pid` names a process we can signal (0-signal probe)."""
+    try:
+        os.kill(int(pid), 0)
+    except Exception:
+        return False
+    return True
+
+
+def _litellm_config_from_cmdline(cmdline):
+    """The `--config <path>` a litellm process was started with, or ''."""
+    parts = str(cmdline or "").split()
+    for i, part in enumerate(parts):
+        if part == "--config" and i + 1 < len(parts):
+            return parts[i + 1]
+        if part.startswith("--config="):
+            return part.split("=", 1)[1]
+    return ""
+
+
+def _is_sparkrun_gateway_config(path):
+    """True when `path` is sparkrun's GENERATED litellm config for this host.
+
+    The fallback proof when sparkrun's PID record is hollow: a litellm bound to
+    the config file sparkrun itself generates is the gateway this state
+    directory owns. The path is not built here — proxy_router is the module
+    that already names it, so there is one source of truth and no home path
+    assembled in this module.
+    """
+    if not path:
+        return False
+    try:
+        from . import proxy_router
+        want = os.path.realpath(os.path.expanduser(
+            proxy_router.LITELLM_CONFIG_PATH))
+        return os.path.realpath(path) == want
+    except Exception:
+        return False
+
+
+def _proxy_gateway_identity():
+    """Who owns :4000, in sparkrun's terms — the decision the drift repair makes.
+
+    Returns ``(kind, owner_pid, owner_cmdline, tracked_pid)``:
+
+      ``absent``   nothing listens: :4000 refuses every connection.
+      ``tracked``  the listener IS sparkrun's tracked gateway.
+      ``child``    the listener is a DESCENDANT of the tracked PID — the shape
+                   this fleet actually runs (uvx wrapper recorded, litellm child
+                   listening).
+      ``stale``    sparkrun's record is hollow (tracked PID gone) but the
+                   listener is a litellm started from sparkrun's own generated
+                   config, which is the strongest proof available.
+      ``foreign``  anything else — an untracked listener, i.e. the F4 orphan
+                   shape that stop + reap + start was written for.
+    """
+    owner, owner_cmd = _proxy_listener()
+    if owner is None:
+        return "absent", None, None, None
+    tracked = _proxy_tracked_pid()
+    is_gateway = "litellm" in (owner_cmd or "").lower()
+    if tracked is None:
+        if is_gateway and _is_sparkrun_gateway_config(
+                _litellm_config_from_cmdline(owner_cmd)):
+            return "stale", owner, owner_cmd, tracked
+        return "foreign", owner, owner_cmd, tracked
+    if owner == tracked:
+        return "tracked", owner, owner_cmd, tracked
+    if is_gateway:
+        pid, depth = owner, 0
+        while pid is not None and depth < PROXY_TRACKED_TREE_DEPTH:
+            pid = _proc_ppid(pid)
+            depth += 1
+            if pid == tracked:
+                return "child", owner, owner_cmd, tracked
+    if (not _proc_alive(tracked)) and is_gateway and _is_sparkrun_gateway_config(
+            _litellm_config_from_cmdline(owner_cmd)):
+        return "stale", owner, owner_cmd, tracked
+    return "foreign", owner, owner_cmd, tracked
+
+
+def _proxy_wait_gateway_listener():
+    """Bounded wait for a listener on :4000, then its identity.
+
+    The same race the orphan repair documents: `proxy start` returns after
+    sparkrun's own startup grace and litellm binds the port seconds later, so
+    poll only while the port is unowned — a visible owner that disagrees is a
+    verdict, not something to wait on.
+    """
+    kind, owner, owner_cmd, tracked = _proxy_gateway_identity()
+    deadline = time.time() + max(0.0, PROXY_REPAIR_VERIFY_WAIT_S)
+    while owner is None and time.time() < deadline:
+        time.sleep(1.0)
+        kind, owner, owner_cmd, tracked = _proxy_gateway_identity()
+    return kind, owner, owner_cmd, tracked
+
+
+def _proxy_adopt_backends(relaunch_hosts):
+    """Apply a backend-set change through sparkrun's OWN restart — no stop here.
+
+    One sanctioned `sparkrun proxy start --hosts … --restart`: sparkrun
+    discovers and PRE-VIEWS the config while the old gateway is still serving
+    and stops it only at the last moment, so the fleet sweep and the config
+    render leave the refusal window entirely. The manual
+    stop → reap → start shape pays both AFTER the port is dead.
+
+    Returns the same keys as :func:`_proxy_repair_orphan` (``ok``,
+    ``port_owner``, ``tracked_pid``, ``verified``, ``output``, ``proxy_down``,
+    plus ``identity``) so the caller's verdict logic never forks.
+    """
+    args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+            "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT),
+            "--restart"]
+    res = run_cmd(sparkrun_bin.argv(*args), timeout=90,
+                  env=_proxy_launch_env())
+    kind, owner, owner_cmd, tracked = _proxy_wait_gateway_listener()
+    verified = kind in PROXY_TRUSTED_KINDS
+    if not verified:
+        log(f"proxy adopt UNVERIFIED on :{PROXY_PORT} — port owner {owner} "
+            f"is {kind} (sparkrun tracks {tracked}): {owner_cmd!r}", "WARN")
+    else:
+        log(f"proxy adopted on :{PROXY_PORT} — gateway owned by PID {owner} "
+            f"(identity {kind}, sparkrun tracks {tracked})")
+    return {"ok": bool(res.get("ok")) and verified, "port_owner": owner,
+            "tracked_pid": tracked, "verified": verified, "identity": kind,
+            "output": res.get("output", ""),
+            # NOTHING listening on the port = :4000 refuses every connection.
             "proxy_down": owner is None}
 
 
@@ -2225,6 +2429,10 @@ def check_proxy(pause_directory=None):
     # the alias check above cannot see that, because /v1/models lists ids and
     # never reveals api_base. Ask the running proxy what it actually routes to.
     backend_drift = False
+    # Set only when the drift is MISSING-only (t_f4ee3ce6) — the re-attach shape
+    # that sparkrun can apply itself. Stays False whenever the drift was
+    # skipped, unverified, or names a dead backend in the router.
+    drift_missing_only = False
     if healthy:
         live = _proxy_backend_probe(timeout=5)
         if not live.get("ok"):
@@ -2247,11 +2455,21 @@ def check_proxy(pause_directory=None):
             # endpoint they used to answer. That is not drift. Asking the overlay
             # HERE — before the verdict, not only at the repair target below —
             # is what stops `hscc node pause` from stopping the fleet's proxy.
+            paused_hp = _paused_nodes(pause_directory)
+            live_hp = live.get("backends") or set()
+            missing_hp, dead_hp, _absent = _proxy_backend_drift_sets(
+                live_hp, healthy_units, fleet_hp, paused_nodes=paused_hp)
             drift_ok, drift_reason = _proxy_backend_drift(
-                live.get("backends") or set(), healthy_units, fleet_hp,
-                paused_nodes=_paused_nodes(pause_directory))
+                live_hp, healthy_units, fleet_hp,
+                paused_nodes=paused_hp)
             if not drift_ok:
                 backend_drift = True
+                # RE-ATTACH SHAPE (t_f4ee3ce6): a healthy unit the router has no
+                # backend for, and nothing in the router pointing at a dead
+                # unit. That is exactly what `hscc node resume` produces, and it
+                # is the one drift sparkrun can apply itself (see the routing in
+                # the repair block, and why `_proxy_backend_drift_sets` exists).
+                drift_missing_only = bool(missing_hp) and not dead_hp
                 healthy, reason = False, drift_reason
     if healthy:
         write_state("proxy", {"ok": True, "port": PROXY_PORT,
@@ -2388,9 +2606,35 @@ def check_proxy(pause_directory=None):
                         # sparkrun's OWN state file, which is precisely what was wrong
                         # (the orphan kept :4000 while the new instance bound :1708).
                         # Needs stop + cmdline-vetted reap + start + verification.
+                        #
+                        # ... UNLESS the live listener IS sparkrun's own gateway and
+                        # the gap is a MISSING-only one (t_f4ee3ce6). Then the F4
+                        # premise (an untracked orphan) does not hold, and stop + reap
+                        # + start is what made every `hscc node resume` cost the fleet
+                        # ~15 s of :4000 refusing connections: the stop, the reap and
+                        # a full discovery sweep all happen AFTER the port is dead.
+                        # `sparkrun proxy start --restart` prepares the same change
+                        # while the old gateway still serves, so the re-attach goes
+                        # through that ONE command instead. Anything else — a dead
+                        # backend in the router, a foreign listener, a hollow PID
+                        # record — still takes the orphan repair below, unchanged.
                         log(f"repairing proxy backend drift on :{PROXY_PORT} — {reason}",
                             "WARN")
-                        r = _proxy_repair_orphan(start_hosts)
+                        kind, owner, owner_cmd, tracked = _proxy_gateway_identity()
+                        if drift_missing_only and kind in PROXY_ADOPTABLE_KINDS:
+                            r = _proxy_adopt_backends(start_hosts)
+                            if not r.get("ok"):
+                                # The adopt could not prove the gateway came back.
+                                # Fall through to the hammer IN THIS TICK rather than
+                                # sleep a cooldown on a port we may have just broken
+                                # (same rule as PROXY_RELAUNCH_DOWN_COOLDOWN_S).
+                                log(f"proxy adopt on :{PROXY_PORT} incomplete "
+                                    f"(identity {r.get('identity')}) — taking the "
+                                    "orphan repair rather than leaving the drift "
+                                    "unrepaired", "WARN")
+                                r = _proxy_repair_orphan(start_hosts)
+                        else:
+                            r = _proxy_repair_orphan(start_hosts)
                         message = ("repaired" if r.get("ok")
                                    else "repair incomplete (unverified)")
                     elif escalated:
