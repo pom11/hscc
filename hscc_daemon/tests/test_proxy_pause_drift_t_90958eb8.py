@@ -111,9 +111,17 @@ def logs(monkeypatch):
     return seen
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def alerts(monkeypatch):
-    """Record what the stream would tell the operator — never a real notify."""
+    """Record what the stream would tell the operator — never a real notify.
+
+    AUTUSE, not opt-in: the down-repair path alerts on its first failed tick,
+    so a case that exercises a failed repair WITHOUT asking for this fixture
+    would otherwise run the real ``send_macos_notification`` (osascript on the
+    operator's own desktop, for a fake outage) and append to the real
+    ``events.jsonl``. A test that asserts on the alert asks for it by name and
+    gets the same recorded instance.
+    """
     seen = {"notify": [], "events": []}
     monkeypatch.setattr(
         health, "send_macos_notification",
