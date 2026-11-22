@@ -2129,6 +2129,42 @@ def _start_refused_already_running(res):
     return any(marker in text for marker in PROXY_ALREADY_RUNNING_MARKERS)
 
 
+def _archive_proxy_log_before_restart(reason):
+    """Seam: copy the outgoing litellm log aside, THEN ask for a restart.
+
+    sparkrun opens ``litellm.log`` in mode ``"w"`` on every gateway launch
+    (``sparkrun/proxy/_supervisor.py::_launch_background``), so the restart we
+    are about to request truncates the one file that could explain the outage
+    we are repairing — which is precisely what happened on 2026-11-22 (audit
+    §3.4: 57 minutes of the only litellm-side record, destroyed by the fix).
+    Copy first. The right fix is a rotate inside sparkrun; this is the fallback
+    and lives in :mod:`hscc_daemon.proxy_log_archive`, whose contract this
+    wraps.
+
+    Thin wrapper so health tests can stub it, same discipline as
+    :func:`_router_drift_probe`. It must NEVER fail a repair: a lost log is
+    bad, an entrypoint left down because a file copy failed is worse, so every
+    outcome — raise, permission error, full disk — logs a WARN and returns.
+    """
+    try:
+        from . import proxy_log_archive
+        res = proxy_log_archive.archive_before_restart()
+    except Exception as exc:  # pragma: no cover - defensive; repair never blocks
+        log(f"proxy log archive FAILED before {reason} ({type(exc).__name__}: "
+            f"{exc}) — restarting anyway; sparkrun will truncate litellm.log",
+            "WARN")
+        return None
+    if res.get("action") == "archived":
+        pruned = res.get("pruned") or []
+        log(f"proxy log archived before {reason}: {res['archived']}"
+            + (f" (pruned {len(pruned)} older archive{'s' if len(pruned) != 1 else ''})"
+               if pruned else ""))
+    elif res.get("error"):
+        log(f"proxy log archive FAILED before {reason} ({res['error']}) — "
+            "restarting anyway; sparkrun will truncate litellm.log", "WARN")
+    return res
+
+
 def _proxy_repair_orphan(relaunch_hosts):
     """Full orphan repair: stop, reap any untracked litellm listener, start.
 
@@ -2159,6 +2195,10 @@ def _proxy_repair_orphan(relaunch_hosts):
     sleeping on a dead entrypoint.
     """
     tracked_before = _proxy_tracked_pid()
+    # Copy the outgoing log FIRST (t_9713c765): `proxy stop` + `proxy start`
+    # end in a launch, and a launch truncates litellm.log. Read-only here — the
+    # proxy may still be serving while we copy.
+    _archive_proxy_log_before_restart("orphan repair")
     run_cmd(sparkrun_bin.argv("proxy", "stop"), timeout=60)
     reaped = _reap_orphan_proxy_listener(tracked_before)
     if not reaped:
@@ -2391,6 +2431,9 @@ def _proxy_adopt_backends(relaunch_hosts):
     ``port_owner``, ``tracked_pid``, ``verified``, ``output``, ``proxy_down``,
     plus ``identity``) so the caller's verdict logic never forks.
     """
+    # `--restart` is a launch, and a launch truncates litellm.log (t_9713c765):
+    # copy the outgoing log while the old gateway is still serving.
+    _archive_proxy_log_before_restart("backend re-attach")
     args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
             "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT),
             "--restart"]
@@ -2947,6 +2990,11 @@ def check_proxy(pause_directory=None):
                             f"{' (--restart: running proxy serves nothing)' if restart else ''}"
                             f" (attempt {prev_streak + 1} of "
                             f"{PROXY_RELAUNCH_MAX_CONSECUTIVE} before stall alarm)", "WARN")
+                        # A start is a launch, and a launch truncates
+                        # litellm.log — also when the proxy is already DOWN,
+                        # where the outgoing log is the only record of why
+                        # (t_9713c765, audit §3.4).
+                        _archive_proxy_log_before_restart("relaunch")
                         args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
                                 "--hosts", ",".join(start_hosts), "--port", str(PROXY_PORT)]
                         if restart:
