@@ -84,11 +84,23 @@ def test_a_stop_requested_before_serving_is_not_lost(hscc_dir):
             "no longer needs the stop flag this case is about")
         stopping = threading.Event()
         stopping.set()                     # asked to stop BEFORE serving began
-        waiter = threading.Thread(
-            target=server.serve_forever,
-            kwargs={"poll_interval": 0.1, "stop_event": stopping}, daemon=True)
+        # The thread's exception must be COLLECTED, not merely noticed: a
+        # serve_forever that does not accept the flag dies in the thread, the
+        # thread ends, and an `is_alive()`-only assert reads that crash as the
+        # clean stop it is supposed to detect.
+        crashed = []
+
+        def _serve():
+            try:
+                server.serve_forever(poll_interval=0.1, stop_event=stopping)
+            except BaseException as exc:       # noqa: BLE001 - report, never swallow
+                crashed.append(exc)
+
+        waiter = threading.Thread(target=_serve, daemon=True)
         waiter.start()
         waiter.join(10)
+        assert not crashed, (
+            f"serve_forever raised instead of honouring the flag: {crashed!r}")
         assert not waiter.is_alive(), (
             "serve_forever ignored a stop that was already requested when it "
             "entered: the flag is lost, the listener keeps the port, and the "

@@ -49,6 +49,13 @@ API_DIR = REPO / "hscc-api"
 # against, so a rename in production fails loudly instead of timing out here.
 READY_LINE = "hscc-api: ready"
 
+# The other half of the readiness contract: what `serve_main` prints when a stop
+# was already requested by the time it reached the point of serving. Coupled to
+# production by the same pin that couples READY_LINE, because no case can reach
+# that branch on an idle machine (see the pin's docstring for why it is pinned
+# rather than tested).
+NOT_SERVING_LINE = "hscc-api: stop requested during startup, not serving"
+
 # The token is DATA — a fixture value, never a real credential, and never
 # printed in an assertion message.
 TOKEN = "e2e-dummy-token-for-launchd-argv"
@@ -586,6 +593,73 @@ class TestStopHandlersInstallBeforeTheBind:
                 f"handler registration (:{first_handler}) and serve_forever "
                 f"(:{first_serving}); a waiter would then proceed before the "
                 f"process can be stopped cleanly")
+
+    def test_a_stop_requested_before_serving_never_starts_the_loops(self):
+        """The early exit is a promise, and it is pinned because it cannot be run.
+
+        Between the handler being installed and the accept loops existing there
+        is a window in which a stop arrives and NOTHING is serving yet. The
+        answer has to be "then we never serve": the process must not drain the
+        backlog it just opened, it tears the sidecar down and exits 0.
+
+        No case reaches that branch on an idle machine — a SIGTERM that early
+        needs the scheduler to cooperate, which is exactly why the roster caught
+        it and a workstation never does. Proven by probe: neutralising the guard
+        (`if False and stopping.is_set()`, which keeps every other line intact)
+        leaves every behavioural case green. So the shape is pinned: a guard
+        whose test IS the stop flag — not something that merely mentions it,
+        which is what the mutant turns it into — ahead of the readiness line,
+        printing its own line instead of `hscc-api: ready`.
+        """
+        body = self._serve_main_body()
+        early = [n for n in ast.walk(body)
+                 if isinstance(n, ast.If) and self._is_stop_request_check(n.test)]
+        assert early, (
+            "serve_main no longer asks the stop flag before serving, so a stop "
+            "requested during startup starts the accept loops and serves from "
+            "the backlog instead of going straight to the teardown")
+        printed = [
+            n for n in ast.walk(body)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "print" and n.args
+            and isinstance(n.args[0], ast.Constant)
+            and n.args[0].value == NOT_SERVING_LINE
+        ]
+        assert printed, (
+            f"nothing prints {NOT_SERVING_LINE!r}: the never-serve path now "
+            f"looks exactly like the serving path in the logs, which is how a "
+            f"unit that answered nothing while looking healthy stayed hidden")
+        registered = self._calls(body, "signal")
+        ready = [
+            n for n in ast.walk(body)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "print" and n.args
+            and isinstance(n.args[0], ast.Constant)
+            and n.args[0].value == READY_LINE
+        ]
+        assert ready, f"no {READY_LINE!r} print to order against"
+        first_handler = min(n.lineno for n in registered)
+        first_ready = min(n.lineno for n in ready)
+        for node in early:
+            assert first_handler < node.lineno < first_ready, (
+                f"the stop guard at :{node.lineno} is not between the handler "
+                f"registration (:{first_handler}) and the readiness line "
+                f"(:{first_ready}); either the flag can be set by nobody or the "
+                f"waiter is released before the branch can take effect")
+
+    @staticmethod
+    def _is_stop_request_check(test):
+        """True for exactly `stopping.is_set()`, not for something wrapping it.
+
+        `if False and stopping.is_set()` mentions the same call and changes the
+        meaning entirely — a structural pin that matched the BoolOp would bless
+        the mutant the behavioural cases already let through.
+        """
+        return (isinstance(test, ast.Call)
+                and isinstance(test.func, ast.Attribute)
+                and test.func.attr == "is_set"
+                and isinstance(test.func.value, ast.Name)
+                and test.func.value.id == "stopping")
 
     def test_the_pinned_function_is_the_one_the_entrypoint_runs(self):
         """Otherwise the pin could bless a copy that nothing ever executes."""

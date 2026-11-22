@@ -182,6 +182,15 @@ a transport problem. Every boot also prints the root it will write:
 hscc-api: profiles root /Users/you/.hermes/profiles (intent: none)
 ```
 
+The last line startup prints before the accept loops start is `hscc-api: ready`,
+and that is the line to wait for if you are going to stop the unit: it appears
+only once the SIGTERM/SIGINT handlers are installed and every listener is bound,
+so a process that has said it can already be stopped cleanly. A port is reachable
+strictly earlier than that — the kernel answers a connect off the listen backlog
+the instant `listen()` runs — so "the port is up" does not yet mean "a stop will
+be handled", which is the distinction that orphaned the gateway sidecar once
+(t_6eff6258).
+
 Reads are deliberately not guarded: a wrong-root read degrades to an honest empty
 list, it cannot corrupt a tree. The generated launchd unit carries neither
 `HERMES_HOME` nor `HSCC_API_PROFILES_ROOT` — a hand-added `EnvironmentVariables`
