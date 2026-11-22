@@ -1641,13 +1641,20 @@ def _node_pause(argv):
 def _node_resume(argv):
     """`hscc node resume <host> [--apply]` — restart, then clear.
 
+    A thin surface over :func:`node_pause_exec.resume_host`, which holds the
+    resume policy and is the SAME function the daemon's expiry tick runs — so
+    the dry-run gate, the rebuild-or-refuse rule and the clear pairing cannot
+    drift between an operator at a terminal and the daemon. This function owns
+    only the argument grammar, the "is this host paused at all" answer (which
+    needs the whole overlay to name the span owner) and the exit code.
+
     The overlay stores unit IDS (node_pauses keeps the entry to six typed
     keys), so the launch commands are rebuilt by the executor's `plan()` from
     serving.json — the same source the keepalive relaunch reads. A recorded
     unit that no longer has a rebuildable command is REFUSED and the pause is
     kept: clearing it would leave a node nobody remembers how to start.
     """
-    from hscc_daemon import heal_breaker, node_pause_exec, node_pauses
+    from hscc_daemon import node_pause_exec, node_pauses
 
     positional, opts, err = _parse_node_args("resume", argv)
     if err:
@@ -1679,61 +1686,8 @@ def _node_resume(argv):
             return 1
         print(f"{host} is not paused. Nothing to resume.")
         return 0
-
-    recorded = entry["units"]
-    print(f"{host}: pause recorded {len(recorded)} unit(s)"
-          f"{' — dry run, nothing restarted' if not apply else ''}")
-    for uid in recorded:
-        print(f"  {uid}")
-    if entry["span_nodes"]:
-        print(f"  every node this affects: {', '.join(entry['span_nodes'])}")
-
-    if recorded:
-        p = node_pause_exec.plan(host)
-        if not p.get("ok"):
-            print(f"error: cannot rebuild the launch commands for {host}: "
-                  f"{p.get('error')}")
-            print("The pause stays recorded; nothing was restarted.")
-            return 1
-        by_id = {}
-        for unit in p["units"]:
-            by_id.setdefault(unit["unit_id"], unit)
-        missing = [uid for uid in recorded if uid not in by_id]
-        if missing:
-            print(f"REFUSED: no launch command can be rebuilt for "
-                  f"{', '.join(missing)}.")
-            print("  Nothing is known about how those units were started, so "
-                  "resuming them would guess a command.")
-            print(f"  The pause on {host} stays recorded. Start the unit by "
-                  f"hand (hscc cluster up / hscc template apply) and then "
-                  f"clear the pause.")
-            return 1
-        units = [by_id[uid] for uid in recorded]
-        res = node_pause_exec.resume_units(units, apply=apply)
-        if not apply:
-            print("Dry run: nothing restarted. Re-run with --apply.")
-            return 0
-        if not res["ok"]:
-            print(f"error: at least one unit failed to restart on {host}.")
-            print(f"  The pause stays recorded — the heal paths must not "
-                  f"resume this node while its units are half up.")
-            return 1
-    elif not apply:
-        print("  the pause recorded no units, so there is nothing to restart")
-        print("Dry run: nothing changed. Re-run with --apply to clear it.")
-        return 0
-
-    # Restarted (or nothing to restart): end the pause, then the strikes —
-    # same order as the daemon's expiry pass, which resumes before it clears.
-    node_pauses.clear(host)
-    print(f"pause for {host} cleared.")
-    cleared = heal_breaker.clear(host, reason=f"hscc node resume {host}")
-    if cleared:
-        heal_breaker.reset_alert(host)
-        print(f"Cleared heal strikes for {host} — healing resumes now.")
-    else:
-        print(f"No strikes recorded for {host} (nothing to clear).")
-    return 0
+    return 0 if node_pause_exec.resume_host(host, entry, apply=apply)["ok"] \
+        else 1
 
 
 def _handle_node(argv):

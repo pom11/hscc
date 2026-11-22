@@ -235,7 +235,7 @@ too, because "I cannot prove this node is safe to park" is exactly what a dry ru
 should surface. `--force` on a host that is *not* flagged prints a note and
 proceeds.
 
-## `--until` records a deadline; nothing auto-resumes it yet
+## `--until` records a deadline, and the daemon honours it
 
 `--until` accepts the repo's single duration grammar — `90m`, `2h`, `1d3h` (parts
 are added), `2w`, a bare number as **seconds**, or an ISO-8601 timestamp. Suffixes:
@@ -254,18 +254,42 @@ expired" — the safe direction for the overlay (a malformed deadline must not
 auto-resume a node behind your back) and the wrong one for a typo on a command
 line, where `2days` would silently park a node forever.
 
-**A deadline is not a resume.** `paused()` ignores the clock: a record whose
-`until` has passed is still a pause, still skips every heal path, and keeps skipping
-until something resumes it. `hscc node paused` flags it for you:
+**A past-due deadline is a job the daemon takes.** A `--until` is a promise about the
+future, and the only process here long-lived enough to keep it is the daemon. The two
+alternatives both fail: an operator typing `hscc node resume` is a timer that goes on
+holiday, and an in-memory timer (`threading.Timer`, a deadline held in a dict) dies in
+exactly the crash or upgrade that also restarts the watchdog — which would then "heal"
+the paused unit back to life on top of whatever the node is doing. So the schedule is
+the overlay file and the clock is read once per tick: the `node_pause_expiry` stream
+(60 s; body `expiry_tick` / `auto_resume_expired` in `hscc_daemon/node_pause_exec.py`,
+wired in `daemon_ops.PERIODIC_INTERVALS`) per tick
 
-```
-  until:   2026-11-22T18:00:00+00:00 — PAST DUE; resume it (hscc node resume 192.0.2.13 --apply)
-```
+* reads the overlay **once** and takes the entries whose `until` has passed — an
+  unreadable `until` is open-ended, so it is never due;
+* skips — and leaves parked — an entry whose `span_nodes` overlap a pause that is not
+  yet due, because the recorded restart re-issues the whole declared workload and would
+  start units on a node you have not released. That skip is logged, counted, and makes
+  the stream red: a schedule that is not being honoured is not silently healthy;
+* resumes the rest through the **same** `resume_host()` that
+  `hscc node resume <host> --apply` runs — same rebuild-or-refuse rule, same "clear the
+  pause only once the units are back" ordering, same heal-strike reset;
+* stamps `~/.hscc/state/node_pause_expiry.json` on every path, so `hscc verify` can tell
+  "nothing was due" from "the stream died".
 
-The overlay does carry the primitives a daemon-driven auto-resume needs
-(`pending_resume()` / `expiry_pass()`) and nothing calls them yet, so
-`hscc node resume <host> --apply` is the only thing that ends a pause today. Treat
-`--until` as a note to your future self, not a timer.
+Nothing is cleared because the tick ran. A restart that fails keeps the pause *and* the
+heal strikes, and the next tick retries it — that durability is the file being re-read,
+not a queue in memory, so a daemon restart in the middle loses nothing. One pass resumes
+at most `MAX_RESUMES_PER_TICK` (4) pauses, longest-waiting first, and defers the rest
+visibly: each resume is a sparkrun control call with a 120 s budget running in that
+stream's own thread. With no pause on disk the tick costs one `os.path.exists` — no
+sparkrun call, no `serving.json` read, no subprocess — which is why a 60 s cadence is
+cheap enough to be invisible.
+
+`hscc node paused` still flags a past-due deadline, and `hscc node resume <host>
+--apply` still ends a pause by hand: the verb and the tick call the same function, so an
+operator who resumes early and a daemon resuming on schedule cannot drift apart. Treat
+`--until` as a timer that the daemon keeps — and `hscc verify`'s `node_pause_expiry` row
+as the place a timer that missed its deadline stops being quiet.
 
 ## Where else the pause shows up
 
