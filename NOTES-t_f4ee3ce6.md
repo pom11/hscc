@@ -45,8 +45,9 @@ Read out of that:
 
 ## 2. FIX 1 (add the backend without restarting) — not available. Verified.
 
-`sparkrun` source is the authority (`/Users/desac/sparkrun`, v0.4.2, the CLI
-the daemon actually execs). `plugins/litellm/engine.py`:
+`sparkrun` source is the authority (the v0.4.2 checkout the daemon's CLI is
+editable-installed from — `sparkrun_bin` resolves to it).
+`plugins/litellm/engine.py`:
 
 * `apply_desired_state()` docstring (~line 617): *"LiteLLM's runtime mutation
   endpoints (`/model/new`, `/model/delete`) are **not** usable here: they
