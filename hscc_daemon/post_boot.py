@@ -744,6 +744,36 @@ def run_post_boot_pass(boot_fn=None, probe_fn=None, up_fn=None,
                           "output": f"cluster up raised {type(e).__name__}: {e}"}
             ok = bool(up_res.get("success", up_res.get("ok", False)))
             changed_final = dict(changed)  # keep the advances either way below
+            if ok and up_res.get("result") == "all-paused":
+                # THIRD outcome, ahead of the ok/not-ok split (t_def484b1).
+                # NOTHING was issued: cmd_cluster_up partitioned the plan it was
+                # handed against the node-pause overlay and every unit of it is
+                # parked by the operator's own record. That reaches here because
+                # the expected_up marker can be stale — only fleet-up and the
+                # autodown wake rewrite it — so a node parked AFTER the last
+                # `hscc cluster up` stays a relaunch candidate until the next
+                # fleet-up. `success` is True because a skip is not a failure
+                # (t_3b909c61 contract rule 6), so the `not ok` arm below must
+                # not be the one that reads this return, and the launched arm
+                # below must not claim a launch that never happened.
+                # Baselines stay ADVANCED: the under-lock advance above stands,
+                # because there is no retry to re-decide (the node is parked
+                # until `hscc node resume <host> --apply`) and restoring them
+                # would re-offer the same parked unit to every later pass.
+                # LOW priority: the operator is informed, never paged about
+                # their own pause.
+                parked_ids = [str(p) for p in (up_res.get("paused") or [])] \
+                    or units
+                result.update(result="skipped-paused", message=(
+                    f"host reboot detected on {issued_nodes} — nothing "
+                    f"relaunched: {parked_ids} held by a node pause (hscc "
+                    f"node resume <host> --apply ends the pause)"))
+                _notify(notify_fn,
+                        "HSCC post-boot relaunch skipped (node paused)",
+                        f"Node(s) {issued_nodes} rebooted; nothing relaunched "
+                        f"— {parked_ids} parked. hscc node resume <host> "
+                        f"--apply to bring it back.", "low")
+                return result
             if not ok:
                 # Failed attempt: restore baselines for the touched nodes so
                 # the retry can re-decide on the next pass (the attempt cap
@@ -831,12 +861,14 @@ def _notify(notify_fn, title, msg, priority):
 # fire. The pass writes ok=False ONLY when a relaunch it owns genuinely
 # failed (launch-failed / gave-up). Every no-action outcome — including a
 # suppressed intentional window, a held lock/lease (another repair owns the
-# moment), and an unavailable boot sweep (dgx's fleet-visibility stream
-# already cries the sparkrun-blind wolf) — is ok=True with the reason,
-# because nothing is wrong in those states.
+# moment), an unavailable boot sweep (dgx's fleet-visibility stream already
+# cries the sparkrun-blind wolf), and a launch nothing could honour because
+# every unit is parked (`skipped-paused`, t_def484b1) — is ok=True with the
+# reason, because nothing is wrong in those states. A parked node must never
+# page the operator about their own pause.
 _STREAM_OK_RESULTS = {"disabled", "no-marker", "steady", "cooldown",
                       "boot-unavailable", "launched", "suppressed",
-                      "skipped"}
+                      "skipped", "skipped-paused"}
 
 
 def check_post_boot_relaunch(pass_fn=None):

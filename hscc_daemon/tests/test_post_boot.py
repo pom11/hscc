@@ -895,6 +895,7 @@ class TestStream:
         monkeypatch.setattr(pb, "write_state", fake_write)
         for outcome, want_ok in (("suppressed", True), ("skipped", True),
                                  ("cooldown", True), ("boot-unavailable", True),
+                                 ("skipped-paused", True),
                                  ("launch-failed", False), ("gave-up", False),
                                  ("launched", True)):
             ok = pb.check_post_boot_relaunch(
@@ -902,3 +903,179 @@ class TestStream:
                                            "actions": [], "observed": {}})
             assert ok is want_ok, outcome
         assert written[pb.POST_BOOT_STREAM]["result"] == "launched"
+
+
+# ── The `all-paused` return: nothing issued, so claim nothing ────────────
+# t_def484b1. `cmd_cluster_up` reports `result: "all-paused"` with `success:
+# True` when EVERY unit of the plan it was handed is parked by node_pauses
+# (t_3b909c61 / #576 — a skip is NOT a failure). post-boot can reach that
+# return through a stale `expected_up` marker: only fleet-up and the autodown
+# wake rewrite the marker, so an operator who ran `hscc cluster up` and parked
+# the node AFTERWARDS leaves the parked unit listed as a relaunch candidate.
+# On that node's next reboot the pass must NOT report "relaunched [unit]" —
+# nothing was issued. Baselines still ADVANCE (there is no retry to re-decide;
+# the node is parked until `hscc node resume <host> --apply`).
+#
+# The launched / launch-failed branches are pinned HERE on purpose: they are
+# the arms the new branch shares, so a mutation that changes the split has to
+# break one of them as well as the new tests.
+ALL_PAUSED = {"success": True, "result": "all-paused",
+              "paused": ["orch"], "units": 0, "issued": [], "plan": [],
+              "dry_run": False, "output": ""}
+
+
+class TestAllPausedReturn:
+    @staticmethod
+    def _run(marker_path, monkeypatch, up_res, fx=None):
+        """One guarded pass with an injected `up_fn` returning `up_res`."""
+        from hscc_daemon import heal_lease
+        if fx is None:
+            fx = Fakes(boots={HOST_A: BOOT_NEW_A, HOST_B: BOOT_OLD_B},
+                       serving=set())      # orch is down after the .244 reboot
+        monkeypatch.setattr(heal_lease, "acquire", lambda *a, **k: (True, None))
+        monkeypatch.setattr(heal_lease, "release", lambda *a, **k: None)
+        calls = []
+
+        def up(nodes):
+            calls.append(list(nodes))
+            fx.up_calls.append(list(nodes))   # same recorder the Fakes use
+            return dict(up_res)
+
+        out = pb.run_post_boot_pass(
+            boot_fn=fx.boot_fn, probe_fn=fx.probe_fn, up_fn=up,
+            lock_acquire=fx.lock_acquire, lock_release=fx.lock_release,
+            intentional_fn=fx.intentional_fn, notify_fn=fx.notify,
+            path=marker_path)
+        return out, fx, calls
+
+    def _marker_setup(self, marker_path):
+        _write_marker(marker_path, _marker(
+            baseline={HOST_A: BOOT_OLD_A, HOST_B: BOOT_OLD_B}))
+
+    # ── the new outcome ───────────────────────────────────────────────────
+    def test_all_paused_is_reported_as_skipped_paused_not_launched(
+            self, marker_path, monkeypatch):
+        self._marker_setup(marker_path)
+        res, fx, calls = self._run(marker_path, monkeypatch, ALL_PAUSED)
+        assert calls == [[HOST_A]]                 # the surface WAS called
+        assert res["result"] == "skipped-paused"
+        assert res["result"] != "launched"
+        assert res["actions"] == []                # claims NO relaunch
+        msg = res["message"]
+        assert "orch" in msg                       # the parked unit is named
+        assert "node pause" in msg
+        assert "hscc node resume" in msg           # the way back
+        assert "via hscc cluster up" not in msg    # no launch claim
+        # and it is not the failure arm either (no restore, no page)
+        assert res["result"] != "launch-failed"
+
+    def test_all_paused_notifies_low_priority_only(self, marker_path,
+                                                   monkeypatch):
+        self._marker_setup(marker_path)
+        res, fx, _calls = self._run(marker_path, monkeypatch, ALL_PAUSED)
+        assert fx.notices, "the operator is still told, quietly"
+        assert [p for _, _, p in fx.notices] == ["low"]
+        assert all(p != "high" for _, _, p in fx.notices)
+        _title, body, _prio = fx.notices[0]
+        assert "orch" in body and "hscc node resume" in body
+
+    def test_all_paused_advances_baselines_and_never_re_decides(
+            self, marker_path, monkeypatch):
+        """`skipped-paused` advances (does NOT restore): the pause is the
+        operator's own record, so the next pass must not offer the same parked
+        unit again — contrast test_launch_failure_keeps_retry_decidable, which
+        restores BOOT_OLD_A precisely so a genuine failure CAN retry."""
+        self._marker_setup(marker_path)
+        res, fx, calls = self._run(marker_path, monkeypatch, ALL_PAUSED)
+        assert res["result"] == "skipped-paused"
+        m = json.load(open(marker_path))
+        assert m["boot_baseline"][HOST_A] == BOOT_NEW_A    # advanced, not undone
+        res2, _fx2, calls2 = self._run(marker_path, monkeypatch, ALL_PAUSED,
+                                       fx=fx)
+        assert res2["result"] == "steady"                  # nothing left to try
+        assert calls2 == []
+        assert fx.up_calls == [[HOST_A]]                   # exactly once total
+
+    def test_all_paused_without_a_paused_list_still_names_the_candidates(
+            self, marker_path, monkeypatch):
+        """Defensive: `paused` is the contract's key, but a return that omits
+        it (or reports it empty) must still say WHICH unit was not started."""
+        self._marker_setup(marker_path)
+        res, _fx, _calls = self._run(
+            marker_path, monkeypatch,
+            {"success": True, "result": "all-paused", "paused": [],
+             "units": 0, "output": ""})
+        assert res["result"] == "skipped-paused"
+        assert "orch" in res["message"]            # fell back to the candidates
+
+    def test_all_paused_label_never_masks_a_real_failure(
+            self, marker_path, monkeypatch):
+        """The new branch is gated on `ok`. A `success: False` return that also
+        carries the label (impossible per the t_3b909c61 contract, so exactly
+        what a regression would look like) must STILL take launch-failed."""
+        self._marker_setup(marker_path)
+        res, fx, _calls = self._run(
+            marker_path, monkeypatch,
+            {"success": False, "result": "all-paused", "paused": ["orch"],
+             "output": "boom"})
+        assert res["result"] == "launch-failed"
+        assert json.load(open(marker_path))["boot_baseline"][HOST_A] == BOOT_OLD_A
+        assert [p for _, _, p in fx.notices] == ["high"]
+
+    # ── the two arms the new branch shares, unchanged ────────────────────
+    def test_plain_success_still_reports_launched_with_a_high_notice(
+            self, marker_path, monkeypatch):
+        self._marker_setup(marker_path)
+        res, fx, calls = self._run(marker_path, monkeypatch,
+                                   {"success": True, "output": "ok"})
+        assert calls == [[HOST_A]]
+        assert res["result"] == "launched"
+        assert res["actions"] == ["orch"]
+        assert "via hscc cluster up" in res["message"]
+        assert [p for _, _, p in fx.notices] == ["high"]
+
+    def test_plain_failure_still_reports_launch_failed(self, marker_path,
+                                                       monkeypatch):
+        self._marker_setup(marker_path)
+        res, fx, calls = self._run(marker_path, monkeypatch,
+                                   {"success": False, "output": "boom"})
+        assert calls == [[HOST_A]]
+        assert res["result"] == "launch-failed"
+        assert "boom" in res["message"]
+        assert res["actions"] == ["orch"]
+        assert json.load(open(marker_path))["boot_baseline"][HOST_A] == BOOT_OLD_A
+        assert [p for _, _, p in fx.notices] == ["high"]
+
+    # ── the overlay stays cmd_cluster_up's job ───────────────────────────
+    def test_pass_never_reads_the_pause_overlay(self, marker_path,
+                                                monkeypatch, tmp_path):
+        """post-boot must not develop its OWN pause read — the partition is
+        `cmd_cluster_up`'s (t_3b909c61 rules 1-3), and a second reader would be
+        a second source of truth for the same overlay. The daemon conftest seals
+        `node_pauses.HSCC_DIR` to this test's tmp root (the card's sealing
+        doctrine — a green pause test must never park a real node); assert the
+        seal is in force, then make ANY overlay read explode: the all-paused
+        pass must still complete, proving it never consults one."""
+        from hscc_daemon import node_pauses
+        sealed = os.path.realpath(node_pauses.HSCC_DIR)
+        assert sealed.startswith(os.path.realpath(str(tmp_path))), sealed
+        # The conftest ALSO redirects os.path.expanduser, so `~/.hscc` is not a
+        # usable witness here — read the real home from the passwd entry, which
+        # no monkeypatch can move.
+        try:
+            import pwd
+            real_home = pwd.getpwuid(os.getuid()).pw_dir
+        except Exception:                    # non-POSIX fallback
+            real_home = os.environ.get("HOME", "")
+        assert real_home and not sealed.startswith(os.path.realpath(real_home)), \
+            (sealed, real_home)
+
+        def exploding(*_a, **_k):
+            raise AssertionError(
+                "post-boot must not read the node-pause overlay itself")
+        for name in ("paused_nodes", "load", "paused", "covering"):
+            monkeypatch.setattr(node_pauses, name, exploding)
+        self._marker_setup(marker_path)
+        res, _fx, calls = self._run(marker_path, monkeypatch, ALL_PAUSED)
+        assert res["result"] == "skipped-paused"
+        assert calls == [[HOST_A]]
