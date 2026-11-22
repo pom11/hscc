@@ -43,3 +43,22 @@ task: t_d24a05ea
   `HERMES_HOME` is exported to every dispatched worker and outranks the `~/.hermes`
   default — that pair is why `HERMES_HOME` is in the seal and not merely in the
   runner.
+- **Mutation battery, 6/6 caught** (copy at an absolute path, green control first
+  at `9 passed`, pristine reset + byte-compare before every probe, anchors asserted
+  `count == 1`, every mutant `compile()`d before it is written, `__pycache__` dropped
+  per run, provenance gated by a `-p` plugin asserting `rolelib`/`generator`/
+  `autonomy`/`orchestrators` were imported from the copy and writing a sentinel the
+  driver checks). Seal deleted → 8 of the 9 cases red; `USERPROFILE` left unsealed →
+  exactly the seal-state case red; the seal moved BELOW the import-time snapshot →
+  the 5 import-time cases red while the call-time ones stayed green (this is the
+  probe that pays for the placement decision — a fixture-shaped seal would have been
+  green here); `TMPDIR` honoured and the containment guard removed → the
+  containment case red; `HSCC_REGISTRY` not popped → the seal-state case red with
+  the operator's registry exported; `HERMES_HOME` not popped → 3 red. Each seeded
+  arm has a positive control under the SAME seed and the pristine conftest: all
+  three green, so the reds are the mutants, not the seeding. Two arms are
+  CAUGHT-BY-SIBLING and are reported as such, not as named catches: with the seal
+  deleted, the pin-absence case stays green because the driver's own environment
+  carries no pins (that claim is what P5/P6 seed); and the two registry cases do not
+  go red for an ambient `HSCC_REGISTRY` because each `delenv`s it first — their own
+  #593 contract, not a gap. Copy restored pristine, probe copies deleted.
