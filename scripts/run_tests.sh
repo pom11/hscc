@@ -345,12 +345,28 @@ trap on_sigterm TERM
 # these removed was passing while reading the operator's board. That is a
 # harness bug and a finding to report — not something to paper over by putting
 # the pin back.
+#
+# HSCC_REGISTRY joins the list, and it is a DIFFERENT kind of pin from the five
+# above: none of the leg conftests re-pins it (the five above are), so the runner
+# is the only place a suite-wide scrub can also reach the leg children —
+# monkeypatch cannot reach children, and hermes_gap's _child_env drops it only for
+# the gated cases' own children. It is read AT CALL TIME by two resolvers
+# (orchestrators._registry_path, main_orch._registry_projects), so an export from
+# provisioning outranks the documented default in any process, including one that
+# imported first. PR #593 (t_4b70e8d4) was exactly that shape: the operator's live
+# ~/.flightdeck/registry.yaml answered a case on a workstation, nothing answered it
+# on the runner, and the leg was red only there. Verified nothing needs it armed:
+# the three suite files that reference it — both bootstrap main_orch files and the
+# whole hscc-roles leg — are green with a value armed AND with it scrubbed. The
+# same consequence rule applies: a leg that reddens here was reading the operator's
+# registry.
 SUITE_ENV_UNSET=(
   HERMES_DELEGATED_CHILD_CONTEXT   # the read fence (in-loop comment)
   HERMES_KANBAN_DB                 # the board location pins (block above)
   HERMES_KANBAN_BOARD
   HERMES_KANBAN_WORKSPACES_ROOT
   HERMES_KANBAN_ATTACHMENTS_ROOT
+  HSCC_REGISTRY                    # the registry location pin (block above)
 )
 ENV_UNSET_ARGS=()
 for _pin in "${SUITE_ENV_UNSET[@]}"; do
