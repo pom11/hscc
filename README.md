@@ -203,7 +203,7 @@ Anything else — no cache, a cache older than 24 h, a cached "up to date" — p
 | watch per-node / per-model live load | `hscc cluster monitor --live` |
 | look back at the stored series, not just the present | `hscc cluster history --window 6h` |
 | see throughput + queue depth, get scaling advice | `hscc throughput` · `hscc autoscale` |
-| take one node out of the fleet for a while | `hscc node pause <host>` — dry-run first; `hscc node paused` to see what is parked |
+| take one node out of the fleet for a while | `hscc node pause <host>` — prints the plan and asks; `hscc node paused` to see what is parked |
 | review + merge a finished card | `hscc project review <card>` |
 | see why a card is stuck / un-stick it | `hscc kanban blocked [--recover <id>]` |
 | preview what would be escalated | `hscc escalate` (dry-run) |
@@ -235,13 +235,16 @@ It never tears down while kanban work is running/ready/in-review, while an agent
 `hscc node pause` takes **one** node out of the fleet for a while — to hand a whole box to a training run, then put it back — without touching any cluster setting. The heal, keepalive, autoscale and fleet-up paths read the pause record and leave that node alone until it ends.
 
 ```
-hscc node pause <host> [--reason <text>] [--until 2h]     # dry-run: prints the unit it would stop, stops nothing
-hscc node pause <host> --apply       # do it — stop first, then record the pause
-hscc node resume <host> --apply      # restart exactly what was running, clear the pause + that node's heal strikes
-hscc node paused [--json]            # what is parked — reads the record, so it works with the fleet unreachable
+hscc node pause <host> [--reason <text>] [--until 2h]   # prints the plan, then asks you to confirm
+hscc node pause <host> --dry-run                        # the plan alone — no question, nothing stops
+hscc node pause <host> --yes                            # no question — for scripts and CI
+hscc node resume <host>                                 # prints what restarts, then asks the same way
+hscc node paused [--json]                               # what is parked — reads the record, so it works with the fleet unreachable
 ```
 
-`--apply` is what mutates: `pause` and `resume` plan and print without it, and `paused` is read-only always. A pause stops exactly one model on exactly one node — a single unit that runs nowhere else. Anything wider is refused outright, nothing stopped and nothing recorded: a node hosting two or more units (the refusal lists them), a unit that also runs on other nodes (the refusal names them), or a node with nothing to pause. Those refusals have no override, because the blast radius is someone else's workload. `--until <duration>` (`90m`, `2h`, `1d3h`, or an ISO timestamp) records a deadline the daemon's expiry tick honours, so the node comes back even if you do not; the schedule lives in the overlay rather than in memory, because an in-memory timer dies in exactly the crash that also restarts the watchdog.
+Nothing mutates until you answer. `pause` prints its plan first — the host, every model it will stop, the reason, and the `--until` deadline if you gave one — then asks `Pause <host> and stop these N model(s)? [y/N]`. Only `y` or `Y` proceeds; `n` and a bare Enter both abort, and an aborted pause records nothing at all, so there is no half-state to clean up. `--yes` skips the question for scripts and CI, and since a prompt nobody can answer is worse than a refusal, a run with no TTY refuses unless you pass it. `--dry-run` is the prompt-free preview: the same plan, printed and dropped. `resume` confirms the same way, listing the models it will restart and clearing the pause plus that node's heal strikes once you say yes.
+
+Eligibility is about blast radius, not count. A node is pausable when **every** model on it runs only on that node, so several single-node models sharing a box pause together in one call and all come back together. It refuses — nothing stopped, nothing recorded — when any model also runs on other nodes (the refusal names the model and the other nodes it spans), or when the node runs no models at all. Those refusals have no override, because the blast radius is someone else's workload. `--until <duration>` (`90m`, `2h`, `1d3h`, or an ISO timestamp) records a deadline the daemon's expiry tick honours, so the node comes back even if you do not; the schedule lives in the overlay rather than in memory, because an in-memory timer dies in exactly the crash that also restarts the watchdog.
 
 The orchestrator-node guard is the one refusal `--force` unlocks, and it refuses on two grounds only: the host is the applied template's declared `orchestrator_node`, or the pause would leave zero healthy units serving the orchestrator alias. A uniform pool is otherwise pausable — every replica advertises that alias on purpose — and says so with a `stays served by N other node(s)` note.
 
