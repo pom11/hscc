@@ -2075,6 +2075,99 @@ def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports,
                   f"backend(s){note}")
 
 
+# The log-on-change latch for `_note_paused_router_stale` below (t_892378c1).
+# Module state, reset per test by tests/conftest.py's `_module_attrs()`.
+# `signature` is the sorted tuple of stale backends last printed, or None when
+# nothing has been printed yet (so a never-dirty check never prints a clear).
+_PAUSED_STALE_ROUTER_LOCK = threading.Lock()
+_paused_stale_router_state: dict = {"signature": None}
+
+
+def _paused_router_stale_backends(expected_absent, live_backends):
+    """The backends the LIVE router still holds for a host the operator parked.
+
+    ``expected_absent`` is :func:`_proxy_backend_drift_sets`' third set — every
+    hscc-owned backend whose HOST is paused — and ``live_backends`` is what
+    ``/v1/model/info`` answered for the running proxy. Their intersection is the
+    one fact the exclusion hides: the endpoint a pause deliberately left behind
+    is still in the live router, so traffic can still be aimed at a machine that
+    was stopped on purpose.
+
+    Intersecting with the RAW live set is the same as intersecting with the
+    drift math's ``live_in_fleet``: ``expected_absent`` is built only from
+    fleet / healthy / live-in-fleet hostports, so anything in it is already
+    hscc-owned. No probe, no I/O — both arguments are already in hand.
+    """
+    live = set(live_backends or ())
+    return {b for b in (expected_absent or ()) if b in live}
+
+
+def _note_paused_router_stale(expected_absent, live_backends):
+    """Print — once per change — the paused-host backends the router still holds.
+
+    WHY. :func:`_proxy_backend_drift` subtracts every parked host's backends
+    (``expected_absent``) from BOTH drift directions, deliberately: reading a
+    pause as DEAD is the bug that stopped the fleet's only entrypoint
+    (t_90958eb8). The cost of subtracting from both is that the DEAD direction
+    became structurally invisible — zero stale/extra-backend verdicts exist in
+    the entire daemon log — so during the 2026-11-22 :4000 outage the daemon
+    could not answer "does the live router still point at the node that was
+    paused five minutes ago?", which is the one alternative explanation the
+    audit could not exclude
+    (``docs/audits/2026-11-22-proxy-connection-error.md`` §3.2/§4.3).
+
+    VISIBILITY, NOT A FAULT. This must not change what the verdict does: it
+    never touches the ``(healthy, reason)`` tuple, never takes a heal lease,
+    never strikes the heal breaker, never emits an event, never notifies and
+    never restarts anything. t_90958eb8's guarantee — a paused node never stops
+    the fleet's entrypoint — stays literally true with this line present, and
+    ``tests/test_proxy_paused_router_stale_t_892378c1.py`` pins that against
+    byte-identical verdict goldens.
+
+    RATE LIMIT: log on CHANGE, not per tick. The signature is the sorted tuple
+    of stale backends, so a node parked for a day costs ONE WARN and the
+    recovery costs one INFO ("no longer points at") — the same once-per-outage
+    posture as the FLEET VISIBILITY latch. The latch is in-process, so a daemon
+    restart re-prints the current state once; that is intentional, since the
+    line is also the evidence that the condition held across a restart.
+
+    Returns the message it printed, or None when it stayed quiet (the caller
+    ignores it; the tests pin the wording). A visibility line must never be able
+    to break the check that prints it, so emission failures are swallowed.
+    """
+    stale = _paused_router_stale_backends(expected_absent, live_backends)
+    signature = tuple(sorted(stale))
+    with _PAUSED_STALE_ROUTER_LOCK:
+        previous = _paused_stale_router_state.get("signature")
+        if signature == previous:
+            return None
+        _paused_stale_router_state["signature"] = signature
+    try:
+        if not stale:
+            if previous is None:
+                # Never dirty, so nothing to clear: a clean check stays silent.
+                return None
+            message = (f"live router no longer points at any paused-host "
+                       f"backend (was {len(previous)}: {list(previous)}) — "
+                       f"the drift verdict was unchanged throughout")
+            log(message, "INFO")
+            return message
+        hosts = sorted({_host_of(b) for b in stale})
+        message = (f"live router still points at {len(stale)} backend(s) on "
+                   f"paused host(s) {sorted(stale)} — not counted as drift "
+                   f"(paused hosts: {', '.join(hosts)})")
+        log(message, "WARN")
+        return message
+    except Exception:  # pragma: no cover - visibility must never break a check
+        return None
+
+
+def _reset_paused_stale_router_state():
+    """Drop the in-process log-on-change latch. Test seam; nothing on disk."""
+    with _PAUSED_STALE_ROUTER_LOCK:
+        _paused_stale_router_state["signature"] = None
+
+
 def _proc_cmdline(pid):
     """The command line of `pid` (stripped), or None if unreadable.
 
@@ -2944,8 +3037,17 @@ def check_proxy(pause_directory=None):
             # is what stops `hscc node pause` from stopping the fleet's proxy.
             paused_hp = _paused_nodes(pause_directory)
             live_hp = live.get("backends") or set()
-            missing_hp, dead_hp, _absent = _proxy_backend_drift_sets(
+            missing_hp, dead_hp, absent_hp = _proxy_backend_drift_sets(
                 live_hp, healthy_units, fleet_hp, paused_nodes=paused_hp)
+            # PAUSED-HOST VISIBILITY (t_892378c1). `absent_hp` is subtracted
+            # from BOTH drift directions above, so "the live router still holds
+            # this parked host's endpoint" has never been printed anywhere — the
+            # DEAD direction is structurally blind while a node is paused, which
+            # is exactly what the 2026-11-22 audit could not exclude. Say it, on
+            # change, and move on: this line is not drift, takes no lease,
+            # strikes nothing, alerts nothing, and must not touch `drift_ok` or
+            # `drift_reason` below.
+            _note_paused_router_stale(absent_hp, live_hp)
             drift_ok, drift_reason = _proxy_backend_drift(
                 live_hp, healthy_units, fleet_hp,
                 paused_nodes=paused_hp)
