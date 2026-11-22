@@ -81,6 +81,24 @@ def _seal_hscc_state(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _seal_applied_state(tmp_path, monkeypatch):
+    """Point the sanctioned applied-template reader at a per-test file.
+
+    The guard consults ``~/.hscc/applied_template.json`` to name the declared
+    orchestrator node, and unlike ``hscc_daemon/tests``, THIS suite has no
+    ``~/.hscc`` isolation of its own. Sealed here (same doctrine as
+    ``_seal_hscc_state`` above) so no test can be decided by — or read — the
+    operator's live record. The reader itself is NOT stubbed: tests write a real
+    record at this path and let ``declaration_agreement.load_applied_state`` read
+    it, which is what keeps the guard honest about the reader it must use.
+    """
+    from hscc_daemon import declaration_agreement as da
+    path = tmp_path / "hscc" / "applied_template.json"
+    monkeypatch.setattr(da, "_APPLIED_STATE_REL", str(path))
+    return path
+
+
 @pytest.fixture
 def fleet(monkeypatch):
     rec = Recorder()
@@ -261,6 +279,179 @@ class TestDelegationIsTheWholeDesign:
             text = f.read()
         for name in ("node_pause", "node_resume", "node_paused"):
             assert re.search(rf"^\s+- {name}$", text, re.MULTILINE), name
+
+
+# ── the guard, seen from both entry points (card t_51a11d16) ────────────────
+# The uniform pool that made every node look like the orchestrator node. The
+# verdict is decided ONCE, in node_pause_exec; the CLI verb prints it and this
+# tool delegates to the verb — so these two agree by construction. Construction
+# is exactly what a refactor breaks, so it is asserted per outcome here, in the
+# one suite where both entry points are importable.
+POOL_A, POOL_B, POOL_C, POOL_D = ("192.0.2.21", "192.0.2.22", "192.0.2.23",
+                                  "192.0.2.24")
+POOL_NODES = (POOL_A, POOL_B, POOL_C, POOL_D)
+POOL_PORTS = tuple(8000 + i for i in range(len(POOL_NODES)))
+POOL_RECIPE = "/srv/recipes/pool.yaml"
+POOL_MODEL = "meta-llm/Pool-8B"
+POOL_SERVED = f"{POOL_MODEL} worker-model orchestrator-model"
+
+POOL_SERVING = {
+    "port": POOL_PORTS[0],
+    "uniform_pool": True,
+    "units": [{"id": f"pool-{i}",
+               "role": "orchestrator" if i == 0 else "worker",
+               "nodes": [h], "port": p, "recipe": POOL_RECIPE,
+               "model": POOL_MODEL, "tp": 1}
+              for i, (h, p) in enumerate(zip(POOL_NODES, POOL_PORTS))],
+}
+
+
+def pool_status(down=()):
+    groups = {}
+    for i, (h, p) in enumerate(zip(POOL_NODES, POOL_PORTS)):
+        if h in down:
+            continue
+        groups.update(_group(f"cid_pool_{i}", POOL_RECIPE, [h], p,
+                             model=POOL_MODEL, served=POOL_SERVED))
+    return {"groups": groups, "solo_entries": [], "errors": {},
+            "idle_hosts": [], "preparing_hosts": [], "pending_ops": [],
+            "total_containers": 0, "host_count": 0}
+
+
+def pool_declare(path, node):
+    """A real applied-template record for the sanctioned reader to find."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "template": "4node-flash-next-all", "uniform_pool": True,
+        "orchestrator_node": node, "units": len(POOL_NODES)}))
+
+
+@pytest.fixture
+def pool(monkeypatch, _seal_applied_state):
+    """Uniform pool + a record naming POOL_A the declared orchestrator node."""
+    rec = Recorder()
+    monkeypatch.setattr(serving, "load_serving", lambda path=None: POOL_SERVING)
+    monkeypatch.setattr(npe, "fetch_cluster_status",
+                        lambda: (pool_status(), None))
+    monkeypatch.setattr(util, "run_cmd", rec)
+    pool_declare(_seal_applied_state, POOL_A)
+    return rec
+
+
+def cli_pause(argv_tail):
+    """Drive the verb directly — the same function the tool delegates to.
+
+    ``argv_tail`` is what remains after ``node pause``, exactly what
+    :func:`node_pause_tools.node_pause` builds and hands over.
+    """
+    from hscc_daemon import hscc as unified
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    rc = None
+    try:
+        with redirect_stdout(buf):
+            rc = unified._node_pause(list(argv_tail))
+    except SystemExit as e:  # a verb must RETURN, never exit
+        rc = e.code if isinstance(e.code, int) else 0
+    return rc, buf.getvalue().strip()
+
+
+class TestBothEntryPointsSayTheSameThing:
+    """One guard, two doors: identical verdict AND identical bytes on every case.
+
+    A refusal that arrives here as an empty preview — or a note the agent never
+    sees because only the CLI prints it — is the failure mode this pins.
+    """
+
+    #: (verb argv tail, tool args, must the pause be refused?)
+    CASES = [
+        ([POOL_B], {"host": POOL_B}, False),                       # replica
+        ([POOL_A], {"host": POOL_A}, True),                        # declared
+        ([POOL_D], {"host": POOL_D}, False),                       # replica
+    ]
+
+    @pytest.mark.parametrize("argv,tool_args,refused", CASES)
+    def test_verdict_and_report_are_identical(self, pool, argv, tool_args,
+                                              refused):
+        rc, text = cli_pause(argv)
+        out = npt.node_pause(tool_args)
+        assert out["report"] == text, "the agent must see the operator's report"
+        assert out["rc"] == rc
+        assert out["refused"] is refused
+        assert ("REFUSED" in text) is refused
+        assert out["executed"] is False, "dry run through both doors"
+        assert pool.calls == []
+
+    def test_a_replica_allows_and_the_note_reaches_the_agent(self, pool):
+        out = npt.node_pause({"host": POOL_B})
+        assert out["refused"] is False
+        assert "orchestrator-model stays served by 3 other node(s)" \
+            in out["report"], out["report"]
+
+    def test_the_declared_node_refusal_reaches_the_agent(self, pool):
+        out = npt.node_pause({"host": POOL_A, "confirm": True})
+        assert out["refused"] is True and out["executed"] is False
+        assert "declared orchestrator node" in out["report"], out["report"]
+        assert pool.calls == []
+        assert node_pauses.paused(POOL_A) is None
+
+    def test_a_last_healthy_server_refuses_through_the_tool_too(self, pool,
+                                                                monkeypatch):
+        monkeypatch.setattr(
+            npe, "fetch_cluster_status",
+            lambda: (pool_status(down={POOL_A, POOL_C, POOL_D}), None))
+        out = npt.node_pause({"host": POOL_B, "confirm": True})
+        assert out["refused"] is True
+        assert "would leave no healthy unit" in out["report"], out["report"]
+        assert pool.calls == []
+
+    def test_parked_replicas_do_not_count_as_servers_through_the_tool(self,
+                                                                      pool):
+        for h in (POOL_A, POOL_C, POOL_D):
+            node_pauses.pause(h, units=[f"pool-{POOL_NODES.index(h)}"])
+        out = npt.node_pause({"host": POOL_B})
+        assert out["refused"] is True, out["report"]
+        assert "paused and therefore not counted" in out["report"]
+
+    def test_force_agrees_in_both_doors_and_overrides_either_ground(self, pool):
+        """POOL_A is refused by the declaration, so --force must be announced;
+        POOL_B needed no override, so --force must NOT invent an override note —
+        both doors have to say the same thing in both cases."""
+        for argv, tool_args, expect in (
+                ([POOL_A, "--force"], {"host": POOL_A, "force": True},
+                 "note: --force given, but this host is the applied "
+                 "template's declared orchestrator node."),
+                ([POOL_B, "--force"], {"host": POOL_B, "force": True},
+                 "note: orchestrator-model stays served by 3 other node(s)")):
+            rc, text = cli_pause(argv)
+            out = npt.node_pause(tool_args)
+            assert out["report"] == text and out["rc"] == rc
+            assert out["refused"] is False and rc == 0, text
+            assert expect in text, text
+        assert pool.calls == [], "--force without confirm is still a dry run"
+
+    def test_the_tool_decides_nothing_about_the_orchestrator_itself(self):
+        """Structural pin: this handler delegates and reports. If a guard ever
+        re-appears here, the agent is running a second orchestrator policy —
+        the exact shape of the bug this card removed from the CLI."""
+        import inspect
+        body = ast.parse(inspect.getsource(npt.node_pause))
+        touched = {n.attr for n in ast.walk(body) if isinstance(n,
+                                                                ast.Attribute)}
+        assert "_node_pause" in touched, (
+            "the handler no longer delegates to the CLI verb, so it is deciding "
+            "something for itself again")
+        banned = {"orchestrator_pause_guard", "orchestrator_flag",
+                  "orchestrator_alias_units", "plan", "paused_nodes",
+                  "load_applied_state", "orchestrator_nodes", "serving_dict",
+                  "stop_units", "resume_units"}
+        assert not (touched & banned), (
+            f"the tool touches policy directly: {sorted(touched & banned)}")
+        said = [n.value for n in ast.walk(body)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        assert not [s for s in said if "orchestrator" in s.lower()], (
+            "the refusal wording belongs to the guard, not to this surface")
 
 
 # ── the fixture-ordering class that made these tests red ───────────────────

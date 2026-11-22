@@ -245,29 +245,71 @@ everywhere, so:
 - `resume` follows the same shape: the span starts as one thing, so a host named
   only in another pause's `span_nodes` is pointed at the owner.
 
-## Orchestrator-model refusal
+## Orchestrator-model guard
 
-A host that serves the orchestrator model — the model every agent in the fleet
-talks to — is refused unless you pass `--force`:
+One function answers "may this node be parked without taking the orchestrator
+model down?" — `node_pause_exec.orchestrator_pause_guard`. `hscc node pause`
+prints its verdict and so does the `node_pause` agent tool, which calls the verb;
+neither carries a decision of its own. It refuses on exactly two grounds.
+
+**The host is the applied template's declared orchestrator node.**
 
 ```
-REFUSED: 192.0.2.11 serves the orchestrator model.
-  why: serving config: orchestrator unit(s) ['orch-1'] declare 192.0.2.11
+REFUSED: 192.0.2.11 is the applied template's declared orchestrator node.
+  why: applied template '4node-flash-next-all' declares orchestrator_node=192.0.2.11; this stop takes down 1 unit(s) on it (span: 192.0.2.11)
   Pausing it parks the model every agent in this fleet talks to.
   Pass --force to pause it anyway.
 Nothing stopped and nothing recorded.
 ```
 
-The `why:` line is the evidence the plan actually read — the serving config's
-orchestrator unit ids, or the live workload that advertises the orchestrator alias —
-never a name the CLI made up. The flag **fails closed**: when the status read or the
-serving config is unavailable the evidence line reads `serving config unavailable —
-cannot rule out this host serving the orchestrator model`, and the host is treated as
-serving the orchestrator model, because refusing is the cheap direction to err in.
-That asymmetry is deliberate: unlike the `--span` guard, this one refuses a dry run
-too, because "I cannot prove this node is safe to park" is exactly what a dry run
-should surface. `--force` on a host that is *not* flagged prints a note and
-proceeds.
+The node comes from the applied-template record (`~/.hscc/applied_template.json`,
+written by `hscc template apply`) read through
+`declaration_agreement.load_applied_state` — the one reader that knows that
+record's path and shape. A fleet with no applied record (a hand-written
+`serving.json`, as `hscc-bootstrap` leaves it) simply has no declaration to
+consult, and the guard says so in a note rather than treating every node as the
+orchestrator node.
+
+**The pause would leave no healthy unit serving the alias.** Healthy means the
+sweep saw containers running and the pause overlay is not holding the node — a
+replica you have deliberately parked is not a server, and neither is a unit the
+sweep never observed. A multi-node unit is one server: it leaves with every node
+it spans, so its sibling node is not counted as a survivor.
+
+```
+REFUSED: 192.0.2.12 serves the orchestrator model.
+  why: orchestrator-model served by 1 healthy unit(s) — pool-1 — and all of them are on node(s) this stop takes down. Pausing 192.0.2.12 would leave no healthy unit serving orchestrator-model; paused and therefore not counted as a healthy server: 192.0.2.13, 192.0.2.14
+  Pausing it parks the model every agent in this fleet talks to.
+  Pass --force to pause it anyway.
+Nothing stopped and nothing recorded.
+```
+
+Anything else is allowed, and says why it is safe:
+
+```
+note: orchestrator-model stays served by 3 other node(s): 192.0.2.11, 192.0.2.13, 192.0.2.14
+```
+
+**Why not "refuse any node that serves the orchestrator model"?** Because under a
+`uniform_pool` template every replica advertises `orchestrator-model` on purpose
+— `serving._served_model_name` stamps both role aliases so each alias
+load-balances across the whole pool. A per-unit flag is then true on every node in
+the fleet, which is what `#567` shipped: `hscc node pause <any host>` refused, on
+a four-node uniform pool, and the only way through was `--force` — a guard that
+must be defeated to be used is not a guard. The question was never "does this
+node advertise the alias" but "would anything still serve it afterwards", which
+needs the whole sweep, not one host. (The flag itself stays: `plan()` still
+reports `serves_orchestrator_model` as advisory evidence, and it is what the
+fail-closed answer rests on.)
+
+The guard **fails closed**: when the status read or the serving config is
+unavailable it refuses with `reason: cannot_rule_out` and says it could not rule
+the host out, rather than allowing a pause it cannot justify. That asymmetry is
+deliberate: unlike the `--span` guard, this one refuses a dry run too, because "I
+cannot prove this node is safe to park" is exactly what a dry run should surface.
+`--force` overrides either refusal and announces which ground it overrode; on a
+node that needed no override it prints the ordinary `note: --force given, but this
+host is not flagged as serving the orchestrator model.`
 
 ## `--until` records a deadline, and the daemon honours it
 

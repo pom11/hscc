@@ -400,6 +400,227 @@ class TestOrchestratorDetection:
         assert plan["serves_orchestrator_model"] is True
 
 
+# ── the guard: ONE check, fleet-wide (card t_51a11d16) ─────────────────────
+# The uniform pool this guard exists for: three replicas, every one of them
+# advertising the orchestrator alias, ONE of them declared by the applied
+# template. Placeholders only (RFC 5737); the status read is injected, so
+# nothing here touches a host (nolive-rule.txt).
+P1, P2, P3 = "192.0.2.41", "192.0.2.42", "192.0.2.43"
+POOL_RECIPE = "/srv/recipes/pool.yaml"
+POOL_MODEL = "meta-llm/Pool-8B"
+POOL_SERVED = f"{POOL_MODEL} worker-model orchestrator-model"
+POOL_PORTS = (8000, 8001, 8002)
+POOL_NODES = (P1, P2, P3)
+
+POOL_SERVING = {
+    "port": POOL_PORTS[0],
+    "uniform_pool": True,
+    "units": [{"id": f"pu{i}",
+               "role": "orchestrator" if i == 0 else "worker",
+               "nodes": [h], "port": p, "recipe": POOL_RECIPE,
+               "model": POOL_MODEL, "tp": 1}
+              for i, (h, p) in enumerate(zip(POOL_NODES, POOL_PORTS))],
+}
+
+
+def pool_status(down=(), served=POOL_SERVED, unobserved=()):
+    """A sweep of the pool.
+
+    ``down`` hosts are missing from the sweep entirely; ``unobserved`` hosts are
+    still declared but the sweep shows no container for them (still loading, or
+    already gone) — the two states the healthy count must treat the same way and
+    the overlay state must treat differently.
+    """
+    groups = {}
+    for i, (h, p) in enumerate(zip(POOL_NODES, POOL_PORTS)):
+        if h in down:
+            continue
+        groups.update(group(f"cid_pu{i}", POOL_RECIPE, [h], p,
+                            model=POOL_MODEL, served=served,
+                            observed=[] if h in unobserved else None))
+    return status_payload(groups=groups)
+
+
+def pool_plan(host, **payload_kw):
+    return npe.plan(host, serving_dict=POOL_SERVING,
+                    status_reader=reader(pool_status(**payload_kw)))
+
+
+DECLARED_P1 = ({"template": "4node-flash-next-all", "uniform_pool": True,
+                "orchestrator_node": P1}, None)
+
+
+class TestOrchestratorPauseGuard:
+    """The guard's own contract, through its injectable seams.
+
+    The CLI suite proves the verdict reaches the operator; this proves the
+    verdict is computed from the right inputs — the plan it was handed, the
+    overlay it reads, and the applied record it is allowed to consult only
+    through the sanctioned reader.
+    """
+
+    def test_a_replica_pause_is_allowed_and_names_the_remaining_servers(self):
+        v = npe.orchestrator_pause_guard(
+            P2, plan=pool_plan(P2), paused=set(), applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_ALLOW
+        assert v["others"] == [P1, P3]
+        assert v["remaining_units"] == 2
+        assert "orchestrator-model stays served by 2 other node(s)" \
+            in v["lines"][0]
+
+    def test_the_declared_node_refuses_and_says_which_record_said_so(self):
+        v = npe.orchestrator_pause_guard(
+            P1, plan=pool_plan(P1), paused=set(), applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_REFUSE
+        assert v["reason"] == npe.REASON_DECLARED_NODE
+        joined = "\n".join(v["lines"])
+        assert "declared orchestrator node" in joined
+        assert "4node-flash-next-all" in joined and f"orchestrator_node={P1}" \
+            in joined
+        assert v["lines"][-1] == "Nothing stopped and nothing recorded."
+
+    def test_an_absent_record_declares_nothing_and_is_said_so(self):
+        """A hand-written serving.json (hscc-bootstrap) has no applied record.
+        That must not become "every node is the orchestrator node" — and must not
+        pass for a checked declaration either."""
+        v = npe.orchestrator_pause_guard(
+            P1, plan=pool_plan(P1), paused=set(),
+            applied_state=(None, "unverified: no applied-template state"))
+        assert v["verdict"] == npe.GUARD_ALLOW
+        assert v["declared_node"] is None
+        assert "could not be consulted" in "\n".join(v["lines"])
+
+    def test_a_healthy_count_is_what_protects_the_last_server(self):
+        """The other two are gone from the sweep: P2 alone serves the alias."""
+        v = npe.orchestrator_pause_guard(
+            P2, plan=pool_plan(P2, down={P1, P3}), paused=set(),
+            applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_REFUSE
+        assert v["reason"] == npe.REASON_NO_HEALTHY_SERVER
+        assert "would leave no healthy unit" in "\n".join(v["lines"])
+        assert v["remaining_units"] == 0
+
+    def test_a_declared_unit_the_sweep_never_saw_is_not_a_server(self):
+        """Down and merely-unobserved are the same thing to a healthy count:
+        neither is evidence of a server that would still answer."""
+        v = npe.orchestrator_pause_guard(
+            P2, plan=pool_plan(P2, unobserved={P1, P3}), paused=set(),
+            applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_REFUSE
+        assert v["healthy_units"] == 1
+
+    def test_parked_replicas_are_not_counted_as_healthy_servers(self):
+        """The overlay is a third state the sweep cannot express: P1/P3 are up
+        and advertising, and deliberately parked. Counting them would allow the
+        pause and leave nothing serving."""
+        v = npe.orchestrator_pause_guard(
+            P2, plan=pool_plan(P2), paused={P1, P3}, applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_REFUSE
+        assert v["reason"] == npe.REASON_NO_HEALTHY_SERVER
+        joined = "\n".join(v["lines"])
+        assert "paused and therefore not counted" in joined
+        assert P1 in joined and P3 in joined
+
+    def test_a_span_unit_leaves_with_every_node_it_spans(self):
+        """A shared unit counts as ONE server: taking it down here takes it down
+        on its sibling node too, so the sibling is not a remaining server."""
+        serving = {"uniform_pool": True, "units": [
+            {"id": "pair", "role": "orchestrator", "nodes": [P1, P2],
+             "port": 8000, "recipe": POOL_RECIPE, "model": POOL_MODEL,
+             "tp": 2}]}
+        payload = status_payload(groups=dict(
+            group("cid_pair", POOL_RECIPE, [P1, P2], 8000,
+                  model=POOL_MODEL, served=POOL_SERVED, tp=2)))
+        plan = npe.plan(P1, serving_dict=serving, status_reader=reader(payload))
+        v = npe.orchestrator_pause_guard(
+            P1, plan=plan, paused=set(),
+            applied_state=({"orchestrator_node": "192.0.2.99"}, None))
+        assert plan["span_nodes"] == [P1, P2]
+        assert v["verdict"] == npe.GUARD_REFUSE
+        assert v["others"] == [], "the span sibling must not count as a survivor"
+        assert "and its span " in "\n".join(v["lines"])
+
+    def test_a_declared_orchestrator_counts_without_advertising_the_alias(self):
+        """Config-declared role and live alias are two proofs, not two gates: a
+        unit serving only its concrete model name still serves the orchestrator."""
+        serving = {"units": [
+            {"id": "orch-only", "role": "orchestrator", "nodes": [P1],
+             "port": 8000, "recipe": POOL_RECIPE, "model": POOL_MODEL}]}
+        payload = status_payload(groups=dict(
+            group("cid_orch_only", POOL_RECIPE, [P1], 8000,
+                  model=POOL_MODEL, served=POOL_MODEL)))
+        v = npe.orchestrator_pause_guard(
+            P1, plan=npe.plan(P1, serving_dict=serving,
+                              status_reader=reader(payload)),
+            paused=set(), applied_state=(None, "no applied state"))
+        assert v["verdict"] == npe.GUARD_REFUSE, \
+            "the one orchestrator unit must be protected even without the token"
+
+    def test_a_host_serving_no_alias_gets_no_note_at_all(self):
+        serving = {"units": [{"id": "w", "role": "worker", "nodes": [P2],
+                              "port": 8100, "recipe": WORKER_RECIPE,
+                              "model": "meta-llm/Work-8B"}]}
+        payload = status_payload(groups=dict(
+            group("cid_w", WORKER_RECIPE, [P2], 8100,
+                  served="meta-llm/Work-8B worker-model")))
+        v = npe.orchestrator_pause_guard(
+            P2, plan=npe.plan(P2, serving_dict=serving,
+                              status_reader=reader(payload)),
+            paused=set(), applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_ALLOW
+        assert v["lines"] == [], "nothing to say about a model it does not serve"
+
+    def test_force_overrides_either_ground_and_says_which(self):
+        declared = npe.orchestrator_pause_guard(
+            P1, plan=pool_plan(P1), paused=set(), applied_state=DECLARED_P1,
+            force=True)
+        assert declared["verdict"] == npe.GUARD_ALLOW
+        assert declared["forced"] is True
+        assert "declared orchestrator node" in declared["lines"][0]
+        last = npe.orchestrator_pause_guard(
+            P2, plan=pool_plan(P2, down={P1, P3}), paused=set(),
+            applied_state=DECLARED_P1, force=True)
+        assert last["verdict"] == npe.GUARD_ALLOW and last["forced"] is True
+        assert "would leave no healthy unit" in last["lines"][0]
+
+    def test_an_unreadable_fleet_read_refuses_rather_than_allows(self):
+        plan = npe.plan(P2, serving_dict=POOL_SERVING,
+                        status_reader=reader(None, "sparkrun status query failed"))
+        v = npe.orchestrator_pause_guard(P2, plan=plan, paused=set(),
+                                         applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_REFUSE
+        assert v["reason"] == npe.REASON_UNREADABLE
+        assert "could not be" in "\n".join(v["lines"])
+
+    def test_an_unreadable_serving_config_refuses_too(self, monkeypatch):
+        monkeypatch.setattr(serving, "load_serving", lambda path=None: None)
+        v = npe.orchestrator_pause_guard(
+            P2, plan=npe.plan(P2, status_reader=reader(pool_status())),
+            paused=set(), applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_REFUSE
+        assert v["reason"] == npe.REASON_UNREADABLE
+
+    def test_a_hand_handed_plan_means_the_fleet_is_read_once(self):
+        """The guard must not sweep again behind the caller's back: a second
+        read could disagree with the plan already printed, and doubles the cost
+        of every pause."""
+        def boom():
+            raise AssertionError("the guard swept the fleet a second time")
+        plan = pool_plan(P2)
+        v = npe.orchestrator_pause_guard(P2, plan=plan, paused=set(),
+                                         status_reader=boom,
+                                         applied_state=DECLARED_P1)
+        assert v["verdict"] == npe.GUARD_ALLOW
+
+    def test_the_plan_carries_the_fleet_wide_alias_view(self):
+        """The guard counts servers on nodes it was not asked about, and it must
+        get them from the plan — one sweep, one answer."""
+        units = pool_plan(P2)["orchestrator_alias_units"]
+        assert sorted(u["nodes"][0] for u in units) == [P1, P2, P3]
+        assert all(u["observed"] for u in units)
+        assert [u["role"] for u in units if u["nodes"] == [P1]] == ["orchestrator"]
+
+
 # ── the two commands ───────────────────────────────────────────────────────
 class TestCommands:
     def test_stop_cmd_names_every_node_of_a_span_unit(self):
