@@ -692,6 +692,54 @@ def test_page_command_region_matches_the_generated_one():
                    "--quiet"]) == 0, "site/index.html drifted from `hscc --help`"
 
 
+# ── a placeholder must be escaped exactly once ───────────────────────────────
+
+def test_no_double_escaped_entity_in_any_shipped_site_file():
+    """`&amp;lt;host&amp;gt;` prints the literal text `&lt;host&gt;`.
+
+    The resume example did exactly that, and every gate in this file stayed
+    green while it did: the page matched the copy card, the copy card matched
+    the CLI, and the generator agreed with itself. What was wrong was a markup
+    step no one reads as a claim — the generator escaped the card's prose and
+    then escaped the captured `code` span again on top of it. So the only
+    guard for it is to look for the double escape itself, in every text file
+    the site publishes.
+    """
+    offenders = []
+    for path in sorted(SITE.rglob("*")):
+        if not path.is_file() or path.suffix in {".png", ".jpg"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for entity in ("&amp;lt;", "&amp;gt;", "&amp;amp;", "&amp;quot;",
+                       "&amp;#"):
+            if entity in text:
+                offenders.append(f"{path.relative_to(SITE)}: {entity}")
+    assert not offenders, ("double-escaped HTML entity in site/ — the browser "
+                           "will show the entity text: "
+                           + ", ".join(offenders))
+    # The one line this test was written for, asserted as published: one
+    # escape, so the reader sees `<host>` like its sibling bullet.
+    assert "<code>hscc node resume &lt;host&gt;</code>" in INDEX_HTML.read_text(
+        encoding="utf-8"), "the resume example lost its single-escaped placeholder"
+
+
+def test_a_placeholder_in_prose_escapes_exactly_once():
+    """The generator half, at the function that broke.
+
+    `inline()` is what hands the copy card's prose to the page. A placeholder
+    inside a `code` span has to arrive as `&lt;host&gt;` — escaped once, so the
+    browser prints `<host>` — and prose still has to be escaped at all, which
+    is the other way a per-segment rewrite could go wrong.
+    """
+    import gen_site_commands as g
+
+    rendered = g.inline("then `hscc node resume <host>` starts it back up")
+    assert rendered == ("then <code>hscc node resume &lt;host&gt;</code> "
+                        "starts it back up"), rendered
+    assert "&amp;" not in rendered, rendered
+    assert g.inline("`a & b` < c") == "<code>a &amp; b</code> &lt; c"
+
+
 # ── what the fixture is allowed to be an oracle for (t_88d896f3) ────────────
 #
 # The fixture used to be checked against one thing: the installed bottle. That

@@ -484,8 +484,21 @@ def test_restart_one_calls_stop_then_run(monkeypatch):
     assert calls[1][:2] == [cmdlib.SPARKRUN, "run"]
 
 
-def test_restart_one_stops_only_target_recipe(monkeypatch):
-    """restart_one must stop the unit's recipe, not --all (which kills siblings)."""
+def test_restart_one_stops_only_target_recipe(monkeypatch, tmp_path):
+    """restart_one must stop the unit's recipe, not --all (which kills siblings).
+
+    The unit's recipe arrives as ``~/...`` and ``restart_one`` expands it before
+    exec, so the expected argv is derived from a HOME this test owns: sealing
+    ``HOME`` to ``tmp_path`` makes the expanded path a fixture fact rather than a
+    machine spelling. The previous form — ``'~/r/27b.yaml' in stop_call or
+    '/Users' in stop_call[2]`` — was a macOS escape hatch: it could only be
+    satisfied where HOME begins with ``/Users``, so it passed on a workstation and
+    failed on the Linux runner, whose HOME is ``/home/runner`` (t_a6aa9a2e).
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    expanded = str(home / "r" / "27b.yaml")
     calls = []
 
     def fake_run(args, timeout=0):
@@ -497,9 +510,19 @@ def test_restart_one_stops_only_target_recipe(monkeypatch):
     cmdlib.restart_one(unit)
     stop_call = calls[0]
     assert "--all" not in stop_call, "must not use --all"
-    assert "~/r/27b.yaml" in stop_call or "/Users" in stop_call[2]  # recipe is the target
     assert stop_call[1] == "stop"
+    # the recipe is the target, expanded against the HOME this test controls
+    assert stop_call[2] == expanded
     assert stop_call[2] != "--all"
+    # the raw tilde must never reach the subprocess — sparkrun does not expand it
+    assert "~/r/27b.yaml" not in stop_call
+    assert stop_call.count(expanded) == 1  # exactly one recipe named: the target
+    # and the target is read from THIS unit: a unit declaring a different recipe
+    # must land a different path, so a hardcoded target cannot pass this case
+    calls.clear()
+    cmdlib.restart_one(dict(unit, id="w2", recipe="~/other/70b.yaml",
+                            nodes=["192.0.2.3"]))
+    assert calls[0][2] == str(home / "other" / "70b.yaml")
 
 
 def test_restart_one_uses_unit_port(monkeypatch):

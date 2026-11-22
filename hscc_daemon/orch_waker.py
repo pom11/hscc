@@ -1627,10 +1627,10 @@ def profile_is_retired(name: str, profiles_dir=None, hermes_home=None) -> bool:
 
     ``resolve_orch`` can only test that a profile DIRECTORY exists, and
     :mod:`hscc-roles.main_orch` documents that a retired cluster-wide identity is
-    deliberately LEFT on disk ("every pre-migration install still has
-    ``general-orch`` on disk (retired, never deleted)"). Directory existence is
-    therefore not evidence that anyone is home; the retirement block written into
-    the profile's ``SOUL.md`` is, and it is written by hscc itself.
+    deliberately LEFT on disk — the resolver's own docstring says the legacy
+    catch-all profile stays "on disk (retired, never deleted)". Directory
+    existence is therefore not evidence that anyone is home; the retirement block
+    written into the profile's ``SOUL.md`` is, and it is written by hscc itself.
 
     Read exactly the way ``migrate_main`` reads it — the marker against
     CASEFOLDED text — so the waker and the migration can never disagree about
@@ -1656,12 +1656,13 @@ def legacy_cluster_identity(profile: str, board: str, hscc_dir=None) -> bool:
 
     The second, identity-shaped half of "no pane is expected": the main
     orchestrator's board is served by ``main_orch.main_profile()`` (default
-    ``general``), and the cluster-wide identities that design REPLACED —
-    ``main_orch.LEGACY_GENERAL_PROFILE`` and ``main_orch.
-    LEGACY_ORCHESTRATOR_ROLE`` — are kept on disk but never panned and never
-    dispatched. A board that resolves to one of those (because the profile
-    directory still exists, and ``resolve_orch`` stops at existence) has no pane
-    to nudge and never will have one.
+    ``general``), and the cluster-wide identities that design REPLACED — the
+    resolver's legacy catch-all profile (``main_orch.legacy_general_profile()``)
+    and its legacy role (``main_orch.LEGACY_ORCHESTRATOR_ROLE``) — are kept on
+    disk but are never panned and never dispatched. A board that resolves to
+    one of those (because the profile directory still exists, and
+    ``resolve_orch`` stops at existence) has no pane to nudge and never will
+    have one.
 
     The names are never spelled here — the resolver owns them, per its own
     docstring ("A function, not a bare constant reference, so modules that
@@ -1675,7 +1676,8 @@ def legacy_cluster_identity(profile: str, board: str, hscc_dir=None) -> bool:
     if mod is None:
         return False
     try:
-        legacy = {str(mod.LEGACY_GENERAL_PROFILE), str(mod.LEGACY_ORCHESTRATOR_ROLE)}
+        legacy = {str(mod.legacy_general_profile()),
+                  str(mod.LEGACY_ORCHESTRATOR_ROLE)}
         main_board = str(mod.main_board(hscc_dir))
     except Exception as e:  # noqa: BLE001 — unknown never skips a board
         LOG.debug("orch-waker: main-orchestrator identity unreadable (%s)", e)

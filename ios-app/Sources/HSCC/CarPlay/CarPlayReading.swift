@@ -62,16 +62,29 @@ struct CarPlayNodeReading: Equatable, Identifiable {
     let label: String
     let model: String?
     let isUp: Bool
+    /// The machine the operator parked. `FleetNodeLine` already carries it and
+    /// `FleetNodeLine.init` already asked it before `isUp`; the row used to drop
+    /// it here, which is how the car screen ended up saying `down` about a
+    /// machine the operator stopped on purpose — the overlay keeps the row's
+    /// `error`, so any surface that reads only `isUp` faults that choice twice.
+    let isPaused: Bool
+    /// The node's status word — the up word, the down word, or the paused
+    /// verdict carrying the reason and its age — written by
+    /// `FleetFormat.status` and nowhere else. A CarPlay copy of that phrase
+    /// would be a second spelling the widget gate cannot see.
+    let statusText: String
     let isOrchestrator: Bool
     let utilPct: Double?
     let tempC: Double?
     let powerW: Double?
     let tps: Double?
 
-    init(_ node: FleetNodeLine) {
+    init(_ node: FleetNodeLine, now: Date = Date()) {
         self.label = node.label
         self.model = node.model
         self.isUp = node.isUp
+        self.isPaused = node.isPaused
+        self.statusText = FleetFormat.status(node, now: now)
         self.isOrchestrator = node.isOrchestrator
         self.utilPct = node.gpuPct
         self.tempC = node.gpuTempC ?? node.cpuTempC
@@ -83,7 +96,16 @@ struct CarPlayNodeReading: Equatable, Identifiable {
 
     var tempText: String { CarPlayTemperature.celsius(tempC) }
     var utilText: String { utilPct.map { "\(Int($0.rounded()))%" } ?? "—" }
-    var tpsText: String { tps.map { "\(Int($0.rounded())) t/s" } ?? "idle" }
+
+    /// Throughput, or `—`. A parked machine reports no rate and `idle` is not
+    /// honest for it: `idle` claims a live engine with nothing queued, which is
+    /// the opposite of a machine the operator took out of service. The `idle`
+    /// word stays exactly where the data earns it — an answering row with no
+    /// serving row.
+    var tpsText: String {
+        if isPaused { return "—" }
+        return tps.map { "\(Int($0.rounded())) t/s" } ?? "idle"
+    }
     var powerText: String { powerW.map { "\(Int($0.rounded())) W" } ?? "— W" }
     var tempBand: CarPlayTempBand { CarPlayTemperature.band(tempC) }
 
@@ -94,19 +116,34 @@ struct CarPlayNodeReading: Equatable, Identifiable {
     /// the orchestrator (never a hard-coded address or position).
     var rowTitle: String { label + (isOrchestrator ? " ◆" : "") }
 
-    /// The image row's subtitle: "34% · 41 t/s".
-    var rowSubtitle: String { "\(utilText) · \(tpsText)" }
+    /// The image row's subtitle: "34% · 41 t/s", or the verdict alone for a
+    /// parked machine. The verdict takes the whole line because there is no
+    /// number left to draw — util and rate are both `-` — and a glance surface
+    /// in a car has one line to say why.
+    var rowSubtitle: String {
+        isPaused ? statusText : "\(utilText) · \(tpsText)"
+    }
 
     /// The SPEC's subtitle-equivalent, used in the pushed node list and by the
-    /// gate: "S1 · 34% · 41 t/s".
-    var detailLine: String { "\(label) · \(utilText) · \(tpsText)" }
+    /// gate: the label, then the two numbers. A parked row carries the label and
+    /// the paused verdict instead, because the two numbers this line shows are
+    /// the two it does not have.
+    var detailLine: String {
+        isPaused ? "\(label) · \(statusText)" : "\(label) · \(utilText) · \(tpsText)"
+    }
 
     /// The pushed node list's second line: throughput, temp and power.
+    ///
+    /// The status word leads whenever the row is not a plainly answering node:
+    /// the paused verdict for one the operator parked, the down word for one
+    /// that is not. `FleetFormat.status` returns the very same `down` string
+    /// this line used to hard-code, so an unpaused fleet's rows are
+    /// byte-identical.
     var detailText: String {
         var parts = [tpsText, tempText, powerText]
         if let model { parts.append(model) }
         if isOrchestrator { parts.append("orchestrator") }
-        if !isUp { parts.insert("down", at: 0) }
+        if isPaused || !isUp { parts.insert(statusText, at: 0) }
         return parts.joined(separator: " · ")
     }
 }
@@ -116,6 +153,11 @@ struct CarPlayNodeReading: Equatable, Identifiable {
 struct CarPlayClusterReading: Equatable {
     let nodes: [CarPlayNodeReading]
     let tally: ClusterNodeTally
+    /// The frame minus the parked machines — the same `FleetVerdict` the C1
+    /// widget headline and the macOS menu bar title count. Built from the rows
+    /// this reading already drew, so the car screen and the tile cannot
+    /// disagree about how many nodes there are to judge.
+    let verdict: FleetVerdict
     let tokPerSec: Double?
     let dataAt: Date?
 
@@ -124,26 +166,37 @@ struct CarPlayClusterReading: Equatable {
     init?(response: MonitorResponse, fetchedAt: Date) {
         guard !response.isDegraded else { return nil }
         let serving = ServingSummary(rows: response.serving)
-        self.nodes = (response.json?.hosts ?? []).map {
-            CarPlayNodeReading(FleetNodeLine(host: $0, serving: response.serving))
+        let rows = (response.json?.hosts ?? []).map {
+            FleetNodeLine(host: $0, serving: response.serving)
         }
+        self.nodes = rows.map { CarPlayNodeReading($0, now: fetchedAt) }
+        self.verdict = FleetVerdict(rows: rows)
         self.tally = ClusterNodeTally.project(response)
         self.tokPerSec = serving.genTps
         self.dataAt = CarPlayDate.monitor(response, fetchedAt: fetchedAt)
     }
 
-    var up: Int? { tally.nodesUp }
-    var total: Int? { tally.nodesTotal }
+    /// Nodes that answered AND were not parked. A parked machine is the
+    /// operator's own choice, so it is evidence about neither.
+    var answered: Int? { verdict.answered }
+    /// Nodes this screen may judge at all.
+    var total: Int? { verdict.judged }
     var tokText: String {
         guard let tokPerSec else { return "— t/s" }
         return "\(Int(tokPerSec.rounded())) t/s"
     }
 
-    /// "4/4 up", "3/4 up", "Down" or "No data" — the C1 health line's words.
+    /// "4/4 up", "3/4 up", "Paused" or "No data" — the C1 health line's words.
+    ///
+    /// `allParked` is asked before the zero case on purpose: a fleet of nothing
+    /// but parked nodes used to land in `up == 0 && total > 0` and print
+    /// **Down**, which is an alarm about a choice the operator made minutes
+    /// ago. The ordering is `FleetVerdict`'s rule, not a local preference.
     var headline: String {
-        guard let up, let total else { return "No data" }
-        if total > 0 && up == 0 { return "Down" }
-        return "\(up)/\(total) up"
+        guard let answered, let total else { return "No data" }
+        if verdict.allParked { return FleetVerdict.pausedWord }
+        if answered == 0 { return "Down" }
+        return "\(answered)/\(total) up"
     }
 
     var detailLine: String { "\(headline) · \(tokText)" }

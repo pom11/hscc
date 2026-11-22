@@ -668,7 +668,7 @@ expect(pauseGroup, "the parked list de-duplicates a node tagged AND named top-le
        && pausedFleet.paused.filter { $0.key == "192.0.2.11" }.count == 1)
 expect(pauseGroup, "the node the frame never listed is still in the parked list",
        pausedFleet.paused.last?.label == ".99"
-       && pausedFleet.paused.last?.reason == "spanned with node-1")
+       && pausedFleet.paused.last?.reason == "maintenance window")
 expect(pauseGroup, "the top-level entry keeps the frame row's truer label when both exist",
        pausedFleet.paused.first?.label == ".11")
 expect(pauseGroup, "the parked list draws no address anywhere (§7)",

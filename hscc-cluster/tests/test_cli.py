@@ -339,12 +339,30 @@ class TestCLIArgvNoScriptName:
         # Simulate the __main__ path: subprocess calls this with [script, 'list'].
         # `--json` selects the machine path (the default human path is themed and
         # no longer JSON), so pass it to keep the JSON contract this test pins.
+        #
+        # HERMETIC (t_bb057914): this used to spawn argv0 "python" with a literal
+        # cwd set to the operator's absolute repo path. Both read the *machine*,
+        # not the tree under test, and each broke in its own way on the CI runner
+        # (a PATH "python" is
+        # the setup-python base interpreter, which has no rich, so `import _theme`
+        # died; the literal cwd does not exist off the operator's Mac, so the spawn
+        # died with FileNotFoundError before exec). Locally the literal path exists
+        # AND PATH-python happens to have rich, so the leg was green on the host
+        # that could not see the bug. Use sys.executable — the interpreter running
+        # this suite, which is the one whose deps `import _theme` needs — and derive
+        # the script path + cwd from THIS test file, so the child is this checkout.
         import subprocess
         result = subprocess.run(
-            ["python", "hscc-cluster/cluster_template_cli.py", "list", "--json"],
-            capture_output=True, text=True, cwd="/Users/desac/dev/hscc",
+            [sys.executable, str(PLUGIN_DIR / "cluster_template_cli.py"),
+             "list", "--json"],
+            capture_output=True, text=True, cwd=str(PLUGIN_DIR.parent),
             timeout=30,
         )
+        # A crashed child used to surface as JSONDecodeError("Expecting value") on
+        # empty stdout — legible enough to stay red, but it hid the real cause.
+        # Pinning returncode first is a strengthening, not a weakening: it turns
+        # "no JSON" into "why no JSON".
+        assert result.returncode == 0, result.stderr
         data = __import__("json").loads(result.stdout)
         assert "error" not in data, f"Got error: {data.get('error')}"
         assert "count" in data and data["count"] >= 2
