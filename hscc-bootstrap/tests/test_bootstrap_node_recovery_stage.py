@@ -23,14 +23,18 @@ from pathlib import Path
 
 import pytest
 
+import hermes_tree
+
 REPO = Path(__file__).resolve().parent.parent.parent
 BOOTSTRAP = REPO / "hscc-bootstrap" / "bootstrap.sh"
-REAL_VENV_PY = Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
-REAL_HERMES_AGENT = Path.home() / ".hermes" / "hermes-agent"
 
+#: What this file needs from the machine, in one place, so the collection-time
+#: gate and the call-time resolvers below state the SAME thing (hermes_tree).
+CAPABILITY = ("test_bootstrap_node_recovery_stage — running the node-recovery "
+              "stage with the real Hermes venv interpreter")
 needs_runtime = pytest.mark.skipif(
-    not REAL_VENV_PY.is_file(),
-    reason="needs the real Hermes venv interpreter to run the installer")
+    not hermes_tree.runtime_available(),
+    reason=hermes_tree.runtime_skip_reason(CAPABILITY))
 
 TREE_DIRS = ("hscc-bootstrap", "hscc_daemon", "hscc-cli", "hscc-cluster",
              "hscc-roles", "hscc-skills")
@@ -119,7 +123,8 @@ def _make_home(tmp_path):
     home = tmp_path / "home"
     hermes = home / ".hermes"
     (hermes / "hermes-agent").mkdir(parents=True)
-    (hermes / "hermes-agent" / "venv").symlink_to(REAL_HERMES_AGENT / "venv")
+    (hermes / "hermes-agent" / "venv").symlink_to(
+        hermes_tree.agent_dir_or_skip(CAPABILITY) / "venv")
     (home / ".hscc").mkdir()
     binp = home / "bin"
     binp.mkdir()

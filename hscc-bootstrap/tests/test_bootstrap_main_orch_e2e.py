@@ -30,13 +30,17 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent.parent
-REAL_VENV_PY = Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
-REAL_HERMES_AGENT = Path.home() / ".hermes" / "hermes-agent"
+import hermes_tree
 
+REPO = Path(__file__).resolve().parent.parent.parent
+
+#: What this file needs from the machine, in one place, so the collection-time
+#: gate and the call-time resolvers below state the SAME thing (hermes_tree).
+CAPABILITY = ("test_bootstrap_main_orch_e2e — driving the orchestrator's install "
+              "path with the real Hermes venv interpreter")
 needs_runtime = pytest.mark.skipif(
-    not REAL_VENV_PY.is_file(),
-    reason="needs the real Hermes venv interpreter to run the installer")
+    not hermes_tree.runtime_available(),
+    reason=hermes_tree.runtime_skip_reason(CAPABILITY))
 
 FAKE_CLUSTER = json.dumps([
     {"name": "fabricated", "hosts": ["192.0.2.1"], "user": "op",
@@ -68,7 +72,8 @@ def _sandbox(tmp_path, *, hermes_initialised=True):
     hermes = home / ".hermes"
     (hermes / "hermes-agent" / "venv").mkdir(parents=True)
     (hermes / "hermes-agent" / "venv").rmdir()
-    (hermes / "hermes-agent" / "venv").symlink_to(REAL_HERMES_AGENT / "venv")
+    (hermes / "hermes-agent" / "venv").symlink_to(
+        hermes_tree.agent_dir_or_skip(CAPABILITY) / "venv")
     if hermes_initialised:
         (hermes / "config.yaml").write_text("_config_version: 52\n",
                                             encoding="utf-8")
@@ -143,7 +148,8 @@ def _wakeups(sandbox):
     env = _env(sandbox)
     env["PYTHONPATH"] = str(sandbox["hermes"] / "plugins")
     proc = subprocess.run(
-        [str(REAL_VENV_PY), "-m", "hscc_daemon.hscc",
+        [str(hermes_tree.venv_python_or_skip(CAPABILITY)),
+         "-m", "hscc_daemon.hscc",
          "main", "wakeups", "list", "--json"],
         capture_output=True, text=True, env=env, timeout=120,
         cwd=str(sandbox["home"]))
@@ -153,7 +159,8 @@ def _wakeups(sandbox):
 
 def _resolver_name(sandbox):
     helper = sandbox["hermes"] / "plugins" / "hscc-roles" / "main_orch.py"
-    proc = subprocess.run([str(REAL_VENV_PY), str(helper), "name"],
+    proc = subprocess.run([str(hermes_tree.venv_python_or_skip(CAPABILITY)),
+                           str(helper), "name"],
                           capture_output=True, text=True, env=_env(sandbox),
                           timeout=60)
     assert proc.returncode == 0, proc.stderr

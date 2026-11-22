@@ -24,14 +24,18 @@ from pathlib import Path
 
 import pytest
 
+import hermes_tree
+
 REPO = Path(__file__).resolve().parent.parent.parent
 BOOTSTRAP = REPO / "hscc-bootstrap" / "bootstrap.sh"
-REAL_VENV_PY = Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
-REAL_HERMES_AGENT = Path.home() / ".hermes" / "hermes-agent"
 
+#: What this file needs from the machine, in one place, so the collection-time
+#: gate and the call-time resolvers below state the SAME thing (hermes_tree).
+CAPABILITY = ("test_bootstrap_dry_run — running bootstrap.sh against the real "
+              "Hermes venv interpreter")
 needs_runtime = pytest.mark.skipif(
-    not REAL_VENV_PY.is_file(),
-    reason="needs the real Hermes venv interpreter to run the installer")
+    not hermes_tree.runtime_available(),
+    reason=hermes_tree.runtime_skip_reason(CAPABILITY))
 
 # What a real brew tap extracts (minus docs/assets — enough for every stage to
 # resolve; the dry-run must never READ payload contents anyway).
@@ -86,7 +90,8 @@ def _make_home(tmp_path):
     home = tmp_path / "home"
     hermes = home / ".hermes"
     (hermes / "hermes-agent").mkdir(parents=True)
-    (hermes / "hermes-agent" / "venv").symlink_to(REAL_HERMES_AGENT / "venv")
+    (hermes / "hermes-agent" / "venv").symlink_to(
+        hermes_tree.agent_dir_or_skip(CAPABILITY) / "venv")
     hscc = home / ".hscc"
     hscc.mkdir()
     binp = home / "bin"
@@ -407,7 +412,8 @@ def test_hscc_bootstrap_verb_from_the_shipped_keg(tmp_path):
         "NO_COLOR": "1", "TERM": "dumb",
     })
     r = subprocess.run(
-        [str(REAL_VENV_PY), "-m", "hscc_daemon.hscc", "bootstrap", "--dry-run"],
+        [str(hermes_tree.venv_python_or_skip(CAPABILITY)),
+         "-m", "hscc_daemon.hscc", "bootstrap", "--dry-run"],
         capture_output=True, text=True, env=env, timeout=300,
         cwd=str(sandbox["home"]))
     out = r.stdout + r.stderr
@@ -461,7 +467,8 @@ def test_hscc_bootstrap_verb_from_libexec_venv(tmp_path):
         "NO_COLOR": "1", "TERM": "dumb",
     })
     r = subprocess.run(
-        [str(REAL_VENV_PY), "-m", "hscc_daemon.hscc", "bootstrap", "--dry-run"],
+        [str(hermes_tree.venv_python_or_skip(CAPABILITY)),
+         "-m", "hscc_daemon.hscc", "bootstrap", "--dry-run"],
         capture_output=True, text=True, env=env, timeout=300,
         cwd=str(sandbox["home"]))
     out = r.stdout + r.stderr
