@@ -1347,6 +1347,44 @@ def _proxy_relaunch_hosts(serving_data=None):
     return sorted(nodes)
 
 
+def _proxy_start_hosts(relaunch_hosts, pause_directory=None):
+    """The ``--hosts`` value for ``sparkrun proxy start``: the relaunch hosts
+    MINUS every node the operator parked (t_90958eb8).
+
+    Two reasons a parked node does not belong in that list. Its endpoint cannot
+    serve, so sparkrun's discovery sweep spends its budget probing a host the
+    operator deliberately stopped and the generated router gains an api_base
+    that answers nothing; and the 2026-11-22 relaunch that blipped :4000 a
+    second time carried the node that had just been resumed, i.e. a list built
+    with the pause in mind would not have carried it at all.
+
+    The relaunch host list itself stays unfiltered on purpose: it is the key
+    this tick's pause-skip and heal strike are keyed on (see the PAUSE SEAM in
+    :func:`check_proxy`), and t_8e5ab6cb pins that those two agree. Dropping a
+    host there would move the key and silently un-arm the skip that keeps a
+    parked node from being repaired at all. Filter at the command, not at the
+    verdict.
+
+    Falls back to the full list when the filter would empty it — `--hosts ""`
+    is not a start — and says so loudly, since that shape means the whole fleet
+    is parked while this path is still armed.
+    """
+    hosts = list(relaunch_hosts or [])
+    if not hosts:
+        return hosts
+    parked = _paused_nodes(pause_directory)
+    kept = [h for h in hosts if h not in parked]
+    if not kept:
+        log(f"proxy start: every relaunch host is paused — passing the full "
+            f"list {hosts} rather than starting the LB over no hosts", "WARN")
+        return hosts
+    if len(kept) != len(hosts):
+        log(f"proxy start: excluding paused host(s) "
+            f"{sorted(set(hosts) - set(kept))} from --hosts — a parked node's "
+            f"endpoint cannot serve")
+    return kept
+
+
 PROXY_RELAUNCH_COOLDOWN_S = int(os.environ.get("HSCC_PROXY_RELAUNCH_COOLDOWN_S", "300"))
 
 
@@ -1440,6 +1478,40 @@ def _proxy_relaunch_cooldown_state():
     meaning "no cooldown".
     """
     return _seconds_since_stamp(_proxy_relaunch_stamp())
+
+
+# DOWN-WINDOW (t_90958eb8). The 300 s cooldown exists to stop a tick hammering
+# `proxy start` over a fault that a start cannot fix (a missing alias, a wedged
+# unit) — every attempt costs a full SSH endpoint-discovery sweep. It was never
+# meant for the shape where the repair itself LEFT the fleet's only entrypoint
+# refusing connections: measured on 2026-11-22, a drift repair stopped the proxy,
+# the start then refused with sparkrun's stale-PID "already running", and the
+# stream slept out the full window with :4000 dead — ~5 minutes of "the fleet is
+# down" where the next tick (a minute away) could have retried. So a failed
+# attempt that ends with NOTHING listening on the port gets this shorter window
+# and an immediate alert instead of a silent 300 s one.
+PROXY_RELAUNCH_DOWN_COOLDOWN_S = int(
+    os.environ.get("HSCC_PROXY_RELAUNCH_DOWN_COOLDOWN_S", "60"))
+
+
+def _proxy_relaunch_window():
+    """The cooldown window the LAST attempt asked for, read DURABLY.
+
+    `PROXY_RELAUNCH_COOLDOWN_S` normally; `PROXY_RELAUNCH_DOWN_COOLDOWN_S` when
+    that attempt left the port with no listener. Durable for the same reason as
+    the stamp — a daemon restart must not turn a down-window tick back into a
+    300 s one. A missing/garbage value falls back to the normal window (fail
+    toward the conservative behaviour the cooldown was written for).
+    """
+    from .state import read_state
+    prev = read_state("proxy")
+    if not isinstance(prev, dict):
+        return PROXY_RELAUNCH_COOLDOWN_S
+    try:
+        window = int(prev.get("cooldown_s") or 0)
+    except (TypeError, ValueError):
+        return PROXY_RELAUNCH_COOLDOWN_S
+    return window if window > 0 else PROXY_RELAUNCH_COOLDOWN_S
 
 
 def _ensure_cmdlib_on_path():
@@ -1604,7 +1676,42 @@ def _fleet_unit_backends(serving_data=None, probe=None):
     return healthy, all_hp
 
 
-def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports):
+def _paused_nodes(pause_directory=None):
+    """Every node the operator parked, for the seams that must not call a
+    parked backend a fault (t_90958eb8).
+
+    ``node_pauses.paused_nodes()`` is the documented one-call form for a skip
+    seam that loops over the fleet: keyed hosts UNION their ``span_nodes``, so
+    the sibling of a tensor-parallel span reads as parked exactly like the
+    keyed host. Never ``paused()`` here — it is host-keyed and would keep
+    treating a span sibling as fair game.
+
+    FAIL-OPEN on purpose: ``node_pauses.load()`` already answers "no pauses"
+    (loudly) for a missing/unreadable/malformed overlay, and a repair path must
+    inherit that direction — a corrupt overlay file may never freeze the
+    fleet's ability to repair itself (same rule the repair seam of t_8e5ab6cb
+    pins). Anything this wrapper itself raises is therefore reported and
+    answered with "nothing is parked".
+    """
+    try:
+        return set(node_pauses.paused_nodes(pause_directory))
+    except Exception as exc:  # pragma: no cover - load() already fails open
+        log(f"proxy repair: node-pause overlay unreadable ({exc}) — treating "
+            f"every node as unparked", "WARN")
+        return set()
+
+
+def _host_of(hostport):
+    """'192.0.2.2:8001' -> '192.0.2.2' (the host half of a backend hostport).
+
+    Mirrors :func:`_hostport_from_api_base`, which always emits ``host:port``,
+    so no DNS or service lookup is involved in the comparison.
+    """
+    return str(hostport).rsplit(":", 1)[0]
+
+
+def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports,
+                         paused_nodes=()):
     """(healthy, reason) — does the RUNNING proxy route to what is actually up?
 
     Only two directions matter, both scoped to hscc's own fleet:
@@ -1617,21 +1724,37 @@ def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports):
     An empty live set is NOT drift here: the catalogue check already owns
     "proxy answers but serves nothing", and reporting it twice would make one
     fault look like two.
+
+    ``paused_nodes`` (t_90958eb8) — the nodes the operator parked — are
+    EXPECTED-ABSENT, not unhealthy. ``hscc node pause`` stops that node's units
+    on purpose and edits nothing the router is built from, so the running proxy
+    keeps an endpoint that is now deliberately gone; reading that as DEAD was
+    the bug that stopped the fleet's only entrypoint because a node was paused.
+    A backend whose HOST is parked is therefore out of both comparisons (and a
+    parked unit that somehow still answers is not one we DEMAND of the router).
+    The exclusion is host-scoped: a genuinely unhealthy backend on a node
+    nobody parked must still report drift and still be repaired.
     """
     if not live_backends:
         return True, "no live backends to compare (catalogue check owns that)"
+    parked = {str(h) for h in (paused_nodes or ()) if h}
     scoped_fleet = set(fleet_hostports)
     live_in_fleet = {b for b in live_backends if b in scoped_fleet}
-    missing = set(healthy_backends) - live_in_fleet
+    expected_absent = {hp for hp in (scoped_fleet | set(healthy_backends)
+                                     | live_in_fleet)
+                       if _host_of(hp) in parked}
+    missing = set(healthy_backends) - live_in_fleet - expected_absent
+    dead = (live_in_fleet - set(healthy_backends)) - expected_absent
+    note = (f" [{len(expected_absent)} backend(s) on paused node(s) "
+            f"expected-absent]") if expected_absent else ""
     if missing:
         return False, (f"live router missing backend(s) {sorted(missing)} "
-                       f"— healthy unit(s) the proxy is not serving")
-    dead = live_in_fleet - set(healthy_backends)
+                       f"— healthy unit(s) the proxy is not serving{note}")
     if dead:
         return False, (f"live router points at unhealthy backend(s) {sorted(dead)} "
-                       f"— load is being sent to a dead worker")
+                       f"— load is being sent to a dead worker{note}")
     return True, (f"live router matches {len(healthy_backends)} healthy "
-                  f"backend(s)")
+                  f"backend(s){note}")
 
 
 def _proc_cmdline(pid):
@@ -1733,6 +1856,26 @@ def _reap_orphan_proxy_listener(tracked_pid):
     return _proxy_listener()[0] is None
 
 
+PROXY_ALREADY_RUNNING_MARKERS = ("already running", "use --restart")
+
+
+def _start_refused_already_running(res):
+    """True when sparkrun refused a plain ``proxy start`` with its stale-PID
+    refusal — ``Error: Proxy is already running (PID 4242) ... Use --restart``.
+
+    Matched on text, not exit code: sparkrun exits 1 for several different
+    failures and the repair must only take the ``--restart`` branch for the one
+    it can fix. This is the same refusal that made the 2026-10-18 incident
+    loop ~36 times (see the PROXY_RELAUNCH_MAX_CONSECUTIVE history above) and
+    the one that turned the 2026-11-22 pause repair into a 5-minute outage: the
+    repair had already STOPPED the proxy, the start then refused, and the tick
+    left :4000 down for a whole 300 s cooldown.
+    """
+    text = (((res or {}).get("output") or "") + " "
+            + ((res or {}).get("stderr") or "")).lower()
+    return any(marker in text for marker in PROXY_ALREADY_RUNNING_MARKERS)
+
+
 def _proxy_repair_orphan(relaunch_hosts):
     """Full orphan repair: stop, reap any untracked litellm listener, start.
 
@@ -1746,6 +1889,19 @@ def _proxy_repair_orphan(relaunch_hosts):
          after 1+2 the port is genuinely free, and --restart's own state-file
          assumptions are what failed us.
       4. verify the port is now owned by the tracked PID.
+
+    STALE-PID REFUSAL (t_90958eb8, step 3b): step 1+2 do NOT guarantee a free
+    port — sparkrun's state file can still carry a PID that ``is_running()``
+    calls alive (the hollow-PID shape above), and then the plain start refuses
+    with ``Proxy is already running (PID ...) ... Use --restart``. Refusing and
+    returning here is what left the fleet's only entrypoint DOWN: the proxy had
+    already been stopped several lines earlier. So a refusal is retried ONCE
+    with ``--restart`` — the one case where --restart is the right tool, because
+    the tracked PID is what is pinning sparkrun's state and it is the only thing
+    standing between us and a start. Verification still owns the verdict: an
+    exit code is not success, and a repair that ends with no listener on the
+    port reports ``proxy_down`` so the caller shortens its cooldown instead of
+    sleeping on a dead entrypoint.
     """
     tracked_before = _proxy_tracked_pid()
     run_cmd(sparkrun_bin.argv("proxy", "stop"), timeout=60)
@@ -1760,6 +1916,13 @@ def _proxy_repair_orphan(relaunch_hosts):
             "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
     res = run_cmd(sparkrun_bin.argv(*args), timeout=90,
                   env=_proxy_launch_env())
+    if not res.get("ok") and _start_refused_already_running(res):
+        log(f"proxy repair: plain `proxy start` refused by a stale tracked PID "
+            f"({(res.get('output') or res.get('stderr') or '')[:200]!r}) — "
+            f"retrying with --restart rather than leaving :{PROXY_PORT} down",
+            "WARN")
+        res = run_cmd(sparkrun_bin.argv(*(args + ["--restart"])), timeout=90,
+                      env=_proxy_launch_env())
     # VERIFY, do not trust exit code: exit 0 over a proxy that bound a
     # different port is exactly how this incident stayed invisible.
     # BOUNDED WAIT first: `proxy start` returns after sparkrun's own 2 s
@@ -1782,7 +1945,10 @@ def _proxy_repair_orphan(relaunch_hosts):
         log(f"proxy repaired on :{PROXY_PORT}, owned by tracked PID {owner}")
     return {"ok": bool(res.get("ok")) and verified,
             "port_owner": owner, "tracked_pid": tracked_after,
-            "verified": verified, "output": res.get("output", "")}
+            "verified": verified, "output": res.get("output", ""),
+            # NOTHING listening on the port = :4000 refuses every connection.
+            # The caller must not put that behind the normal cooldown.
+            "proxy_down": owner is None}
 
 
 def _router_drift_probe():
@@ -1888,7 +2054,7 @@ def _proxy_escalated_repair(relaunch_hosts, streak, last_error, reason):
     return _proxy_repair_orphan(relaunch_hosts)
 
 
-def _proxy_stall_alert(relaunch_hosts, streak, last_error, reason):
+def _proxy_stall_alert(relaunch_hosts, streak, last_error, reason, down=False):
     """Loud operator alert for a stalled relaunch loop — throttled.
 
     Desktop notify (priority high) + a durable events.jsonl row, exactly the
@@ -1898,12 +2064,22 @@ def _proxy_stall_alert(relaunch_hosts, streak, last_error, reason):
     the 2026-10-08 NAS class of failure. Throttle lives in the stream state
     (`stall_alerted_at`), so it survives a daemon restart: the 3h incident
     alerts every PROXY_STALL_NOTIFY_COOLDOWN_S, never once per 5-min tick.
+
+    ``down`` (t_90958eb8) says the check itself proved nothing is listening on
+    the port. It changes the WORDING and the severity framing — "the proxy is
+    down and refusing connections, retrying in N s" is the sentence an operator
+    needs at the first failed tick, not after the third — not the throttle.
     """
     since = _seconds_since_stamp(_proxy_stall_stamp())
     if since is not None and since < PROXY_STALL_NOTIFY_COOLDOWN_S:
         return False, None
-    msg = (f"Proxy :{PROXY_PORT} down and {streak} relaunches failed — "
-           f"escalated repair in progress. Reason: {reason}. "
+    retry_in = (PROXY_RELAUNCH_DOWN_COOLDOWN_S if down
+                else PROXY_RELAUNCH_COOLDOWN_S)
+    head = (f"Proxy :{PROXY_PORT} is DOWN — nothing is listening and it refuses "
+            f"connections, retrying in {retry_in}s" if down else
+            f"Proxy :{PROXY_PORT} down and {streak} relaunches failed — "
+            f"escalated repair in progress")
+    msg = (f"{head}. Reason: {reason}. "
            f"Last error: {(last_error or 'none')[:300]}. "
            f"If this repeats, sparkrun's tracked PID is hollow: "
            f"`sparkrun proxy stop` then `sparkrun proxy start --hosts "
@@ -1912,6 +2088,7 @@ def _proxy_stall_alert(relaunch_hosts, streak, last_error, reason):
                             priority="high")
     emit_event("proxy.relaunch.stalled", {
         "port": PROXY_PORT, "streak": streak, "reason": reason,
+        "proxy_down": bool(down), "retry_in_s": retry_in,
         "last_error": (last_error or "")[:400],
         "hosts": list(relaunch_hosts or []),
     }, severity="error")
@@ -2065,8 +2242,14 @@ def check_proxy(pause_directory=None):
             # verdict (with load grace + debounce) stays with check_workers.
             healthy_units, fleet_hp = _fleet_unit_backends(
                 serving_data, probe=lambda u, timeout=5: http_check(u, timeout=2))
+            # EXPECTED-ABSENT (t_90958eb8): a node the operator parked has its
+            # units stopped ON PURPOSE, and the running router still carries the
+            # endpoint they used to answer. That is not drift. Asking the overlay
+            # HERE — before the verdict, not only at the repair target below —
+            # is what stops `hscc node pause` from stopping the fleet's proxy.
             drift_ok, drift_reason = _proxy_backend_drift(
-                live.get("backends") or set(), healthy_units, fleet_hp)
+                live.get("backends") or set(), healthy_units, fleet_hp,
+                paused_nodes=_paused_nodes(pause_directory))
             if not drift_ok:
                 backend_drift = True
                 healthy, reason = False, drift_reason
@@ -2092,6 +2275,11 @@ def check_proxy(pause_directory=None):
     # daemon restart cannot reset it.
     restart = _proxy_needs_restart(probe)
     since = _proxy_relaunch_cooldown_state()
+    # The window the LAST attempt asked for: 300 s normally, 60 s when that
+    # attempt left the port with no listener (t_90958eb8 — see
+    # PROXY_RELAUNCH_DOWN_COOLDOWN_S for why sleeping on a dead entrypoint is
+    # the one shape the cooldown must not cover).
+    window = _proxy_relaunch_window()
     r = {"ok": False, "skipped": "cooldown"}
     suppressed = False
     deferred = False
@@ -2100,11 +2288,11 @@ def check_proxy(pause_directory=None):
     # a skip says "no repair belongs here", and a reader must not confuse them.
     paused_skip = False
     attempted = False
-    if since is not None and since < PROXY_RELAUNCH_COOLDOWN_S:
+    if since is not None and since < window:
         suppressed = True
-        wait = int(PROXY_RELAUNCH_COOLDOWN_S - since)
+        wait = int(window - since)
         log(f"proxy relaunch suppressed — attempted {int(since)}s ago "
-            f"(cooldown {PROXY_RELAUNCH_COOLDOWN_S}s); retry in {wait}s", "WARN")
+            f"(cooldown {window}s); retry in {wait}s", "WARN")
         message = f"relaunch cooldown — retry in {wait}s"
     else:
         # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14). The proxy relaunch
@@ -2178,6 +2366,13 @@ def check_proxy(pause_directory=None):
                 # not success (rc-0-over-still-empty-discovery is the
                 # 2026-10-11 shape).
                 attempted = True
+                # The `--hosts` value THIS command gets: parked nodes excluded
+                # (t_90958eb8). Computed here, after the cooldown / lease /
+                # breaker gates, so a tick that attempts nothing never consults
+                # the overlay. `relaunch_hosts` itself stays the tick's KEY —
+                # see _proxy_start_hosts for why filtering there would un-arm
+                # the pause skip.
+                start_hosts = _proxy_start_hosts(relaunch_hosts, pause_directory)
                 prev_streak = _proxy_relaunch_streak()
                 # This tick is attempt number prev_streak+1. The MAX-th
                 # consecutive stalled attempt escalates (two polite plain
@@ -2195,7 +2390,7 @@ def check_proxy(pause_directory=None):
                         # Needs stop + cmdline-vetted reap + start + verification.
                         log(f"repairing proxy backend drift on :{PROXY_PORT} — {reason}",
                             "WARN")
-                        r = _proxy_repair_orphan(relaunch_hosts)
+                        r = _proxy_repair_orphan(start_hosts)
                         message = ("repaired" if r.get("ok")
                                    else "repair incomplete (unverified)")
                     elif escalated:
@@ -2205,18 +2400,18 @@ def check_proxy(pause_directory=None):
                         from .state import read_state as _rs
                         _prev = _rs("proxy") or {}
                         r = _proxy_escalated_repair(
-                            relaunch_hosts, prev_streak,
+                            start_hosts, prev_streak,
                             _prev.get("relaunch_error") if isinstance(_prev, dict) else "",
                             reason)
                         message = ("escalated repair" if r.get("ok")
                                    else "escalated repair incomplete (unverified)")
                     else:
-                        log(f"relaunching with {relaunch_hosts}"
+                        log(f"relaunching with {start_hosts}"
                             f"{' (--restart: running proxy serves nothing)' if restart else ''}"
                             f" (attempt {prev_streak + 1} of "
                             f"{PROXY_RELAUNCH_MAX_CONSECUTIVE} before stall alarm)", "WARN")
                         args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                                "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
+                                "--hosts", ",".join(start_hosts), "--port", str(PROXY_PORT)]
                         if restart:
                             args.append("--restart")
                         r = run_cmd(sparkrun_bin.argv(*args), timeout=90,
@@ -2236,6 +2431,18 @@ def check_proxy(pause_directory=None):
             f"{(r.get('output') or r.get('stderr') or 'no command output')[:400]}",
             "ERROR")
     new_streak = _proxy_relaunch_streak() + (1 if attempted else 0)
+    # REPAIR NEVER LEAVES :4000 DOWN (t_90958eb8, fix 2). `proxy_down` is the
+    # repair's own verdict that NOTHING is listening on the port — i.e. :4000
+    # refuses every connection right now. The streak gate above exists so a
+    # one-off transient does not page, and it has no business covering this
+    # shape: measured on 2026-11-22, a drift repair stopped the proxy, its start
+    # refused with sparkrun's stale-PID "already running", and the stream then
+    # slept the full 300 s cooldown with the fleet's only entrypoint dead —
+    # ~5 minutes where the next tick (a minute away) could have retried. So a
+    # confirmed-down repair alerts on its FIRST tick (still throttled by
+    # PROXY_STALL_NOTIFY_COOLDOWN_S inside the alert, so this cannot storm) and
+    # asks for the short retry window below.
+    down_after = bool(r.get("proxy_down"))
     alert_stamp = None
     # Alert when a repair attempt FAILED and the stream has now been
     # unrecoverable for MAX consecutive attempts. `attempted` keeps
@@ -2243,10 +2450,11 @@ def check_proxy(pause_directory=None):
     # count and out of the alarm; `not ok` keeps the moment an escalated
     # repair SUCCEEDS from raising a false alarm on its own tick. The
     # intentional-autodown window never alerts.
-    if attempted and not ok and new_streak >= PROXY_RELAUNCH_MAX_CONSECUTIVE \
-            and not _intentional_window():
+    if attempted and not ok and not _intentional_window() \
+            and (new_streak >= PROXY_RELAUNCH_MAX_CONSECUTIVE or down_after):
         alerted, alert_stamp = _proxy_stall_alert(
-            relaunch_hosts, new_streak, r.get("output") or "", reason)
+            relaunch_hosts, new_streak, r.get("output") or "", reason,
+            down=down_after)
         if alerted:
             message = (message + f" — STALLED after {new_streak} attempts, "
                                  "operator notified")
@@ -2265,6 +2473,12 @@ def check_proxy(pause_directory=None):
                                       and not paused_skip),
                   "deferred": deferred,
                   "paused": paused_skip,
+                  # The repair's own verdict on whether anything answers the
+                  # port when this tick left (t_90958eb8): True means :4000
+                  # refused every connection, which is why `cooldown_s` above is
+                  # the short one and why the alert fired without waiting for
+                  # the streak.
+                  "proxy_down": down_after,
                   "router_drift": drift["detail"],
                   "router_drift_warn": bool(drift["warn"]),
                   "unit_alias_warn": unit_alias_warn,
@@ -2285,6 +2499,10 @@ def check_proxy(pause_directory=None):
         stamp = _proxy_relaunch_stamp()
         if stamp:
             proxy_data["last_relaunch"] = stamp
+            # Same carry rule for the WINDOW (t_90958eb8): a tick that attempted
+            # nothing must not silently promote a 60 s down-window back to
+            # 300 s — that re-creates the outage the short window exists to cut.
+            proxy_data["cooldown_s"] = window
         # Same rule for the stall-alert throttle: re-stamping it on a tick that
         # alerted nothing would push the notify window out forever and the
         # operator would never hear about a 3-hour outage.
@@ -2300,6 +2518,11 @@ def check_proxy(pause_directory=None):
         # WITHOUT the stamp, so a genuinely recovered proxy clears the
         # cooldown on its own and stays fast to recover later.
         proxy_data["last_relaunch"] = now_iso()
+        # ...and the window it asked for, so the NEXT tick knows whether it is
+        # waiting 300 s on a fault a start cannot fix or 60 s on an entrypoint
+        # the repair itself left refusing connections (t_90958eb8).
+        proxy_data["cooldown_s"] = (PROXY_RELAUNCH_DOWN_COOLDOWN_S if down_after
+                                    else PROXY_RELAUNCH_COOLDOWN_S)
     if alert_stamp:
         proxy_data["stall_alerted_at"] = alert_stamp
     elif not ok:
