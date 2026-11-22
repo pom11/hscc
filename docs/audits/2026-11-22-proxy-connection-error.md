@@ -213,29 +213,30 @@ does not protect it: the reaper is armed to kill a healthy production proxy and 
 ## 6. Recommended fix cards (atomic, one seam each — NOT implemented here)
 
 Ordered by value. Each names the single seam so two cards never edit the same decision.
+**Carded on the board 2026-11-22 as children of t_f54f735a** (ids below); none is implemented here.
 
-1. **Completion-probe health for `check_proxy`** *(closes §4.1 — the outage)*.
+1. **Completion-probe health for `check_proxy`** — `t_f0b8051b` *(closes §4.1 — the outage)*.
    Add one tiny non-streaming completion (`max_tokens=1`) through
    `http://localhost:PROXY_PORT/v1/chat/completions` to the `check_proxy` verdict
    (`health.py:2098`), unhealthy on transport failure or 5xx, keeping `/v1/models` as the cheap
    pre-check. Reuse the engine-wedge probe body shape (`health.py:4650-4670`) so the probe is known
    good against vLLM. Guard against probing a deliberately-down proxy (autodown/pause).
-2. **Make repair verification descendant-aware** *(§4.4, the verify predicate only)*.
+2. **Make repair verification descendant-aware** — `t_65f77a97` *(§4.4, the verify predicate only)*.
    `health.py:1793/1942`: accept a listener that **is** the tracked PID **or a descendant of it**
    (walk `ppid` a bounded number of levels), so a `uvx`-launched proxy verifies instead of always
    reporting `FAILED (repair incomplete (unverified))`.
-3. **Orphan-reaper must not kill a descendant of the tracked PID** *(§4.4 corollary — separate card
-   because it is a kill path)*. `health.py:1826`: the "is this mine?" guard must apply the same
+3. **Orphan-reaper must not kill a descendant of the tracked PID** — `t_af7d5486` *(§4.4 corollary —
+   separate card because it is a kill path)*. `health.py:1826`: the "is this mine?" guard must apply the same
    descendant rule as card 2 before any `SIGTERM`/`SIGKILL`.
-4. **Preserve the outgoing proxy log across restarts** *(§3.4 — forensics survival)*.
+4. **Preserve the outgoing proxy log across restarts** — `t_9713c765` *(§3.4 — forensics survival)*.
    The repair/restart path should archive `<CACHE>/sparkrun/proxy/litellm.log` (timestamped copy,
    bounded retention) before the new process truncates it. This is sparkrun-owned territory; prefer
    the smallest upstream sparkrun addition and file it, rather than forking log handling in hscc.
-5. **Restore visibility of paused-host backends in the live router** *(§4.3, visibility only)*.
+5. **Restore visibility of paused-host backends in the live router** — `t_892378c1` *(§4.3, visibility only)*.
    `health.py:1743-1747`: keep the paused-host exclusion from *triggering* a repair (that is
    t_90958eb8's fix and must not regress), but log a WARN naming backends the live router still
    holds for paused hosts, so the direction is observable instead of silently subtracted.
-6. **Log proxy-check state transitions** *(forensics)*. `check_proxy` logs `Running proxy check`
+6. **Log proxy-check state transitions** — `t_e26aaa56` *(forensics)*. `check_proxy` logs `Running proxy check`
    every tick and nothing when green, so "green for 45 minutes" is only provable from *absence* of
    lines — exactly what made this investigation slow. Emit a line on green→unhealthy and
    unhealthy→green transitions (and a low-frequency heartbeat verdict), so a future window is
