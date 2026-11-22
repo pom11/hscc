@@ -683,9 +683,12 @@ struct MonitorNode: Codable, Identifiable {
 
     /// The same octet, dot-prefixed (`.244`), for the places that use it as an
     /// IDENTITY tail rather than as a label — matching a serving row's `node`
-    /// against a host row, naming a history series. Unchanged since before
-    /// 1.4.4 on purpose: those comparisons pair two strings produced by this
-    /// one function, and a label change must not become a matching change.
+    /// against a host row, in the widget's C1 pairing and the menu bar's serving
+    /// cell. NOT a label any more: since apps 1.4.4 every surface that NAMES a
+    /// node uses `nodeLabel` above, including the history chart's series legend.
+    /// Unchanged since before 1.4.4 on purpose: those comparisons pair two strings
+    /// produced by this one function, and a label change must not become a matching
+    /// change — a mismatch there silently pairs a model with the wrong machine.
     static func shortTail(_ line: String) -> String {
         if let tail = lastOctet(of: line) { return "." + tail }
         return line.isEmpty ? "?" : line
