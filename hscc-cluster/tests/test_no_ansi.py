@@ -153,11 +153,20 @@ class TestNoAnsiTemplateCli:
         # worktree's plugin dir and must byte-equal the canonical raw dump.
         # Compute the plugin dir from THIS test file's own location (immune to
         # sys.path ordering), exactly as hscc-cluster/tests/conftest.py does.
+        #
+        # HERMETIC (t_bb057914): argv0 used to be the bare name "python", a PATH
+        # lookup that has nothing to do with the interpreter running this suite.
+        # On the CI runner it resolved to the setup-python base interpreter, which
+        # has no `rich`, and the child died on `_theme.py:34 from rich.console
+        # import Console` -> `assert 1 == 0`. The venv that runs pytest DOES have
+        # rich (requirements-ci.txt pulls it via `-r requirements.txt`), so this
+        # file could not even be collected without it — sys.executable is both the
+        # portable choice and the only interpreter whose deps the test can rely on.
         import os
         import subprocess as _sp
         plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         result = _sp.run(
-            ["python", os.path.join(plugin_dir, "cluster_template_cli.py"),
+            [sys.executable, os.path.join(plugin_dir, "cluster_template_cli.py"),
              "list", "--json"],
             capture_output=True, text=True, cwd=os.path.dirname(plugin_dir),
             timeout=60,
