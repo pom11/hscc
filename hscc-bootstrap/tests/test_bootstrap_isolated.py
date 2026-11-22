@@ -9,11 +9,22 @@ installer.
 
 Isolation is HERMES_HOME / HSCC_DIR / HERMES_SCRIPTS pointed into tmp.
 
-HERMES_BIN IS sealed, at a stub that refuses, and so is `sparkrun` — at a stub that
-answers with a fabricated cluster. Both are on the child's PATH/lookup order for the
-same reason: the run must not inherit the operator's machine.
+HERMES_BIN IS sealed, at a stub that refuses; so is `sparkrun`, at a stub that answers
+with a fabricated cluster; and so is the project registry, at a fabricated
+`registry.yaml` (`HSCC_REGISTRY`). All three are on the child's lookup path for the same
+reason: the run must not inherit the operator's machine.
 
-`sparkrun` is the newer of the two seals (t_5b560adf). `doctor._sparkrun_cluster_ok`
+`HSCC_REGISTRY` is the newest of the three (t_5b560adf, third layer). `orchestrators.py`
+resolves the project list from `$HSCC_REGISTRY` or `~/.flightdeck/registry.yaml`, and
+`bootstrap.sh`'s `Install: per-project orchestrators` stage provisions one orchestrator
+per registry project — so a fresh isolated install used to create `*-orch` profiles for
+whatever the OPERATOR had registered. Sealed, the list is empty and the orchestrator
+review case had nothing to review. That module's own docstring already documents the
+shape (t_4b70e8d4: a resolver test that "passed" on the operator's host by reading the
+live registry and went red on CI); the seal-list test below now asks the module, in a
+child with the installer's env, which projects it believes exist.
+
+`sparkrun` is the second of the three (t_5b560adf). `doctor._sparkrun_cluster_ok`
 is FATAL and the installer's preflight runs before any stage, so the isolated run used
 to succeed only because the child inherited `PATH` and found the *operator's* real
 sparkrun with a cluster configured (`~/.config/sparkrun`). That is a home path: the
@@ -58,6 +69,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -113,6 +125,24 @@ def _sealed_hermes_bin(home: Path) -> Path:
     return stub
 
 
+#: A registry of projects that exist only inside this sandbox. `orchestrators.py`
+#: resolves the project list from `$HSCC_REGISTRY` or `~/.flightdeck/registry.yaml`
+#: (a HOME path), so `bootstrap.sh`'s `Install: per-project orchestrators` stage used to
+#: provision whatever the OPERATOR has registered — which is why
+#: `test_fresh_bootstrap_leaves_every_orchestrator_reviewable` was green here and red
+#: everywhere the home was sealed (t_5b560adf measured exactly that: `bootstrap
+#: provisioned no *-orch profiles — nothing to check`). Same failure shape, same module,
+#: as its own docstring's t_4b70e8d4 note: a test "passing" on the operator's host by
+#: reading the live registry. Two fabricated projects, so the fan-out is a fan-out.
+FAKE_REGISTRY = """\
+projects:
+  - name: sealedalpha
+    board: sealedalpha
+  - name: sealbett
+    board: sealbett
+"""
+
+
 def _make_sandbox(tmp_path, *, need_tree: bool) -> dict:
     """A throwaway HERMES_HOME/HSCC_DIR, with the real venv reachable on demand."""
     home = tmp_path / "home"
@@ -124,9 +154,13 @@ def _make_sandbox(tmp_path, *, need_tree: bool) -> dict:
         # Symlink the DIRECTORY, not the python binary: symlinking the binary
         # relocates sys.prefix and the venv's packages (rich, yaml) disappear.
         (hermes / "hermes-agent").symlink_to(hermes_tree.agent_dir_or_skip(CAPABILITY))
+    registry = home / "flightdeck" / "registry.yaml"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(FAKE_REGISTRY, encoding="utf-8")
     return {"home": home, "hermes": hermes, "hscc": hscc,
             "hermes_bin": _sealed_hermes_bin(home),
-            "sparkrun_bin": _sealed_sparkrun_bin(home)}
+            "sparkrun_bin": _sealed_sparkrun_bin(home),
+            "registry": registry}
 
 
 @pytest.fixture
@@ -195,6 +229,12 @@ def _env(sandbox):
         "HSCC_DIR": str(sandbox["hscc"]),
         "HERMES_SCRIPTS": str(sandbox["hermes"] / "scripts"),
         "HERMES_BIN": str(sandbox["hermes_bin"]),
+        # The project registry: `orchestrators._registry_path` reads this env and
+        # otherwise `~/.flightdeck/registry.yaml`. Left unsealed, the
+        # `Install: per-project orchestrators` stage provisions whatever the operator
+        # has registered — a home path again, and the reason the orchestrator-review
+        # case was green on this host and red under a seal (t_5b560adf).
+        "HSCC_REGISTRY": str(sandbox["registry"]),
         # Sandbox bin FIRST: `sparkrun` resolves to the sealed stub, everything else
         # (bash, git, uv, brew, tmux…) still resolves as it always has. Prepending
         # rather than narrowing keeps the stages that legitimately need system tools
@@ -333,11 +373,30 @@ def test_the_sandbox_seals_every_input_the_stages_shell_out_to(sandbox_seal_view
     failed on the operator's machine. The stub answers with a fabricated cluster, so
     the check runs everywhere and passes nowhere by accident.
     """
+    # The no-tree sandbox: this case asserts the child env and the two stubs, and never
+    # executes the venv (fixture docstring), so it must not retire when none is declared.
+    sandbox = sandbox_seal_view
     env = _env(sandbox)
-    for key in ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS", "HERMES_BIN"):
+    for key in ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS", "HERMES_BIN",
+                "HSCC_REGISTRY"):
         assert key in env, f"{key} is not sealed — the installer could reach live state"
         assert str(env[key]).startswith(str(sandbox["home"])), \
             f"{key}={env[key]!r} points outside the sandbox {sandbox['home']!r}"
+    # The registry seal must be honoured by the RESOLVER, not just exported. This is
+    # the exact bug `orchestrators._registry_path`'s docstring records (t_4b70e8d4):
+    # a test that "passes" on the operator's host because the resolver fell back to
+    # the live ~/.flightdeck/registry.yaml. Ask the module itself, in a child with the
+    # installer's env, which projects it thinks exist.
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); import orchestrators;"
+         "print(orchestrators.list_registry_projects())",
+         str(REPO / "hscc-roles")],
+        capture_output=True, text=True, timeout=120, env=env)
+    assert probe.returncode == 0, probe.stderr[-400:]
+    assert probe.stdout.strip() == "['sealedalpha', 'sealbett']", \
+        "the resolver did not answer from the sealed registry — it read the machine: " \
+        f"{probe.stdout.strip()[:200]!r}"
     stub = Path(env["HERMES_BIN"])
     assert stub.is_file() and stub.stat().st_mode & 0o111, \
         "HERMES_BIN must be an executable stub, else find_hermes_bin falls back "
