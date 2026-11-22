@@ -113,20 +113,40 @@ def _sealed_hermes_bin(home: Path) -> Path:
     return stub
 
 
-@pytest.fixture
-def sandbox(tmp_path):
-    """A throwaway HERMES_HOME/HSCC_DIR with the real venv reachable."""
+def _make_sandbox(tmp_path, *, need_tree: bool) -> dict:
+    """A throwaway HERMES_HOME/HSCC_DIR, with the real venv reachable on demand."""
     home = tmp_path / "home"
     hermes = home / ".hermes"
     hscc = home / ".hscc"
     for d in (hermes, hscc):
         d.mkdir(parents=True)
-    # Symlink the DIRECTORY, not the python binary: symlinking the binary
-    # relocates sys.prefix and the venv's packages (rich, yaml) disappear.
-    (hermes / "hermes-agent").symlink_to(hermes_tree.agent_dir_or_skip(CAPABILITY))
+    if need_tree:
+        # Symlink the DIRECTORY, not the python binary: symlinking the binary
+        # relocates sys.prefix and the venv's packages (rich, yaml) disappear.
+        (hermes / "hermes-agent").symlink_to(hermes_tree.agent_dir_or_skip(CAPABILITY))
     return {"home": home, "hermes": hermes, "hscc": hscc,
             "hermes_bin": _sealed_hermes_bin(home),
             "sparkrun_bin": _sealed_sparkrun_bin(home)}
+
+
+@pytest.fixture
+def sandbox(tmp_path):
+    """A throwaway HERMES_HOME/HSCC_DIR with the real venv reachable."""
+    return _make_sandbox(tmp_path, need_tree=True)
+
+
+@pytest.fixture
+def sandbox_seal_view(tmp_path):
+    """The same sandbox WITHOUT the venv symlink.
+
+    For ``test_the_sandbox_seals_every_input_the_stages_shell_out_to``, which asserts the
+    child's ENV and the two stubs and never executes the venv. Before t_5b560adf it asked
+    for the tree it did not need and got a *dangling* symlink under a sealed home
+    (``symlink_to`` does not check its target), so it reported a pass against a venv that
+    was not there. Refusing to run without a tree would be honest but would retire a case
+    that needs nothing; taking the tree out of its fixture keeps it running on every host.
+    """
+    return _make_sandbox(tmp_path, need_tree=False)
 
 
 def _sealed_sparkrun_bin(home: Path) -> Path:
@@ -293,7 +313,7 @@ def _assert_all_orch_profiles_reviewable(sandbox):
     assert not broken, f"profiles created by THIS run cannot review: {broken}"
 
 
-def test_the_sandbox_seals_every_input_the_stages_shell_out_to(sandbox):
+def test_the_sandbox_seals_every_input_the_stages_shell_out_to(sandbox_seal_view):
     """The isolated run's child env must not reach the operator's install.
 
     Guards the premise of every `@needs_runtime` case here: a stage that shells

@@ -40,3 +40,39 @@ task: t_5b560adf
   the roster-wide HOME seal — with the old `~`-derived gate they were invisible
   everywhere the crash could bite.
 ---
+kind: Verified
+order: 1
+task: t_5b560adf
+
+- Two arms, one sha (`7220b5eb` = #606's seal head `58653473` + this branch's
+  `c920b708`), canonical `HSCC_TEST_LEGS=hscc-bootstrap bash scripts/run_tests.sh -rsf`:
+  sealed **1 failed, 1343 passed, 0 skipped** (227.86 s leg) against
+  `HSCC_TEST_NO_SEAL=1` **1344 passed, 0 skipped** (234.05 s). The seal no longer
+  retires anything on this leg, and the leg's wall clock went UP by ~4x, which is the
+  point: the same tree with a *bogus* pin retires the coverage in 46.60 s
+  (1306 passed, 36 skipped, each reason naming the bogus pin), and #606 without this
+  seam sealed to 1296 passed / 35 skipped in 53.97 s at `58653473`. The runner's own
+  log line proves the declaration reached the child
+  (`HOME seal: declared HERMES_AGENT_PATH=…`).
+  The 1 is not the seam's cost and not the seal's coverage — it is the same machine
+  dependency one layer further in: `test_fresh_bootstrap_leaves_every_orchestrator_reviewable`
+  asserts `*-orch` profiles exist, and `hscc-roles/hscc.py generate` derives its agent
+  list from state the sealed home does not have, so it provisions none. Attributed and
+  carded (`t_edc71fcb`, narrowed to that one case) — not skipped, not weakened.
+  Pre-lane reference for this leg, `96a9f38a` (t_2b2a6c3b's roster): `1329 passed`
+  unsealed → `1294 passed, 35 skipped` sealed, the subset `230.35 s → 2.74 s`.
+- `test_hermes_agent_tree_seam.py`: 11 cases green in the runner. Mutation battery
+  over `hermes_tree.py` + one consumer — **8/8 CAUGHT, 0 survived** (pin
+  short-circuit deleted, candidate order swapped, pasteable `PIN=<path>` clause
+  weakened, HOME leaked into a pinned skip reason, gate weakened to the directory,
+  pin re-frozen at import (compound), resolver fabricates a path instead of
+  skipping, consumer swaps in a blanket reason). Green control first, pristine
+  reset + byte-compare per probe, `compile()` every mutant, anchors `count == 1`,
+  in-run provenance gate (a `-p` plugin writing the imported `hermes_tree.__file__`,
+  asserted to be inside the copy), `dirty after: ''`.
+- `scripts` leg, sealed arm at `0fd66683`: **635 passed, 5 skipped** — the skip
+  count #606's `HSCC_TAP_DIR` declaration already made the leg delta-free; no new
+  seam built or needed there.
+- `changelog_fragments.py check`: OK (132 fragment entries). Diff grepped for
+  address / token shapes: clean.
+---
