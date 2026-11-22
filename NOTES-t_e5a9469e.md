@@ -15,10 +15,33 @@ answers from the hold when the Prober owns the port and from a REAL
 `connect_ex("127.0.0.1", API_DEFAULT_PORT)` when the hold FAILED.
 
 So the sensor has exactly one fireable posture, and it is the non-hermetic one.
-Measured on this host with `Prober` driven directly
-(`scratch/repro_mechanism.py`, venv python, one probe = `hscc project init -h`,
-the real probe path — throwaway sensor port so nothing of the operator's is
-touched):
+Before driving it, the socket semantics it relies on were measured on this host
+(`darwin`, python 3.14.10, `scratch/probe_bound_no_listen_semantics.py`) against
+the sensor's own read — `settimeout(0.25)` then `connect_ex(...) == 0`
+(`hscc_cli_help_audit.py:690-692`):
+
+```
+state                       connect_ex          secs     `== 0` -> sensor verdict
+nothing bound               ECONNREFUSED (61)   0.0001   False  free      (correct)
+bound, never listen()ed     EAGAIN (35)         0.2521   False  free      (WRONG: held)
+real listener               0                   0.0001   True   busy      (correct)
+```
+
+A bound-but-not-`listen()`ed socket answers no SYN at all on macOS/BSD — the read
+waits out the whole window and returns `EAGAIN`, which `== 0` calls free. That
+kernel behaviour is already pinned on main
+(`test_cli_help_surface.py:1199`, `test_bound_without_listen_does_not_report_refused`)
+and the code comment at `hscc_cli_help_audit.py:524-529` says the same; the sensor
+just did not act on it. It matters because the audit's defensive hold IS such a
+socket, and so is a *concurrent* audit's: the baseline can record "free" while
+another process owns the port. (While these numbers were taken, host 8787 answered
+`EAGAIN` after 0.25 s — another walk's hold was live.)
+
+Measured on this host with `Prober` driven directly by a scratch-only diagnostic
+(`repro_mechanism.py`, not committed — its output is transcribed below, and the
+socket table above comes from the same kind of probe), with the venv python, one
+probe = `hscc project init -h` — the real probe path, on a throwaway sensor port
+so nothing of the operator's is touched.
 
 | posture (state of the sensor port)                 | hold taken | busy_at_start | port_flip |
 |----------------------------------------------------|-----------|---------------|-----------|
