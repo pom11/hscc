@@ -351,13 +351,16 @@ def test_roadmap_adopt_backup_path_survives(tmp_path):
                               func=roadmap_cmd.cmd_adopt)
     out = _run(lambda: roadmap_cmd.run(args, reg))
     # Both the value and the `.bak` line are paths inside a panel row, so a deep tmp
-    # root folds them mid-token — measured: `…/repoa` ⏎ `[bold]b[/bold]c/ROADMAP.md.bak`
-    # (red at tmp roots 161..163 and 176..190; the break falls inside the value at
-    # those lengths and outside it elsewhere, which is why the raw assert flickered).
-    # "backed up" is the backup row's own leading words and never folds.
+    # root folds the row mid-token — measured: `…/repoa` ⏎ `[bold]b[/bold]c/ROADMAP.md.bak`
+    # (the node is red at tmp roots 161..163 and 176..190; the break falls inside the
+    # value at those lengths and outside it elsewhere, which is why the raw assert
+    # flickered). "backed up" is the backup row's own leading words and never folds.
     _assert_literal_folded(out, "backed up", MARK_BOTH)
-    # the .bak line is a second path render and must survive too
-    assert _says(out, ".bak"), f"backup line missing: {out!r}"
+    # the .bak line is a second path render and must survive too. RAW on purpose:
+    # measured at tmp roots 100/130/160/170/185/190/200/212 the break never lands
+    # inside `.bak` (at 170 it lands earlier — `MAP.md.bak` is whole while `ROAD` is
+    # split off), so this one has an honest raw assert and keeps it.
+    assert ".bak" in out, f"backup line missing: {out!r}"
 
 
 def test_archive_sessions_counts_and_index_path_survive(monkeypatch, tmp_path):
