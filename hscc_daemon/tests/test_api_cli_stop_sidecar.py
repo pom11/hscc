@@ -200,6 +200,18 @@ from hscc_daemon import api_cli
 verb, rest = sys.argv[1], sys.argv[2:]
 
 if verb == "serve":
+    # Install the stop handlers EXACTLY the way `hscc api start` does in its
+    # forked child (api_cli._handle_start). This arm skips the double fork only
+    # so the exit code stays observable, and skipping the registration would
+    # leave the SIGTERM answered by the kernel's default action — the case
+    # would then measure the harness, not the handler. Pin
+    # TestStopPathIsCooperative.test_the_serving_process_is_given_the_handler
+    # keeps `_handle_start` registering both signals, so this line cannot drift
+    # away from production on its own.
+    import signal as _signal
+    _signal.signal(_signal.SIGTERM, api_cli._sigterm_handler)
+    _signal.signal(_signal.SIGINT, api_cli._sigterm_handler)
+
     _api = api_cli._load_api_server()
     api_cli._serve(_api, ["127.0.0.1"], False, int(rest[0]))
     print("@@SERVE_RETURNED@@", flush=True)
@@ -429,14 +441,12 @@ def _popen(sandbox, verb, *args):
                             stderr=subprocess.STDOUT, text=True)
 
 
-def _wait_listening(sandbox, port, not_pid, timeout=40.0):
-    """The server's PID, once its OWN log says it is listening.
+def _wait_listening(sandbox, port, timeout=40.0):
+    """Block until the child's OWN log says it is listening on `port`.
 
-    The log line — not the port — is the readiness here: `hscc api start`
-    writes it from inside `_serve` after every bind, and it is the line the
-    operator reads. The harness process also writes the pid file with its own
-    pid before the grandchild overwrites it, so the returned pid must differ
-    from `not_pid` as well as being alive.
+    The log line — not a port probe — is the readiness here: `_serve` writes it
+    after every bind and it is the line the operator reads, and unlike a probe
+    it also proves the child got far enough into startup to have a log.
     """
     needle = f"HSCC API listening on 127.0.0.1:{port}"
     deadline = time.time() + timeout
@@ -446,13 +456,33 @@ def _wait_listening(sandbox, port, not_pid, timeout=40.0):
         except FileNotFoundError:
             text = ""
         if needle in text:
-            pid = _read_int(sandbox["pid_file"])
-            if pid and pid != not_pid and _alive(pid):
-                return pid
+            return
         time.sleep(0.05)
     raise AssertionError(
-        f"`hscc api start` never reached {needle!r} with a live pid file "
-        f"within {timeout}s.\n{_describe(sandbox)}")
+        f"the child never reached {needle!r} within {timeout}s.\n"
+        f"{_describe(sandbox)}")
+
+
+def _wait_serving_child(sandbox, port, not_pid, timeout=40.0):
+    """:func:`_wait_listening` plus the promise `start` makes on top of it.
+
+    `hscc api start` is a double fork, so the pid the caller must signal is not
+    the pid of the CLI process it spawned: the CLI parent writes its OWN pid
+    into the pid file and the server grandchild overwrites it a moment later.
+    The pid to return therefore has to be alive AND not the harness's, or the
+    caller would SIGTERM a process that has already exited and test nothing.
+    """
+    _wait_listening(sandbox, port, timeout)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pid = _read_int(sandbox["pid_file"])
+        if pid and pid != not_pid and _alive(pid):
+            return pid
+        time.sleep(0.05)
+    raise AssertionError(
+        f"`hscc api start` served but never left a live pid of its own in "
+        f"{sandbox['pid_file'].name} within {timeout}s (the caller would have "
+        f"had nothing to signal).\n{_describe(sandbox)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -475,7 +505,7 @@ def test_api_stop_tears_the_sidecar_down(sandbox):
     started = _start_api(sandbox, port)
     assert started.returncode == 0, (
         f"`hscc api start` failed: {started.stdout}\n{started.stderr}")
-    pid = _wait_listening(sandbox, port, not_pid=started.pid)
+    pid = _wait_serving_child(sandbox, port, not_pid=started.pid)
 
     stopped = _run(sandbox, "stop")
     try:
@@ -535,13 +565,24 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
     the sidecar alive and no `_serve`-returned line — three witnesses for one
     mechanism.
 
-    Both signals the handler installs are covered: SIGTERM is what `hscc api
-    stop` sends, SIGINT is what an operator in the foreground produces.
+    Both signals the handler installs are covered, and they are not equally
+    sharp: measured at the base of this card, the SIGINT arm ALREADY ended
+    cleanly without a handler, because an unhandled SIGINT raises
+    KeyboardInterrupt and `_MultiServer.serve_forever` swallows it — so the SIGTERM
+    arm is the one that separates the two behaviours (measured: rc -15 by the
+    default action at base with no handler, rc 0 with the cooperative one). The
+    SIGINT arm stays because it guards the other failure this fix could have
+    introduced: a handler that blocks instead of setting the flag hangs the same
+    signal an operator in the foreground sends.
     """
     port = _free_port()
     proc = _popen(sandbox, "serve", str(port))
     try:
-        _wait_listening(sandbox, port, not_pid=proc.pid)
+        # No pid file here: this arm runs `_serve` in the foreground exactly as
+        # `python -m api_server serve` does, and that entry path deliberately
+        # writes none. The signal goes to the pid WE spawned, so there is no
+        # double-fork to resolve and no pid file to wait for.
+        _wait_listening(sandbox, port)
         assert _have(sandbox, SIDECAR_STARTED), (
             f"the sidecar never started, so nothing below proves a teardown: "
             f"{_describe(sandbox)}")
@@ -710,6 +751,44 @@ class TestStopPathIsCooperative:
             "_sigterm_handler no longer marks the pid file stopped: a stop "
             "that takes a moment to tear the sidecar down would leave the pid "
             "file claiming a live server")
+
+    def test_the_serving_process_is_given_the_handler(self):
+        """The process that serves must HAVE the handler in the first place.
+
+        `_handle_start` installs the handlers in the child, before the second
+        fork, so the grandchild that goes on to serve already answers the stop
+        signal — the card is explicit that the ordering here is not the defect
+        (unlike `serve_main`, where the registration used to sit after the
+        bind). What is worth pinning is the existence and the wiring: a child
+        that never registers them falls back to the kernel's default action,
+        which is the same orphaned sidecar by a third route.
+
+        This is also what makes the harness's `serve` arm honest: it registers
+        the same two signals for the same callable, and this pin is what stops
+        that copy drifting from production.
+        """
+        body = self._body(api_cli._handle_start)
+        registered = self._calls(body, "signal")
+        assert registered, (
+            "`hscc api start`'s child registers no signal handler, so the "
+            "process that ends up serving has no answer to the stop signal and "
+            "the kernel's default action skips _serve's teardown")
+        # The argument of `signal.signal(signal.SIGTERM, ...)` is itself an
+        # Attribute: `signal.SIGTERM`, i.e. Name('signal') + attr 'SIGTERM'.
+        handled = {arg.attr for node in registered for arg in node.args
+                   if isinstance(arg, ast.Attribute)
+                   and isinstance(arg.value, ast.Name)
+                   and arg.value.id == "signal"}
+        assert {"SIGTERM", "SIGINT"} <= handled, (
+            f"the child handles {sorted(handled) or 'nothing'}; `hscc api stop` "
+            f"sends SIGTERM and an operator in the foreground sends SIGINT, and "
+            f"either unhandled signal skips the sidecar teardown")
+        served = self._calls(body, "_serve")
+        assert served, "_handle_start no longer calls _serve at all"
+        assert (min(n.lineno for n in registered)
+                < min(n.lineno for n in served)), (
+            "the registration now sits after the serve call, so the process "
+            "reaches the accept loop before it can answer a stop")
 
     def test_the_sidecar_teardown_lives_in_the_finally(self):
         """The teardown must be in the `finally:` that wraps the serving call.
