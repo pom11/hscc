@@ -44,23 +44,29 @@ kind: Verified
 order: 1
 task: t_5b560adf
 
-- Two arms, one sha (`7220b5eb` = #606's seal head `58653473` + this branch's
-  `c920b708`), canonical `HSCC_TEST_LEGS=hscc-bootstrap bash scripts/run_tests.sh -rsf`:
-  sealed **1 failed, 1343 passed, 0 skipped** (227.86 s leg) against
-  `HSCC_TEST_NO_SEAL=1` **1344 passed, 0 skipped** (234.05 s). The seal no longer
-  retires anything on this leg, and the leg's wall clock went UP by ~4x, which is the
-  point: the same tree with a *bogus* pin retires the coverage in 46.60 s
-  (1306 passed, 36 skipped, each reason naming the bogus pin), and #606 without this
-  seam sealed to 1296 passed / 35 skipped in 53.97 s at `58653473`. The runner's own
-  log line proves the declaration reached the child
-  (`HOME seal: declared HERMES_AGENT_PATH=…`).
-  The 1 is not the seam's cost and not the seal's coverage — it is the same machine
-  dependency one layer further in: `test_fresh_bootstrap_leaves_every_orchestrator_reviewable`
-  asserts `*-orch` profiles exist, and `hscc-roles/hscc.py generate` derives its agent
-  list from state the sealed home does not have, so it provisions none. Attributed and
-  carded (`t_edc71fcb`, narrowed to that one case) — not skipped, not weakened.
-  Pre-lane reference for this leg, `96a9f38a` (t_2b2a6c3b's roster): `1329 passed`
-  unsealed → `1294 passed, 35 skipped` sealed, the subset `230.35 s → 2.74 s`.
+- Two arms, one sha (`4c003700` = #606's seal head `58653473` + this branch's
+  `24a25f2e`), canonical `HSCC_TEST_LEGS=hscc-bootstrap bash scripts/run_tests.sh -rsf`:
+  sealed **1344 passed, 0 skipped, 0 failed** (249.57 s leg, rc 0) and
+  `HSCC_TEST_NO_SEAL=1` **1344 passed, 0 skipped** (261.60 s). **The leg is delta-free:
+  the seal now costs this leg nothing.** The runner's own log line proves the declaration
+  reached the child (`HOME seal: declared HERMES_AGENT_PATH=…`).
+  Two more arms, same tree, to show what the gate was buying: the same tree with a *bogus*
+  pin retires the coverage in **71.07 s** (1309 passed, 35 skipped — every reason naming
+  the bogus pin), and #606 without this seam sealed to **1296 passed / 35 skipped in
+  53.97 s** at `58653473`. Pre-lane reference for the same leg, `96a9f38a`
+  (t_2b2a6c3b's roster): `1329 passed` unsealed → `1294 passed, 35 skipped` sealed, the
+  subset `230.35 s → 2.74 s`.
+- What it took to get the sealed arm to that pair (each step one machine dependency the
+  `~`-derived gate had been hiding, sealed arm at the merged tree): seam alone →
+  `4 failed, 1338 passed` (doctor crashed on `sparkrun cluster default --json` printing
+  `null`); + null-document handling → `4 failed` (preflight's FATAL `sparkrun cluster`
+  row, cluster config under `~/.config/sparkrun`); + sandbox-first `sparkrun` stub →
+  `1 failed` (`orchestrators.py` reading `~/.flightdeck/registry.yaml`, so
+  `Install: per-project orchestrators` provisioned the operator's projects and nothing
+  on a sealed home); + fabricated `HSCC_REGISTRY` → **0 failed**. No assertion was
+  weakened and no case was skipped on the way; each seal gained its own assertion in
+  `test_the_sandbox_seals_every_input_the_stages_shell_out_to`, including a child process
+  that asks the resolver which projects it believes exist.
 - `test_hermes_agent_tree_seam.py`: 11 cases green in the runner. Mutation battery
   over `hermes_tree.py` + one consumer — **8/8 CAUGHT, 0 survived** (pin
   short-circuit deleted, candidate order swapped, pasteable `PIN=<path>` clause
