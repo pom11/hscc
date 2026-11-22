@@ -71,7 +71,7 @@ SPARKRUN_CONTROL_TIMEOUT = 120
 #: /v1/models the client is cut loose and the restart is reported as verified by
 #: the health probe (which is the ONLY honest success signal for a
 #: ``sparkrun run`` client that hangs on its child ssh session after the
-#: container is already serving: the operator's .246 launch sat 40 min on a
+#: container is already serving: the operator's live launch sat 40 min on a
 #: machine whose model answered in 10). The endpoint is re-asked every couple of
 #: seconds (``util.run_cmd``'s poll cadence); a unit takes minutes to load, so a
 #: faster poll would only buy requests.
@@ -615,10 +615,10 @@ def _unit_record(live, declared, host, serving_dict):
         # launched with, so the recorded serve_cmd wins when the unit carries
         # one. Without it the builder derives the served names from this unit's
         # own fields, and a uniform_pool unit's fields cannot rebuild what the
-        # apply path advertised — the .246 resume came back with two names where
-        # the running unit served three, which is a different intent hash, so
-        # ``--ensure`` started a DIFFERENT workload and the node left the
-        # orchestrator pool. A record whose placement (recipe/hosts/port)
+        # apply path advertised — the reported resume came back with two names
+        # where the running unit served three, which is a different intent
+        # hash, so ``--ensure`` started a DIFFERENT workload and the node left
+        # the orchestrator pool. A record whose placement (recipe/hosts/port)
         # disagrees is refused inside the builder and the derived argv is used.
         resume_cmd = serving._unit_run_cmd(dict(declared, nodes=nodes,
                                                 port=port, tp=tp),

@@ -1219,7 +1219,7 @@ def resume_pool_plan(serve_cmd=None):
 
 
 class TestResumeReplaysTheRecordedLaunchArgv:
-    """The .246 resume, at the executor seam (DEFECTS 1 and 2)."""
+    """The reported live resume, at the executor seam (DEFECTS 1 and 2)."""
 
     def _unit(self, serve_cmd=None):
         return unit_of(resume_pool_plan(serve_cmd), "pool1")
@@ -1314,7 +1314,7 @@ class TestTildeIsRejectedByTheFakeCli:
 class TestBoundedLaunchWait:
     """``sparkrun run`` is a CLIENT, and a client can sit on its child ssh
     session for tens of minutes after the container it launched is serving
-    (the operator's .246 launch: up in 10 min, client killed at 40).
+    (the operator's live launch: serving in ~10 min, client cut loose at ~40).
 
     So the resume's success signal is the unit answering its own ``/v1/models``,
     the wait is bounded, and a client that had to be cut loose is reported as

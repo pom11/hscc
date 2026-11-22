@@ -965,8 +965,8 @@ class TestFleetUpMaxNumSeqs:
 class TestResumeReproducesTheLaunchArgv:
     """A node RESUME replays the unit's recorded launch argv (t_09708c17).
 
-    Two defects shipped in one argv on the operator's .246 resume, both produced
-    by the field rebuild in ``serving._unit_run_cmd``:
+    Two defects shipped in one argv in one operator-reported live resume, both
+    produced by the field rebuild in ``serving._unit_run_cmd``:
 
     * **literal ``~``** — serving.json stored ``"~/…"`` for that unit and the
       argv runs WITHOUT a shell, so sparkrun received a tilde character and
@@ -992,7 +992,7 @@ class TestResumeReproducesTheLaunchArgv:
     RECIPE_TILDE = "~/sparkrun-local/recipes/local-fixed/lab-flash-solo-vllm.yaml"
     RECIPE_ABS = os.path.expanduser(RECIPE_TILDE)
     NODE = "192.0.2.246"
-    #: The serving.json unit AS STORED for the .246 shape: a ``~`` recipe, no
+    #: The serving.json unit AS STORED for the reported shape: a ``~`` recipe, no
     #: per-unit ``uniform_pool`` key (that flag is top-level), and a cap.
     UNIT = {"id": "wk1", "role": "worker", "nodes": [NODE], "port": 8003,
             "recipe": RECIPE_TILDE, "model": "lab/Flash-Next-NVFP4", "tp": 1,

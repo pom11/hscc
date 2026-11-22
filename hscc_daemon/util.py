@@ -28,10 +28,11 @@ def run_cmd_until_ready(args, ready, timeout=120, poll=2.0, env=None,
     """Run ``args`` with a BOUNDED wait that can end EARLY because the workload
     it starts became reachable.
 
-    Why this exists (t_09708c17, the .246 resume): ``sparkrun run --no-follow
-    --ensure`` is a CLIENT, and a client can wedge on a child ssh session long
-    after the container it launched is up and serving — the operator's manual
-    launch sat 40 minutes on a machine whose model was answering in 10. Treating
+    Why this exists (t_09708c17, the reported live resume): ``sparkrun run
+    --no-follow --ensure`` is a CLIENT, and a client can wedge on a child ssh
+    session long after the container it launched is up and serving — the
+    operator's manual launch sat 40 minutes on a machine whose model was
+    answering in 10. Treating
     "the client returned" as the success signal therefore reports a FAILURE for
     a restart that worked, and a resume that reports failure keeps the node
     parked. Here the success signal is the unit itself: as soon as ``ready()``

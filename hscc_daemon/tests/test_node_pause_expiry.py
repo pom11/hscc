@@ -725,3 +725,99 @@ class TestNoInMemoryTimers:
         later = npe.auto_resume_expired(now=at(120), directory=overlay,
                                         echo=Lines(), run=fleet)
         assert later["resumed"] == [W1], later
+
+
+class TestTheTickBudget:
+    """How much of a backlog ONE tick may spend (t_09708c17 DEFECT 3).
+
+    Both bounds here are stream-safety, not tidiness: a launch client that has
+    to be cut loose costs the stream thread up to ``SPARKRUN_LAUNCH_WAIT_TIMEOUT``
+    (the client is not coming back on its own), and ``verify``'s staleness floor
+    is what the stream must stay inside. A pass that walked a whole backlog of
+    detached launches would breach it, so: a fixed number of resumes per tick,
+    and a hard stop at ONE resume once a client had to be detached. Neither is
+    visible in a one-host test, which is why they run against a stub ``resume``
+    here — the budget is the thing under test, not the executor.
+    """
+
+    #: Ascending, all two-digit, so overlay order and this list agree.
+    HOSTS = [f"192.0.2.{n}" for n in range(20, 26)]
+
+    @staticmethod
+    def _stub_resume(detached_on=None):
+        calls = []
+
+        def resume(host, entry, **kw):
+            calls.append(host)
+            return {"action": npe.RESUME_RESUMED, "ok": True, "host": host,
+                    "detached": host == detached_on}
+
+        return calls, resume
+
+    def _seed_backlog(self, overlay):
+        for host in self.HOSTS:
+            seed(overlay, host=host, until=at(-1), span_nodes=(host,))
+
+    def test_a_backlog_is_walked_four_per_tick_and_the_rest_defer(self,
+                                                                   overlay,
+                                                                   fleet):
+        """The budget is the constant, and the default is the budget.
+
+        Deliberately no ``limit=`` here: that is what makes this the pin on
+        ``MAX_RESUMES_PER_TICK`` itself — raise the constant and this goes red,
+        so the ceiling cannot be quietly widened by someone who wants a "faster"
+        tick.
+        """
+        assert npe.MAX_RESUMES_PER_TICK == 4, \
+            "widen this test's expectation with the constant, and say why"
+        self._seed_backlog(overlay)
+        calls, resume = self._stub_resume()
+        res = npe.auto_resume_expired(now=NOW, directory=overlay,
+                                      echo=Lines(), resume=resume, run=fleet)
+        budgeted = self.HOSTS[:npe.MAX_RESUMES_PER_TICK]
+        rest = self.HOSTS[npe.MAX_RESUMES_PER_TICK:]
+        assert calls == budgeted, "the tick spent more launches than it owns"
+        assert res["resumed"] == budgeted
+        assert res["deferred"] == rest
+        assert res["ok"] is True
+        # No claim about the overlay here on purpose: with ``resume`` stubbed,
+        # "the deferred pause is still recorded" would be true of every host and
+        # prove nothing. Clearing belongs to ``resume_host`` and is pinned where
+        # the real one runs (the one-host pass above asserts the resumed host's
+        # record is gone); "a deferred host is a delay, not a drop" is pinned by
+        # the pass never calling ``expiry_pass`` — see the kept-and-retried cases.
+
+    def test_a_pass_that_had_to_cut_a_client_loose_stops_at_one(self, overlay,
+                                                                fleet):
+        """The second bound: after one detach, nothing else launches this tick.
+
+        The first resume is the one that had to be cut loose, so a second launch
+        would spend the same bound again in the same stream tick — the exact
+        shape that carries the stream past the staleness floor. The rest are
+        deferred and SAY so.
+        """
+        first, rest = self.HOSTS[0], self.HOSTS[1:]
+        self._seed_backlog(overlay)
+        calls, resume = self._stub_resume(detached_on=first)
+        lines = Lines()
+        res = npe.auto_resume_expired(now=NOW, directory=overlay, echo=lines,
+                                      resume=resume, run=fleet)
+        assert calls == [first], \
+            "a pass that detached a client must not launch another one"
+        assert sorted(res["deferred"]) == sorted(rest)
+        assert res["ok"] is True
+        assert any("cut loose" in line for line in lines.lines), lines.text
+        assert any("deferring" in line and "next tick" in line
+                   for line in lines.lines), lines.text
+
+    def test_one_launch_never_outlives_the_stream_staleness_floor(self):
+        """The bound exists to sit INSIDE ``verify``'s 600 s floor: one launch
+        must be cut loose before the stream can be called stale for waiting on
+        it. A constant raised past the floor silently un-safes the whole design,
+        so it is pinned rather than commented."""
+        assert npe.SPARKRUN_LAUNCH_WAIT_TIMEOUT < 600, \
+            "a launch wait at or past the staleness floor makes a resume that " \
+            "is cut loose look like a stream that died"
+        assert npe.SPARKRUN_LAUNCH_WAIT_TIMEOUT > npe.SPARKRUN_CONTROL_TIMEOUT, \
+            "a cold model start is not a control call; sharing the bound would " \
+            "abort real launches"
