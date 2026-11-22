@@ -1143,6 +1143,20 @@ import datetime as _dt
 
 NOW = _dt.datetime(2026, 8, 23, 12, 0, 0, tzinfo=_dt.timezone.utc)
 
+#: The wake seam's floor — the ``down_since`` the wake-seam case below seeds. The
+#: case's docstring has always explained it as "a fixed ANCIENT time (before any
+#: real ``now_iso`` the probe might stamp), so the wake decision is deterministic
+#: regardless of the machine clock". That is true, and it is load-bearing: the
+#: probe stamps ``record_activity()`` with the PRODUCT's clock (autodown.py:138 ->
+#: ``state.now_iso``) while the case is judged at ``NOW``, so the only thing making
+#: the wake deterministic is this constant sitting behind both clocks. Prose did
+#: not stop the sibling file from decaying around exactly this pair
+#: (t_93d499d7, leg hscc_daemon red at 2026-11-22T13:00Z), so
+#: ``TestWakeSeamFloorIsExecutable`` asks the product's own predicate instead
+#: of trusting the sentence. Named rather than inline for that reason: a guard
+#: cannot point at a string literal buried in a case body.
+WAKE_SEAM_FLOOR = "2020-01-01T00:00:00+00:00"
+
 
 class TestCycle:
     """cycle() decision + interlock conjunction tests.
@@ -3508,11 +3522,16 @@ class TestProbeKanbanActivity:
         down_since is a fixed ANCIENT time (before any real `now_iso` the probe
         might stamp), so the wake decision is deterministic regardless of the
         machine clock.
+
+        That sentence is the case's whole claim to be clock-independent, and it is
+        now checked rather than asserted: see ``WAKE_SEAM_FLOOR`` and
+        ``TestWakeSeamFloorIsExecutable``, which ask ``_fresh_activity_since_down``
+        the same question against the clock the probe actually stamps with.
         """
         calls = []
         monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
                             raising=False)
-        down = "2020-01-01T00:00:00+00:00"
+        down = WAKE_SEAM_FLOOR
         cfg = dict(ad.DEFAULT_CONFIG)
         cfg["enabled"] = True
         cfg["state"] = "down"
@@ -4297,3 +4316,50 @@ class TestLockAndGates:
         assert verify_ids == {"orch", "wk-keep"}
         cfg = ad.load_config()
         assert cfg["state"] == "down"               # recorded down
+
+
+# ── the floor the wake seam stands on is a checked fact, not a sentence ──────
+class TestWakeSeamFloorIsExecutable:
+    """t_3b38aca4: one case in this module is clock-independent *only* because
+    ``WAKE_SEAM_FLOOR`` sits behind the clock the activity probe stamps.
+
+    The probe path is ``cycle()`` → kanban probe → ``record_activity()`` →
+    ``state.now_iso()`` — the PRODUCT's clock (autodown.py:138) — while the case is
+    judged at the fixture ``NOW``. Two clocks, one literal, a docstring holding
+    them together. The frozen-clock sweep (t_3b38aca4) found it: this is the only
+    module in hscc_daemon/tests whose suite reddens when the wall clock is moved to
+    the far past (2020-01-01: 1 failed, 203 passed) while staying green at the real
+    clock, on both sides of its own literal, and at 2200-01-01. So it is NOT the
+    forward date-bomb that reddened leg hscc_daemon at 2026-11-22T13:00Z — real time
+    moves away from a 2020 floor, never back towards it.
+
+    What it is, is a premise with no guard. The edit that would turn it into that
+    bomb is innocent-looking: "modernise" the floor to a future year and the wake
+    decision starts waiting on the machine clock, which fails on every host at once
+    on a date. These cases ask the product's own predicate rather than trusting the
+    sentence — the posture #617/#622 established for the pause file
+    (``TestFixtureClockIsTheOnlyClock``).
+    """
+
+    def test_the_floor_is_behind_the_clock_the_probe_stamps(self):
+        """The wake seam, asked of the product's own predicate, with the timestamp
+        ``record_activity`` actually writes."""
+        assert ad._fresh_activity_since_down({
+            "down_since": WAKE_SEAM_FLOOR,
+            "last_activity_iso": ad.now_iso(),      # autodown.py:138's value
+        }) is True, (
+            f"{WAKE_SEAM_FLOOR} no longer reads as earlier than now_iso(): the wake "
+            "seam in test_kanban_wake_seam_when_down is now waiting on the machine "
+            "clock — the future-date-red shape, not a fixture")
+
+    def test_the_floor_is_behind_the_fixture_clock_too(self):
+        """``cycle()`` is judged at ``NOW``. If the floor ever overtook NOW the case
+        would be green for a different reason than it claims: the probe's stamp
+        would no longer be the thing that crosses the floor. The two None checks are
+        not ceremony — an unparseable floor is what makes the wake seam fail safe
+        (``_fresh_activity_since_down`` returns False), i.e. a silent never-wake."""
+        floor = ad._parse_iso(WAKE_SEAM_FLOOR)
+        fixture = ad._parse_iso(NOW.isoformat())
+        assert floor is not None, f"{WAKE_SEAM_FLOOR} is not parseable by the product"
+        assert fixture is not None, "the fixture NOW is not parseable by the product"
+        assert floor < fixture
