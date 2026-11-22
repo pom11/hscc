@@ -9,11 +9,17 @@ installer.
 
 Isolation is HERMES_HOME / HSCC_DIR / HERMES_SCRIPTS pointed into tmp.
 
-HOME is deliberately NOT faked, even though that would contain a helper that
-still hardcodes `expanduser("~/.hscc/...")`. Preflight legitimately discovers
-prerequisites under the real home — sparkrun's cluster config lives in
-`~/.config/sparkrun` — so a fake HOME fails the doctor with "no cluster
-configured" and the installer never runs. Two controls cover the gap instead:
+HOME is deliberately NOT faked HERE, even though that would contain a helper that
+still hardcodes `expanduser("~/.hscc/...")`. What the seal does to that choice is
+worth stating, because it changed under t_5b560adf: the roster-wide HOME seal in
+`scripts/run_tests.sh` (PR #606) moves HOME for every leg, so this file DOES run under
+a fake home on a sealed roster — and preflight must then *survive* what it cannot see
+rather than assume the operator's machine. It now does: `sparkrun cluster default
+--json` answers the literal `null` when there is no `~/.config/sparkrun`, and
+`doctor._sparkrun_default_cluster_matches_serving` treats a document that is not a
+mapping as "nothing to compare — skipped" instead of crashing (the crash is what made
+four cases here red the moment the leg stopped skipping them). Two controls still cover
+the helper-hardcoding gap this note is about:
   * preventive: ``test_helpers_do_not_hardcode_the_home_paths`` fails on a new
     hardcoded path, before it can ever run;
   * detective: the live-state checksum assertion below fails if a run did

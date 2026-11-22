@@ -1716,6 +1716,38 @@ class TestClusterVsServing:
             _runner=lambda: "", _serving_raw=_SERVING_TWO)
         assert c.ok is True and "skipped" in c.detail
 
+    def test_a_null_document_skips_instead_of_crashing(self):
+        """A host with no default cluster: ``sparkrun`` prints ``null``, not ``{}``.
+
+        t_5b560adf, measured: under the roster-wide HOME seal (empty HOME, so the
+        real sparkrun resolves no ``~/.config/sparkrun`` — the same posture a CI
+        runner has) the runner returned the literal ``null``. ``json.loads`` accepts
+        that, so ``data.get("hosts")`` raised ``AttributeError`` inside doctor, the
+        preflight failed, and the installer died — taking four
+        ``test_bootstrap_isolated.py`` cases with it. ``not raw`` and the
+        ``ValueError`` branch cover an absent or malformed answer; this is the third
+        shape, and it is the one a fresh host produces.
+        """
+        c = doctor._sparkrun_default_cluster_matches_serving(
+            _runner=lambda: "null", _serving_raw=_SERVING_TWO)
+        assert c.ok is True and c.fatal is False, \
+            f"a JSON null must not be a fatal preflight: {c.detail}"
+        assert "skipped" in c.detail
+
+    def test_a_non_mapping_document_skips_instead_of_crashing(self):
+        """Same refusal for any JSON that parses but is not a mapping.
+
+        Pairing with the ``null`` case keeps the guard honest: a fix that only
+        special-cases ``None`` would still crash on the array spelling, and the
+        reason a reader sees has to name what arrived rather than assume.
+        """
+        for raw in ('["192.0.2.1"]', '"hscc"', "7", "true"):
+            c = doctor._sparkrun_default_cluster_matches_serving(
+                _runner=lambda raw=raw: raw, _serving_raw=_SERVING_TWO)
+            assert c.ok is True and c.fatal is False, \
+                f"{raw!r} parsed to a non-mapping and was not skipped: {c.detail}"
+            assert "skipped" in c.detail, f"{raw!r}: {c.detail}"
+
 
 class TestServingConsistency:
     @staticmethod
