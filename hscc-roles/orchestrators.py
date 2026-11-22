@@ -35,7 +35,14 @@ import main_orch
 
 # Registry default matches flightdeck's DEFAULT_REGISTRY (~/.flightdeck/registry.yaml).
 # Overridable with HSCC_REGISTRY so tests/provisioning can target a fixture.
-REGISTRY_PATH = os.environ.get("HSCC_REGISTRY", "~/.flightdeck/registry.yaml")
+DEFAULT_REGISTRY_PATH = "~/.flightdeck/registry.yaml"
+
+#: Historical spelling, kept for any caller that reads the module attribute. It is
+#: the DEFAULT, never the effective path: the ``HSCC_REGISTRY`` override is applied
+#: by :func:`_registry_path` at CALL time and must not be frozen here (see the
+#: reason in that function). Tests pin this — the per-call test in
+#: ``tests/test_orchestrators.py`` would go red if an env read came back here.
+REGISTRY_PATH = DEFAULT_REGISTRY_PATH
 
 
 def main_name(hscc_dir=None):
@@ -78,10 +85,28 @@ class UnknownProjectError(OrchestratorError):
 
 
 def _registry_path(path: Optional[str]) -> str:
-    """Resolve the registry path: explicit arg > HSCC_REGISTRY env > default."""
+    """Resolve the registry path: explicit arg > ``HSCC_REGISTRY`` env > default.
+
+    The env is read HERE, when the resolver runs, not when this module is imported
+    — the posture ``main_orch._registry_projects()`` already uses (main_orch.py:227).
+    An import-time snapshot made the override invisible to anything that sets it
+    after import (a test's ``monkeypatch.setenv``, a caller re-pointing the
+    registry at runtime), and worse, on a host that happens to carry a real
+    ``~/.flightdeck/registry.yaml`` the resolver then answered from THAT file while
+    the caller believed the env had pointed it elsewhere — so the contract looked
+    satisfied. Measured t_4b70e8d4: ``test_resolver_env_registry_override`` passed
+    on the operator's host by reading the live registry (``repo`` came back as the
+    real checkout, not the fixture's ``/tmp/hscc``) and went red on CI, where the
+    default path does not exist and the empty project list raised
+    ``UnknownProjectError('hscc')``.
+
+    An empty ``HSCC_REGISTRY`` counts as unset (``or``, not a key test), matching
+    main_orch's chain: an exported-but-empty variable must not resolve to ``""``.
+    """
     if path:
         return os.path.expanduser(path)
-    return os.path.expanduser(REGISTRY_PATH)
+    return os.path.expanduser(
+        os.environ.get("HSCC_REGISTRY") or DEFAULT_REGISTRY_PATH)
 
 
 def _load_projects(path: Optional[str]) -> list[dict]:
