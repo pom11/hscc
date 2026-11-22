@@ -148,3 +148,23 @@ stamp a bare `steady`.
 * `doctor` has no row for the paneless-skip set. The stream `message` carries it
   (so `hscc verify`/`doctor` print it), and a dedicated row is its own card in
   the `hscc-doctor-row` shape.
+
+## 6. What shipped (this branch)
+
+* `hscc_daemon/orch_waker.py`: `PANELESS_STATE_KEY` (+ owned-key/validator),
+  `paneless_reason` (the two-half rule), `make_paneless_checker` (the wiring,
+  per-tick pane cache, `main_orch` consulted with a verbatim-marker fallback),
+  the gate in `tick` (after every delivery gate, before the wake claim),
+  `run_tick(paneless=, hscc_dir=)` wiring — installed only when `run_tick` owns
+  delivery, so a caller that injects its own `inject` keeps its own verdict —
+  and the fail-loud plumbing: `report["paneless"]`, the stream entry's
+  `paneless` field, a `_tick_message` that names the board and reason, and
+  `waker_status`'s `paneless_skip`.
+* `hscc_daemon/tests/test_orch_waker_paneless_skip.py` — 31 tests, hermetic.
+  Full `hscc_daemon` leg: 4628 passed, 1 skipped.
+* Two measurements worth keeping from writing the tests, because both would
+  otherwise read as a waker bug: a board's FIRST tick only stamps its watermark
+  (a test that skipped that tick had its whole first batch swallowed as backlog),
+  and a board DB without `task_runs` makes the legacy check return `False`
+  through a caught `sqlite3.Error` — so the fixture board carries the full table
+  set and one test pins the missing-table case explicitly as fail-open.
