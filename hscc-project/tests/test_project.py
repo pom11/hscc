@@ -1279,7 +1279,21 @@ class TestNoAnsiProject:
         registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
                              path=reg)
         seam = CaptureExec()
+        # `session_db` is NOT decoration: with it None, cmd_chat opens the REAL
+        # hscc-orch state.db through Hermes' own SessionDB, and on an interpreter
+        # that cannot host the runtime (CI's thin venv has no hermes_cli and no
+        # resolvable $HOME/.hermes/hermes-agent/venv) that raises
+        # HermesRuntimeUnavailable out of cmd_chat — the banner never prints and
+        # the case reddens on an interpreter fact instead of an ANSI one (the CI
+        # red on t_cc2f23ea). It is also the only way this case stops opening the
+        # operator's live profile tree, which this file's module docstring
+        # forbids outright. Note the half-seam posture is what made it look
+        # irreproducible: `_ns` already defaults `default_db` to a fake, and
+        # session_discovery skips its runtime probe when ANY seam is injected —
+        # so the probe never ran and only the un-seamed orchestrator read hit the
+        # real runtime. Every sibling chat case here injects both.
         out = _no_ansi(lambda: project_cmd.cmd_chat(
-            _ns(registry=reg, exec_seam=seam, name="hscc")))
+            _ns(registry=reg, exec_seam=seam, name="hscc",
+                session_db=_db_session("hscc"))))
         assert "project hscc -> profile hscc-orch" in out
 
