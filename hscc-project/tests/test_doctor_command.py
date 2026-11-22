@@ -354,27 +354,48 @@ def _learning_args(tmp_path, **overrides):
 
 
 # --------------------------------------------------------------------------- #
-# A rendering caveat the learning assertions have to respect.
+# A rendering caveat the human-view assertions have to respect.
 #
 # Every row here is printed through a Rich Panel, which HARD-WRAPS a long
 # `detail` at the console width — and `_theme.make_console` deliberately pins
 # that width to 200 for a pipe. So a sentence can be split across two printed
 # lines, and *where* it splits depends on the length of the data inside the row.
 # For the memory rows that data includes pytest's tmp_path, i.e. the machine.
-# Measured at bb5d2b83 with one variable (the tmp root length; CI-shaped HOME,
-# p313 so hermes_cli is unimportable as in CI's thin venv): a tmp root of
-# 60/66/120/126 chars reddens test_all_memory_files_stale_is_problem and
-# 72..114/132+ greens it, while the row carries the whole sentence in BOTH
-# cases. The CI runner's root (`/tmp/pytest-of-runner/pytest-0/…`, 62 chars)
-# sits in the reddening window; a workstation's default does not — which is why
-# this leg was red on the runner and green on the laptop, and why the CI box
-# looked like a missing verdict when only the assertion was missing.
+# Two ways the split happens, two normalisers:
 #
-# A content claim must not be asserted against a layout. `_flowed()` removes the
-# panel's own decoration and collapses its hard wraps, so the assertions ask
-# what the row SAYS. Nothing is relaxed: the whole phrase is still required, in
-# order — delete "— learning has stopped" from `_staleness_check` and the case
-# reddens again (mutation probe P1 on t_cc2f23ea).
+#   * a wrap at a WORD boundary — `_flowed()` recovers it (box-drawing removed,
+#     hard wraps collapsed to one space);
+#   * a FOLD inside one token that is longer than the room left on the line
+#     (a tmp_path is always such a token), which inserts no space at all — only
+#     `_says()`, which drops layout whitespace from both sides, recovers it.
+#
+# Measured by sweeping the tmp-root LENGTH with one variable (CI-shaped HOME,
+# p313 so hermes_cli is unimportable as in CI's thin venv; the same table comes
+# out of the workstation posture). A raw `assert "<phrase>" in out` is RED here:
+#
+#   test_all_memory_files_stale_is_problem        'learning has stopped'
+#                                       split at 57..68 and 119..127  (t_cc2f23ea;
+#                                       CI's own root 62 is inside the window)
+#   test_learning_missing_mem_config…   'cannot read the'
+#                                       split at 119..127 and 151..155
+#   test_memory_freshness_ignores_…     'backend-engineer/memories/MEMORY.md'
+#                                       folded at 152..185 (a word-boundary
+#                                       reflow does NOT recover a fold)
+#   test_newest_across_profiles_…       'profiles/newest/memories/MEMORY.md'
+#                                       folded at 162..194
+#
+# Every other `in out` phrase in this file was swept over the same range
+# (48..210 chars, every integer) and never splits: a status marker is the row's
+# first token, and a phrase that sits before the row's machine-dependent data can
+# never have a break land inside it. Those stay RAW on purpose — the stricter the
+# normaliser, the less layout the assertion tolerates. The `err` phrases are a
+# plain `print()` to stderr, not Rich, so nothing wraps them at all.
+#
+# A content claim must not be asserted against a layout. Nothing is relaxed by
+# either helper: the whole phrase is still required, in order — delete the
+# asserted clause from `_staleness_check` / `_memori_db_check` / the freshness
+# detail and the case reddens again (mutation probes on t_cc2f23ea and
+# t_036fedf8).
 # --------------------------------------------------------------------------- #
 
 _BOX_DRAWING = str.maketrans({c: " " for c in "│╭╮╰╯─┌┐└┘"})
@@ -383,6 +404,29 @@ _BOX_DRAWING = str.maketrans({c: " " for c in "│╭╮╰╯─┌┐└┘"})
 def _flowed(out: str) -> str:
     """``out`` with the panel's box-drawing removed and its hard wraps collapsed."""
     return " ".join(out.translate(_BOX_DRAWING).split())
+
+
+def _says(text: str, phrase: str) -> bool:
+    """True when the rendered rows SAY ``phrase``, independent of panel layout.
+
+    ``_flowed()`` recovers a wrap that happened at a *word boundary*. It cannot
+    recover a FOLD: when one token is longer than the room left on the line, Rich
+    breaks the token itself and adds no space — and a ``tmp_path`` printed inside
+    a memory row is always such a token (measured: the path token is ~90 chars,
+    far beyond any line). So this compares with every whitespace character
+    removed from both sides: the phrase's characters must still appear, in order.
+
+    Nothing else is relaxed. Reordering, a missing word or a deleted clause all
+    stay RED — deleting "— learning has stopped" from `_staleness_check`, or the
+    profile path out of the freshness detail, reddens the cases again (mutation
+    probes P1/P3/P5 on t_036fedf8). And it is not a word-salad acceptor: the
+    characters still have to occur contiguously once layout spaces are gone.
+
+    Use ``_flowed()`` wherever a word-boundary reflow is enough (it is the
+    stricter normaliser); reach for ``_says`` only for a phrase that sits INSIDE
+    a token long enough to be folded.
+    """
+    return "".join(phrase.split()) in "".join(text.translate(_BOX_DRAWING).split())
 
 
 def test_learning_fresh_db_ok(monkeypatch, capsys, tmp_path):
@@ -438,11 +482,26 @@ def test_memory_freshness_ignores_ancient_memori_db(monkeypatch, capsys, tmp_pat
     rc = cmd.cmd_doctor(_args(**snap), projects)
     assert rc == 0
     out = capsys.readouterr().out
+    # The status marker stays RAW: it is the row's first token, so no word wrap
+    # or fold can reach it, and checking it unflowed keeps this case honest about
+    # the row having been rendered as a row at all.
     assert "memory-stale [ok]" in out
+    # The sentence sits ~20 chars into the row, before any machine-dependent
+    # data, so a wrap can never land inside it (swept across tmp roots 48..210
+    # chars: never split). Kept raw on purpose — the stricter the normaliser,
+    # the less layout the assertion tolerates.
     assert "memory fresh: newest MEMORY.md is" in out
-    # the freshest file is named, and it is a MEMORY.md, not memories.db
-    assert "backend-engineer/memories/MEMORY.md" in out
-    assert "memory-stale" in out and "memories.db" not in out.split("memory-stale")[-1]
+    # the freshest file is named, and it is a MEMORY.md, not memories.db.
+    # Layout-proof, both ways: the path is ONE token ~90 chars long, so Rich
+    # folds it mid-word (measured: this raw assert is RED for tmp roots of
+    # 152..185 chars and GREEN below — the same machine lottery as
+    # `test_all_memory_files_stale_is_problem`, at the other end of the range),
+    # and the negative form would be satisfied by a fold that split
+    # "memories.db" in two. `_says` removes layout whitespace only; the
+    # characters must still appear contiguously and in order.
+    assert _says(out, "backend-engineer/memories/MEMORY.md")
+    assert "memory-stale" in out and not _says(out.split("memory-stale")[-1],
+                                               "memories.db")
 
 
 def test_newest_across_profiles_is_picked_and_named(monkeypatch, capsys, tmp_path):
@@ -473,7 +532,11 @@ def test_newest_across_profiles_is_picked_and_named(monkeypatch, capsys, tmp_pat
     # fresh -> ok (even though two other profiles are stale)
     assert rc == 0
     assert "memory-stale [ok]" in out
-    assert "profiles/newest/memories/MEMORY.md" in out
+    # The named path is one long token, so Rich folds it mid-word for a deep
+    # tmp root (measured: this raw assert goes RED at tmp roots 162..194 chars,
+    # green at every shorter one). `_says` asks what the row says; the marker
+    # above stays raw so the case still proves the row was rendered.
+    assert _says(out, "profiles/newest/memories/MEMORY.md")
 
 
 def test_all_memory_files_stale_is_problem(monkeypatch, capsys, tmp_path):
@@ -675,11 +738,17 @@ def test_learning_missing_mem_config_is_reported_not_crash(monkeypatch, capsys, 
     assert rc == 1                       # reported, exits non-zero
     out = capsys.readouterr().out
     assert "memory-db [UNVERIFIED]" in out
-    # Rich word-wraps the long panel line (the tmp_path prefix pushes the
-    # phrase past width 200), splitting it across two lines — so assert the
-    # first part, which stays intact on the wrapped line. Content check
-    # preserved: doctor reports WHY the DB could not be read.
-    assert "cannot read the" in out
+    # Asserted against `_flowed(out)`. The comment here used to claim the phrase
+    # "stays intact on the wrapped line" because the tmp_path prefix pushes it
+    # past width 200 — that is exactly the layout assumption this file is now
+    # free of: where the line breaks is set by the tmp root length, and the
+    # break lands INSIDE this phrase for tmp roots of 119..127 and 151..155
+    # chars (swept 48..210). The word-boundary reflow is enough here (every word
+    # of the phrase survives), and the raw marker above stays raw: it is the
+    # row's first token, so it cannot wrap and still proves a row was rendered.
+    # Content check preserved: doctor reports WHY the DB could not be read.
+    flow = _flowed(out)
+    assert "cannot read the" in flow
 
 
 def test_learning_json_shape(monkeypatch, capsys, tmp_path):
