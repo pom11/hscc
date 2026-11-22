@@ -1189,6 +1189,22 @@ def _sparkrun_default_cluster_matches_serving(_runner=None,
         return Check("sparkrun cluster vs serving", True,
                      detail="unparseable cluster default output — skipped",
                      fatal=False)
+    if not isinstance(data, dict):
+        # ``sparkrun cluster default --json`` prints the literal ``null`` on a host
+        # with no default cluster — measured under the roster-wide HOME seal (empty
+        # HOME, so the real sparkrun resolves no ``~/.config/sparkrun``; that posture
+        # is what a CI runner has too). ``json.loads`` ACCEPTS ``null``, so the only
+        # thing between that host and a traceback was this branch: without it the
+        # mapping access below crashed doctor's preflight and the whole installer
+        # died with it — 4 isolated-install cases in hscc-bootstrap went from skip
+        # (blind ~ gate) to RED (honest gate) the moment the leg grew a real-tree
+        # seam (t_5b560adf). A document that is not a mapping carries no hosts, so
+        # it is the same "nothing to compare" answer as an empty cluster, and
+        # report-only like every other branch in this check.
+        return Check("sparkrun cluster vs serving", True,
+                     detail=f"cluster default returned {type(data).__name__}, "
+                            "not a mapping — skipped",
+                     fatal=False)
     cluster_hosts = {h for h in (data.get("hosts") or []) if h}
     serving_nodes = set()
     for u in _serving_units(_serving_raw):

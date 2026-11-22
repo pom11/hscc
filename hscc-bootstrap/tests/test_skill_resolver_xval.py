@@ -31,15 +31,20 @@ from pathlib import Path
 
 import pytest
 
+import hermes_tree
 import skill_guard
 
 REPO = Path(__file__).resolve().parent.parent.parent
-REAL_VENV_PY = Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
-REAL_HERMES_AGENT = Path.home() / ".hermes" / "hermes-agent"
 
+#: What this file needs from the machine, in one place, so the collection-time
+#: gate and the call-time resolver below state the SAME thing (hermes_tree). The
+#: live resolver is consulted by spawning THIS checkout's venv interpreter against
+#: THIS checkout's tree, so both halves must come from one candidate.
+CAPABILITY = ("test_skill_resolver_xval — cross-checking the resolution mirror "
+              "against the live resolver in a real hermes-agent checkout")
 needs_hermes = pytest.mark.skipif(
-    not (REAL_VENV_PY.is_file() and REAL_HERMES_AGENT.is_dir()),
-    reason="needs the real Hermes checkout + venv to consult the live resolver")
+    not hermes_tree.runtime_available(),
+    reason=hermes_tree.runtime_skip_reason(CAPABILITY))
 
 SKILL = "sdlc-review"
 
@@ -92,10 +97,11 @@ def _real_verdict(home: Path) -> bool:
     ``Ambiguous skill name`` label instead). Anything the probe could not
     classify aborts here rather than defaulting to "loads".
     """
+    agent_dir, venv_python = hermes_tree.runtime_or_skip(CAPABILITY)
     probe = home / "_probe.py"
     probe.write_text(_PROBE, encoding="utf-8")
     out = subprocess.run(
-        [str(REAL_VENV_PY), str(probe), str(REAL_HERMES_AGENT)],
+        [str(venv_python), str(probe), str(agent_dir)],
         capture_output=True, text=True, env={**os.environ, "HERMES_HOME": str(home)},
         cwd=str(home), timeout=120)
     assert out.returncode == 0, f"probe failed: {out.stderr[-800:]}"
