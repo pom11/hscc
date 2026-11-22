@@ -394,15 +394,20 @@ struct ClusterMonitorTables: Equatable {
                                     backendRows: backendRows.count)
     }
 
-    static func project(_ response: MonitorResponse?) -> ClusterMonitorTables? {
+    static func project(_ response: MonitorResponse?, now: Date = Date()) -> ClusterMonitorTables? {
         guard let response, let hosts = response.json?.hosts, !hosts.isEmpty else {
             return nil
         }
         let rows = response.serving ?? []
+        // The parked set comes from the shared index, so this cells-twin of
+        // `ClusterMonitorViewModel` renders a backend on a parked machine the
+        // same way that view-model does — the two copies exist to split layout
+        // from cells, not to disagree about what a parked machine is.
+        let parked = FleetProjection.parkedIndex(of: response)
         return ClusterMonitorTables(
             hostCount: hosts.count,
             hostRows: hosts.map(CLIMonitorHostRow.init(node:)),
-            backendRows: rows.map(CLIMonitorServingRow.init(row:)),
+            backendRows: rows.map { CLIMonitorServingRow(row: $0, parked: parked, now: now) },
             totalRows: CLIMonitorServingTotal.summing(rows: rows),
             details: hosts.map(ClusterMonitorHostDetail.init(host:)),
             proxyError: response.serving_proxy_error,
