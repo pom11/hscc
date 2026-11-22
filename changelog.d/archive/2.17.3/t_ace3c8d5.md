@@ -60,7 +60,7 @@ task: t_ace3c8d5
   module is not importable there — the very seam) and printed `connect=0` for
   everything; a `builtins.__import__` hook patched a partially-initialised module and
   corrupted the loader into returning `None`. And `HERMES_DELEGATED_CHILD_CONTEXT`
-  (this worker exports `/Users/desac/.hermes`) fences every path under that root —
+  (this worker exports `~/.hermes`) fences every path under that root —
   including pytest's `TMPDIR` — routing `connect()` to its read-only early-return and
   masking both sibling imports, so the sweep was re-run with `-u
   HERMES_DELEGATED_CHILD_CONTEXT -u HERMES_KANBAN_DB -u HERMES_KANBAN_BOARD`; both
