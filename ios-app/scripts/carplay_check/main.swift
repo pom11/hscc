@@ -29,6 +29,10 @@ let iso = ISO8601DateFormatter()
 
 // MARK: Fake fleet (fake hosts only: 192.0.2.0/24)
 
+/// A sample that reports a hostname. Since apps 1.4.4 the hostname is NOT the
+/// label — the node is labelled by the last octet of its IP — so these names
+/// being present and unused by every expectation below is the point: a surface
+/// that fell back to the hostname would fail here, not quietly agree.
 func sample(_ name: String, util: String, temp: String, power: String) -> MonitorSample {
     MonitorSample(hostname: name, gpu_util_pct: util, gpu_temp_c: temp,
                   gpu_power_w: power)
@@ -36,16 +40,16 @@ func sample(_ name: String, util: String, temp: String, power: String) -> Monito
 
 let hosts = [
     MonitorNode(host: "192.0.2.11", error: nil,
-                sample: sample("S1", util: "34", temp: "61", power: "120"),
+                sample: sample("cad-orchestrator", util: "34", temp: "61", power: "120"),
                 used_slots: 1, free_slots: 2, workloads: nil),
     MonitorNode(host: "192.0.2.12", error: nil,
-                sample: sample("S2", util: "81", temp: "68", power: "240"),
+                sample: sample("cad-2", util: "81", temp: "68", power: "240"),
                 used_slots: 1, free_slots: 2, workloads: nil),
     MonitorNode(host: "192.0.2.13", error: nil,
-                sample: sample("S3", util: "92", temp: "72", power: "260"),
+                sample: sample("cad-3", util: "92", temp: "72", power: "260"),
                 used_slots: 1, free_slots: 2, workloads: nil),
     MonitorNode(host: "192.0.2.14", error: nil,
-                sample: sample("S4", util: "12", temp: "58", power: "80"),
+                sample: sample("cad-4", util: "12", temp: "58", power: "80"),
                 used_slots: 0, free_slots: 2, workloads: nil),
 ]
 
@@ -75,13 +79,17 @@ if let cluster = CarPlayClusterReading(response: monitor, fetchedAt: now) {
     check(cluster.gauges.count == 4, "four gauges")
     equal(cluster.headline, "4/4 up", "headline")
     equal(cluster.detailLine, "4/4 up · 231 t/s", "detail")
-    equal(cluster.gauges[0].detailLine, "S1 · 34% · 41 t/s", "subtitle-equivalent")
-    equal(cluster.gauges[0].rowTitle, "S1 ◆", "orchestrator mark")
-    equal(cluster.gauges[1].rowTitle, "S2", "no invented orchestrator mark")
+    // The rows are labelled by the last octet of the host the route returned
+    // (192.0.2.11 -> "11"), even though each sample reports a hostname: the
+    // operator's 1.4.4 rule is the octet, and CarPlay reads it through the same
+    // shared path as the widget (`FleetNodeLine.label`).
+    equal(cluster.gauges[0].detailLine, "11 · 34% · 41 t/s", "subtitle-equivalent")
+    equal(cluster.gauges[0].rowTitle, "11 ◆", "orchestrator mark")
+    equal(cluster.gauges[1].rowTitle, "12", "no invented orchestrator mark")
     equal(cluster.gauges[2].tempText, "72°", "temp text")
     check(cluster.gauges[2].tempBand == .warn, "72 °C is warn")
     check(cluster.gauges[1].tempBand == .ok, "68 °C is ok")
-    check(cluster.hottest?.label == "S3", "hottest node")
+    check(cluster.hottest?.label == "13", "hottest node")
     equal(cluster.modelLine, "orchestrator-model ×1 · qwen3.8-flash-next ×3",
           "model line")
 } else {
@@ -334,15 +342,17 @@ guard let pausedMonitor = try? JSONDecoder().decode(MonitorResponse.self,
 // machine the operator parked; `paused (reason, since)` is the one it requires.
 check(parked.nodes.count == 4, "the car lists the four hosts the frame reached")
 check(parked.tally.nodesPaused == 3, "the parked node the frame omitted is still counted")
-check(parked.nodes[0].isPaused, "row 0 (.11) is read as parked")
+check(parked.nodes[0].isPaused, "row 0 (host 192.0.2.11) is read as parked")
 equal(parked.nodes[0].statusText, "paused (training run, 3h ago)",
       "parked with reason and since")
 equal(parked.nodes[0].rowSubtitle, "paused (training run, 3h ago)",
       "the image row's subtitle is the verdict, not a pair of dashes")
 equal(parked.nodes[0].detailLine, "\(parked.nodes[0].label) · paused (training run, 3h ago)",
       "the pushed list's subtitle-equivalent carries the verdict")
-// The label half is the SHARED path's (`FleetNodeLine.label` = `displayLabel`),
-// never a name this file chose: the §7 proof is that no address reaches it.
+// The label half is the SHARED path's (`FleetNodeLine.label` =
+// `MonitorNode.displayLabel` = `MonitorNode.nodeLabel`), never a name this file
+// chose, and never a positional row number either: the §7 proof is that no
+// address reaches it, and the 1.4.4 proof is that it is the octet.
 check(parked.nodes.allSatisfy { !$0.label.contains("192.0.2.") },
       "no parked or live row label puts an address on the car screen (§7)")
 check(parked.nodes[0].detailText.hasPrefix("paused ("), "the pushed list leads with the verdict")
@@ -352,7 +362,7 @@ check(!parked.nodes[0].rowSubtitle.contains("idle"), "a parked subtitle never sa
 
 // The second parked row has `paused_reason: ""` and `paused_since: null`: silence,
 // not values, so it degrades to the bare word rather than to `paused (, )` or a dash.
-check(parked.nodes[1].isPaused, "row 1 (.12) is parked even though it answered")
+check(parked.nodes[1].isPaused, "row 1 (host 192.0.2.12) is parked even though it answered")
 equal(parked.nodes[1].statusText, "paused", "an empty reason and a null since read bare paused")
 equal(parked.nodes[1].tpsText, "—", "a parked engine says —, not idle")
 check(!parked.nodes[1].detailText.contains("idle"), "no parked row falls through to idle")
@@ -395,7 +405,7 @@ if let parkedOnly = CarPlayClusterReading(response: allParked, fetchedAt: pauseN
 if let control = CarPlayClusterReading(response: monitor, fetchedAt: now) {
     equal(control.headline, "4/4 up", "unpaused headline is unchanged")
     equal(control.nodes[0].rowSubtitle, "34% · 41 t/s", "unpaused subtitle is unchanged")
-    equal(control.nodes[0].detailLine, "S1 · 34% · 41 t/s", "unpaused detail line is unchanged")
+    equal(control.nodes[0].detailLine, "11 · 34% · 41 t/s", "unpaused detail line is unchanged")
     check(control.nodes.allSatisfy { !$0.isPaused }, "the control fleet has no parked row")
     let controlDown = MonitorResponse(
         success: true, error: nil,

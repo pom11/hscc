@@ -314,9 +314,9 @@ func monitorTablesFromFixtures(_ c: DecodeCheck) {
              liveDetail.clock == "806 MHz" && liveDetail.uptime == "22d 2h"
                 && liveDetail.net == "↓2.4 KB/s ↑14.2 KB/s",
              "clock=\(liveDetail.clock) up=\(liveDetail.uptime) net=\(liveDetail.net)")
-    c.expect("monitor-tables", "\(label): live — the detail label is a hostname, not an address (§7)",
+    c.expect("monitor-tables", "\(label): live — the detail label is the node's last octet, not an address (§7)",
              tables.details.allSatisfy { !$0.label.hasPrefix("192.0.2.") }
-                && liveDetail.label == "node-1", "got \(liveDetail.label)")
+                && liveDetail.label == "11", "got \(liveDetail.label)")
     let hostRow = tables.hostRows[0]
     c.expect("monitor-tables", "\(label): live — temp/power/util columns carry the threshold verdict",
              hostRow.cpuTempLevel == .ok && hostRow.gpuPowerLevel == .unknown

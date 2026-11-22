@@ -46,14 +46,16 @@ struct ClusterNodeTally: Equatable {
     /// there is nothing to tag. `0` = the route named no parked node; nil = the
     /// read said nothing about nodes at all.
     let nodesPaused: Int?
-    /// Display labels of the nodes that did not answer, in the order the route
-    /// listed them (`.NNN` tails via `MonitorNode.displayLabel`, never an
-    /// address — §7). Parked nodes are NOT in here: they are in `pausedLabels`.
+    /// Display labels of the nodes that did not answer, in `FleetNodeOrder`'s
+    /// order — by last octet, numerically — via `MonitorNode.displayLabel`,
+    /// never an address (§7). Parked nodes are NOT in here: they are in
+    /// `pausedLabels`.
     let downLabels: [String]
-    /// Display labels of the parked nodes, in the order the route listed the
-    /// tagged rows and then the top-level set. Same §7 rule as `downLabels` —
-    /// a `.NNN` tail or a reported hostname, never the pause record's host
-    /// string, which is an address the moment the operator paused by IP.
+    /// Display labels of the parked nodes, same `FleetNodeOrder` order and same
+    /// §7 rule as `downLabels` — a last octet, or the reported short name when
+    /// the payload carries no IPv4 for that machine. The pause record's own host
+    /// string is never drawn: it is an address the moment the operator paused by
+    /// IP.
     let pausedLabels: [String]
 
     /// "The read told us nothing about nodes." Every field nil, no labels.
@@ -87,13 +89,23 @@ struct ClusterNodeTally: Equatable {
             .filter { $0.isPaused }
             .filter { ($0.key.map { !pausedKeys.contains($0) }) ?? true }
         let down = hosts.filter { !$0.isUp && !$0.isPaused }
+        // Both label lists come out in `FleetNodeOrder`'s order — by last octet,
+        // numerically — not in the order sparkrun happened to put them in the
+        // frame. These are the lines a tile names machines by ("down: 9, 10"),
+        // so they read in the same order every other node list in the app does.
+        let downLabels = FleetNodeOrder.sortedByOctet(down,
+                                                     label: { $0.displayLabel })
+            .map { $0.displayLabel }
+        let pausedLabels = FleetNodeOrder.sortedByOctet(
+            paused.map { $0.displayLabel }
+                + extra.compactMap { FleetPausedNode(entry: $0, in: hosts)?.label },
+            label: { $0 })
         return ClusterNodeTally(nodesUp: hosts.filter { $0.isUp }.count,
                                 nodesDown: down.count,
                                 nodesTotal: hosts.count,
                                 nodesPaused: paused.count + extra.count,
-                                downLabels: down.map { $0.displayLabel },
-                                pausedLabels: paused.map { $0.displayLabel }
-                                    + extra.compactMap { FleetPausedNode(entry: $0, in: hosts)?.label })
+                                downLabels: downLabels,
+                                pausedLabels: pausedLabels)
     }
 }
 
@@ -173,6 +185,59 @@ struct FleetVerdict: Equatable {
 }
 
 // ---------------------------------------------------------------------------
+// The order: every node list a surface draws is ordered by LAST OCTET,
+// numerically.
+//
+// The label rule above makes a node's identity its last octet, so the operator
+// reads the fleet in the same order they read an address: 2, 9, 10, 100. A
+// string sort would file `10` before `9` and `100` before `9` too — the same
+// fleet would appear in a different order on two tiles of the same app
+// depending on whether a host got a single-digit address, and the whole point of
+// the label rule is that a number means the same machine everywhere.
+//
+// It lives HERE rather than in a view because it is one rule with six callers
+// (the widget's node rows, the C1 column, the parked list, the two label lists
+// in the tally, the desktop dropdown's host rows and CarPlay's pushed list), and
+// every one of them already reads the rows this file projects. A surface that
+// re-sorted would be a second order rule, which is what this file exists to
+// prevent.
+// ---------------------------------------------------------------------------
+
+enum FleetNodeOrder {
+    /// The numeric key of a label that IS an octet (`"10"` → 10), nil for a
+    /// hostname fallback and for anything a numeric parse refuses (a digit run
+    /// too long for `Int` is a hostname-shaped thing, not an octet).
+    static func octetKey(_ label: String) -> Int? {
+        guard !label.isEmpty, label.allSatisfy({ $0.isNumber }) else { return nil }
+        return Int(label)
+    }
+
+    /// THE order for a list of nodes, given how to read each one's label.
+    ///
+    /// Octet-labelled rows first, lowest octet first; hostname-labelled rows
+    /// after them, in the order the route listed them; equal keys keep their
+    /// route order. The route position is carried into the comparison on
+    /// purpose — Swift's `sorted` makes NO stability guarantee, so "stable by
+    /// octet" has to be implemented rather than assumed, or the same payload
+    /// can come out in a different order on two runs.
+    static func sortedByOctet<T>(_ rows: [T], label: (T) -> String) -> [T] {
+        rows.enumerated()
+            .sorted { lhs, rhs in
+                let left = octetKey(label(lhs.element))
+                let right = octetKey(label(rhs.element))
+                switch (left, right) {
+                case let (a?, b?) where a != b: return a < b
+                case (.some, .some): return lhs.offset < rhs.offset
+                case (.some, .none): return true
+                case (.none, .some): return false
+                case (.none, .none): return lhs.offset < rhs.offset
+                }
+            }
+            .map(\.element)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The serving table, projected once for every surface.
 //
 // `hscc cluster monitor` prints one row per (backend, model): model, run/wait,
@@ -227,6 +292,13 @@ struct ServingSummary: Equatable {
 /// table together give us. Every field is a route field, not a derived state.
 struct FleetNodeLine: Equatable, Identifiable {
     let label: String
+    /// The hostname the node reported about itself (`sample.hostname`), when it
+    /// reported one. This is NOT the label — since apps 1.4.4 the label is the
+    /// last octet (`MonitorNode.nodeLabel`) — it is the name kept for the one
+    /// place a name has always been the point: the accessibility label a surface
+    /// speaks. Nil when the route carried none, and a caller must then fall back
+    /// to `label` rather than to an address (§7).
+    let reportedName: String?
     let model: String?
     let isUp: Bool
     let gpuPct: Double?
@@ -260,6 +332,8 @@ struct FleetNodeLine: Equatable, Identifiable {
 
     init(host: MonitorNode, serving: [ServingRow]?) {
         self.label = host.displayLabel
+        let reported = host.sample?.hostname?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.reportedName = (reported?.isEmpty == true) ? nil : reported
         self.isUp = host.isUp
         self.isPaused = host.isPaused
         let reason = host.paused_reason?
@@ -312,12 +386,21 @@ struct FleetProjection: Equatable {
         }
         self.tally = ClusterNodeTally.project(response)
         self.serving = ServingSummary(rows: response.serving)
-        self.nodes = hosts.map { FleetNodeLine(host: $0, serving: response.serving) }
-        // The parked set, ordered as the payload states it: the rows the route
-        // tagged (in frame order) then the top-level entries the frame never
-        // listed. Both halves are de-duplicated by the route's own identity rule
-        // (`PauseContract.nodeKey`), because a span record parks a whole unit
-        // and the same machine can arrive tagged AND named top-level.
+        // Octet order, not frame order. `nodes` IS the node list every surface
+        // draws — the widget's rows, the C1 column, CarPlay's pushed list, the
+        // desktop dropdown's hosts — so ordering it once here is what makes
+        // "stable by octet" true everywhere at once, and no view has to sort
+        // (a view that sorted would be a second order rule).
+        self.nodes = FleetNodeOrder.sortedByOctet(
+            hosts.map { FleetNodeLine(host: $0, serving: response.serving) },
+            label: { $0.label })
+        // The parked set, assembled as the payload states it — the rows the
+        // route tagged (in frame order) then the top-level entries the frame
+        // never listed — and then put in `FleetNodeOrder`'s octet order like
+        // every other node list. Both halves are de-duplicated by the route's
+        // own identity rule (`PauseContract.nodeKey`), because a span record
+        // parks a whole unit and the same machine can arrive tagged AND named
+        // top-level.
         var listed: [FleetPausedNode] = hosts.compactMap { host in
             host.isPaused ? FleetPausedNode(node: host) : nil
         }
@@ -329,7 +412,7 @@ struct FleetProjection: Equatable {
                 listed.append(match)
             }
         }
-        self.paused = listed
+        self.paused = FleetNodeOrder.sortedByOctet(listed, label: { $0.label })
         let workloads = hosts.flatMap { $0.workloads ?? [] }
         let ids = Set(workloads.compactMap { $0.id })
         if !ids.isEmpty {
@@ -375,9 +458,9 @@ extension FleetProjection {
 /// Built from either half of the payload: a tagged host row (which can carry a
 /// reported hostname) or a top-level `paused_nodes` entry (which carries only
 /// the pause record's host string). Both go through the app-wide §7 label rule
-/// `MonitorNode.displayLabel` / `MonitorNode.shortTail`, so neither can put an
-/// address on a tile — an operator who paused a node BY IP gets `.013`, exactly
-/// like every other surface.
+/// `MonitorNode.nodeLabel` — the last octet of the node's IP, or the short name
+/// when its host carries no IPv4 — so neither can put an address on a tile: an
+/// operator who paused a node BY IP gets `13`, exactly like every other surface.
 struct FleetPausedNode: Equatable, Identifiable {
     /// The route's identity for this node (trim + case-fold), used only to
     /// de-duplicate the two halves of the payload. Never drawn.
@@ -404,17 +487,18 @@ struct FleetPausedNode: Equatable, Identifiable {
 
     /// From a top-level `paused_nodes` entry. `hosts` is the frame this payload
     /// carried: when it happens to list the same machine, its `displayLabel`
-    /// wins, because a hostname the route reported is a truer label than the
-    /// tail we can derive from the pause record's string. When the frame did not
-    /// reach the machine — the whole reason the top-level list exists — the
-    /// label is derived with the same rule, never taken from the record.
+    /// wins, because a hostname the route reported is a name the machine gave
+    /// itself. When the frame did not reach the machine — the whole reason the
+    /// top-level list exists — the label is derived from the pause record's host
+    /// string with THE same rule, never taken from it raw: an operator who
+    /// paused a node BY IP gets `13`, exactly like every other surface.
     init?(entry: PausedNodeEntry, in hosts: [MonitorNode]) {
         guard entry.isPaused, let key = entry.key else { return nil }
         self.key = key
         if let row = hosts.first(where: { PauseContract.nodeKey($0.host) == key }) {
             self.label = row.displayLabel
         } else {
-            self.label = MonitorNode.shortTail(entry.node ?? "")
+            self.label = MonitorNode.nodeLabel(host: entry.node ?? "", reportedHostname: nil)
         }
         self.reason = FleetPausedNode.normalised(entry.paused_reason)
         self.since = entry.paused_since

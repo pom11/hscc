@@ -540,13 +540,15 @@ c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/L
              && m.nodes.allSatisfy { $0.sample?.cpuUsagePct != nil && $0.sample?.memUsedPct != nil }
              && m.nodes.allSatisfy { $0.sample?.gpuUtilPct != nil },
              "node metrics stopped parsing")
-    c.expect("v1_cluster_monitor.json", "displayLabel never leaks the node's LAN address (§7)",
+    c.expect("v1_cluster_monitor.json", "displayLabel is the node's last octet and never its address (§7)",
              m.nodes.allSatisfy { node in
-                 !node.displayLabel.contains(node.host)
-                 && (node.displayLabel == node.sample?.hostname
-                     || (node.displayLabel.hasPrefix(".")
-                         && node.displayLabel.dropFirst().allSatisfy { ch in ch.isNumber }))
-             }, "a surface could render a full address")
+                 // Computed here rather than through `lastOctet` so the leg does
+                 // not agree with itself: the octet is what the fixture's own
+                 // host string says its last component is.
+                 let own = node.host.split(separator: ".").last.map(String.init) ?? ""
+                 return !holdsDottedQuad(node.displayLabel) && node.displayLabel != node.host
+                     && !own.isEmpty && node.displayLabel == own
+             }, "a surface could render a full address, or a label stopped being the octet")
     c.expect("v1_cluster_monitor.json", "shortTail reduces an address to its last octet (§7)",
              m.nodes.allSatisfy { MonitorNode.shortTail($0.host)
                  == "." + ($0.host.split(separator: ".").last.map(String.init) ?? "") }
@@ -823,6 +825,16 @@ monitorRateRules(c)
 monitorDetailRules(c)
 monitorPlans(c)
 monitorTablesFromFixtures(c)
+// ---- The node label and the octet order (t_60c8a3e1, apps 1.4.4) ---------
+// The checks are in node_label.swift; only the calls are here. They EXECUTE
+// Sources/Shared/SharedModels.swift's `MonitorNode.nodeLabel` (the ONE label
+// rule: a node is named by the last octet of its IP, with a hostname fallback)
+// and `FleetNodeOrder` (lists ordered by that octet numerically, not by the
+// address string), which is what every widget, the desktop widgets, the menu bar
+// and CarPlay draw a node row by. Exact inputs are 192.0.2.x — the address
+// guard refuses anything else.
+nodeLabelRules(c)
+nodeOrderRules(c)
 
 // ---- Cluster history (t_b6512c2e) ---------------------------------------
 // The four `v1_cluster_history_*.json` fixtures are NOT hand-typed:

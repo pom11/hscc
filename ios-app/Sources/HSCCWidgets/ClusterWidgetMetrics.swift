@@ -90,10 +90,18 @@ enum ClusterMetricHeat: Equatable {
 /// numbers C1 prints beside it. Every field is a route field (or the serving
 /// row that names the node's backend); no view derives a number of its own.
 struct ClusterC1Node: Equatable, Identifiable {
-    /// The approved C1 short name, `S1`…`Sn` in route order. Hostnames such as
-    /// `gx10-cad0` do not fit the medium node column or a Lock Screen ring.
+    /// The node's shared label: the last octet of its IP (`MonitorNode.nodeLabel`,
+    /// reached here through `FleetNodeLine.label`). Before apps 1.4.4 this was a
+    /// positional row-number name built from the row's index in the frame, which
+    /// named a ROW rather than a machine and reordered with sparkrun; the
+    /// operator replaced it with the octet so a tile names the host they
+    /// recognise. One to three digits, so it still fits the medium node column
+    /// and a Lock Screen ring — the reason the positional name was chosen in the
+    /// first place.
     let label: String
-    /// The node's own hostname, for accessibility and the large table's tooltip.
+    /// The node's own hostname when it reported one, else its label — the name
+    /// an accessibility label speaks (`ClusterWidgetViews`'s `Hottest …`), which
+    /// is a place a name has always been the point. Never an address (§7).
     let hostname: String
     let model: String?
     let isUp: Bool
@@ -105,9 +113,9 @@ struct ClusterC1Node: Equatable, Identifiable {
 
     var id: String { label }
 
-    init(_ node: FleetNodeLine, index: Int) {
-        self.label = "S\(index + 1)"
-        self.hostname = node.label
+    init(_ node: FleetNodeLine) {
+        self.label = node.label
+        self.hostname = node.reportedName ?? node.label
         self.model = node.model
         self.isUp = node.isUp
         self.isOrchestrator = node.isOrchestrator
@@ -293,7 +301,7 @@ struct ClusterC1: Equatable {
         } else {
             self.tokPerSec = nil
         }
-        self.nodes = entry.fleet?.nodes.enumerated().map { ClusterC1Node($1, index: $0) } ?? []
+        self.nodes = entry.fleet?.nodes.map { ClusterC1Node($0) } ?? []
         self.hottestC = nodes.compactMap(\.tempC).max()
         self.modelNames = entry.fleet?.serving.modelNames ?? []
         self.daemonRunning = entry.daemonHost?.daemon_running

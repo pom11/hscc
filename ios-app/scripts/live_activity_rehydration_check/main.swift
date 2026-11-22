@@ -61,7 +61,7 @@ let blind = ClusterHealthSignals(servingState: "unreachable", nodesUp: nil, node
 check("a blind but non-empty bubble is kept",
       !ClusterHealthOrphanRule.isOrphan(blind, updatedAt: quiet2m, now: now))
 let fleetDown = ClusterHealthSignals(servingState: "down", nodesUp: 0, nodesDown: 4,
-                                     nodesTotal: 4, failureLabel: nil, downNodes: [".1"])
+                                     nodesTotal: 4, failureLabel: nil, downNodes: ["1"])
 check("a genuinely down fleet is kept — a zero is an answer",
       !ClusterHealthOrphanRule.isOrphan(fleetDown, updatedAt: quiet2m, now: now))
 
@@ -94,7 +94,7 @@ check("tone: healthy is ok", ClusterHealthReading.tone(healthy) == .ok)
 check("tone: a node down while serving is warn",
       ClusterHealthReading.tone(ClusterHealthSignals(
         servingState: "serving", nodesUp: 3, nodesDown: 1, nodesTotal: 4,
-        failureLabel: nil, downNodes: [".4"])) == .warn)
+        failureLabel: nil, downNodes: ["4"])) == .warn)
 check("tone: down is bad", ClusterHealthReading.tone(fleetDown) == .bad)
 check("tone: an unreachable read with no numbers is bad",
       ClusterHealthReading.tone(blind) == .bad)
@@ -113,22 +113,28 @@ checkLevel("temp 74.9 -> warn", ClusterHealthReading.watchTempLevel(74.9), .warn
 checkLevel("temp 75 -> critical", ClusterHealthReading.watchTempLevel(75), .critical)
 checkLevel("temp not told -> unknown", ClusterHealthReading.watchTempLevel(nil), .unknown)
 
+// Labels as the driver really builds them today: the octet of the host the
+// monitor route returned (192.0.2.11 -> "11"). The column used to invent a
+// positional short name for its own four-slot layout, which named a row and not
+// a machine; `nodeColumns` now draws the line's own shared label, so these four
+// rows carry the same identity every other surface prints.
 let columns = ClusterHealthReading.nodeColumns([
-    ClusterHealthHostLine(label: ".1", gpuPct: "34", gpuTemp: "72 C", gpuPower: "10.00 W",
+    ClusterHealthHostLine(label: "11", gpuPct: "34", gpuTemp: "72 C", gpuPower: "10.00 W",
                           gpuTempLevel: .warn, gpuPowerLevel: .ok, isDown: false,
                           gpuTempC: 72, gpuUtilPct: 34),
-    ClusterHealthHostLine(label: ".2", gpuPct: "85", gpuTemp: "76 C", gpuPower: "20.00 W",
+    ClusterHealthHostLine(label: "12", gpuPct: "85", gpuTemp: "76 C", gpuPower: "20.00 W",
                           gpuTempLevel: .warn, gpuPowerLevel: .warn, isDown: false,
                           gpuTempC: 76, gpuUtilPct: 85),
-    ClusterHealthHostLine(label: ".3", gpuPct: "-", gpuTemp: "-", gpuPower: "-",
+    ClusterHealthHostLine(label: "13", gpuPct: "-", gpuTemp: "-", gpuPower: "-",
                           gpuTempLevel: .unknown, gpuPowerLevel: .unknown, isDown: true),
-    ClusterHealthHostLine(label: ".4", gpuPct: "12", gpuTemp: "64 C", gpuPower: "5.00 W",
+    ClusterHealthHostLine(label: "14", gpuPct: "12", gpuTemp: "64 C", gpuPower: "5.00 W",
                           gpuTempLevel: .ok, gpuPowerLevel: .ok, isDown: false,
                           gpuTempC: 64, gpuUtilPct: 12),
 ])
-check("four node columns, in route order", columns.map(\.shortName) == ["S1", "S2", "S3", "S4"])
+check("four node columns, each labelled by the node's own octet",
+      columns.map(\.shortName) == ["11", "12", "13", "14"])
 checkText("column temp is rounded degrees", columns[0].tempText, "72°")
-checkText("column detail is S1 · util%", columns[0].detailText, "S1 · 34%")
+checkText("column detail is the octet · util%", columns[0].detailText, "11 · 34%")
 check("a down node keeps its column but has no reading", columns[2].isDown
       && columns[2].tempText == "—" && columns[2].utilText == "—")
 check("the row clips at four", ClusterHealthReading.nodeColumns(
@@ -188,7 +194,8 @@ let fourHosts = [upHost("1"), upHost("2"), badHost("3"), badHost("4")]
 let half = ClusterNodeTally.project(monitor(fourHosts))
 check("4 listed / 2 errored -> 2 up, 2 down",
       half.nodesUp == 2 && half.nodesDown == 2 && half.nodesTotal == 4)
-check("the failed nodes are named in route order", half.downLabels == [".3", ".4"])
+check("the failed nodes are named by octet, in octet order",
+      half.downLabels == ["3", "4"])
 check("a down-node label is never an address (§7)",
       !half.downLabels.contains { $0.contains("192.0.2") })
 
