@@ -29,3 +29,25 @@ task: t_d9f2af76
   handed also inherited `PYTHONPATH`, while the arm claims "no PYTHONPATH".
   It now spawns `sys.executable` with `PYTHONPATH` dropped — same failure, for
   the same reason, on every host.
+---
+kind: Verified
+task: t_d9f2af76
+
+- **Guard proven to bite: 7/7 mutants caught, plus a green false-positive arm.**
+  Planting argv0 `"python3"`, a home-prefixed `cwd`, or argv0 hidden behind a
+  local name into `hscc-cluster/tests` each reddened that leg's guard naming the
+  planted file; deleting `BANNED_ARGV0` or `is_home_prefixed` from the detector
+  reddened its own unit tests *and* every leg guard's non-vacuity arm; pointing a
+  guard's sweep root at an empty dir failed the `scanned > 0` assertion instead
+  of passing. Adding `pytest.skip` to a guard left that guard reporting
+  `1 passed, 1 skipped` — silenced, exactly as the card warned — while the
+  no-skip belt reddened. Planting home-prefixed paths as *fixture data* (the
+  `test_registry.py` shape) kept the guard green, which is the arm that
+  distinguishes the AST sweep from the substring ban that would have been deleted.
+  Control green and provenanced, tree clean after every restore.
+- **It catches the bug it was written for.** The detector reports all three faults
+  in the pre-fix `hscc-cluster` source at `df7d517e` (both argv0 `"python"` and the
+  home-prefixed `cwd`) and goes clean on the fixed source at `96a9f38a`. The first
+  attempt at this arm read `origin/main` and printed zero violations — PR #597 had
+  merged mid-card, so "main" already carried the fix; a base arm must pin a sha,
+  not a moving ref.
