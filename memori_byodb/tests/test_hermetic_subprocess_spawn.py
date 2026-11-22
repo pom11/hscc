@@ -52,7 +52,9 @@ guard = _load_detector()
 #: is not looking, and every green below it is unprovenanced.
 _MUST_BE_BANNED = """
 import subprocess
+from pathlib import Path
 subprocess.run(["python", "x.py"], cwd="/Users/operator/dev/hscc")
+subprocess.run([str(Path.home() / "venv" / "bin" / "python"), "y.py"])
 """.strip()
 
 
@@ -63,7 +65,9 @@ def test_the_sweep_bites_on_a_source_that_must_be_banned():
     detector reports as what it is instead of passing.
     """
     kinds = sorted(v.kind for v in guard.scan_source(_MUST_BE_BANNED, "probe.py"))
-    assert kinds == sorted([guard.KIND_INTERPRETER, guard.KIND_HOME_PATH]), (
+    assert kinds == sorted([guard.KIND_INTERPRETER,
+                              guard.KIND_HOME_PATH,
+                              guard.KIND_HOME_EXPRESSION]), (
         "the detector returned %r for a source that is banned by construction: "
         "the sweep below cannot be trusted" % kinds)
 
