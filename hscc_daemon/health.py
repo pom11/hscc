@@ -1788,6 +1788,84 @@ def _proc_cmdline(pid):
         return None
 
 
+# How far the repair verifier may walk DOWNWARD from sparkrun's tracked PID
+# before it stops calling a port owner "our proxy" (t_640be7a2). The live shape
+# is one level (`uvx litellm` wrapper -> litellm child that binds :4000); the
+# cap exists so a mis-stated identity costs a couple of `ps` calls, never a
+# process-table scan.
+PROXY_TRACKED_TREE_MAX_DEPTH = int(
+    os.environ.get("HSCC_PROXY_TRACKED_TREE_MAX_DEPTH", "3"))
+# Hard ceiling on how many PIDs one walk may visit, so a chatty parent (a shell
+# with dozens of children) cannot turn the bounded-depth rule into a wide one.
+PROXY_TRACKED_TREE_MAX_PIDS = int(
+    os.environ.get("HSCC_PROXY_TRACKED_TREE_MAX_PIDS", "64"))
+
+
+def _proc_children(pid):
+    """Direct children of `pid` from the process table, or [] if unreadable.
+
+    Seam for the proxy identity check, same discipline as :func:`_proc_cmdline`:
+    the answer comes from `ps`, never from a guess, and an unreadable answer is
+    an empty list (fail closed — no children means no descendant may be
+    credited with owning the port).
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid=", "-P", str(pid)],
+            capture_output=True, text=True, timeout=5).stdout
+        return [int(p) for p in out.split() if p.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def _proxy_owner_is_tracked_proxy(owner, tracked_pid, max_depth=None):
+    """(matched, depth) — is the port owner the tracked proxy, or ITS OWN child?
+
+    THE PIDS ARE NOT THE SAME PROCESS (t_640be7a2). For ``uvx litellm``
+    sparkrun's state file tracks the WRAPPER, while the socket on :4000 is held
+    by a litellm CHILD of that wrapper — the hollow-PID shape already documented
+    in :func:`_proxy_kill_hollow_tracked`. Comparing the two with ``==`` (the
+    old rule) called a working proxy "repair UNVERIFIED" and then "FAILED" at
+    ERROR level on 2026-11-22 while :4000 answered every request.
+
+    So identity is the tracked PID's PROCESS TREE, walked breadth-first from the
+    tracked PID to at most ``PROXY_TRACKED_TREE_MAX_DEPTH`` levels /
+    ``PROXY_TRACKED_TREE_MAX_PIDS`` processes, and no wider: a port owner that
+    is NOT in that tree stays unmatched. This widens identity to the proxy's own
+    descendants, never to "any pid that happens to own the port".
+
+    Depth is 0 for the tracked PID itself and 1..N for descendants, so callers
+    can say in the log WHICH process served the port.
+    """
+    if not owner or not tracked_pid or int(owner) <= 0 or int(tracked_pid) <= 0:
+        return False, None
+    owner, root = int(owner), int(tracked_pid)
+    if owner == root:
+        return True, 0
+    depth_cap = (PROXY_TRACKED_TREE_MAX_DEPTH if max_depth is None
+                 else int(max_depth))
+    seen = {root}
+    frontier = [root]
+    for depth in range(1, max(0, depth_cap) + 1):
+        nxt = []
+        for pid in frontier:
+            for child in _proc_children(pid):
+                if child == owner:
+                    return True, depth
+                if child in seen:
+                    continue
+                seen.add(child)
+                nxt.append(child)
+                if len(seen) > PROXY_TRACKED_TREE_MAX_PIDS:
+                    # Ceiling reached: stop widening. An owner we never reached
+                    # stays unverified, which is the honest answer.
+                    return False, None
+        frontier = nxt
+        if not frontier:
+            break
+    return False, None
+
+
 def _proxy_listener():
     """(pid, cmdline) of the process LISTENING on PROXY_PORT, or (None, None).
 
@@ -1828,8 +1906,11 @@ def _reap_orphan_proxy_listener(tracked_pid):
 
     Guards, in order, all required before any signal is sent:
       1. no listener -> nothing to do (returns True, port is free).
-      2. the listener IS the tracked PID -> not an orphan, do NOT touch it
-         (that is sparkrun's own process and it can stop it).
+      2. the listener IS the tracked PID **or a descendant of it** -> not an
+         orphan, do NOT touch it (that is sparkrun's own process, or the
+         litellm child of sparkrun's launcher — the t_640be7a2 shape: killing
+         it takes a WORKING :4000 down, which is worse than the bookkeeping
+         mismatch the verifier used to complain about).
       3. the cmdline must mention litellm -> we kill only the thing we mean.
          A foreign listener (a second hscc-api, a dev server) is reported and
          left alone, exactly like the 2.8.0 orphaned-serve heal's contract.
@@ -1839,9 +1920,13 @@ def _reap_orphan_proxy_listener(tracked_pid):
     pid, cmdline = _proxy_listener()
     if pid is None:
         return True
-    if tracked_pid is not None and pid == tracked_pid:
-        log(f"proxy listener on :{PROXY_PORT} is the tracked PID {pid} — "
-            f"not an orphan, leaving it to sparkrun")
+    matched, depth = _proxy_owner_is_tracked_proxy(pid, tracked_pid)
+    if matched:
+        log(f"proxy listener on :{PROXY_PORT} is "
+            + (f"the tracked PID {pid}" if depth == 0 else
+               f"PID {pid}, a depth-{depth} descendant of tracked PID "
+               f"{tracked_pid}")
+            + " — not an orphan, leaving it to sparkrun")
         return False
     if not cmdline or "litellm" not in cmdline.lower():
         log(f"proxy listener on :{PROXY_PORT} is PID {pid} but its cmdline is "
@@ -1904,7 +1989,9 @@ def _proxy_repair_orphan(relaunch_hosts):
       3. `sparkrun proxy start --hosts <fleet>` — plain start, no --restart:
          after 1+2 the port is genuinely free, and --restart's own state-file
          assumptions are what failed us.
-      4. verify the port is now owned by the tracked PID.
+      4. verify the port is now owned by the tracked PID **or a descendant of
+         it** (see :func:`_proxy_owner_is_tracked_proxy` — sparkrun tracks the
+         launcher, the child holds the socket).
 
     STALE-PID REFUSAL (t_90958eb8, step 3b): step 1+2 do NOT guarantee a free
     port — sparkrun's state file can still carry a PID that ``is_running()``
@@ -1952,14 +2039,31 @@ def _proxy_repair_orphan(relaunch_hosts):
         time.sleep(1.0)
         owner, owner_cmd = _proxy_listener()
     tracked_after = _proxy_tracked_pid()
-    verified = (owner is not None and tracked_after is not None
-                and owner == tracked_after)
+    # IDENTITY IS THE PROCESS TREE, NOT ONE PID (t_640be7a2). sparkrun tracks the
+    # `uvx litellm` WRAPPER; the process holding :4000 is usually its litellm
+    # child. The old `owner == tracked` equality called that healthy proxy
+    # UNVERIFIED -> FAILED, which is the false alarm the operator measured on
+    # 2026-11-22 ("port owner 15706, sparkrun tracks 15701" over a proxy that
+    # answered every request).
+    verified, depth = _proxy_owner_is_tracked_proxy(owner, tracked_after)
     if not verified:
         log(f"proxy repair UNVERIFIED on :{PROXY_PORT} — port owner {owner}, "
             f"sparkrun tracks {tracked_after} ({owner_cmd!r})", "WARN")
+    elif depth:
+        log(f"proxy repaired on :{PROXY_PORT}, owned by PID {owner} — a "
+            f"depth-{depth} descendant of tracked PID {tracked_after} "
+            f"(sparkrun tracks the launcher, not the socket owner)")
     else:
         log(f"proxy repaired on :{PROXY_PORT}, owned by tracked PID {owner}")
     return {"ok": bool(res.get("ok")) and verified,
+            # `healthy` is the END-STATE verdict and it is deliberately not the
+            # same thing as `ok`: `ok` also carries the start command's exit
+            # code, which feeds the streak/escalation machinery. A repair whose
+            # proxy IS serving :4000 (verified, whatever the CLI said) must
+            # never be reported to the operator as a FAILED repair at ERROR
+            # level — see the verdict gate in check_proxy (t_640be7a2).
+            "healthy": bool(verified),
+            "owner_depth": depth,
             "port_owner": owner, "tracked_pid": tracked_after,
             "verified": verified, "output": res.get("output", ""),
             # NOTHING listening on the port = :4000 refuses every connection.
@@ -2153,6 +2257,24 @@ def _proxy_adopt_backends(relaunch_hosts):
             "output": res.get("output", ""),
             # NOTHING listening on the port = :4000 refuses every connection.
             "proxy_down": owner is None}
+
+def _proxy_repair_verdict(res, ok_text, incomplete_prefix):
+    """The sentence a repair tick reports — the END STATE decides the wording.
+
+    ``ok`` mixes two things: the start command's exit code (which the streak and
+    escalation machinery need, so it must stay conservative) and the verified
+    verdict. ``healthy`` is the end state a repair exists to produce — the
+    tracked proxy's own process tree serving :4000. Reporting THAT to the
+    operator as ``proxy repair FAILED`` at ERROR level is the t_640be7a2 false
+    alarm, so the healthy-but-not-ok shape gets its own honest sentence instead
+    of a failure verdict derived from pid/exit-code bookkeeping.
+    """
+    if res.get("ok"):
+        return ok_text
+    if res.get("healthy"):
+        return (f"{incomplete_prefix} incomplete (:{PROXY_PORT} IS served by "
+                f"the tracked proxy; the sparkrun command reported a failure)")
+    return f"{incomplete_prefix} incomplete (unverified)"
 
 
 def _router_drift_probe():
@@ -2635,8 +2757,9 @@ def check_proxy(pause_directory=None):
                                 r = _proxy_repair_orphan(start_hosts)
                         else:
                             r = _proxy_repair_orphan(start_hosts)
-                        message = ("repaired" if r.get("ok")
-                                   else "repair incomplete (unverified)")
+                        # t_640be7a2: the END STATE decides the wording — a proxy
+                        # served by the tracked tree is not reported as FAILED.
+                        message = _proxy_repair_verdict(r, "repaired", "repair")
                     elif escalated:
                         # Carry the PREVIOUS attempt's surfaced error into the
                         # escalation banner — the streak that triggered this
@@ -2647,8 +2770,8 @@ def check_proxy(pause_directory=None):
                             start_hosts, prev_streak,
                             _prev.get("relaunch_error") if isinstance(_prev, dict) else "",
                             reason)
-                        message = ("escalated repair" if r.get("ok")
-                                   else "escalated repair incomplete (unverified)")
+                        message = _proxy_repair_verdict(
+                            r, "escalated repair", "escalated repair")
                     else:
                         log(f"relaunching with {start_hosts}"
                             f"{' (--restart: running proxy serves nothing)' if restart else ''}"
@@ -2671,9 +2794,21 @@ def check_proxy(pause_directory=None):
     # NOTHING, so it is not a failed repair and must not read as one (the same
     # argument as `suppressed` / `deferred`, three lines below).
     if not ok and not suppressed and not deferred and not paused_skip:
-        log(f"proxy repair on :{PROXY_PORT} FAILED ({message}): "
-            f"{(r.get('output') or r.get('stderr') or 'no command output')[:400]}",
-            "ERROR")
+        detail = (r.get('output') or r.get('stderr') or 'no command output')[:400]
+        if r.get("healthy"):
+            # t_640be7a2: the port IS served by the tracked proxy's own process
+            # tree, so :4000 answers requests and this tick's verdict is a
+            # bookkeeping mismatch, not an outage. ERROR level here is what made
+            # a HEALTHY proxy look like a failed repair in the 2026-11-22 log
+            # (`proxy repair UNVERIFIED ... port owner 15706, sparkrun tracks
+            # 15701` + `[ERROR] proxy repair FAILED`, while every request was
+            # being served). Still surfaced, as a WARN, because the streak and
+            # the escalation path legitimately stay armed.
+            log(f"proxy repair on :{PROXY_PORT} INCOMPLETE ({message}): "
+                f"{detail}", "WARN")
+        else:
+            log(f"proxy repair on :{PROXY_PORT} FAILED ({message}): "
+                f"{detail}", "ERROR")
     new_streak = _proxy_relaunch_streak() + (1 if attempted else 0)
     # REPAIR NEVER LEAVES :4000 DOWN (t_90958eb8, fix 2). `proxy_down` is the
     # repair's own verdict that NOTHING is listening on the port — i.e. :4000
