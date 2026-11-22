@@ -382,6 +382,206 @@ class TestPauseRefusals:
         assert node_pauses.paused(W1) is None
 
 
+# ── the uniform pool: EVERY replica advertises the orchestrator alias ───────
+# The defect this section pins (#567 → t_51a11d16, the operator's live dry-run):
+# ``serving._served_model_name`` stamps BOTH role aliases on every unit of a
+# uniform pool (hscc_daemon/serving.py:444-464), so a per-unit "serves the
+# orchestrator model" flag is True on EVERY node — and the verb refused the
+# whole fleet, making the feature's first real use require --force. The applied
+# template declares ONE orchestrator_node; the rest are interchangeable behind
+# the proxy. Every host here is an RFC 5737 placeholder (nolive-rule.txt).
+POOL_A = "192.0.2.21"   # the applied template's declared orchestrator_node
+POOL_B = "192.0.2.22"
+POOL_C = "192.0.2.23"
+POOL_D = "192.0.2.24"
+POOL_NODES = (POOL_A, POOL_B, POOL_C, POOL_D)
+POOL_RECIPE = "/srv/recipes/pool.yaml"
+POOL_MODEL = "meta-llm/Pool-8B"
+#: Both aliases on one unit — what a uniform-pool replica actually advertises.
+POOL_SERVED = f"{POOL_MODEL} worker-model orchestrator-model"
+
+POOL_SERVING = {
+    "port": 8000,
+    "uniform_pool": True,
+    "units": [{"id": f"pool-{i}",
+               "role": "orchestrator" if i == 0 else "worker",
+               "nodes": [h], "port": 8000, "recipe": POOL_RECIPE,
+               "model": POOL_MODEL, "tp": 1}
+              for i, h in enumerate(POOL_NODES)],
+}
+
+
+def pool_payload(down=()):
+    """One sweep of the pool; ``down`` hosts are absent from it entirely."""
+    groups = {}
+    for i, h in enumerate(POOL_NODES):
+        if h in down:
+            continue
+        groups.update(_group(f"cid_pool_{i}", POOL_RECIPE, [h], 8000,
+                             model=POOL_MODEL, served=POOL_SERVED))
+    return {"groups": groups, "solo_entries": [], "errors": {},
+            "idle_hosts": [], "preparing_hosts": [], "pending_ops": [],
+            "total_containers": 0, "host_count": 0}
+
+
+def write_applied_state(tmp_path, node, template="pool-8b-v4"):
+    """The applied-template record at the path the SANCTIONED reader uses.
+
+    The conftest redirects ``~/.hscc`` to this test's tmp dir, so writing the
+    real file here makes ``declaration_agreement.load_applied_state`` — the one
+    reader the guard is allowed to use — find a real record. Nothing is patched
+    on the reader itself, which is the point: a guard that re-parsed the file by
+    hand would pass a patched-seam test and fail on a real apply.
+    """
+    path = tmp_path / "hscc" / "applied_template.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "template": template,
+        "applied_at": "2026-11-22T00:00:00",
+        "orchestrator_node": node,
+        "uniform_pool": True,
+        "units": len(POOL_NODES),
+    }))
+    return path
+
+
+@pytest.fixture
+def pool(monkeypatch, tmp_path):
+    """Uniform-pool fleet + an applied record naming POOL_A the orchestrator."""
+    rec = Recorder()
+    monkeypatch.setattr(serving, "load_serving", lambda path=None: POOL_SERVING)
+    monkeypatch.setattr(npe, "fetch_cluster_status",
+                        lambda: (pool_payload(), None))
+    monkeypatch.setattr(util, "run_cmd", rec)
+    write_applied_state(tmp_path, POOL_A)
+    return rec
+
+
+def park(*hosts):
+    """Hold nodes with the pause OVERLAY (parked, still answering the sweep).
+
+    The distinction the guard must get right: a parked replica is not a healthy
+    server, and it is not the same state as a node missing from the sweep. The
+    autouse conftest fixture has already redirected ``node_pauses.HSCC_DIR`` to
+    this test's tmp dir, so this writes an overlay entry and nothing else.
+    """
+    for h in hosts:
+        node_pauses.pause(h, units=[f"pool-{POOL_NODES.index(h)}"],
+                          reason="maintenance")
+
+
+class TestUniformPoolOrchestratorGuard:
+    """The four acceptance cases the operator's dry-run could not get past."""
+
+    def test_pausing_a_replica_is_allowed_and_says_who_still_serves_it(
+            self, pool):
+        rc, out = run(["pause", POOL_B])
+        assert rc == 0, out
+        assert "REFUSED" not in out, out
+        # 4 healthy replicas, this one goes down → 3 others keep the alias up.
+        assert "orchestrator-model stays served by 3 other node(s)" in out, out
+        for other in (POOL_A, POOL_C, POOL_D):
+            assert other in out, f"{other} must be named as a remaining server"
+        assert pool.calls == [], "a dry run must not shell out"
+        assert node_pauses.paused(POOL_B) is None
+
+    def test_declared_orchestrator_node_refuses_with_the_declared_reason(
+            self, pool):
+        rc, out = run(["pause", POOL_A])
+        assert rc == 1, out
+        assert "REFUSED" in out
+        assert "declared orchestrator node" in out, out
+        # The WHY cites the record the reader actually read, not a model name.
+        assert "orchestrator_node=" in out and POOL_A in out, out
+        assert "pool-8b-v4" in out, "the refusal names the applied template"
+        assert pool.calls == []
+        assert node_pauses.paused(POOL_A) is None
+
+    def test_sole_healthy_server_refuses_even_though_replicas_exist(
+            self, pool, monkeypatch):
+        """Others DOWN (missing from the sweep), not paused: this host is the
+        only healthy alias server left, so the pause must be refused."""
+        monkeypatch.setattr(
+            npe, "fetch_cluster_status",
+            lambda: (pool_payload(down={POOL_A, POOL_C, POOL_D}), None))
+        rc, out = run(["pause", POOL_B])
+        assert rc == 1, out
+        assert "REFUSED" in out
+        assert "would leave no healthy unit" in out, out
+        assert pool.calls == []
+        assert node_pauses.paused(POOL_B) is None
+
+    def test_parked_replicas_are_not_counted_as_healthy_servers(self, pool,
+                                                                monkeypatch):
+        """Others PAUSED (still in the sweep), not down: the overlay wins."""
+        park(POOL_A, POOL_C, POOL_D)
+        rc, out = run(["pause", POOL_B])
+        assert rc == 1, out
+        assert "REFUSED" in out
+        assert "would leave no healthy unit" in out, out
+        # The refusal must explain that the visible replicas are parked, or the
+        # operator reads a healthy fleet and an unexplained refusal.
+        assert "paused and therefore not counted" in out, out
+        assert POOL_C in out and POOL_D in out, out
+        assert pool.calls == []
+
+    def test_force_overrides_the_declared_node_refusal(self, pool):
+        rc, out = run(["pause", POOL_A, "--apply", "--force"])
+        assert rc == 0, out
+        assert "note: --force given" in out, out
+        assert "declared orchestrator node" in out, out
+        assert pool.calls, "--force --apply must stop"
+        entry = node_pauses.paused(POOL_A)
+        assert entry is not None and entry["stopped"] is True
+
+    def test_force_overrides_the_no_healthy_server_refusal(self, pool,
+                                                          monkeypatch):
+        monkeypatch.setattr(
+            npe, "fetch_cluster_status",
+            lambda: (pool_payload(down={POOL_A, POOL_C, POOL_D}), None))
+        rc, out = run(["pause", POOL_B, "--apply", "--force"])
+        assert rc == 0, out
+        assert "note: --force given" in out, out
+        assert "would leave no healthy unit" in out, out
+        assert pool.calls, "--force --apply must stop"
+
+    def test_the_note_is_a_dry_run_verdict_too(self, pool, monkeypatch):
+        """The ALLOW note is part of the plan's answer, not of the stop: it must
+        print with no --apply (the operator's dry-run is what was broken)."""
+        rc, out = run(["pause", POOL_C])
+        assert rc == 0, out
+        assert "Dry run: nothing stopped" in out
+        assert "orchestrator-model stays served by" in out
+
+    def test_a_plain_pause_prints_no_orchestrator_note(self, fleet):
+        """Non-uniform template, worker node: unchanged behaviour — no note, no
+        refusal, and no claim about a model this node does not serve."""
+        rc, out = run(["pause", QUIET])
+        assert rc == 0, out
+        assert "orchestrator" not in out.lower(), out
+
+    def test_non_uniform_sole_orchestrator_still_refuses(self, fleet):
+        """Non-uniform template (one dedicated orchestrator unit, no applied
+        record): the healthy-count rule reproduces the old refusal."""
+        rc, out = run(["pause", ORCH])
+        assert rc == 1, out
+        assert "REFUSED" in out
+        assert "would leave no healthy unit" in out, out
+        assert fleet.calls == []
+
+    def test_no_applied_record_is_reported_not_silently_ignored(self, pool,
+                                                                monkeypatch,
+                                                                tmp_path):
+        """A fleet with no applied-template record (hscc-bootstrap writes
+        serving.json by hand) must not lose the healthy-count guard, and must
+        say out loud that the declaration could not be consulted."""
+        (tmp_path / "hscc" / "applied_template.json").unlink()
+        rc, out = run(["pause", POOL_B])
+        assert rc == 0, out
+        assert "orchestrator-model stays served by 3 other node(s)" in out, out
+        assert "applied-template record could not be consulted" in out, out
+
+
 class TestPauseApply:
     def test_apply_stops_every_unit_then_records_the_overlay(self, fleet):
         rc, out = run(["pause", W1, "--apply", "--span", "--reason",
@@ -795,3 +995,73 @@ class TestResumePolicyIsShared:
         assert called == {"resume_host"}, (
             f"_node_resume calls {sorted(called)}; only resume_host belongs "
             f"there — the rest is policy and lives in node_pause_exec")
+
+
+# ── ONE orchestrator guard, both entry points (card t_51a11d16) ────────────
+class TestOrchestratorGuardIsShared:
+    """`hscc node pause` owns NO orchestrator decision of its own.
+
+    #567 put the refusal inline in the verb. The agent tool inherited it by
+    calling the verb — one copy, but a copy that could only see one host, which
+    is why it refused a whole uniform pool. The replacement is ONE function in
+    ``node_pause_exec`` and the verb prints its verdict; these two tests are the
+    teeth behind that "one shared check" requirement. Delete the call and the
+    behavioural refusal tests go red; re-inline any part of the decision and the
+    source pin goes red.
+    """
+
+    def test_the_verb_asks_the_guard_and_prints_only_its_lines(self, pool,
+                                                               monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            npe, "orchestrator_pause_guard",
+            lambda host, **kw: seen.append((host, kw)) or {
+                "verdict": npe.GUARD_REFUSE, "reason": "pinned", "forced": False,
+                "lines": ["REFUSED: pinned by the test"], "others": []})
+        rc, out = run(["pause", POOL_B])
+        assert rc == 1, out
+        assert out.endswith("REFUSED: pinned by the test\n"), out
+        assert len(seen) == 1, seen
+        host, kw = seen[0]
+        assert host == POOL_B
+        assert kw["force"] is False
+        assert kw["plan"]["host"] == POOL_B, (
+            "the verb hands the guard the plan it already computed — a guard "
+            "that swept the fleet again could disagree with the plan printed "
+            "above it, and doubles the sparkrun read")
+        assert pool.calls == [] and node_pauses.paused(POOL_B) is None, \
+            "a refused pause stops nothing, whoever decided the refusal"
+
+    def test_the_verb_holds_no_orchestrator_policy_of_its_own(self):
+        """Source pin: the verb reads the guard's verdict and prints its lines.
+
+        The word ``orchestrator`` may not appear in any string the verb decides
+        on, and the guard's own primitives may not be called from it — the moment
+        either returns, there are two answers to "may I park this node?" and the
+        agent tool is running whichever one the verb forgot to update.
+        """
+        import inspect
+        body = ast.parse(inspect.getsource(unified._node_pause))
+        called = {n.func.attr for n in ast.walk(body)
+                  if isinstance(n, ast.Call) and isinstance(n.func,
+                                                            ast.Attribute)}
+        assert "orchestrator_pause_guard" in called, \
+            "the verb no longer asks the guard — the guard is now dead code"
+        banned = {"orchestrator_flag", "orchestrator_alias_units",
+                  "orchestrator_nodes", "paused_nodes"}
+        assert not (called & banned), (
+            f"_node_pause calls {sorted(called & banned)}; that is policy and "
+            "lives in node_pause_exec")
+        read = {n.attr for n in ast.walk(body) if isinstance(n, ast.Attribute)}
+        assert "serves_orchestrator_model" not in read, \
+            "the plan flag is advisory; the guard is the decision"
+        doc = ast.get_docstring(body) or ""
+        # Comments are not in the AST, so this scans the strings the verb could
+        # print or compare against — prose about the delegation is welcome.
+        said = [n.value for n in ast.walk(body)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and n.value != doc]
+        offending = [s for s in said if "orchestrator" in s.lower()]
+        assert not offending, (
+            f"the verb strings {offending}; the refusal wording belongs to the "
+            "guard so both entry points say the same thing")

@@ -1564,20 +1564,18 @@ def _node_pause(argv):
         print(f"  every node this affects: {', '.join(affected)}")
 
     # ── refusals: each prints WHY, and none of them touches the fleet ──────
-    if p.get("serves_orchestrator_model") and not opts["--force"]:
-        # This one refuses a DRY RUN too, unlike the --span guard below: the
-        # card states it as a refusal of the verb, the plan is already printed
-        # above it so nothing is hidden, and the flag can be True from
-        # "the serving config was unreadable" — a dry run is exactly when the
-        # operator wants to hear that this node is not safe to park.
-        evidence = (p.get("orchestrator_evidence")
-                    or "no evidence recorded with the plan")
-        print(f"REFUSED: {host} serves the orchestrator model.")
-        print(f"  why: {evidence}")
-        print("  Pausing it parks the model every agent in this fleet talks "
-              "to.")
-        print("  Pass --force to pause it anyway.")
-        print("Nothing stopped and nothing recorded.")
+    # The orchestrator refusal is ONE function's verdict, printed verbatim. This
+    # verb deliberately carries no orchestrator wording of its own: the agent
+    # tool path calls this verb, so printing the guard's own lines is what makes
+    # the two entry points agree by construction rather than by luck. It refuses
+    # a DRY RUN too, unlike the --span guard below — the plan is already printed
+    # above it so nothing is hidden, and a dry run is exactly when the operator
+    # wants to hear that this node is not safe to park.
+    verdict = node_pause_exec.orchestrator_pause_guard(
+        host, plan=p, force=opts["--force"])
+    for line in verdict["lines"]:
+        print(line)
+    if verdict["verdict"] == node_pause_exec.GUARD_REFUSE:
         return 1
     if span_units and apply and not opts["--span"]:
         # The opt-in guards the STOP, not the reading of the plan: a dry run
@@ -1599,9 +1597,6 @@ def _node_pause(argv):
         # hurt the fleet is a stop nobody opted into).
         print("note: --span without --apply still stops nothing "
               "(dry-run is the default).")
-    if opts["--force"] and not p.get("serves_orchestrator_model"):
-        print("note: --force given, but this host is not flagged as serving "
-              "the orchestrator model.")
 
     if not units:
         print("  nothing to stop on this node")

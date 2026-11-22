@@ -257,6 +257,288 @@ def orchestrator_flag(host, serving_dict, live_entries=None):
     return False, f"serving config declares no orchestrator unit on {host}"
 
 
+# ── who serves the orchestrator alias, fleet-wide ──────────────────────────
+def _live_serves_alias(live, declared_match):
+    """Whether one swept workload serves the orchestrator-model alias.
+
+    Two independent proofs, either sufficient: the live workload advertises the
+    alias token, or the serving.json unit it matched is declared
+    ``role == "orchestrator"`` (a unit may serve the orchestrator under its
+    concrete model name only, and it may advertise the alias without the config
+    having been re-applied — the two sources corroborate each other, they do
+    not gate each other).
+    """
+    if _ORCHESTRATOR_ALIAS in str(live.get("served_model_name") or "").split():
+        return True
+    return bool(declared_match) and declared_match.get("role") == "orchestrator"
+
+
+def orchestrator_alias_units(serving_dict, live_entries):
+    """Every LIVE unit serving the orchestrator alias, wherever it runs.
+
+    This is the fleet-wide view the guard needs, and it is deliberately NOT the
+    same question as :func:`orchestrator_flag` ("does THIS host serve it?").
+    Under a ``uniform_pool`` template every replica advertises the alias
+    (``serving._served_model_name`` stamps both aliases), so a per-unit flag
+    cannot tell the orchestrator node from a interchangeable replica — that
+    confusion is what made `hscc node pause` refuse every node in the fleet
+    (#567, replaced by :func:`orchestrator_pause_guard`).
+
+    Only swept workloads are listed: a declared unit the sweep did not show is
+    not running, so it can only ever subtract from the healthy count, never
+    add to it, and pretending otherwise would count a stopped server as a live
+    one. ``observed`` is kept visible so a caller can see the difference
+    between "launched across these nodes" and "the sweep saw containers here".
+    """
+    declared = _serving_units(serving_dict)
+    out = []
+    for live in (live_entries or []):
+        match, _why = _find_declared_unit(declared, live)
+        if not _live_serves_alias(live, match):
+            continue
+        nodes = _hosts_of(live.get("nodes"))
+        out.append({
+            "unit_id": (match or {}).get("id") or live.get("cluster_id") \
+                or ",".join(nodes),
+            "role": "orchestrator" if (match or {}).get("role") == "orchestrator" \
+                else "alias",
+            "nodes": nodes,
+            "observed_nodes": _hosts_of(live.get("observed_nodes")),
+            "observed": bool(live.get("observed_nodes")),
+        })
+    return out
+
+
+# ── THE orchestrator guard (the only one) ──────────────────────────────────
+#: The verdicts :func:`orchestrator_pause_guard` can reach, and the reason
+#: strings behind a refusal. Both entry points print ``verdict`` + ``lines``
+#: verbatim, so the wording is pinned here and nowhere else.
+GUARD_ALLOW = "allow"
+GUARD_REFUSE = "refuse"
+
+REASON_DECLARED_NODE = "declared_orchestrator_node"
+REASON_NO_HEALTHY_SERVER = "no_healthy_orchestrator_server"
+REASON_UNREADABLE = "cannot_rule_out"
+
+
+def _declared_orchestrator_node(applied_state=None):
+    """The applied template's declared orchestrator node, or None.
+
+    Read through the SANCTIONED reader — ``declaration_agreement.load_applied_state``
+    — which is the one function that knows the record's path (``~/.hscc/applied_template.json``),
+    its v1/v2 shape and the top-level ``orchestrator_node`` key (the same key
+    doctor's ``template drift`` row and verify's ``--deployed`` read). This
+    module does not open, parse or glob that file itself.
+
+    Returns ``(node_or_None, note)``. An absent record is NOT an error: a fleet
+    whose serving.json was hand-written (``hscc-bootstrap``) legitimately has no
+    applied-template state, and treating that as "everything is the orchestrator
+    node" is exactly the failure this guard replaces. It is reported in ``note``
+    so the caller can say out loud that the declaration could not be consulted.
+    """
+    state, err = (applied_state if applied_state is not None
+                  else _load_applied_state())
+    if err or not isinstance(state, dict):
+        return None, ("the applied-template record could not be consulted (%s)"
+                      " — the declared orchestrator node was not checked"
+                      % (err,))
+    node = state.get("orchestrator_node")
+    node = node.strip() if isinstance(node, str) else None
+    if not node:
+        return None, "the applied template declares no orchestrator_node"
+    template = state.get("template")
+    where = ("applied template %r declares orchestrator_node=%s"
+             % (template, node) if template else
+             "the applied record declares orchestrator_node=%s" % node)
+    return node, where
+
+
+def _load_applied_state():
+    """Call the sanctioned applied-state reader (lazy: it pulls health/proxy_router)."""
+    try:
+        from . import declaration_agreement as _da
+    except Exception as exc:  # pragma: no cover - import-time only
+        return None, "declaration_agreement unavailable (%s)" % (exc,)
+    try:
+        return _da.load_applied_state()
+    except Exception as exc:  # pragma: no cover - defensive
+        return None, "applied-template record unreadable (%s)" % (exc,)
+
+
+def orchestrator_pause_guard(host, plan=None, serving_dict=None,
+                             status_reader=None, paused=None, force=False,
+                             applied_state=None):
+    """THE orchestrator-model pause guard. One function, both entry points.
+
+    It answers one question — *if this host (and its span) goes down, does
+    anything still serve the orchestrator alias?* — and refuses on exactly two
+    grounds:
+
+    ``declared_orchestrator_node``
+        the host is the applied template's declared ``orchestrator_node``.
+        That node is pinned by the fleet's own template; the other replicas are
+        interchangeable behind the proxy and it is not.
+    ``no_healthy_orchestrator_server``
+        every healthy unit serving the alias is on a node this stop takes down,
+        so pausing would leave ZERO. A replica the pause overlay is holding does
+        NOT count as healthy (it is deliberately parked, and would come back via
+        the resume path, not by being ignored here), and neither does a unit the
+        sweep did not observe running.
+
+    Anything else is an ALLOW, with a note naming how many other nodes keep
+    serving the alias. The host merely *advertising* the alias is not a refusal:
+    under a ``uniform_pool`` template every replica advertises it, so a
+    per-unit flag would refuse the whole fleet and make the feature's first real
+    use require ``--force`` — which defeats the guard (#567, the defect this
+    replaces).
+
+    ``--force`` overrides either refusal; the override is announced in the same
+    ``note: --force given, …`` shape the verb has always used.
+
+    Fail-closed: an unreadable fleet read or serving config yields a REFUSE
+    (``cannot_rule_out``), never an allow — the same posture as
+    :func:`orchestrator_flag`, and the reason says it could not rule the host
+    out rather than claiming it is the orchestrator.
+
+    Args:
+        host: the host about to be paused.
+        plan: the caller's :func:`plan` result (re-used, so one pause never
+            sweeps the fleet twice). Computed when not given.
+        paused: node set held by the pause overlay. Default: one read of the
+            overlay, so the caller cannot get a stale answer by reading it
+            earlier.
+        applied_state: injectable ``(dict_or_None, err_or_None)`` for the
+            applied-template record, for tests.
+
+    Returns a dict: ``verdict``, ``reason``, ``forced``, ``lines`` (the exact
+    lines to print — the callers print them, they do not compose their own),
+    ``others`` (nodes still serving the alias), ``healthy_units`` /
+    ``remaining_units``, plus ``declared_node`` / ``note`` for the record.
+    """
+    host = (host or "").strip()
+    if serving_dict is None:
+        serving_dict = serving.load_serving()
+    if plan is None:
+        plan = _plan_enumerate(host, serving_dict=serving_dict,
+                               status_reader=status_reader)
+    if paused is None:
+        paused = node_pauses.paused_nodes()
+    paused = {str(n).strip() for n in (paused or set()) if str(n).strip()}
+
+    out = {"host": host, "verdict": GUARD_ALLOW, "reason": None, "forced": False,
+           "lines": [], "others": [], "healthy_units": 0, "remaining_units": 0,
+           "declared_node": None, "note": None}
+
+    def _refuse(reason, why, headline):
+        out["verdict"] = GUARD_REFUSE
+        out["reason"] = reason
+        out["lines"] = [
+            "REFUSED: %s %s" % (host, headline),
+            "  why: %s" % why,
+            "  Pausing it parks the model every agent in this fleet talks to.",
+            "  Pass --force to pause it anyway.",
+            "Nothing stopped and nothing recorded.",
+        ]
+
+    # ── cannot rule it out → refuse (fail-closed, like orchestrator_flag) ──
+    if not plan.get("ok"):
+        _refuse(REASON_UNREADABLE,
+                plan.get("error") or "the fleet status read failed",
+                "serves the orchestrator model.")
+        out["lines"][1] = ("  why: %s — pausing now could take the only "
+                           "orchestrator server down, and the fleet could not be "
+                           "read to rule that out" % (plan.get("error"),))
+        return out
+    if serving_dict is None:
+        # The plan flagged this fail-closed too; keep the same answer.
+        _refuse(REASON_UNREADABLE, plan.get("orchestrator_evidence")
+                or "serving config unavailable", "serves the orchestrator model.")
+        return out
+
+    # ── 1. the host is the template's declared orchestrator node ───────────
+    notes = []
+    declared, note = _declared_orchestrator_node(applied_state)
+    out["declared_node"] = declared
+    out["note"] = None if declared else note
+    if declared and host == declared:
+        if not force:
+            _refuse(REASON_DECLARED_NODE,
+                    "%s; this stop takes down %d unit(s) on it (span: %s)"
+                    % (note, len(plan.get("units") or []),
+                       ", ".join(plan.get("span_nodes") or [host])),
+                    "is the applied template's declared orchestrator node.")
+            return out
+        out["forced"] = True
+        notes.append("note: --force given, but this host is the applied "
+                     "template's declared orchestrator node.")
+
+    # ── 2. would this leave no healthy server of the alias? ────────────────
+    affected = {str(n).strip() for n in (plan.get("span_nodes") or [])
+                if str(n).strip()}
+    affected.add(host)
+    alias_units = plan.get("orchestrator_alias_units")
+    if alias_units is None:
+        alias_units = orchestrator_alias_units(
+            serving_dict, _live_entries((status_reader or
+                                         fetch_cluster_status)()))
+    healthy = [u for u in alias_units
+               if u.get("observed")
+               and not (set(u.get("nodes") or []) & paused)]
+    taken = [u for u in healthy
+             if set(u.get("nodes") or []) & affected]
+    remaining = [u for u in healthy if u not in taken]
+    others = sorted({n for u in remaining for n in (u.get("observed_nodes")
+                                                    or u.get("nodes") or [])}
+                    - affected)
+    # Nodes that hold the alias but are being held by the pause overlay: named in
+    # the refusal so "why is this refused when the replica is right there" is
+    # answerable from the terminal, not from the overlay file.
+    parked = sorted({n for u in alias_units for n in (u.get("nodes") or [])}
+                    & paused)
+    out["healthy_units"] = len(healthy)
+    out["remaining_units"] = len(remaining)
+    out["others"] = others
+
+    if healthy and taken and not remaining:
+        why = ("orchestrator-model served by %d healthy unit(s) — %s — and all "
+               "of them are on node(s) this stop takes down. Pausing %s%s would "
+               "leave no healthy unit serving %s%s"
+               % (len(taken),
+                  ", ".join(sorted(u["unit_id"] for u in taken)),
+                  host,
+                  ("" if len(affected) <= 1
+                   else " (and its span %s)"
+                        % ", ".join(sorted(affected - {host}))),
+                  _ORCHESTRATOR_ALIAS,
+                  ("; paused and therefore not counted as a healthy server: %s"
+                   % ", ".join(parked)) if parked else ""))
+        if not force:
+            _refuse(REASON_NO_HEALTHY_SERVER, why,
+                    "serves the orchestrator model.")
+            return out
+        out["forced"] = True
+        notes.append("note: --force given, but pausing %s would leave no "
+                     "healthy unit serving %s." % (host, _ORCHESTRATOR_ALIAS))
+
+    # ── 3. allowed ─────────────────────────────────────────────────────────
+    if taken and remaining:
+        # The host does serve the alias and something else still will — say so,
+        # so an ALLOW never reads like an all-clear about the orchestrator.
+        notes.append("note: %s stays served by %d other node(s): %s"
+                     % (_ORCHESTRATOR_ALIAS, len(others), ", ".join(others)))
+    elif not taken and force:
+        notes.append("note: --force given, but this host is not flagged as "
+                     "serving the orchestrator model.")
+    if out["note"] and taken:
+        # Only worth saying when this host actually serves the alias: a pause of
+        # a node that serves nothing must not print a warning about a record the
+        # answer never needed (bootstrap fleets hand-write serving.json and have
+        # no applied record at all — that is normal, not a finding).
+        notes.append("note: %s" % out["note"])
+    out["lines"] = notes
+    return out
+
+
 # ── the plan ───────────────────────────────────────────────────────────────
 def _unit_record(live, declared, host, serving_dict):
     """Assemble one enumerable unit: identity, span, and its two commands."""
@@ -422,8 +704,20 @@ def plan(host, serving_dict=None, status_reader=None):
         "serves_orchestrator_model": (any(u["kind"] == "orchestrator"
                                           for u in units) or flag),
         "orchestrator_evidence": evidence,
+        # Fleet-wide, not host-scoped: the guard needs who ELSE serves the
+        # alias, and it must get that from THIS sweep rather than shell out a
+        # second time (one pause = one sparkrun status read, and the two reads
+        # could otherwise disagree about a unit that changed state between them).
+        "orchestrator_alias_units": orchestrator_alias_units(serving_dict,
+                                                             entries),
     })
     return result
+
+
+#: :func:`orchestrator_pause_guard` takes the caller's plan as a ``plan=``
+#: parameter, which shadows the enumerator inside its own body — so the
+#: "caller handed me no plan" fallback path calls it through this name.
+_plan_enumerate = plan
 
 
 # ── stop / resume ──────────────────────────────────────────────────────────
