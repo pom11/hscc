@@ -792,7 +792,7 @@ def test_chat_no_note_when_no_telegram_history(tmp_path, capsys):
                                 "--continue", "20260921_abc"]
 
 
-def test_unimportable_runtime_reports_error_not_empty_history(monkeypatch):
+def test_unimportable_runtime_reports_error_not_empty_history(monkeypatch, tmp_path):
     """A wrong interpreter must not render as "no telegram history".
 
     `hscc` runs under miniconda, where `hermes_cli` is not importable, while
@@ -800,8 +800,22 @@ def test_unimportable_runtime_reports_error_not_empty_history(monkeypatch):
     ImportError and return None, so `project sessions ecofire-bc` printed
     "no telegram history" for a project with six sessions and 1,128 messages —
     an environment fault reported as a fact about the operator's data.
+
+    The project must resolve from THIS fixture's registry, not from the machine's:
+    `list_project_sessions` resolves the orchestrator identity BEFORE it reaches
+    the seam under test, so with `path=None` the case answered from the
+    workstation's own registry — which carries an `hscc` row here and none on a
+    fresh runner, where the case died as
+    `UnknownProjectError: unknown project 'hscc'` before the fake was ever
+    consulted (the CI red on t_cc2f23ea, the same class t_4b70e8d4 fixed one layer
+    down). `HOME` is sealed to the same tmp dir so no other read in the path can
+    answer from the operator's tree either; with both seals the case is red or
+    green for the same reason on every machine.
     """
     from flightdeck.core import project_lifecycle as pl
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    reg = _reg(tmp_path, "hscc", topic=8891)
 
     def _boom(*a, **k):
         raise pl.HermesRuntimeUnavailable("cannot import the Hermes runtime (test)")
@@ -809,7 +823,7 @@ def test_unimportable_runtime_reports_error_not_empty_history(monkeypatch):
     monkeypatch.setattr(session_discovery, "_open_profile_sdb_ro", _boom, raising=False)
     monkeypatch.setattr(pl, "_open_profile_session_db", _boom)
 
-    result = session_discovery.list_project_sessions("hscc")
+    result = session_discovery.list_project_sessions("hscc", path=reg)
 
     assert result["runtime_error"], "must say the runtime was unreadable"
     assert "Hermes runtime" in result["runtime_error"]
