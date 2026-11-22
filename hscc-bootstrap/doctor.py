@@ -2019,6 +2019,57 @@ def _refused_node_pauses_check() -> dict:
                    "routing; a suite must never read the operator's overlay."}
 
 
+#: Fallback for the check name when the stream's module cannot be imported —
+#: same trick as ``_KANBAN_ENFORCE_CHECK_NAME`` so the row still prints.
+_NODE_PAUSE_EXPIRY_CHECK_NAME = "node pause expiry (durable-until stream)"
+
+
+def _load_node_pause_exec():
+    """Import ``hscc_daemon/node_pause_exec.py`` for the expiry-stream row.
+
+    The verdict lives with the stream (t_32a06db9's rule): its cadence SOT is
+    ``daemon_ops.PERIODIC_INTERVALS``, its stamp shape is what
+    ``expiry_tick`` writes, and its definition of "past due" is the tick's own
+    ``_due_entries`` — a row written down here in bootstrap would drift from all
+    three. doctor only adapts the result to its five Check fields. Two-step
+    import like :func:`_load_kanban_pause` (deployed plugin, then repo root),
+    and None means the row reports itself unverifiable rather than vanishing.
+    """
+    try:
+        from hscc_daemon import node_pause_exec
+        return node_pause_exec
+    except Exception:  # noqa: BLE001 - any import failure means "not deployed"
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import node_pause_exec
+        return node_pause_exec
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _refused_node_pause_expiry_check() -> dict:
+    """In-suite stand-in for the expiry-stream row when no seam was injected.
+
+    The row's real targets are ``~/.hscc/state/node_pause_expiry.json`` and
+    ``~/.hscc/node_pauses.json`` — the operator's live stamp and overlay, which
+    would decide what the suite asserts. Same fence as
+    :func:`_refused_node_pauses_check`, and the feature module applies the
+    identical fence to its own default-root path
+    (:func:`hscc_daemon.node_pause_exec.doctor_check` with ``root=None``), so a
+    caller cannot walk past it by skipping the registry.
+    """
+    return {"name": _NODE_PAUSE_EXPIRY_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "node-pause-expiry check refused inside a pytest process "
+                      "— inject _node_pause_expiry_check",
+            "fix": "Call node_pause_exec.doctor_check(root=<tmp ~/.hscc-shaped "
+                   "root>) for the real read path, or pass "
+                   "_node_pause_expiry_check=lambda: {...} to pin the row's "
+                   "routing; a suite must never read the operator's stamp."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -2190,6 +2241,37 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
         missing_detail="hscc-bootstrap/doctor_node_pauses.py not importable — "
                        "parked nodes cannot be told apart from broken ones",
         missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
+    # t_005e87fd (split out of t_110adc1a): is the daemon actually ENDING an
+    # expired pause? `hscc node pause --until 2h` is a promise about the future,
+    # and the `node_pause_expiry` stream (60 s, PERIODIC_INTERVALS) is what keeps
+    # it — `hscc verify` already covers the stream automatically, but verify says
+    # "did the stream run", never "did the operator's schedule get honoured". The
+    # stream goes RED for exactly the two states that mean it did not: `kept` (a
+    # due pause whose restart failed) and `skipped` (a due pause another pause
+    # still holds part of its span). This row is the kanban_enforce half for it
+    # (t_51931733): parked/past-due counts + last-pass freshness + the stamped
+    # RED named out of the stamp, with fatal RED reserved for the orch-waker
+    # class (the daemon runs and this stream has never stamped — the wiring
+    # itself), warn for stale / red-tick / predates-build / daemon-down.
+    # NO row_kwargs, same reason as kanban_enforce and node_pauses above
+    # (t_adb66608, t_be690204): both artefacts this row reads are written by
+    # HOME-bound writers with no HSCC_DIR override — the stamp through
+    # ``state.STATE_DIR`` and the overlay through ``node_pauses``' own default
+    # root — so a root lifted from the environment is a directory no pause can
+    # reach, and the row would call a live stream "never stamped" (a FATAL, once
+    # a pid file happened to sit there). The feature module keeps a ``root=``
+    # caller seam for tests, threaded through all three reads at once.
+    doctor_rows.FeatureCheckRow(
+        key="node_pause_expiry", seam_kwarg="_node_pause_expiry_check",
+        row_kwargs=(),
+        loader="_load_node_pause_exec",
+        refusal="_refused_node_pause_expiry_check",
+        fallback_name="_NODE_PAUSE_EXPIRY_CHECK_NAME",
+        missing_detail="hscc_daemon/node_pause_exec.py not importable — an "
+                       "expired node pause cannot be told apart from a pause "
+                       "the daemon is honouring",
+        missing_fix="Deploy the hscc_daemon plugin next to hscc-bootstrap "
                     "(re-run bootstrap)."),
 ]
 
