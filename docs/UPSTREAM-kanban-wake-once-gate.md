@@ -6,7 +6,9 @@ Status: **filed upstream** as
 — proposed, not implemented. Cross-linked into #144882 (the wake-path map) and #146361
 (same `uuid4` root cause).
 Follows `t_ff520296` (PR #265, merged `2e477e15`), which fixed only the half this
-repo owns. Full attribution for the doubling: `NOTES-t_ff520296.md` (in that commit).
+repo owns. Full attribution for the doubling: kanban card `t_ff520296`, whose worker
+notes sat at the repo root until the `t_8da36880` cleanup —
+`git show bf36daf4^:NOTES-t_ff520296.md` reads them.
 
 **The one open question is closed.** §9.4 asked which `deliver_wake` branch the
 `hscc-orch` sub takes, because the whole §3.2 half is worthless to us if the answer is
