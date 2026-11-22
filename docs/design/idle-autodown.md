@@ -316,7 +316,10 @@ feature. The design:
   orchestrator AND keepalive workers;
 - keeps the `keepalive_ok` **interlock** (§6.4): if a keepalive unit is sick
   we abort teardown — a "don't shut down mid-problem" guard, NOT an
-  exemption. Healthy or not, keeping it still goes down.
+  exemption. Healthy or not, keeping it still goes down. One unit does not
+  abort it: a keepalive unit the `node_pauses` overlay holds is *parked*, not
+  sick (t_eec97ea8) — and it still goes down with the fleet, because only the
+  interlock exempts it, never the stop plan.
 
 ---
 
@@ -575,6 +578,18 @@ predicate §1. It is a conjunction; any false ⇒ abort. Sources:
    teardown targets now (C4 reversed), but if a keepalive unit is itself
    unhealthy we abort, so we do not tear the whole fleet down mid-problem while
    a worker is mid-flight relying on it. Cautious and simple.
+   **One exemption, and it is the operator's** (t_eec97ea8): a keepalive unit
+   whose span the `node_pauses` overlay holds is *parked*, not sick, and
+   contributes no abort. The gate's premise is "mid-problem while a worker is
+   relying on it" — a park is neither (the operator stopped the unit, so nothing
+   relies on it), and without the exemption parking one keepalive node would
+   disable the fleet's only automatic power-down for the whole duration of the
+   park. Read through `paused_nodes()` (spans included), like every other skip
+   seam. Everything unverifiable stays fail-closed: unparseable serving, an
+   unresolvable unit set, failed tp-peer resolution or an unhealthy/raising
+   probe on a unit that is NOT parked all abort, and an unreadable overlay
+   exempts NOTHING (the deliberate opposite of the wake seam's fail-open — for
+   an interlock the conservative action is "no exemption").
 
 The double-evaluation (timer + pre-stop) closes the race where a card is
 created between the cycle's idle decision and the first `sparkrun stop`. If the
@@ -1064,7 +1079,9 @@ orchestrator **and** all worker units, **including keepalive units** (see the
 C4-reversal decision above) — via a single `sparkrun stop --all`
 (`serving.fleet_down_cmd()`); a wake brings every unit back up
 (`serving.fleet_up_plan()`), orchestrator first. The remaining keepalive guard
-is an interlock, not an exemption: a *sick* keepalive unit aborts the teardown.
+is an interlock, not an exemption: a *sick* keepalive unit aborts the teardown,
+while a *parked* one (held by the `node_pauses` overlay) does not — it is the
+operator's own statement that the unit is meant to be absent (t_eec97ea8).
 Teardown tells the watchdog to back off first (latched block) so the health
 daemon does not resurrect the layer mid-teardown.
 

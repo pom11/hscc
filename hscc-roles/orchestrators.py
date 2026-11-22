@@ -251,10 +251,6 @@ _MAIN_ASSISTANT_WORK = (
     "or live state. Where a note contradicts what you measure, write the "
     "contradiction into a dated sync-notes file rather than quietly picking a "
     "side.\n"
-    "- **TRANSITIONAL (until the tmux-socket fallback lands, card t_58af8078 — "
-    "delete this line when it ships):** prefix every tmux and inject command "
-    "with the tmux socket environment variable `TMUX_TMPDIR`, so the command "
-    "reaches the server you mean instead of the default one.\n"
 )
 
 
