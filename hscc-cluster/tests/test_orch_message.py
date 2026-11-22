@@ -161,6 +161,238 @@ def test_self_message_refused(repl):
     assert repl.calls == []
 
 
+# ── Rule 1b: the CONFIGURED main orchestrator is accepted at both ends ───────
+#
+# The ONE main orchestrator's name is the chosen slug itself — no `-orch`
+# suffix — so ORCH_PROFILE_RE refused it and the cluster's top orchestrator
+# could not use the orchestrator nudge tool at all (it had to shell out to
+# `hscc orch inject`). The tests below pin the allowance, and pin its *shape*:
+# the name must come out of `hscc-roles/main_orch.py` — the resolver `hscc main
+# status` reads — never from a copy of it kept in this plugin.
+#
+# Fictional main names only (ops / control), same fixture rule as the rest of
+# this file. Every case runs against the sealed HSCC_DIR of `_hermetic_env`, so
+# the state document being configured is always the tmp one, never ~/.hscc.
+
+@pytest.fixture(scope="session")
+def real_main_orch():
+    """The REAL ``hscc-roles/main_orch.py`` — the resolver `hscc main status`
+    reads (`hscc_daemon/main_cli.py::status` -> `main_orch.main_profile`).
+
+    By file path for the same reason as `real_repl` above: independent of
+    sys.path and of any stub, so a test comparing against it cannot drift from
+    the module that owns the answer. Import only — no pane, no tmux.
+    """
+    import importlib.util
+    from pathlib import Path
+    path = (Path(om.__file__).resolve().parent.parent
+            / "hscc-roles" / "main_orch.py")
+    assert path.exists(), f"canonical main_orch not found at {path}"
+    spec = importlib.util.spec_from_file_location("_main_orch_canonical", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def configure_main(tmp_path, real_main_orch, name):
+    """Store the main orchestrator's name in the sealed HSCC_DIR, the way
+    bootstrap's `main_orch.py store` leaves it, and prove the resolver reads it.
+
+    The state document is written directly rather than through
+    ``main_orch.store_name`` so the test needs no roles dir, no registry and no
+    profiles dir — the document *is* the storage contract. The filename comes
+    from the resolver's own ``STATE_FILENAME``, so if that file is ever renamed
+    these tests configure nothing and fail loudly instead of passing vacuously.
+    """
+    doc = tmp_path / real_main_orch.STATE_FILENAME
+    doc.write_text(json.dumps({"name": name}) + "\n")
+    assert real_main_orch.stored_name(str(tmp_path)) == name
+    return doc
+
+
+def add_pane(repl, profile, pane, target):
+    """Give the fake tmux exactly one pane for `profile` (the stub refuses a
+    missing or ambiguous one, so a target with no pane is not a delivery test)."""
+    repl.panes.append({"pane": pane, "target": target, "profile": profile})
+    return repl
+
+
+def test_configured_main_orchestrator_accepted_as_target(repl, tmp_path, real_main_orch):
+    configure_main(tmp_path, real_main_orch, "ops")
+    add_pane(repl, "ops", "%2", "s1:0.2")
+    out = send(to="ops")
+    assert out["ok"] is True and out["sent"] is True
+    assert out["reason"] == om.REASON_SENT
+    assert repl.calls[0]["profile"] == "ops"
+    # signed by the RUNNING profile, not by whoever was configured as main
+    assert repl.calls[0]["text"].startswith("[from demo-orch] ")
+
+
+def test_configured_main_orchestrator_accepted_as_sender(repl, tmp_path,
+                                                        real_main_orch, monkeypatch):
+    configure_main(tmp_path, real_main_orch, "ops")
+    monkeypatch.setenv("HERMES_PROFILE", "ops")
+    out = send(to="other-orch")
+    assert out["ok"] is True and out["sent"] is True
+    assert out["from"] == "ops"
+    assert repl.calls[0]["text"].startswith("[from ops] ")
+
+
+def test_main_orchestrator_to_itself_is_still_a_loop_not_a_message(
+        repl, tmp_path, real_main_orch, monkeypatch):
+    """The self-guard is identity-based, so the new door cannot be used to
+    inject into one's own pane."""
+    configure_main(tmp_path, real_main_orch, "ops")
+    monkeypatch.setenv("HERMES_PROFILE", "ops")
+    add_pane(repl, "ops", "%2", "s1:0.2")
+    out = send(to="ops")
+    assert out["reason"] == om.REASON_SELF
+    assert repl.calls == []
+
+
+def test_allow_follows_the_config_not_a_hardcoded_name(repl, tmp_path, real_main_orch):
+    """The no-hardcode proof the card asks for: change the configured name and
+    the tool follows — the new name is accepted, the previous one is refused
+    again. A literal 'general' (or any other name) in the plugin could not do
+    this, and the source guard below forbids one.
+    """
+    doc = configure_main(tmp_path, real_main_orch, "ops")
+    add_pane(repl, "ops", "%2", "s1:0.2")
+    add_pane(repl, "control", "%3", "s1:0.3")
+    assert send(to="ops")["ok"] is True
+
+    doc.write_text(json.dumps({"name": "control"}) + "\n")   # rename in place
+    assert real_main_orch.main_profile(str(tmp_path)) == "control"
+    assert send(to="control")["ok"] is True
+
+    stale = send(to="ops")
+    assert stale["ok"] is False and stale["reason"] == om.REASON_TARGET_NOT_ORCH
+    assert [c["profile"] for c in repl.calls] == ["ops", "control"]
+
+
+def test_allowance_answers_what_hscc_main_status_answers(repl, tmp_path, real_main_orch):
+    """Same-source pin: the tool's answer equals the resolver's for a stored
+    name AND for an un-stored install (where the resolver's own default applies
+    — following it is what proves there is no copy of it here)."""
+    assert om.main_orchestrator_profile() == real_main_orch.main_profile(str(tmp_path))
+    configure_main(tmp_path, real_main_orch, "ops")
+    assert om.main_orchestrator_profile() == "ops"
+    assert om.is_orch_profile("ops") is True
+    assert real_main_orch.main_profile(str(tmp_path)) == "ops"
+
+
+def test_project_orchestrators_unaffected_by_the_new_door(repl, tmp_path, real_main_orch):
+    """Non-main `*-orch` profiles keep the shipped behaviour, with and without a
+    configured main: accepted at both ends, subject to every other guard."""
+    assert om.is_orch_profile("demo-orch") is True
+    assert om.is_orch_profile("other-orch") is True
+    assert send(to="other-orch")["ok"] is True
+
+    configure_main(tmp_path, real_main_orch, "ops")
+    assert om.is_orch_profile("other-orch") is True
+    second = send(to="other-orch")
+    assert second["ok"] is True and second["from"] == "demo-orch"
+
+
+def test_non_orch_names_still_refused_with_a_main_configured(repl, tmp_path, real_main_orch):
+    """The allowance is one name wide, not a general loosening: workers stay out
+    even when their name shares the main's prefix."""
+    configure_main(tmp_path, real_main_orch, "ops")
+    for bad in ("worker-engineer", "ops-engineer", "ops-worker", "general-orch-worker",
+                "engineering", "other"):
+        out = send(to=bad)
+        assert out["reason"] == om.REASON_TARGET_NOT_ORCH, bad
+    assert repl.calls == []
+
+
+def test_empty_target_still_refused_as_bad_args(repl, tmp_path, real_main_orch):
+    """Shipped argument-shape guard, unchanged by the new door."""
+    configure_main(tmp_path, real_main_orch, "ops")
+    assert send(to="  ")["reason"] == om.REASON_BAD_ARGS
+    assert repl.calls == []
+
+
+def test_default_cannot_be_made_injectable_by_configuring_it_as_main(
+        repl, tmp_path, real_main_orch, monkeypatch):
+    """`main_orch.validate_name` accepts any lowercase slug, and `default` is
+    one — so the reserved-identity guard, not the config, is what keeps the
+    operator's own REPL out of reach."""
+    configure_main(tmp_path, real_main_orch, "default")
+    add_pane(repl, "default", "%2", "s1:0.2")
+    assert send(to="default")["reason"] == om.REASON_TARGET_NOT_ORCH
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    assert send()["reason"] == om.REASON_SENDER_NOT_ORCH
+    assert repl.calls == []
+
+
+def test_unreachable_resolver_degrades_to_the_orch_rule_only(
+        monkeypatch, repl, tmp_path, real_main_orch):
+    """No resolver is not 'no rule': the shipped `*-orch` rule keeps deciding,
+    and the configured main is simply invisible until the resolver is back.
+    Never a guessed name (that is how a wrong pane gets typed into)."""
+    configure_main(tmp_path, real_main_orch, "ops")
+    add_pane(repl, "ops", "%2", "s1:0.2")
+    monkeypatch.setattr(om, "_load_main_orch", lambda: None)
+    assert om.main_orchestrator_profile() is None
+    assert om.is_orch_profile("ops") is False
+    assert om.is_orch_profile("other-orch") is True
+    out = send(to="ops")
+    assert out["reason"] == om.REASON_TARGET_NOT_ORCH and repl.calls == []
+
+
+def test_resolver_that_raises_is_treated_as_no_resolver(monkeypatch):
+    """An exception from the resolver must not escape into the tool call and
+    must not be read as 'anything goes'."""
+    class Broken:
+        @staticmethod
+        def main_profile(hscc_dir=None):
+            raise RuntimeError("state document unreadable")
+
+    monkeypatch.setattr(om, "_load_main_orch", lambda: Broken())
+    assert om.main_orchestrator_profile() is None
+    assert om.is_orch_profile("ops") is False
+    assert om.is_orch_profile("ops-orch") is True
+
+
+def test_main_orch_module_and_sibling_dir_are_reached_not_reimplemented():
+    """The loader resolves through the sibling plugin dir, so a deployed tree
+    (hscc-cluster next to hscc-roles) works and the answer is the real module."""
+    module = om._load_main_orch()
+    assert module is not None
+    assert module.STATE_FILENAME == "main-orchestrator.json"
+    assert callable(module.main_profile)
+    from pathlib import Path
+    assert module.__file__ and om.ROLES_DIRNAME in Path(module.__file__).parts
+
+
+def test_refusal_detail_names_the_configured_main(repl, tmp_path, real_main_orch):
+    """A refusal that only says "must end in '-orch'" misdirects an operator
+    whose main orchestrator has another name."""
+    configure_main(tmp_path, real_main_orch, "ops")
+    detail = send(to="worker-engineer")["detail"]
+    assert "must end in '-orch'" in detail and "'ops'" in detail
+
+
+def test_module_never_spells_the_main_orchestrator_identity():
+    """Structural guard, same doctrine as the verb-literal guard above: the
+    main orchestrator's name and its state filename belong to
+    `hscc-roles/main_orch.py`. Either spelled in this plugin is a second source
+    of truth that will silently survive a rename — which is the bug this card is
+    about. Proven to fire: adding `if name == "general"` back fails this test.
+    """
+    import re
+    from pathlib import Path
+    src = Path(om.__file__).read_text()
+    for pattern in (r"""['"]general['"]""", r"""['"]main-orchestrator\.json['"]"""):
+        assert not re.search(pattern, src), (
+            f"orch_message.py hardcodes {pattern!r} — the main orchestrator's "
+            "identity belongs to hscc-roles/main_orch.py; reach it through "
+            "_load_main_orch()/main_orchestrator_profile() instead."
+        )
+
+
 # ── Rule 3 + queue-only (rule 2): formatting and the verb decision ─────────
 
 def test_prefix_and_ref_formatting(repl):

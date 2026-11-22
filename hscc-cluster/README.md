@@ -108,8 +108,12 @@ Registered in `__init__.py` into the `hscc-cluster` toolset as
 1. **Both ends are orchestrators.** The sender is the *running* profile's
    identity (`HERMES_PROFILE`, falling back to the `profiles/<name>` leaf of
    `HERMES_HOME`, else `default`) — never an argument, so a sender cannot sign
-   as someone else. Sender and target must match `*-orch`; worker profiles and
-   `default` are refused, as is `to == sender`.
+   as someone else. Each end must be a `*-orch` profile **or** the configured
+   main orchestrator (the name `hscc-roles/main_orch.py` resolves — the same
+   source `hscc main status` reads, so a renamed main needs no edit here);
+   worker profiles and `default` are refused even if a config names `default`
+   as the main, as is `to == sender`. If the resolver is unreachable the tool
+   falls back to the `*-orch` rule alone rather than guessing a name.
 2. **Queue-only.** Delivery always asks `repl_inject` for `mode="auto"`, so a
    nudge queues behind a running turn; `steer` is never chosen by this tool.
 3. **Auto-signed.** `[from <sender-orch>] ` always, plus `re: t_xxxx ` when
