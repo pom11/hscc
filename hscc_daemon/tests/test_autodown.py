@@ -4333,20 +4333,26 @@ class TestWakeSeamFloorIsExecutable:
 
     The probe path is ``cycle()`` → kanban probe → ``record_activity()`` →
     ``state.now_iso()`` — the PRODUCT's clock (autodown.py:138) — while the case is
-    judged at the fixture ``NOW``. Two clocks, one literal, a docstring holding
-    them together. The frozen-clock sweep (t_3b38aca4) found it: this is the only
-    module in hscc_daemon/tests whose suite reddens when the wall clock is moved to
-    the far past (2020-01-01: 1 failed, 203 passed) while staying green at the real
-    clock, on both sides of its own literal, and at 2200-01-01. So it is NOT the
-    forward date-bomb that reddened leg hscc_daemon at 2026-11-22T13:00Z — real time
-    moves away from a 2020 floor, never back towards it.
+    judged at the fixture ``NOW``. Two clocks, one literal, a docstring holding them
+    together, and nothing asking whether the sentence is still true.
 
-    What it is, is a premise with no guard. The edit that would turn it into that
-    bomb is innocent-looking: "modernise" the floor to a future year and the wake
-    decision starts waiting on the machine clock, which fails on every host at once
-    on a date. These cases ask the product's own predicate rather than trusting the
-    sentence — the posture #617/#622 established for the pause file
-    (``TestFixtureClockIsTheOnlyClock``).
+    MEASURED (t_3b38aca4's frozen-clock sweep, this tree): of the eight modules that
+    fix an instant to a literal, this is the only one still red when the wall clock is
+    moved to the far past — at 2020-01-01 it answers for 206 cases and 2 fail: the case
+    below, and the guard under it, which fails there *by design* because at that date
+    the floor genuinely has stopped sitting behind ``now_iso()``. The same file is
+    green at the real clock, at 2200-01-01 (with and without ``time.time()`` frozen),
+    at the shipped rule's own ±400-day travel, and bracketing its own literal. So this
+    is NOT the forward date-bomb that reddened leg hscc_daemon at 2026-11-22T13:00Z —
+    real time moves away from a 2020 floor, never back towards it.
+
+    It is also outside the reach of the shipped rule: ``test_single_clock_rule.py``
+    travels 400 days, and 400 days back from any plausible date still leaves 2020
+    behind it. That is why the premise gets its own executable form rather than a
+    sentence — the edit that WOULD turn it into a forward bomb is innocent-looking
+    ("modernise" the floor to a future year) and would fail on every host at once on a
+    date. These cases ask the product's own predicate instead, the posture
+    #617/#622/#627 established for the pause and cron-watcher files.
     """
 
     def test_the_floor_is_behind_the_clock_the_probe_stamps(self):
