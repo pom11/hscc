@@ -12,6 +12,7 @@ hscc is the manager layer on top of sparkrun (which runs vLLM inference on DGX S
 - [Changelog](https://github.com/pom11/hscc/blob/main/CHANGELOG.md): every release
 - [HTTP API](https://github.com/pom11/hscc/blob/main/docs/API.md): the read-only API the apps use
 - [Fleet guide](https://github.com/pom11/hscc/blob/main/docs/FLEET.md): nodes, serving and templates
+- [Node pause](https://github.com/pom11/hscc/blob/main/docs/ops/node-pause.md): park one machine for a while — the plan it prints, the confirmation it asks for, the durable record the repair paths honour, and auto-resume with --until
 
 ## Apps
 

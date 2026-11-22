@@ -50,8 +50,15 @@ struct DashboardHostRow: Equatable, Identifiable {
     let label: String
     /// GPU%, GPU Temp, CPU Temp, GPU Power, in `ClusterSmallGrid.Column` order.
     let cells: [ClusterSmallGrid.Cell]
-    /// The CLI's error row: no sample, so every numeric cell is `-`.
+    /// The CLI's error row: no sample, so every numeric cell is `-`. A PARKED
+    /// host is NOT down — the overlay deliberately keeps the row's `error`, so
+    /// `error != nil` alone calls the operator's own choice a fault. `isPaused`
+    /// is asked first, exactly as `FleetNodeLine` and `FleetFormat.status` do.
     let isDown: Bool
+    /// The operator parked this machine. Its verdict line is drawn by the
+    /// section's `node pauses` block (`Tile.parkedLines`), which is also where a
+    /// machine the frame never listed can appear.
+    let isPaused: Bool
     /// `used_slots` / `free_slots` — the slot pair `hscc cluster status`
     /// (sparkrun) counts. nil = the route did not send it for this host.
     let usedSlots: Int?
@@ -61,15 +68,18 @@ struct DashboardHostRow: Equatable, Identifiable {
         id = row.host
         label = row.displayLabel
         cells = ClusterSmallGrid.Column.allCases.map { ClusterSmallGrid.Cell(column: $0, row: row) }
-        isDown = row.error != nil
+        isPaused = node.isPaused
+        isDown = row.error != nil && !isPaused
         usedSlots = node.used_slots
         freeSlots = node.free_slots
     }
 
     /// VoiceOver gets the numbers the dense row cannot fit: which host, every
-    /// cell, and the slot pair.
+    /// cell, and the slot pair. A parked host is named as parked first, so the
+    /// row never reads as a fault to someone who cannot see the colour.
     var accessibilityLabel: String {
         var parts = [label]
+        if isPaused { parts.append("paused — see the node pauses list") }
         parts.append(contentsOf: cells.map { "\($0.column.cliColumn) \($0.text)" })
         if let usedSlots, let freeSlots {
             parts.append("\(usedSlots) used, \(freeSlots) free slots")
@@ -125,6 +135,11 @@ struct DashboardServingRow: Equatable, Identifiable {
     let model: String
     let cells: [Column: String]
     let isTotalRow: Bool
+    /// The machine behind this backend is parked, so `model` is the paused
+    /// verdict rather than the CLI's `down`. The view paints it `warn` for the
+    /// same reason `serving_table` does: a parked machine is a deliberate choice,
+    /// not a fault to be coloured red.
+    let isPaused: Bool
     /// The CLI's `_load_style` verdict for this row, which is the only
     /// threshold the monitor CLI applies anywhere.
     let level: ClusterMetricLevel
@@ -141,6 +156,7 @@ struct DashboardServingRow: Equatable, Identifiable {
         for column in Column.allCases { cells[column] = column.cellText(in: row) }
         self.cells = cells
         isTotalRow = row.isTotalRow
+        isPaused = row.isPaused
         level = row.loadLevel
     }
 
@@ -186,6 +202,11 @@ enum DashboardFleetReading {
         static func hosts(_ count: Int) -> String { "\(count) host(s)" }
         /// `render`'s dim note beside the serving header — the shared owner's.
         static var tokensNote: String { CLIMonitorNote.tokensNote }
+        /// `render`'s title for the parked block: `hscc cluster monitor` prints
+        /// a `node pauses` heading above one line per parked machine
+        /// (`cluster_live.py`'s `render`, fed by `cluster_render.pause_lines`).
+        /// Quoted here because this pane prints the CLI's sentences, not its own.
+        static let nodePauses = "node pauses"
     }
 
     struct Tile: Equatable {
@@ -207,11 +228,26 @@ enum DashboardFleetReading {
         /// Whether the route sent a serving section at all. nil-drawing is
         /// `ServingTotals.notTold`; false is the CLI's `no backends` line.
         let hasServingSection: Bool
+        /// One line per parked machine — `render`'s `node pauses` block, the
+        /// place the CLI puts the full verdict string when the Model column is
+        /// too narrow to hold it. Built by `FleetProjection.paused`, so it
+        /// covers BOTH halves of the payload: the rows the route tagged and the
+        /// parked node the frame never listed (which no host row can ever show).
+        /// `[]` is the route saying nothing is parked; the block is then absent,
+        /// because a heading over nothing reads as a fault.
+        let parkedLines: [String]
+        /// The `answered/judged` fleet line, parked machines excluded from both
+        /// sides — `FleetVerdict.tallyText`, the same string the C1 widget's
+        /// tally and the menu bar's own title print.
+        let fleetTally: String
 
         var accessibilityLabel: String {
             var parts = [Copy.hosts(hostCount)]
             parts.append(contentsOf: rows.map(\.accessibilityLabel))
             if hiddenHosts > 0 { parts.append("\(hiddenHosts) more not shown") }
+            if !parkedLines.isEmpty {
+                parts.append("\(Copy.nodePauses): \(parkedLines.joined(separator: ", "))")
+            }
             parts.append(contentsOf: serving.map(\.accessibilityLabel))
             if let note { parts.append(note) }
             return parts.joined(separator: ". ")
@@ -225,7 +261,8 @@ enum DashboardFleetReading {
     /// so `zip` pairs a row with its own node; a payload whose two halves differ
     /// in length pairs the prefix, which is the honest truncation.
     static func tile(from view: ClusterMonitorViewModel?,
-                     response: MonitorResponse?) -> Tile? {
+                     response: MonitorResponse?,
+                     now: Date = Date()) -> Tile? {
         guard let view, !view.hostRows.isEmpty || !view.servingRows.isEmpty else { return nil }
         let nodes = response?.json?.hosts ?? []
         let paired = zip(nodes, view.hostRows).map { DashboardHostRow(node: $0, row: $1) }
@@ -247,6 +284,14 @@ enum DashboardFleetReading {
         // one line of room prints the first, as the dropdown always has.
         let note = view.note
 
+        // The parked block. `FleetProjection.paused` is the single seam that
+        // knows the whole parked set, and `FleetPausedNode.statusText` is the
+        // single owner of the verdict copy — this file composes the ` · ` between
+        // a label and that verdict and nothing else. §7 holds because the label
+        // is the projection's, never the pause record's host string.
+        let projection = FleetProjection(projecting: response)
+        let parkedLines = (projection?.paused ?? []).map { "\($0.label) · \($0.statusText(now: now))" }
+
         return Tile(rows: shownHosts,
                     hiddenHosts: max(0, paired.count - hostRowLimit),
                     hostCount: view.hostCount,
@@ -255,7 +300,9 @@ enum DashboardFleetReading {
                     totals: ClusterSmallGrid.ServingTotals.summing(
                         view.totalRows, hasServingSection: view.hasServingSection),
                     note: note?.text,
-                    hasServingSection: view.hasServingSection)
+                    hasServingSection: view.hasServingSection,
+                    parkedLines: parkedLines,
+                    fleetTally: FleetVerdict(rows: projection?.nodes).tallyText)
     }
 }
 

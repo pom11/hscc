@@ -57,6 +57,11 @@ real_sources=(
   ../ios-app/Sources/Shared/SharedStore.swift
   ../ios-app/Sources/Shared/WidgetSurfaceKind.generated.swift
   ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
+  # The dropdown's parked block and its `nodes up` tally read the shared seam
+  # (`FleetProjection.paused`, `FleetVerdict`, `FleetPausedNode.statusText`), and
+  # the app target compiles this file by path — a harness without it would be
+  # testing a dropdown that cannot link, which is how a gate turns into a comment.
+  ../ios-app/Sources/Shared/ClusterNodeTally.swift
   "${grid_sources[@]}"
   Sources/HSCCMac/DashboardFleetReading.swift
 )

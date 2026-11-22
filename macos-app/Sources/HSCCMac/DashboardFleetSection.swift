@@ -57,6 +57,14 @@ extension DashboardView {
                 if tile.hiddenHosts > 0 {
                     moreLine(tile.hiddenHosts, "host")
                 }
+                // `hscc cluster monitor`'s `node pauses` block: one line per
+                // parked machine, carrying the full verdict string the CLI puts
+                // under the table when its Model column is too narrow for it.
+                // This is also the ONLY place a parked node the frame never
+                // listed can appear — no host row exists for it to draw.
+                if !tile.parkedLines.isEmpty {
+                    parkedBlock(tile.parkedLines)
+                }
 
                 Divider().overlay(Theme.Semantic.surfaceElevated)
                 servingHeader
@@ -212,9 +220,16 @@ extension DashboardView {
             Text(row.port)
                 .frame(width: ServingWidth.port, alignment: .trailing)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            // The Model cell, which is where `serving_table` puts the verdict for
+            // a parked backend (`warn`, never `down` in `error`). Like every
+            // string in this column it can outgrow the space — the CLI ellipsises
+            // the same cell at its 26-char cap — and the `node pauses` block above
+            // is where the whole verdict is readable, in both places.
             Text(row.model)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundColor(row.isTotalRow ? Theme.Semantic.accent : Theme.Semantic.onSurface)
+                .foregroundColor(row.isTotalRow ? Theme.Semantic.accent
+                                    : row.isPaused ? Theme.Semantic.warn
+                                    : Theme.Semantic.onSurface)
                 .lineLimit(1)
                 .truncationMode(.middle)
             ForEach(DashboardServingRow.Column.allCases) { column in
@@ -255,6 +270,28 @@ extension DashboardView {
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
         .accessibilityLabel("workload \(workload.name), tp \(workload.tp), pp \(workload.pp)")
+    }
+
+    /// `render`'s `node pauses` block: the title line, then one row per parked
+    /// machine. Every string here was built by `DashboardFleetReading` from
+    /// `FleetProjection.paused` + `FleetPausedNode.statusText`; this view adds no
+    /// word and no number of its own, and it is `warn` for the reason
+    /// `cluster_render.pause_lines` gives — a machine off the fleet by deliberate
+    /// choice is not red (a fault) and not dim (nobody should have to look twice).
+    private func parkedBlock(_ lines: [String]) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            Text(DashboardFleetReading.Copy.nodePauses)
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.caption2)
+                    .foregroundColor(Theme.Semantic.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(DashboardFleetReading.Copy.nodePauses): \(lines.joined(separator: ", "))")
     }
 
     private func moreLine(_ hidden: Int, _ noun: String) -> some View {
