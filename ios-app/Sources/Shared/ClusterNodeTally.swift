@@ -161,6 +161,15 @@ struct FleetVerdict: Equatable {
     /// fleet-level word is written — the per-node copy is `FleetFormat.paused`,
     /// and the two must not drift.
     static let pausedWord = "Paused"
+
+    /// The `answered/judged` tally string, `—` when the read named no frame.
+    /// The C1 widget's own `tally` and the macOS menu bar's `Cluster nodes up`
+    /// title are BOTH this line — three surfaces, one number, and the menu bar
+    /// has no room for a second opinion.
+    var tallyText: String {
+        guard let answered, let judged else { return "—" }
+        return "\(answered)/\(judged)"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +341,22 @@ struct FleetProjection: Equatable {
         } else {
             self.jobs = nil
         }
+    }
+}
+
+extension FleetProjection {
+    /// The parked set of one payload, indexed by the route's own identity rule
+    /// (`PauseContract.nodeKey`), for a surface that has to answer "is THIS
+    /// machine parked?" for a machine it is drawing a row of — a serving row's
+    /// `node`, say. Both cell view-models index through this one function rather
+    /// than each writing its own lookup, so the widget, the desktop dropdown and
+    /// the menu bar cannot disagree about which backend sits on a parked box.
+    static func parkedIndex(of response: MonitorResponse) -> [String: FleetPausedNode] {
+        var index: [String: FleetPausedNode] = [:]
+        for entry in FleetProjection(projecting: response)?.paused ?? [] {
+            index[entry.key] = entry
+        }
+        return index
     }
 }
 

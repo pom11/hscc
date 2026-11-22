@@ -339,8 +339,12 @@ equal(parked.nodes[0].statusText, "paused (training run, 3h ago)",
       "parked with reason and since")
 equal(parked.nodes[0].rowSubtitle, "paused (training run, 3h ago)",
       "the image row's subtitle is the verdict, not a pair of dashes")
-equal(parked.nodes[0].detailLine, ".11 · paused (training run, 3h ago)",
+equal(parked.nodes[0].detailLine, "\(parked.nodes[0].label) · paused (training run, 3h ago)",
       "the pushed list's subtitle-equivalent carries the verdict")
+// The label half is the SHARED path's (`FleetNodeLine.label` = `displayLabel`),
+// never a name this file chose: the §7 proof is that no address reaches it.
+check(parked.nodes.allSatisfy { !$0.label.contains("192.0.2.") },
+      "no parked or live row label puts an address on the car screen (§7)")
 check(parked.nodes[0].detailText.hasPrefix("paused ("), "the pushed list leads with the verdict")
 check(!parked.nodes[0].detailText.contains("down"), "a parked row never says down")
 check(!parked.nodes[0].detailText.contains("idle"), "a parked row never says idle")

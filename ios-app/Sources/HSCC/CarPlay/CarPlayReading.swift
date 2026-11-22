@@ -68,9 +68,10 @@ struct CarPlayNodeReading: Equatable, Identifiable {
     /// machine the operator stopped on purpose — the overlay keeps the row's
     /// `error`, so any surface that reads only `isUp` faults that choice twice.
     let isPaused: Bool
-    /// The node's status word — `up`, `down` or `paused (reason, since)`,
-    /// written by `FleetFormat.status` and nowhere else. A CarPlay copy of that
-    /// phrase would be a second spelling the widget gate cannot see.
+    /// The node's status word — the up word, the down word, or the paused
+    /// verdict carrying the reason and its age — written by
+    /// `FleetFormat.status` and nowhere else. A CarPlay copy of that phrase
+    /// would be a second spelling the widget gate cannot see.
     let statusText: String
     let isOrchestrator: Bool
     let utilPct: Double?
@@ -124,8 +125,9 @@ struct CarPlayNodeReading: Equatable, Identifiable {
     }
 
     /// The SPEC's subtitle-equivalent, used in the pushed node list and by the
-    /// gate: "S1 · 34% · 41 t/s". A parked row says "S1 · paused (…)" instead,
-    /// because the two numbers this line carries are the two it does not have.
+    /// gate: the label, then the two numbers. A parked row carries the label and
+    /// the paused verdict instead, because the two numbers this line shows are
+    /// the two it does not have.
     var detailLine: String {
         isPaused ? "\(label) · \(statusText)" : "\(label) · \(utilText) · \(tpsText)"
     }
@@ -133,9 +135,10 @@ struct CarPlayNodeReading: Equatable, Identifiable {
     /// The pushed node list's second line: throughput, temp and power.
     ///
     /// The status word leads whenever the row is not a plainly answering node:
-    /// `paused (…)` for one the operator parked, `down` for one that is not.
-    /// `FleetFormat.status` returns the very same `down` string this line used
-    /// to hard-code, so an unpaused fleet's rows are byte-identical.
+    /// the paused verdict for one the operator parked, the down word for one
+    /// that is not. `FleetFormat.status` returns the very same `down` string
+    /// this line used to hard-code, so an unpaused fleet's rows are
+    /// byte-identical.
     var detailText: String {
         var parts = [tpsText, tempText, powerText]
         if let model { parts.append(model) }

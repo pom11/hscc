@@ -199,10 +199,10 @@ struct ClusterC1: Equatable {
     /// `FleetFormat.paused`, so the two cannot drift apart.
     static let pausedHeadline = FleetVerdict.pausedWord
 
-    var tally: String {
-        guard let answered, let judged else { return "—" }
-        return "\(answered)/\(judged)"
-    }
+    /// The `answered/judged` pair the medium column draws. The string is
+    /// `FleetVerdict.tallyText` — the same line the macOS menu bar's
+    /// `Cluster nodes up` title prints — so the two cannot drift apart.
+    var tally: String { verdict.tallyText }
 
     var tokText: String {
         guard let tokPerSec else { return "— tok/s" }
