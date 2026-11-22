@@ -105,14 +105,41 @@ Interpreter: `~/.hermes/hermes-agent/venv/bin/python`, with the five
 | B | none (control) | both files green | `23 passed`, `31 passed` ✔ |
 | C | `legacy_general_profile()` renamed away in the resolver (an old deployed `main_orch`) | the paneless test reddens → it really reads the resolver | `1 failed, 30 passed` ✔ |
 
+## Why it merged red — measured, not guessed
+
+Neither a missing roster nor the guard's placement. `pytest-legs.yml:51-63`
+runs every leg **advisory** unless the `HSCC_TESTS_ENFORCE` repository variable
+is `true`, and in that mode `sweep_verdict.sh:67-72` prints `::warning::` and
+exits 0. So CI at `origin/main 04586596` really did observe the failure —
+
+```
+E   AssertionError: hardcoded main-orchestrator identity outside the resolver:
+hscc-roles/tests/test_main_orch.py:206: AssertionError
+2 failed, 344 passed, 10 skipped in 7.61s
+  ✗ hscc-roles (pytest exit 1)
+::warning:: a test leg is red (advisory: HSCC_TESTS_ENFORCE is not set to true)
+```
+
+— and then reported the job **success**. That is how #587 merged this red in
+and #589 merged over it, and why the sibling card had to explain a failure it
+did not cause in its own PR body.
+
+Two things follow, both deliberately left out of this card:
+
+- **Flipping `HSCC_TESTS_ENFORCE` to `true`** (and requiring the check) is a
+  policy call for the operator / @hscc-orch, not for a fix card: it turns every
+  advisory leg into a gate, including the CI-only failure below, which would
+  block every PR until it is fixed.
+- **CI carries a second, CI-only failure** in this leg:
+  `hscc-roles/tests/test_orchestrators.py::test_resolver_env_registry_override`
+  (`orchestrators.UnknownProjectError: unknown project 'hscc': not in the
+  registry and not the 'general' sentinel`, raised at `orchestrators.py:160`).
+  It passes in the local roster posture — it is one of the 356 above — and
+  fails only in CI's, where `hermes_cli` is not importable (the source of the
+  leg's 10 skips). Cause **not** investigated here; filed as a follow-up card.
+
 ## Follow-ups noticed, deliberately not done here
 
-- **Cross-leg drift.** The guard lives in the `hscc-roles` leg but scans
-  `hscc_daemon/**`; #587 therefore merged with the roles leg red while its own
-  daemon leg was green. The roster in `scripts/run_tests.sh` does cover it, so
-  this is a merge-gate question ("did the merge run the roster, or one leg?"),
-  not a guard gap. Worth its own card before the next daemon-leg card repeats
-  it.
 - **`hscc-roles/orchestrators.py:65,135`** still read
   `main_orch.LEGACY_GENERAL_PROFILE` (the constant) rather than the accessor.
   Allowed today because that file is in `RESOLVER_FILES`, and the hscc-api
