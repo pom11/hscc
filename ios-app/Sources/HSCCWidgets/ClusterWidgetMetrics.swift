@@ -99,8 +99,9 @@ struct ClusterC1Node: Equatable, Identifiable {
     /// and a Lock Screen ring — the reason the positional name was chosen in the
     /// first place.
     let label: String
-    /// The node's own hostname when it reported one, else its label — for
-    /// accessibility and the large table's tooltip. Never an address (§7).
+    /// The node's own hostname when it reported one, else its label — the name
+    /// an accessibility label speaks (`ClusterWidgetViews`'s `Hottest …`), which
+    /// is a place a name has always been the point. Never an address (§7).
     let hostname: String
     let model: String?
     let isUp: Bool

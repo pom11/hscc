@@ -294,11 +294,10 @@ struct FleetNodeLine: Equatable, Identifiable {
     let label: String
     /// The hostname the node reported about itself (`sample.hostname`), when it
     /// reported one. This is NOT the label — since apps 1.4.4 the label is the
-    /// last octet (`MonitorNode.nodeLabel`) — it is the human name kept for the
-    /// places that had always shown a name rather than an identity: the
-    /// accessibility label and the large tile's tooltip. Nil when the route
-    /// carried none, and a caller must then fall back to `label` rather than to
-    /// an address (§7).
+    /// last octet (`MonitorNode.nodeLabel`) — it is the name kept for the one
+    /// place a name has always been the point: the accessibility label a surface
+    /// speaks. Nil when the route carried none, and a caller must then fall back
+    /// to `label` rather than to an address (§7).
     let reportedName: String?
     let model: String?
     let isUp: Bool
