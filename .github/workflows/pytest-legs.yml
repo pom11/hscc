@@ -147,11 +147,28 @@ permissions:
   contents: read
 
 concurrency:
-  group: pytest-legs-${{ github.ref }}
-  # A superseded push to the same PR is worth cancelling at minutes per leg.
-  # Pushes to main never are: a CANCELLED check counts against branch
-  # protection, and a cancelled full-suite run on main loses the backstop this
-  # file exists to keep.
+  # Only pull_request runs share a group. Every other event — push to main,
+  # workflow_dispatch — is grouped on its own run id, which GitHub documents as
+  # "guaranteed to be both unique and defined for the run", so two pushes are
+  # never in one group and there is nothing for GitHub to replace.
+  #
+  # Why a shared group was not made safe by leaving cancel-in-progress at false
+  # — that flag only protects a run already IN PROGRESS. GitHub keeps at most one
+  # `pending` run per group (its default `queue` is `single`) — "any existing
+  # `pending` job or workflow in the same concurrency group will be canceled and
+  # the new queued job or workflow will take its place" (workflow-syntax,
+  # `concurrency`). Measured on the posture this file made binding: PR #607
+  # merged as 62c76fe3 at 11:50:01Z started push run 45019238106, main moved a
+  # minute later, and that run finished completed/cancelled with 0 jobs — the
+  # sha had no full-roster evidence at all, and nothing reported a failure.
+  #
+  # `queue: max` (up to 100 pending) is the rejected alternative: it queues the
+  # backstop behind the roster ahead of it, still cancels past 100, and GitHub
+  # refuses it together with the cancel-in-progress of true that PRs need.
+  #
+  # Cost, accepted knowingly: in a merge burst two full rosters run at once.
+  # Per-sha evidence is the product this workflow exists to make.
+  group: pytest-legs-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

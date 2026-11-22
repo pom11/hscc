@@ -801,9 +801,14 @@ class TestCommands:
     def test_stop_cmd_names_every_node_of_a_span_unit(self):
         plan = npe.plan(W1, serving_dict=SERVING,
                         status_reader=reader(payload_for_host(W1)))
+        # The intent flags ride on the stop too (t_8ad06a53): `--hosts`/`--port`
+        # alone make sparkrun recompute a DIFFERENT intent, answer "No running
+        # workload matches intent …" and stop nothing.
         assert unit_of(plan, "wspan")["stop_cmd"] == [
             "sparkrun", "stop", SPAN_RECIPE, "--hosts", f"{W1},{W2}",
-            "--port", "8200"]
+            "--port", "8200",
+            "--served-model-name", "meta-llm/Work-8B worker-model",
+            "--tp", "2"]
 
     def test_resume_cmd_is_the_keepalive_ensure_command(self):
         """Byte-identical to the sanctioned relaunch builder, so --ensure
@@ -1237,9 +1242,15 @@ class TestResumeReplaysTheRecordedLaunchArgv:
                                    "--served-model-name") == RESUME_SERVED
 
     def test_the_record_is_what_carries_the_alias_the_fields_cannot(self):
-        """Rebuilt from this unit's own fields the argv serves TWO names — the
-        defect. The record is the only place the third name exists for a stored
-        uniform_pool unit, which is the operator's reason resume replays it."""
+        """Rebuilt from this unit's own fields, UNSTAMPED, the argv serves TWO
+        names — the defect as reported. The record is where the third name is
+        still available for a stored uniform_pool unit, which is the operator's
+        reason resume replays it.
+
+        (``_unit_run_cmd`` is called here without the ``uniform_pool`` stamp
+        because that is what the reported path did and what any caller outside
+        the pause plan gets; the plan itself stamps it, pinned next door.)
+        """
         u = self._unit(RESUME_LAUNCH)
         rebuilt = serving._unit_run_cmd(dict(RESUME_UNIT,
                                              nodes=[RESUME_NODE], port=8003,
@@ -1252,14 +1263,19 @@ class TestResumeReplaysTheRecordedLaunchArgv:
         """DEFECT 1 is fixed on the fallback too, not only on the record path:
         a ``~`` in serving.json must never reach a child process.
 
-        The residual this case deliberately does NOT bless: with no record the
-        fallback still serves two names for a stored uniform_pool unit, so such
-        a unit resumes out of the pool. Flagged on the card — it needs the
-        operator's ruling on stamping ``uniform_pool`` into the resume record.
+        The other half of what this case used to leave open is now CLOSED, by
+        the placement stamp t_8ad06a53 landed on main: the pause builds its
+        resume from the same dict as its stop, and that dict carries
+        ``uniform_pool`` from the serving top level, so a pool unit with no
+        recorded serve_cmd rebuilds ALL THREE names rather than the two its own
+        role field can derive. Pinned here because it is a composition of two
+        cards' fixes — neither side's test would catch the other being dropped.
         """
         u = self._unit()
         assert "~" not in " ".join(u["resume_cmd"])
         assert u["resume_cmd"][2] == RESUME_RECIPE_ABS
+        assert serving._flag_after(u["resume_cmd"],
+                                   "--served-model-name") == RESUME_SERVED
 
 
 class TestTildeIsRejectedByTheFakeCli:

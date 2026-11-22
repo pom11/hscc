@@ -58,6 +58,57 @@ def test_two_binds_are_served_with_one_token_and_port(hscc_dir):
         server.server_close()
 
 
+def test_a_stop_requested_before_serving_is_not_lost(hscc_dir):
+    """A stop asked for before the accept loops exist still ends them.
+
+    ``serve_main`` installs its SIGTERM/SIGINT handlers BEFORE it binds
+    (t_6eff6258), so a stop can be requested while these loops do not exist yet
+    — and :meth:`_MultiServer.shutdown` deliberately refuses to act on a
+    listener whose loop was never started, so the request has nowhere to go.
+    ``serve_forever`` re-checking the caller's flag is what keeps that request
+    from being dropped on the floor and the process sitting in an accept loop
+    nobody asked to run, holding the port and the sidecar's token.
+
+    Deterministic by construction: the flag is set BEFORE the call, so this
+    walks into the window instead of racing for it — which is the only way to
+    cover an ordering the suite otherwise sees only on a loaded runner. The
+    call runs on a joined thread because the failure mode is a HANG, and a hang
+    inside ``serve_forever`` on the main thread would take the whole leg with
+    it instead of reporting itself.
+    """
+    server = api_server.create_server(hscc_dir=hscc_dir, addr=("127.0.0.1", 0))
+    try:
+        server.shutdown()                  # the pre-serve stop: refused, by design
+        assert server._started is False, (
+            "shutdown() stopped being a no-op before serving, so the entrypoint "
+            "no longer needs the stop flag this case is about")
+        stopping = threading.Event()
+        stopping.set()                     # asked to stop BEFORE serving began
+        # The thread's exception must be COLLECTED, not merely noticed: a
+        # serve_forever that does not accept the flag dies in the thread, the
+        # thread ends, and an `is_alive()`-only assert reads that crash as the
+        # clean stop it is supposed to detect.
+        crashed = []
+
+        def _serve():
+            try:
+                server.serve_forever(poll_interval=0.1, stop_event=stopping)
+            except BaseException as exc:       # noqa: BLE001 - report, never swallow
+                crashed.append(exc)
+
+        waiter = threading.Thread(target=_serve, daemon=True)
+        waiter.start()
+        waiter.join(10)
+        assert not crashed, (
+            f"serve_forever raised instead of honouring the flag: {crashed!r}")
+        assert not waiter.is_alive(), (
+            "serve_forever ignored a stop that was already requested when it "
+            "entered: the flag is lost, the listener keeps the port, and the "
+            "supervised sidecar keeps the token")
+    finally:
+        server.server_close()
+
+
 def test_first_bind_is_primary_and_duplicates_are_deduped(hscc_dir, monkeypatch):
     monkeypatch.setattr(
         api_server, "local_interface_addresses",

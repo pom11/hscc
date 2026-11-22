@@ -21,10 +21,12 @@ results. That is the same transport ``health._sparkrun_workloads`` and
 path to the fleet: no raw ``ssh``, no local ``docker`` (a local ``docker ps``
 answers *empty*, not *error*, on this fleet — the v1.15.0 failure class), and
 no hand-rolled host resolution. Lifecycle commands are the existing builders
-(``serving.vllm_stop_cmd`` for the stop, ``serving._unit_run_cmd`` — the
-keepalive relaunch command, ``--ensure`` included — for the resume) and are
-executed through ``util.run_cmd``, which performs the PATH-independent
-``sparkrun`` argv resolution (t_b543e530).
+(``serving.unit_stop_cmd`` for the stop, ``serving._unit_run_cmd`` — the
+keepalive relaunch command, ``--ensure`` included — for the resume); both are
+fed the SAME declared unit, because sparkrun matches a stop by the intent hash
+the run's flags produce (t_8ad06a53). They are executed through
+``util.run_cmd``, which performs the PATH-independent ``sparkrun`` argv
+resolution (t_b543e530).
 
 Why span detection is the hard part of ``plan``
 -----------------------------------------------
@@ -594,35 +596,59 @@ def _unit_record(live, declared, host, serving_dict):
                                              serving_dict) else "worker")
     unit_id = declared_node.get("id") or live.get("cluster_id") or ",".join(nodes)
 
-    stop_cmd = None
-    if recipe and nodes:
-        stop_cmd = serving.vllm_stop_cmd(node=",".join(nodes), recipe=recipe,
-                                         port=port)
+    # ONE placement dict feeds BOTH commands, so a unit's stop argv and its
+    # resume argv carry the SAME intent flags (t_8ad06a53). `fleet_up_plan`
+    # stamps `uniform_pool` on every entry it hands `_unit_run_cmd` — a pool
+    # fleet serves EITHER role, so `_served_model_name` must advertise BOTH
+    # aliases — and the pause stamps it too. Without the stamp the pause's own
+    # argv would carry a different `--served-model-name` than the launch `hscc
+    # cluster up` issued, sparkrun would recompute another intent for the stop,
+    # answer "No running workload matches intent …" and stop nothing.
+    placement = None
+    if declared:
+        placement = dict(declared, nodes=nodes, port=port, tp=tp,
+                         uniform_pool=serving.is_uniform_pool(serving_dict))
+
+    # The stop is the mirror of the resume, built from the SAME declared unit.
+    # sparkrun's `stop` matches by the intent hash recipe + --hosts/--port/
+    # --served-model-name/--tp feed (serving.vllm_stop_cmd's docstring names the
+    # sparkrun functions), so the pre-fix argv — recipe/hosts/port only —
+    # computed a DIFFERENT intent and stopped nothing (2.17.3: `hscc node pause`
+    # printed "1 unit(s) stopped" while the container stayed up).
+    #
+    # A workload with no serving.json unit behind it is the deliberate
+    # exception: its launch flags were never recorded anywhere hscc may trust,
+    # so nothing is guessed and the stop is the provable target+port form. When
+    # sparkrun cannot match THAT either, the failure is now reported per unit
+    # (`stop_units` → the CLI's report) instead of being counted as a stop.
+    stop_cmd = serving.unit_stop_cmd(
+        placement if (placement and placement.get("recipe")) else
+        {"recipe": recipe, "nodes": nodes, "port": port})
     resume_cmd = None
     resume_blocked = None
     if declared and declared.get("recipe"):
-        # The resume command: recipe, --cluster, --hosts, --port, --no-follow,
-        # --ensure, --served-model-name, --tp and the recorded -o overrides.
-        # The declared unit goes to the SAME builder ``hscc cluster up`` uses,
-        # with only the placement overridden (nodes/port/tp), so a resume from
-        # one node of a span re-issues the whole declared workload. Swapping in
-        # the live recipe here instead would change sparkrun's intent hash and
-        # launch a PARALLEL DUPLICATE of the unit rather than re-issuing it
-        # (t_e1ff0e8e).
+        # The resume command, from the SAME placement dict the stop above is
+        # built from: recipe, --cluster, --hosts, --port, --no-follow, --ensure,
+        # --served-model-name, --tp and the recorded -o overrides. Passing the
+        # declared unit to the builder ``hscc cluster up`` and health's keepalive
+        # relaunch both use — with only the placement overridden (nodes/port/tp) —
+        # is what makes a resume from one node of a span re-issue the whole
+        # declared workload. Swapping in the live recipe here instead would change
+        # sparkrun's intent hash and launch a PARALLEL DUPLICATE of the unit
+        # rather than re-issuing it (t_e1ff0e8e).
         #
         # ``prefer_serve_cmd`` is the resume half of the operator's 11-22 ruling
         # (t_09708c17): a resume must reproduce the EXACT argv the unit was
         # launched with, so the recorded serve_cmd wins when the unit carries
-        # one. Without it the builder derives the served names from this unit's
-        # own fields, and a uniform_pool unit's fields cannot rebuild what the
-        # apply path advertised — the reported resume came back with two names
-        # where the running unit served three, which is a different intent
-        # hash, so ``--ensure`` started a DIFFERENT workload and the node left
-        # the orchestrator pool. A record whose placement (recipe/hosts/port)
-        # disagrees is refused inside the builder and the derived argv is used.
-        resume_cmd = serving._unit_run_cmd(dict(declared, nodes=nodes,
-                                                port=port, tp=tp),
-                                           prefer_serve_cmd=True)
+        # one. Without a record the builder derives the served names from this
+        # dict's fields, and that is why the `uniform_pool` stamp above matters
+        # on this path too (t_8ad06a53): a pool unit's own role field is one
+        # role, and an unstamped rebuild advertises two names where the running
+        # unit served three — a different intent hash, so ``--ensure`` starts a
+        # DIFFERENT workload and the node leaves the orchestrator pool. A record
+        # whose placement (recipe/hosts/port) disagrees is refused inside the
+        # builder and the derived argv is used.
+        resume_cmd = serving._unit_run_cmd(placement, prefer_serve_cmd=True)
     elif declared:
         resume_blocked = ("the serving.json unit declares no recipe — the "
                           "launch command cannot be reproduced")

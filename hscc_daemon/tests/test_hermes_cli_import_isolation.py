@@ -35,9 +35,18 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-REAL_AGENT = Path.home() / ".hermes" / "hermes-agent"
 
+from hscc_daemon.tests.hermes_cli_plant import agent_tree_root  # noqa: E402
 from hscc_daemon.tests.real_hermes import require_real_hermes  # noqa: E402
+
+#: The tree this process resolves ``hermes_cli`` from — asked of the harness
+#: OWNER, never re-derived from ``~``. ``hermes_cli_plant.agent_tree_root`` is
+#: itself production's ``hermes_import.resolve_agent_tree``, so the rule and the
+#: shipped code cannot disagree about where hermes lives. A ``Path.home()`` copy
+#: here read as "no such tree" under the roster-wide HOME seal (t_ce473bf0):
+#: ``HOME`` had moved to an empty /tmp dir while the runner declared the real
+#: tree through the documented ``HERMES_AGENT_PATH`` seam (PR #606).
+REAL_AGENT = Path(agent_tree_root())
 
 # The shape test_autodown.TestLoadKanbanDb plants: a kanban_db with no
 # list_boards, i.e. exactly autodown's "single-board shape".
@@ -82,9 +91,13 @@ from hscc_daemon import autodown
 # loaded as a plugin, so file B had no licence to re-derive "is this path a
 # plant" for itself (t_b62da70c) — a third rule here would be exactly the drift
 # this file family exists to prevent.
-from hscc_daemon.tests.hermes_cli_plant import is_planted_path
+from hscc_daemon.tests.hermes_cli_plant import (agent_tree_root,
+                                                is_planted_path)
 
-REAL_AGENT = Path.home() / ".hermes" / "hermes-agent"
+#: Same rule as the outer module and for the same reason: the tree is asked of
+#: the owner, never re-derived from ``~``, because under the HOME seal the tree
+#: is wherever the runner declared it (t_ce473bf0).
+REAL_AGENT = Path(agent_tree_root())
 
 
 def test_no_planted_agent_dir_survives_on_sys_path():
@@ -201,8 +214,23 @@ def _cli_slice():
                   if n == "hermes_cli" or n.startswith("hermes_cli."))
 
 
-def test_open_a_real_import_window(tmp_path, monkeypatch):
-    monkeypatch.delenv("HERMES_AGENT_PATH", raising=False)
+def test_open_a_real_import_window(tmp_path):
+    # The window must open on the tree THIS process resolves hermes from, and
+    # the nested run inherits the parent's environment — which under the
+    # roster-wide HOME seal carries the runner's DECLARED HERMES_AGENT_PATH
+    # (PR #606). The `delenv` that used to open this case was a defensive no-op
+    # while nothing exported the pin and became a landmine once the runner did:
+    # with HOME moved to an empty /tmp dir the default resolves to
+    # '<sealed-home>/.hermes/hermes-agent', the production loader imports
+    # nothing, and the non-vacuity assert below reddens a hermetic-runner change
+    # as if the t_572b4856 leak were back (measured sealed, t_ce473bf0). Asking
+    # the seam keeps file A's premise and the outer gate's premise one and the
+    # same question.
+    from hscc_daemon import hermes_import
+    tree = hermes_import.resolve_agent_tree()
+    assert os.path.isdir(tree), (
+        "no agent tree to open a window on here — the outer gate should have "
+        f"skipped this nested run instead of running it: {tree!r}")
     before = _cli_slice()
     lib = autodown._load_kanban_db_or_default()
     after = _cli_slice()

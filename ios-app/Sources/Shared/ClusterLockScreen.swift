@@ -44,6 +44,13 @@ import Foundation
 // all, because `serving_table` prints `no backends behind the proxy` for that
 // case rather than a `total (0)` row: there is no queue to count.
 //
+// A PARKED MACHINE IS NOT A DOWN BACKEND. `serving_table` consults the pause
+// overlay ONLY inside its error branch, so a parked box whose engine stopped
+// answering is a deliberate stop: it leaves `backendsDown` and gets its own
+// `N backends paused` clause. That is the same reduction t_3c0b54b6 made for the
+// node tally (`FleetVerdict`), applied to the one surface that prints the
+// sentence before the operator has opened the app.
+//
 // Foundation-only, like the view-model it reads: no SwiftUI, no WidgetKit, no
 // `Color`, and no `WidgetFamily` (the macOS SDK marks the accessory cases
 // unavailable, so a type naming them cannot be compiled by the executed gate).
@@ -117,9 +124,23 @@ struct CLILockScreenMetrics: Equatable {
     let waiting: Int?
     /// Live backends the totals are made of (the `n` in the CLI's `total (n)`).
     let backendsReporting: Int
-    /// Backends the route reported as down: they add nothing to the totals, so
-    /// a queue of 0 beside a down backend is not "nothing to do".
+    /// Down backends on a machine NOBODY parked: the only ones this sentence may
+    /// call `down`.
+    ///
+    /// `CLIMonitorServingRow.isDown` stays `row.error != nil` — the overlay keeps
+    /// a parked row's error on purpose, and the committed CLI parity golden pins
+    /// its `down` byte — so the subtraction happens HERE, the one place the lock
+    /// screen's sentence is decided. It is the same reduction t_3c0b54b6 made for
+    /// the node tally (`FleetVerdict`): a machine the operator parked with
+    /// `hscc node pause` is a choice, not a fault, and this is the surface that
+    /// shows the sentence first thing in the morning.
     let backendsDown: Int
+    /// Down backends on a machine the operator parked. Its own clause, never
+    /// folded into `backendsDown` (that is the alarm again) and never folded into
+    /// the queue (a stopped engine is not "nothing to do"). The word is
+    /// `FleetFormat.pausedWord` — the one owner of the verdict word, the same one
+    /// the node rows draw — so the lock screen invents no second phrase.
+    let backendsPaused: Int
     /// Whether the serving section exists at all (§6 rule 1).
     let servingReported: Bool
 
@@ -154,7 +175,13 @@ struct CLILockScreenMetrics: Equatable {
         gpuUtil = CLIFleetAggregate(values: gpuReads, rule: .mean)
         gpuPower = CLIFleetAggregate(values: powerReads, rule: .sum)
 
-        backendsDown = model.backendRows.filter { $0.isDown }.count
+        // `isPaused` is `isDown && the overlay parks this row's node`, so these
+        // two filters PARTITION the errored rows: a backend lands in exactly one
+        // count, never both. A payload with no pause overlay — or a caller that
+        // has no pause knowledge, the CLI's `pauses=None` rule — leaves
+        // `backendsPaused` at 0 and every byte of the sentence where it was.
+        backendsPaused = model.backendRows.filter { $0.isPaused }.count
+        backendsDown = model.backendRows.filter { $0.isDown && !$0.isPaused }.count
         backendsReporting = model.totalRows.reduce(0) { $0 + $1.backends }
         // No total rows means no live backend: the CLI prints its `no backends
         // behind the proxy` note for that, not a total row, so the queue here
@@ -255,9 +282,13 @@ enum CLILockScreenCopy {
         var parts = [FleetFormat.count(running, singular: "run", plural: "run"),
                      FleetFormat.count(waiting, singular: "wait", plural: "wait")]
         if metrics.backendsDown > 0 {
-            parts.append(FleetFormat.count(metrics.backendsDown,
-                                           singular: "backend down",
-                                           plural: "backends down"))
+            parts.append(backendPhrase(metrics.backendsDown, word: "down"))
+        }
+        // The parked clause beside it, not inside it: a queue of 0 next to a
+        // parked backend says "nothing to do on purpose", and next to a faulting
+        // one says "nothing to do because it is broken". Two sentences.
+        if metrics.backendsPaused > 0 {
+            parts.append(backendPhrase(metrics.backendsPaused, word: FleetFormat.pausedWord))
         }
         return parts.joined(separator: " · ")
     }
@@ -281,9 +312,14 @@ enum CLILockScreenCopy {
             return FleetFormat.count(running, singular: "run", plural: "run")
         }
         if metrics.backendsDown > 0 {
-            return FleetFormat.count(metrics.backendsDown,
-                                     singular: "backend down",
-                                     plural: "backends down")
+            return backendPhrase(metrics.backendsDown, word: "down")
+        }
+        // Nothing queued and nothing faulting, but the engine is stopped on a
+        // parked box: say which of the two the operator is looking at. This
+        // branch sits AFTER the faulting one on purpose — when a payload has
+        // both, the real fault is the sharper answer to "is it working".
+        if metrics.backendsPaused > 0 {
+            return backendPhrase(metrics.backendsPaused, word: FleetFormat.pausedWord)
         }
         return "idle"
     }
@@ -365,7 +401,16 @@ enum CLILockScreenCopy {
         if let running = metrics.running, let waiting = metrics.waiting {
             parts.append("\(running) running, \(waiting) waiting")
             if metrics.backendsDown > 0 {
+                // The committed sentence, kept byte-for-byte — the gate holds an
+                // unpaused payload to exactly these bytes. Its missing plural is
+                // pre-existing wording and this card is not free to move it.
                 parts.append("\(metrics.backendsDown) backend down")
+            }
+            // The parked half goes through the one phrase helper, so the verdict
+            // word here IS `FleetFormat.pausedWord` — the same word the node rows
+            // draw — and this file invents no second phrase for the slot.
+            if metrics.backendsPaused > 0 {
+                parts.append(backendPhrase(metrics.backendsPaused, word: FleetFormat.pausedWord))
             }
         } else {
             // The note words are `CLIMonitorNote`'s, never re-typed here: the
@@ -394,6 +439,15 @@ enum CLILockScreenCopy {
     /// listed hosts reported.
     private static func coverage(_ aggregate: CLIFleetAggregate) -> String {
         aggregate.isPartial ? " \(aggregate.hostsReporting)/\(aggregate.hostsListed)" : ""
+    }
+
+    /// `1 backend down` / `2 backends paused`. ONE site, because the two words
+    /// fill the same slot and must not be worded twice: `down` is the CLI's word
+    /// for a backend that answered nothing, and the parked half passes
+    /// `FleetFormat.pausedWord` — the one owner of the verdict word, as
+    /// `FleetVerdict.pausedWord` is the owner of the fleet-level one.
+    private static func backendPhrase(_ count: Int, word: String) -> String {
+        FleetFormat.count(count, singular: "backend \(word)", plural: "backends \(word)")
     }
 
     private static func dashWith(_ unit: String) -> String {

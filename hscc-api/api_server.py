@@ -987,7 +987,18 @@ class _MultiServer:
     def hosts(self) -> list[str]:
         return [s.server_address[0] for s in self.servers]
 
-    def serve_forever(self, poll_interval=0.5):
+    def serve_forever(self, poll_interval=0.5, stop_event=None):
+        """Join the listener loops until ``shutdown()`` or ``stop_event``.
+
+        ``stop_event`` is the caller's "a stop was requested" flag, and it
+        exists because ``serve_main`` installs its signal handlers BEFORE these
+        listeners are bound (t_6eff6258): a SIGTERM can therefore land before
+        this method is ever entered, and ``shutdown()`` is a no-op until
+        ``_started`` is set. Re-checking the flag in the join loop is what makes
+        a stop requested during startup still end the loops, instead of the
+        request being lost and the process sitting in an accept loop that
+        nobody asked to run.
+        """
         self._started = True
         self._threads = [
             threading.Thread(target=s.serve_forever,
@@ -1000,6 +1011,11 @@ class _MultiServer:
             thread.start()
         try:
             while any(t.is_alive() for t in self._threads):
+                if stop_event is not None and stop_event.is_set():
+                    # Same path a real shutdown() takes, just asked for by the
+                    # flag instead of by the caller's thread.
+                    self.shutdown()
+                    return
                 for thread in self._threads:
                     thread.join(0.5)
         except KeyboardInterrupt:  # pragma: no cover - terminal foreground path
@@ -1257,6 +1273,43 @@ def serve_main(bind_override=None, port_override=None, *,
     # ~/.hscc/logs/api.log / api.err.log, which is where to look.
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
+
+    # launchd stops the unit with SIGTERM. Without a handler the default action
+    # kills us before bridge.shutdown(), orphaning the supervised serve on
+    # 9119 with our token — so the next boot pays the stale-token heal.
+    #
+    # Registered HERE — before create_servers() resolves anything or binds —
+    # because "the port is up" is not "the process can be stopped": the kernel
+    # completes a TCP handshake off the listen backlog the instant listen()
+    # returns, so a caller that waits for the port and then signals can hit this
+    # process while it is still inside startup. launchd can stop the unit at any
+    # point after spawn regardless, so the handler has to cover the whole
+    # startup and not just the part after a socket exists. Ordering pinned by
+    # tests/test_api_server_entrypoint.py::TestStopHandlersInstallBeforeTheBind.
+    import signal as _signal
+    import threading as _threading
+
+    stopping = _threading.Event()    # "a stop was requested"; see serve_forever
+    server = None                    # bound below; the handler may fire first
+
+    def _on_term(signum, frame):
+        # Handlers run on the MAIN thread at a bytecode boundary, so this must
+        # not block: set the flag, and hand the blocking part to a thread —
+        # server.shutdown() waits for serve_forever() to return, so calling it
+        # from the handler would deadlock against the accept loop it stops.
+        # `server` is None until the bind happens: the flag alone is what a
+        # stop-during-startup needs, and serve_main acts on it below.
+        print(f"hscc-api: signal {signum}, shutting down", flush=True)
+        stopping.set()
+        if server is not None:
+            _threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        _signal.signal(_signal.SIGTERM, _on_term)
+        _signal.signal(_signal.SIGINT, _on_term)
+    except (ValueError, OSError):
+        pass                      # not the main thread / not installable
+
     if bind_overrides is None and bind_override is not None:
         bind_overrides = ([bind_override] if isinstance(bind_override, str)
                           else list(bind_override))
@@ -1313,30 +1366,32 @@ def serve_main(bind_override=None, port_override=None, *,
         log.warning("gateway sidecar startup skipped: %r", exc)
         bridge = None
 
-    # launchd stops the unit with SIGTERM. Without a handler the default action
-    # kills us before bridge.shutdown(), orphaning the supervised serve on
-    # 9119 with our token — so the next boot pays the stale-token heal.
-    import signal as _signal
-    import threading as _threading
-
-    def _on_term(signum, frame):
-        # server.shutdown() blocks until serve_forever() returns, so it runs on
-        # its own thread: calling it from the handler would deadlock against the
-        # accept loop it is trying to stop.
-        print(f"hscc-api: signal {signum}, shutting down", flush=True)
-        _threading.Thread(target=server.shutdown, daemon=True).start()
-
+    # The handlers that make this a clean stop were installed at the top of
+    # serve_main, before anything was bound — see the note there for why the
+    # ordering is the whole point (t_6eff6258).
     try:
-        _signal.signal(_signal.SIGTERM, _on_term)
-        _signal.signal(_signal.SIGINT, _on_term)
-    except (ValueError, OSError):
-        pass                      # not the main thread / not installable
-
-    try:
-        server.serve_forever()
-    except Exception as exc:
-        print(f"hscc-api: crashed: {exc}", file=sys.stderr)
-        return 1
+        if stopping.is_set():
+            # A stop was requested while the listeners were still coming up —
+            # the exact window the roster hit. Nothing was ever served, and the
+            # answer is still the clean path: fall through to the same finally:
+            # so the sidecar is torn down and the unit exits 0, instead of
+            # losing to the default action's 15 with the serve child alive.
+            print("hscc-api: stop requested during startup, not serving",
+                  flush=True)
+        else:
+            # Readiness contract (t_6eff6258): this is the LAST line startup
+            # prints before serve_forever(), so it appears only once the
+            # SIGTERM/SIGINT handlers are installed AND every listener is
+            # bound. Something waiting for THIS line — the entrypoint test, or a
+            # supervisor — is guaranteed a process that can already be stopped
+            # cleanly. A port probe is strictly earlier than here and therefore
+            # cannot carry that promise.
+            print("hscc-api: ready", flush=True)
+            try:
+                server.serve_forever(stop_event=stopping)
+            except Exception as exc:
+                print(f"hscc-api: crashed: {exc}", file=sys.stderr)
+                return 1
     finally:
         clear_api_state()
         if bridge is not None:

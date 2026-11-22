@@ -30,7 +30,12 @@ What is pinned, in order of the damage each prevents:
      full roster is decide_legs.sh, and "could not run is red before advisory"
      is leg_verdict.sh;
   6. `-e` is disabled around the runner, because GitHub's `bash -e` would abort
-     the step before rc=$? and turn a classified red into an opaque error.
+     the step before rc=$? and turn a classified red into an opaque error;
+  7. a run that is not a pull_request cannot land in a concurrency group shared
+     with another such run. `cancel-in-progress: false` only protects a run
+     already in progress — GitHub keeps one `pending` run per group and cancels
+     the older pending one when a newer arrives, which is how a push to main lost
+     its whole roster while nothing reported a failure (t_d8119645).
 """
 
 import re
@@ -186,6 +191,171 @@ def test_the_legs_job_does_not_cancel_a_push_to_main():
     assert m and "pull_request" in m.group(1), (
         "cancelling a full-suite run on main destroys the backstop, and a "
         "cancelled check counts against branch protection"
+    )
+
+
+# --- the concurrency group (t_d8119645) -------------------------------------
+#
+# The group used to be `pytest-legs-${{ github.ref }}`, i.e. one group per
+# branch, with `cancel-in-progress: false` as the reason to believe a push to
+# main was safe. It was not: that flag protects a run already IN PROGRESS, while
+# GitHub keeps at most ONE `pending` run per group and cancels the older pending
+# one when a newer arrives. So two pushes to main inside one roster's runtime
+# cost the earlier sha its entire full-suite run — measured, `completed /
+# cancelled` with 0 jobs.
+
+# The one shape `concurrency.group` may have: a literal prefix, an expression
+# branching on the event name, a part shared per pull request, and a fallback
+# for every other event. Any other shape fails rather than being accepted.
+_GROUP_SHAPE = re.compile(
+    r"""^
+    (?P<prefix>[^\$\s]*)
+    \$\{\{\s*
+        github\.event_name\s*==\s*'(?P<event>[a-z_]+)'\s*
+        &&\s*(?P<shared>[^$|{}]+?)\s*
+        \|\|\s*(?P<fallback>[^$|{}]+?)\s*
+    \}\}$
+    """,
+    re.VERBOSE,
+)
+
+# The group parts a test here can evaluate. `github.head_ref` is the docs' own
+# per-PR spelling, so it joins `github.ref` as "shared per pull request". A part
+# outside this map is a FAILURE, never a pass — an expression the test cannot
+# reason about must not be allowed to read as "probably fine".
+_EVALUABLE = {
+    "github.ref": lambda ref, run_id: ref,
+    "github.head_ref": lambda ref, run_id: ref,
+    "github.run_id": lambda ref, run_id: run_id,
+}
+
+
+def _concurrency() -> dict[str, str]:
+    """The scalar children of the top-level `concurrency:` block, as written."""
+    out, inside = {}, False
+    for ln in _lines():
+        if ln == "concurrency:":
+            inside = True
+            continue
+        if inside:
+            if ln and not ln.startswith((" ", "\t", "#")):
+                break
+            m = re.match(r"^  ([A-Za-z0-9_.-]+):\s*(\S.*?)\s*$", ln)
+            if m:
+                out[m.group(1)] = m.group(2)
+    return out
+
+
+def _group_for(event_name: str, *, ref: str, run_id: str) -> str:
+    """Evaluate the workflow's `concurrency.group` for one event.
+
+    A deliberately tiny evaluator, not a GitHub expression engine: it knows only
+    the shape `_GROUP_SHAPE` admits and refuses anything it cannot recognise.
+
+    This pins what the FILE asks for. It cannot prove what GitHub then does with
+    the group it is handed — that half is measurement, recorded on t_d8119645.
+    """
+    group = _concurrency().get("group", "")
+    m = _GROUP_SHAPE.match(group)
+    if not m:
+        raise AssertionError(
+            "concurrency.group is not the event-gated shape pinned here: "
+            f"{group!r}. It must branch on the event name so that only "
+            "pull_request runs can share a group."
+        )
+    if m.group("event") != "pull_request":
+        raise AssertionError(
+            f"the shared-group branch keys on {m.group('event')!r}, not "
+            "'pull_request', so pushes could land in a group with each other"
+        )
+    part = m.group("shared") if event_name == "pull_request" else m.group("fallback")
+    if part not in _EVALUABLE:
+        raise AssertionError(
+            f"unsupported concurrency.group part {part!r}: the test cannot tell "
+            "whether it is per-run-unique, so it refuses to guess"
+        )
+    return m.group("prefix") + _EVALUABLE[part](ref, run_id)
+
+
+def test_two_pushes_to_main_can_never_share_a_concurrency_group():
+    """The backstop is per-sha evidence, so one push must not be able to displace
+    another — and a shared group guarantees it can.
+
+    GitHub's default is `queue: single`: one pending run per group, and "any
+    existing `pending` job or workflow in the same concurrency group will be
+    canceled and the new queued job or workflow will take its place". Nothing in
+    `cancel-in-progress` changes that. The only shape where a push to main cannot
+    be dropped is one where pushes never share a group at all.
+    """
+    first = _group_for("push", ref="refs/heads/main", run_id="45019238106")
+    second = _group_for("push", ref="refs/heads/main", run_id="45019240000")
+    assert first != second, (
+        "two pushes to main landed in the same concurrency group: the queued one "
+        "is cancelled when the next push arrives, and that main sha silently "
+        "loses its full-roster run (measured: run 45019238106 finished "
+        "completed/cancelled with 0 jobs)"
+    )
+    # A dispatch is not a pull_request either, and a silently-dropped manual
+    # roster is worse than no manual roster.
+    assert _group_for("workflow_dispatch", ref="refs/heads/main", run_id="7") != _group_for(
+        "workflow_dispatch", ref="refs/heads/main", run_id="8"
+    ), "two workflow_dispatch runs share a group, so the queued one can be cancelled"
+    assert "queue" not in _concurrency(), (
+        "`queue: max` was rejected deliberately: it queues the backstop behind "
+        "the roster ahead of it, still cancels past 100 pending, and GitHub "
+        "refuses it together with the cancel-in-progress: true that PRs need"
+    )
+
+
+def test_a_superseded_push_to_a_pull_request_still_shares_its_group():
+    """The behaviour the old comment was reaching for, kept: every run of one PR
+    sits in one group with cancel-in-progress armed, so the stale commit stops
+    spending runner minutes. Splitting the group per run here would have thrown
+    away the only real saving the block ever bought."""
+    a = _group_for("pull_request", ref="refs/pull/607/merge", run_id="11")
+    b = _group_for("pull_request", ref="refs/pull/607/merge", run_id="22")
+    assert a == b, (
+        "a PR's runs no longer share a group, so a superseded push to that PR is "
+        "never cancelled and each stale commit pays for a full roster"
+    )
+    assert a != _group_for("pull_request", ref="refs/pull/608/merge", run_id="33"), (
+        "one group for every PR lets a push to one PR cancel another PR's roster"
+    )
+    assert "pull_request" in _concurrency()["cancel-in-progress"]
+
+
+def test_the_concurrency_comment_records_the_rule_that_actually_applies():
+    """The comment used to state that pushes to main are never cancelled. That is
+    contradicted by measurement and by GitHub's own docs, and a comment that
+    reads as settled fact is exactly what the next reader trusts instead of
+    testing.
+
+    This pins TEXT only — it cannot prove GitHub's behaviour. What it does is
+    keep the refuted claim from being pasted back, and keep the rule that does
+    apply next to the flag it does not apply to.
+    """
+    text = _text()
+    block = text[text.index("\nconcurrency:\n") : text.index("\njobs:\n")]
+    comment = " ".join(ln.strip("# ").strip() for ln in block.splitlines() if ln.strip().startswith("#"))
+    assert comment, "the concurrency block lost its rationale comment"
+    for refuted in ("never are", "Pushes to main never", "never cancelled"):
+        assert refuted not in comment, (
+            f"the concurrency comment restates the refuted claim {refuted!r} — "
+            "a pending run in a shared group IS cancelled and replaced"
+        )
+    assert "pending" in comment, (
+        "the comment must name the rule that actually applies: GitHub keeps at "
+        "most one PENDING run per concurrency group and replaces it"
+    )
+    # The block's rationale is prose, and one neighbouring pin finds the real
+    # setting by grepping the whole file for `cancel-in-progress: <value>` — so a
+    # comment that spells that form takes the pin's match for itself and the pin
+    # then asserts on prose (measured: it read 'false`:' and failed). The setting
+    # must stay the only place that form appears.
+    assert not re.search(r"cancel-in-progress:\s*\S", comment), (
+        "the concurrency comment spells the setting form `cancel-in-progress: "
+        "<value>`, which test_the_legs_job_does_not_cancel_a_push_to_main greps "
+        "for — write it as prose (\"leaving cancel-in-progress at false\")"
     )
 
 
