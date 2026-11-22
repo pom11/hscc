@@ -65,8 +65,15 @@ SERVING = {
 }
 
 #: The single clock every case is judged against, so "expired" and "future" are
-#: facts about the fixture, not about when pytest ran.
-_T0 = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+#: facts about the fixture, not about when pytest ran. Anchored to IMPORT time for
+#: exactly that reason: a literal timestamp made the whole file decay — every
+#: `at(3600)` neighbour pause turned into a past-due record the moment the wall
+#: clock passed that literal hour, `resume_host`'s span guard (`continue` on an
+#: expired other pause, node_pause_exec.py) stepped aside as designed, and the two
+#: span-refusal tests went red on an unchanged tree (observed live: CI leg
+#: hscc_daemon green on main at 12:45 UTC, red at 14:14 UTC on an unrelated PR,
+#: with `{'action': 'resumed', 'ok': True}` where the refusal was asserted).
+_T0 = datetime.now(timezone.utc).replace(microsecond=0)
 NOW = _T0.isoformat()
 
 

@@ -435,7 +435,17 @@ def restart_vllm(verify_fn=None, pause_directory=None):
     except (IndexError, TypeError):
         recipe = ""
     unit = _registered_serving_unit(node, port)
-    stop_cmd = serving.vllm_stop_cmd(node=node, recipe=recipe, port=None)
+    # The stop mirrors VLLM_START_CMD — the exact argv this restart launches —
+    # rather than re-deriving a target by hand (t_8ad06a53). sparkrun's `stop`
+    # matches a workload by the INTENT HASH it recomputes from the recipe plus
+    # --port/--served-model-name/--tp, so a stop that omits a flag the launch
+    # passed matches NOTHING and answers "No running workload matches intent
+    # …"; rule 3 then aborts the restart (and the pause verb, which shares the
+    # builder, used to call that failure a stop). The flags are read back out of
+    # the start argv, so start and stop cannot drift apart here either.
+    stop_cmd = serving.vllm_stop_cmd(
+        node=node, recipe=recipe,
+        **serving.stop_flags_from_run_argv(VLLM_START_CMD))
 
     if unit is not None:
         msg = (f"vLLM restart refused: {node}:{port} is registered unit "
