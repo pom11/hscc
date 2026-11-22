@@ -212,4 +212,4 @@ def test_no_hardcoded_old_profile_or_board_literals_outside_resolver():
         "indirectly in prose. Do NOT add the offending file to RESOLVER_FILES: "
         "that set is the resolver's own two files, and a consumer listed there "
         "could hardcode the very identity it is supposed to resolve (ruled in "
-        "t_d1afc6e6, NOTES-t_d1afc6e6.md).")
+        "t_d1afc6e6).")
