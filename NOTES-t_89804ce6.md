@@ -121,5 +121,46 @@ non-tty), so this is not the parent's prohibited "widen the console to pass".
 
 ## ASK 3 / ASK 4 — status
 
-* 0 asserts deleted, skipped, xfailed or broadened.
-* …  (fill in below as the arms land)
+| case | assert now | why |
+|---|---|---|
+| `test_list_shows_columns_and_health` | **RAW** (unchanged) | the view fix makes it true at every length 61..212 |
+| `TestNoAnsiProject::test_list_human` | **RAW** (unchanged) | same |
+| `test_project_list_rows_survive_markup` | **RAW** (unchanged) | same |
+| `test_roadmap_add_path_and_heading_survive` | `_assert_literal_folded(out, "added a new item")` → `_says` | the fold splits `[/bold]` |
+| `test_roadmap_adopt_backup_path_survives` | `_says` for the value, **`.bak` kept RAW** | measured at 100/130/160/170/185/190/200/212: the break never lands inside `.bak` (at 170 it lands earlier — `ROAD` / `MAP.md.bak`), so that phrase has an honest raw assert |
+| `test_cli_run_reports_real_totals` | `_says(captured, "map-sessions-")` | the fold splits the file name |
+| `test_cli_install_service_writes_unit_in_private_home` | `_says(out, <full plist path>)` | red from tmp root 161 |
+| `test_autodown_cli.py::…unevaluable_kanban_interlock` | `_says(out, <full agent-source path>)` | red in two windows (68..73, 144..149) |
+
+0 asserts deleted, skipped, xfailed or broadened. Every normalised assert keeps a
+RAW anchor from the same row.
+
+### The normalised asserts still refuse (does the promise survive the normaliser?)
+
+* Product mutation, real tree, reverted after the arm: renaming the proposal
+  prefix away from `map-sessions-` in `flightdeck/core/map_sessions.py` →
+  **pytest rc=1 (CAUGHT)** at tmp root 190, unmutated control **rc=0**.
+* On the four captured renders: raw phrase absent (`False`), `_says` recovers
+  (`True`), and deleting the folded fragment from the render makes `_says`
+  refuse again (`False`) — so the normaliser is not matching everything.
+
+### Post-fix render (tmp root 190, verbatim tee; the long run of `c` in the path
+### and the line ends are trimmed here for page width only — the tee itself has
+### `rich_ellipsis=0`, i.e. Rich printed no `…` anywhere)
+
+```
+┃ NAME  ┃ REPO                                              … BOARD ┃ TOPIC ┃ HEALTH ┃
+│ sigma │ /private/tmp/s898/rd/cccc…ccccc                   …
+│       │ _list_shows_columns_and_he0/sigma                 …
+│ sigma │ 140   │ ok     │                                   (row tail)
+```
+
+Four of five columns are back at their floor width — `NAME`, `BOARD`, `TOPIC`
+and `HEALTH` all render, the path is whole across two lines, and the health cell
+reads `ok`.
+
+## GATE
+
+The affected legs (canonical + CI-shaped, one pytest process per leg dir) are
+posted with their SHA in the PR body and on the card — the pair is measured at
+the PR head commit itself, so no commit in this branch is unmeasured.
