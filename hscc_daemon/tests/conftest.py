@@ -392,6 +392,12 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (proxy_log_archive, "SRC_OVERRIDE", p("absent-litellm.log")),
             (proxy_log_archive, "PROXY_LOG_KEEP", 5),
             (proxy_log_archive, "PROXY_LOG_CAP_BYTES", 64 * 1024 * 1024),
+            # health.py (t_892378c1) — the log-on-change latch behind the
+            # paused-host router WARN. In-process only (nothing on disk), but
+            # without a per-test reset a test that saw a stale entry leaves the
+            # NEXT test's identical WARN suppressed, so the suite would pass or
+            # fail on test ORDER. Rebound fresh, exactly like the latch above.
+            (health, "_paused_stale_router_state", {"signature": None}),
             # heal_lease.py (F2) — the durable single-flight repair lease. This
             # MUST be redirected: check_workers / check_proxy / recover now all
             # take and release it, so an unredirected path would write a LIVE
