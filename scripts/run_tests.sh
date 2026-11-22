@@ -183,6 +183,18 @@ fi
 # refused outright — hermes resolves a home under `~/.hermes` back to the live
 # root (t_d39c720e), so a "sealed" home there is not sealed and would read as one.
 #
+# WHY THE ROOT IS DECIDED BEFORE mktemp (t_9c1ff8e1). On a host whose login home IS
+# `/tmp` — the Linux/CI default shape, and what `HSCC_TEST_LEGS=<bogus>` met on #606's
+# own CI — the two rules above are mutually unsatisfiable: every dir `mktemp` can make
+# under `/tmp` is inside the login home, so the refusal fired rc 3 BEFORE leg selection
+# and the roster could not run at all, nor reject a typo'd leg with its contracted 64.
+# So when `/tmp` is inside the login home the root becomes `/var/tmp` — the other
+# literal, still never `$TMPDIR`, still subject to the same refusal (a host that
+# contains BOTH has nowhere to seal and still gets rc 3). The decision reads ONLY
+# `$SUITE_REAL_HOME`, and never what `mktemp` answered: a fallback triggered by the
+# refusal would swallow the refusal itself, and the guard below would stop being a
+# guard (pinned both ways in scripts/tests/test_run_tests_home_seal.py).
+#
 # WHY THE RUNNER PRINTS THE PATH. A roster log has to prove its own posture: the
 # `sealed HOME=` line is what makes a `1164 passed, 5 skipped` line attributable
 # to the seal rather than to whatever else the machine looked like.
@@ -194,11 +206,32 @@ SUITE_REAL_HOME="${HOME:-}"
 if [ "${HSCC_TEST_NO_SEAL:-0}" = "1" ]; then
   echo "HOME seal: DISABLED (HSCC_TEST_NO_SEAL=1) — legs run with the operator's HOME"
 else
-  SUITE_HOME="$(mktemp -d /tmp/hscc-suite-home-XXXXXX 2>/dev/null || true)"
+  # The root is decided from the LOGIN HOME alone, before mktemp runs — the two
+  # literals below are the whole answer, never `$TMPDIR` and never "whatever mktemp
+  # answered" (see WHY THE ROOT IS DECIDED BEFORE mktemp above). The literals stay
+  # spelled out per branch rather than folded into one `$SUITE_HOME_ROOT/template`
+  # argument on purpose: `mktemp -d /tmp/hscc-suite-home-XXXXXX` is the string
+  # scripts/tests/test_run_tests_home_seal.py pins, and a rewrite that hides it makes
+  # that guard parse a shape it no longer checks.
+  SUITE_HOME_ROOT="/tmp"
+  case "/tmp" in
+    "$SUITE_REAL_HOME"|"$SUITE_REAL_HOME"/*)
+      SUITE_HOME_ROOT="/var/tmp"
+      echo "HOME seal: /tmp is inside the login home ($SUITE_REAL_HOME) — sealing under /var/tmp instead" ;;
+  esac
+  if [ "$SUITE_HOME_ROOT" = "/var/tmp" ]; then
+    SUITE_HOME="$(mktemp -d /var/tmp/hscc-suite-home-XXXXXX 2>/dev/null || true)"
+  else
+    # Set here, not only above: the branch that runs THIS mktemp is the branch that
+    # owns the root the banner names, so no third value can leave the log naming a
+    # root the path does not live under.
+    SUITE_HOME_ROOT="/tmp"
+    SUITE_HOME="$(mktemp -d /tmp/hscc-suite-home-XXXXXX 2>/dev/null || true)"
+  fi
   if [ -z "$SUITE_HOME" ] || [ ! -d "$SUITE_HOME" ]; then
     # Fail CLOSED: running the roster unsealed while claiming otherwise is the
     # worse outcome, so an inability to seal stops the run before leg 1.
-    echo "run_tests.sh: cannot create the sealed HOME under /tmp — refusing to run the roster unsealed" >&2
+    echo "run_tests.sh: cannot create the sealed HOME under $SUITE_HOME_ROOT — refusing to run the roster unsealed" >&2
     exit 3
   fi
   case "$SUITE_HOME" in
@@ -208,7 +241,7 @@ else
   esac
   export HOME="$SUITE_HOME"
   export USERPROFILE="$SUITE_HOME"   # pathlib/expanduser readers on a Windows host
-  echo "HOME seal: HOME=USERPROFILE=$SUITE_HOME (empty dir under /tmp; HSCC_TEST_NO_SEAL=1 opts out)"
+  echo "HOME seal: HOME=USERPROFILE=$SUITE_HOME (empty dir under $SUITE_HOME_ROOT; HSCC_TEST_NO_SEAL=1 opts out)"
   # Declared, not discovered. `hscc-cluster`'s two source cross-checks compare the
   # staged media recipes against sparkrun SOURCE, which a deployed plugin dir
   # cannot import and CI does not have; their seam is `SPARKRUN_SRC`

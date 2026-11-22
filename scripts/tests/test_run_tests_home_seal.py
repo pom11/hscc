@@ -31,17 +31,29 @@ Six claims, each pinned separately so a regression names itself:
   6. ``SPARKRUN_SRC`` is DECLARED from the machine's own checkout when the operator
      did not set one, and an operator's value always wins — the runner exports that
      one path and never the home, so the coverage of hscc-cluster's source
-     cross-checks survives the seal without the seal becoming a suggestion.
+     cross-checks survives the seal without the seal becoming a suggestion;
+  7. when the login home IS the seal root (``HOME=/tmp`` — the Linux/CI default) the
+     root becomes ``/var/tmp`` and the roster still runs (t_9c1ff8e1: #606's own
+     ``leg scripts`` was red on exactly this). The fallback is decided from the login
+     home BEFORE ``mktemp`` runs, never from what ``mktemp`` answered, so claim 4's
+     refusal still refuses — both arms are pinned, and the shipped
+     ``test_run_tests_leg_selection.py`` end-to-end case cannot see this posture on a
+     Mac because ``tempfile.gettempdir()`` is ``/var/folders/…`` there and ``/tmp`` on
+     the runner it was red on.
 
 Hermetic: tmp dirs, a ``mktemp`` shim on ``PATH``, and ``bash`` only. Nothing here
-imports a plugin or reads the operator's real home.
+imports a plugin or reads the operator's real home. The two t_9c1ff8e1 cases and the
+one end-to-end case write a real dir under ``/var/tmp`` (that is the posture) and
+remove it again.
 """
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 RUNNER = SCRIPTS / "run_tests.sh"
+REPO = SCRIPTS.parent
 
 BLOCK_START = "# ━━━ roster-wide HOME seal for every leg (t_2b2a6c3b)"
 PROBE = ("printf 'HOME=%s\\nUSERPROFILE=%s\\nSPARKRUN_SRC=%s\\nNOSEAL=%s\\n' "
@@ -179,6 +191,126 @@ def test_a_home_that_cannot_be_created_stops_the_run_instead_of_running_unsealed
     r = _run(_block(), env, tmp_path)
     assert r.returncode == 3, f"expected rc 3 (fail closed), got {r.returncode}: {r.stdout}"
     assert "refusing to run the roster unsealed" in r.stderr
+
+
+# ── 4b. the login home IS the seal root (t_9c1ff8e1) ──────────────────────────
+# Every case above builds its login home with ``_home(tmp_path)``, i.e. a dedicated
+# dir the seal root can never be inside. That is why twelve shipped cases and a
+# 16-probe mutation battery all missed this: on the Linux/CI default host ``HOME`` is
+# ``/tmp``, so the seal root and the login home are the same directory and the two
+# pinned rules (/tmp, never inside the login home) have no answer. These cases set the
+# HOME the defect can actually see — a literal path, not a tmp dir.
+
+def _login_home(tmp_path, home: str, **extra) -> dict:
+    """``_env`` with the LOGIN HOME pinned to a literal path (``/tmp``, ``/var``, …)."""
+    env = _env(tmp_path)
+    env["HOME"] = home
+    env.update({k: v for k, v in extra.items() if v is not None})
+    return env
+
+
+def _mktemp_shim(tmp_path, creates: Path) -> Path:
+    """A ``mktemp`` on PATH that CREATES and echoes *creates*, ignoring the template."""
+    shim = tmp_path / "shim"
+    shim.mkdir(exist_ok=True)
+    (shim / "mktemp").write_text('#!/bin/sh\n'
+                                 f'd="{creates}"\n'
+                                 'mkdir -p "$d"\n'
+                                 'echo "$d"\n')
+    (shim / "mktemp").chmod(0o755)
+    return shim
+
+
+def _sealed_from_banner(stdout: str) -> str | None:
+    """The path the seal banner announced, or None."""
+    for line in stdout.splitlines():
+        if line.startswith("HOME seal: HOME=USERPROFILE="):
+            return line.split("=", 2)[2].split(" (")[0]
+    return None
+
+
+def test_a_login_home_that_is_the_seal_root_falls_back_to_var_tmp(tmp_path):
+    """``HOME=/tmp`` must seal under ``/var/tmp``, not stop the roster (t_9c1ff8e1).
+
+    The shipped shape died rc 3 here — before leg selection, so no leg ran at all and
+    even a typo'd leg name lost its contracted 64. The root is decided BEFORE ``mktemp``
+    precisely so the refusal below keeps its teeth (see the next case).
+    """
+    r = _run(_block(), _login_home(tmp_path, "/tmp"), tmp_path)
+    assert r.returncode == 0, f"HOME=/tmp must seal, not refuse: {r.stdout}{r.stderr}"
+    values = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    sealed = Path(values["HOME"])
+    try:
+        assert str(sealed).startswith("/var/tmp/hscc-suite-home-"), values
+        assert sealed.is_dir() and not any(sealed.iterdir()), \
+            "the fallback root must still hand the legs an EMPTY home"
+        assert values["USERPROFILE"] == str(sealed)
+        assert not str(sealed).startswith("/tmp/"), \
+            "the fallback must not have sealed under the login home it just fell back from"
+        assert "is inside the login home" in r.stdout, \
+            "the log has to say WHY the root moved, or a reader of a roster log " \
+            "sees a root they cannot explain"
+        assert "(empty dir under /var/tmp;" in r.stdout, (
+            "the banner names the root ACTUALLY chosen — a log that says /tmp while "
+            "sealing under /var/tmp is the posture lie this block exists to prevent")
+    finally:
+        if sealed.is_dir():
+            sealed.rmdir()
+
+
+def test_the_fallback_is_not_triggered_by_what_mktemp_answered(tmp_path):
+    """The trap in the fix: a fallback driven by the REFUSAL swallows the refusal.
+
+    ``HOME=/tmp`` (so the root is ``/var/tmp``) AND a ``mktemp`` shim answering a path
+    inside that login home. The runner must still refuse rc 3. An implementation that
+    reacted to "mktemp answered inside the login home" by retrying somewhere else would
+    pass this configuration green — and the containment guard would survive the mutation
+    probe that pins t_d39c720e, because nothing would ever reach the refusal again.
+    """
+    inside = Path("/tmp") / f"hscc-suite-home-SHIM{os.getpid()}"
+    shim = _mktemp_shim(tmp_path, inside)
+    env = _login_home(tmp_path, "/tmp")
+    env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
+    try:
+        r = _run(_block(), env, tmp_path)
+        assert r.returncode == 3, (
+            "the refusal is the contract; retrying after it is how the containment "
+            f"guard becomes decoration (rc={r.returncode}):\n{r.stdout}{r.stderr}")
+        assert "refusing a sealed HOME inside the login home" in r.stderr
+        assert _sealed_from_banner(r.stdout) is None, (
+            "a refusal that still exported leaves the leg children with the path "
+            "this check just refused")
+    finally:
+        if inside.exists():
+            inside.rmdir()
+
+
+def test_the_shipped_script_reaches_leg_selection_when_the_login_home_is_tmp(tmp_path):
+    """End-to-end on the real runner at the posture CI runs: ``HOME=/tmp`` (t_9c1ff8e1).
+
+    Same contract as ``test_run_tests_leg_selection.py``'s end-to-end case, but with the
+    temp root pinned literally: that case passes on macOS precisely because
+    ``tempfile.gettempdir()`` is ``/var/folders/…`` there, which is how a defect that
+    reddened the Linux leg stayed invisible on the machine that wrote the guard.
+    """
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": "/tmp",
+           "TMPDIR": str(tmp_path / "tmpdir"),
+           "FASTEMBED_CACHE_DIR": str(tmp_path / "fastembed"),
+           "HSCC_TEST_LEGS": "hscc-apo"}
+    proc = subprocess.run(["bash", str(RUNNER)], capture_output=True, text=True,
+                          check=False, env=env, cwd=REPO)
+    sealed = _sealed_from_banner(proc.stdout)
+    try:
+        assert proc.returncode == 64, (
+            f"a bad leg must exit 64 on EVERY host, got {proc.returncode}:\n"
+            f"{proc.stdout}{proc.stderr}")
+        assert "hscc-apo" in proc.stderr
+        assert "refusing a sealed HOME" not in proc.stderr
+        assert sealed is not None and sealed.startswith("/var/tmp/hscc-suite-home-"), \
+            f"the run must prove it sealed, and where:\n{proc.stdout}"
+    finally:
+        if sealed and Path(sealed).is_dir():
+            shutil.rmtree(sealed, ignore_errors=True)
 
 
 # ── 5. TMPDIR cannot move the seal ────────────────────────────────────────────
