@@ -300,6 +300,117 @@ state.applyCluster(CarPlayClusterReading(response: monitor, fetchedAt: now),
                    failed: false, now: now)
 check(!state.clusterDimmed, "fresh cluster is not dimmed")
 
+// MARK: - The parked node (t_3c0b54b6)
+
+// The SAME committed fixture `cluster_widget_check.sh` and `model_decode_check.sh`
+// run — the shared-metrics capture with two tagged parked rows (one with a reason
+// and a stamp, one with `paused_reason: ""` and `paused_since: null`), one real
+// down row and one answering row, plus a parked node the frame never listed. It is
+// decoded here rather than restated, so the car screen is held to the same bytes
+// the tile is.
+func carplayFixture(_ name: String) -> Data {
+    let path = "\(FileManager.default.currentDirectoryPath)/scripts/model_decode_check/fixtures/\(name)"
+    guard let data = FileManager.default.contents(atPath: path) else {
+        print("FATAL: fixture not readable at \(path) (run the script from ios-app/)")
+        exit(2)
+    }
+    return data
+}
+
+// The pause stamp in the fixture is 2026-11-21T10:00:00+00:00; three hours later
+// it is `3h ago`, the same pinned clock the widget gate uses.
+let pauseNow = Date(timeIntervalSince1970: 1795255200 + 3 * 3600)
+
+print("")
+print("parked node (v1_cluster_monitor_paused.json)")
+guard let pausedMonitor = try? JSONDecoder().decode(MonitorResponse.self,
+                                                    from: carplayFixture("v1_cluster_monitor_paused.json")),
+      let parked = CarPlayClusterReading(response: pausedMonitor, fetchedAt: pauseNow) else {
+    print("FATAL: the committed v1_cluster_monitor_paused.json did not decode + project")
+    exit(2)
+}
+
+// --- the rows. `down` and `idle` are the two words this card forbids for a
+// machine the operator parked; `paused (reason, since)` is the one it requires.
+check(parked.nodes.count == 4, "the car lists the four hosts the frame reached")
+check(parked.tally.nodesPaused == 3, "the parked node the frame omitted is still counted")
+check(parked.nodes[0].isPaused, "row 0 (.11) is read as parked")
+equal(parked.nodes[0].statusText, "paused (training run, 3h ago)",
+      "parked with reason and since")
+equal(parked.nodes[0].rowSubtitle, "paused (training run, 3h ago)",
+      "the image row's subtitle is the verdict, not a pair of dashes")
+equal(parked.nodes[0].detailLine, "\(parked.nodes[0].label) · paused (training run, 3h ago)",
+      "the pushed list's subtitle-equivalent carries the verdict")
+// The label half is the SHARED path's (`FleetNodeLine.label` = `displayLabel`),
+// never a name this file chose: the §7 proof is that no address reaches it.
+check(parked.nodes.allSatisfy { !$0.label.contains("192.0.2.") },
+      "no parked or live row label puts an address on the car screen (§7)")
+check(parked.nodes[0].detailText.hasPrefix("paused ("), "the pushed list leads with the verdict")
+check(!parked.nodes[0].detailText.contains("down"), "a parked row never says down")
+check(!parked.nodes[0].detailText.contains("idle"), "a parked row never says idle")
+check(!parked.nodes[0].rowSubtitle.contains("idle"), "a parked subtitle never says idle")
+
+// The second parked row has `paused_reason: ""` and `paused_since: null`: silence,
+// not values, so it degrades to the bare word rather than to `paused (, )` or a dash.
+check(parked.nodes[1].isPaused, "row 1 (.12) is parked even though it answered")
+equal(parked.nodes[1].statusText, "paused", "an empty reason and a null since read bare paused")
+equal(parked.nodes[1].tpsText, "—", "a parked engine says —, not idle")
+check(!parked.nodes[1].detailText.contains("idle"), "no parked row falls through to idle")
+
+// Control: the row that is genuinely down keeps the old word, and the row that is
+// simply up keeps the old line. Nothing about an unpaused fleet moved.
+check(!parked.nodes[2].isPaused && !parked.nodes[2].isUp, "row 2 (.13) is a real fault")
+check(parked.nodes[2].detailText.hasPrefix("down · "), "an untagged errored row still leads with down")
+check(!parked.nodes[2].detailText.contains("paused"), "a real fault is not softened to paused")
+check(!parked.nodes[3].isPaused && parked.nodes[3].isUp, "row 3 (.14) is up")
+check(!parked.nodes[3].detailText.contains("paused"), "an answering row draws no verdict word")
+check(!parked.nodes[3].rowSubtitle.contains("paused"), "an answering subtitle is unchanged")
+
+// --- the fleet line. Two of the four listed nodes are parked, so the sentence
+// judges two, not four — and a frame that is ALL parked says Paused, not Down.
+check(parked.verdict.answered == 1 && parked.verdict.judged == 2,
+      "the verdict counts only un-parked nodes on both sides (1/2)")
+check(parked.tally.nodesUp == 2 && parked.tally.nodesTotal == 4,
+      "the route's own numbers stay the route's (2 up of 4 listed)")
+equal(parked.headline, "1/2 up", "the fleet line judges the two nodes it may judge")
+check(!parked.headline.contains("Down"), "a partly-parked fleet is not an alarm")
+
+let allParkedHosts = [MonitorNode(host: "192.0.2.11", error: "collect failed", sample: nil,
+                                  status: PauseContract.status, paused_reason: "training run",
+                                  paused_since: "2026-11-21T10:00:00+00:00")]
+let allParked = MonitorResponse(success: true, error: nil,
+                                json: MonitorPayload(timestamp: nil, hosts: allParkedHosts),
+                                serving: nil, speak: "")
+if let parkedOnly = CarPlayClusterReading(response: allParked, fetchedAt: pauseNow) {
+    equal(parkedOnly.headline, FleetVerdict.pausedWord, "a fleet of nothing but parked nodes is Paused")
+    check(parkedOnly.headline != "Down", "an all-parked frame is never Down")
+    equal(parkedOnly.nodes[0].rowSubtitle, "paused (training run, 3h ago)",
+          "and its one row still says why")
+} else {
+    check(false, "an all-parked frame projects")
+}
+
+// Control on the fake fleet this harness already builds (no parked rows at all):
+// the three fields this card changed must read exactly as they did before it.
+if let control = CarPlayClusterReading(response: monitor, fetchedAt: now) {
+    equal(control.headline, "4/4 up", "unpaused headline is unchanged")
+    equal(control.nodes[0].rowSubtitle, "34% · 41 t/s", "unpaused subtitle is unchanged")
+    equal(control.nodes[0].detailLine, "S1 · 34% · 41 t/s", "unpaused detail line is unchanged")
+    check(control.nodes.allSatisfy { !$0.isPaused }, "the control fleet has no parked row")
+    let controlDown = MonitorResponse(
+        success: true, error: nil,
+        json: MonitorPayload(timestamp: nil,
+                             hosts: [MonitorNode(host: "192.0.2.21", error: "ssh timeout",
+                                                 sample: nil, workloads: nil)]),
+        serving: nil, speak: "")
+    if let downRow = CarPlayClusterReading(response: controlDown, fetchedAt: now) {
+        equal(downRow.nodes[0].detailText, "down · idle · — · — W",
+              "an unpaused down row keeps every word it used to print")
+    } else {
+        check(false, "the control down row projects")
+    }
+}
+
 print("")
 if failures == 0 {
     print("CARPLAY READING: \(checks) checks passed")

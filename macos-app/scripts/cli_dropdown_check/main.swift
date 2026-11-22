@@ -372,6 +372,157 @@ check("status: a failed read draws no panel",
       ClusterStatusReading.panel(status: nil, hosts: live.json?.hosts) == nil)
 
 // ---------------------------------------------------------------------------
+// The parked node (t_3c0b54b6) — the shared paused capture, not a restatement.
+//
+// `v1_cluster_monitor_paused.json` is the fixture #573 committed for the iOS
+// widgets; the dropdown reads the SAME seam, so it is held to the SAME bytes
+// here. Two things are proven: a parked machine is never drawn as `down` or
+// `idle` anywhere in the pane, and a machine the frame never listed is still
+// named — which no host row could ever do.
+// ---------------------------------------------------------------------------
+
+print("")
+print("parked node (v1_cluster_monitor_paused.json)")
+
+// The fixture's pause stamp is 2026-11-21T10:00:00+00:00; three hours later the
+// verdict reads `3h ago`. The same pinned clock the widget and CarPlay gates use.
+let pauseNow = Date(timeIntervalSince1970: 1795255200 + 3 * 3600)
+let paused = decoded(MonitorResponse.self, "v1_cluster_monitor_paused.json")
+let pausedView = ClusterMonitorViewModel.project(paused, now: pauseNow)
+let pausedTile = DashboardFleetReading.tile(from: pausedView, response: paused, now: pauseNow)
+// The unpaused live capture, re-projected on the same pinned clock, is the
+// control for every "unchanged" claim below.
+let liveControlView = ClusterMonitorViewModel.project(live, now: pauseNow)
+
+check("paused: the pane still draws the frame's four hosts",
+      pausedTile?.rows.count == 4, "got \(pausedTile?.rows.count ?? -1)")
+
+// The host row: a parked host keeps its `error` (the overlay does not delete a
+// diagnostic), so `error != nil` alone called it down. Rows are picked by their
+// WIRE identity (`id`, never drawn), never by a label: every label this pane
+// prints comes out of the shared label path (`MonitorNode.displayLabel`), so a
+// change to how a node is labelled moves the row and this check together.
+let parkedRow = pausedTile?.rows.first { $0.id == "192.0.2.11" }
+check("paused: the parked host row is not flagged down",
+      parkedRow?.isDown == false && parkedRow?.isPaused == true)
+check("paused: the parked host row names the verdict for VoiceOver",
+      parkedRow?.accessibilityLabel.contains("paused") == true)
+check("paused: the parked host row's label is the shared path's, not an address",
+      parkedRow?.label == MonitorNode(host: "192.0.2.11", error: "collect failed",
+                                      sample: nil).displayLabel
+      && parkedRow?.label.contains("192.0.2.") == false)
+let downRow = pausedTile?.rows.first { $0.id == "192.0.2.13" }
+check("paused: a host that really failed is still down",
+      downRow?.isDown == true && downRow?.isPaused == false)
+
+// The serving Model cell, which is where `serving_table` prints the verdict.
+// The committed capture's backends all answer, so the errored-on-a-parked-machine
+// row — the CLI's `if r.get("error")` branch — is planted here on fake hosts.
+func plantedBackend(host: String, parked: Bool, reason: String?,
+                    since: String?) -> DashboardServingRow? {
+    let node = MonitorNode(host: host, error: "collect failed", sample: nil,
+                           status: parked ? PauseContract.status : nil,
+                           paused_reason: reason, paused_since: since)
+    let backend = ServingRow(node: host, port: "8001", model: "org/model-c",
+                             routes: nil, running: nil, waiting: nil, kv: nil,
+                             gen_tps: nil, prompt_tps: nil, prompt_total: nil,
+                             gen_total: nil, error: "engine unreachable")
+    let payload = MonitorResponse(success: true, error: nil,
+                                  json: MonitorPayload(timestamp: nil, hosts: [node]),
+                                  serving: [backend], speak: "")
+    guard let view = ClusterMonitorViewModel.project(payload, now: pauseNow) else { return nil }
+    return DashboardServingRow(row: view.backendRows[0])
+}
+if let parkedBackend = plantedBackend(host: "192.0.2.11", parked: true,
+                                      reason: "training run",
+                                      since: "2026-11-21T10:00:00+00:00") {
+    check("paused: the Model cell reads the verdict, not down",
+          parkedBackend.model == "paused (training run, 3h ago)", "got \"\(parkedBackend.model)\"")
+    check("paused: the Model cell is not the word down",
+          parkedBackend.model != "down" && parkedBackend.isPaused)
+    check("paused: the row's error text survives (the overlay deletes no diagnostic)",
+          parkedBackend.cells[.run] == "engine unreachable",
+          "got \"\(parkedBackend.cells[.run] ?? "")\"")
+} else {
+    check("paused: the parked backend case projects", false)
+}
+// A pause record with no reason and no stamp is legal on the wire, and the cell
+// degrades to the bare word — never to an empty pair of parentheses, and never
+// back to `down` (the machine is still parked; §6 rule 1).
+if let bareBackend = plantedBackend(host: "192.0.2.11", parked: true,
+                                    reason: nil, since: nil) {
+    check("paused: a reason-less, stamp-less pause degrades to the bare word",
+          bareBackend.model == "paused", "got \"\(bareBackend.model)\"")
+    check("paused: the degraded cell never opens a parenthesis",
+          !bareBackend.model.contains("(") && bareBackend.isPaused)
+} else {
+    check("paused: the bare-word case projects", false)
+}
+// The control: the SAME row shape on a machine nobody parked is the CLI's `down`
+// byte for byte — which is also what the committed goldens pin above.
+if let plainBackend = plantedBackend(host: "192.0.2.11", parked: false,
+                                     reason: nil, since: nil) {
+    check("paused: an untagged errored backend still says down (CLI parity intact)",
+          plainBackend.model == "down" && !plainBackend.isPaused,
+          "got \"\(plainBackend.model)\"")
+} else {
+    check("paused: the untagged control case projects", false)
+}
+
+// The `node pauses` block: the CLI's own answer for the full verdict string, and
+// the only place a parked machine the frame never listed can appear.
+//
+// The label half of every line is compared through the SHARED label path
+// (`MonitorNode.displayLabel` / `MonitorNode.shortTail` — what `FleetPausedNode`
+// itself uses), never against a hard-coded node name: when the label rule moves,
+// the rows and these checks move together. The verdict half is pinned by literal,
+// because that copy is the deliverable.
+let parkedLines = pausedTile?.parkedLines ?? []
+let parkedLabel0 = MonitorNode(host: "192.0.2.11", error: "collect failed", sample: nil,
+                               status: PauseContract.status, paused_reason: "training run",
+                               paused_since: "2026-11-21T10:00:00+00:00").displayLabel
+check("paused: the block names every parked machine, frame-listed or not",
+      parkedLines.count == 3, "got \(parkedLines.count)")
+check("paused: a parked line is <shared-path label> · <shared verdict>",
+      parkedLines.first == "\(parkedLabel0) · paused (training run, 3h ago)",
+      "got \(parkedLines.first ?? "")")
+check("paused: an empty reason and a null since degrade to the bare word",
+      parkedLines.filter { $0.hasSuffix(" · paused") }.count == 1,
+      "got \(parkedLines.joined(separator: " | "))")
+check("paused: two lines carry the reason and the age",
+      parkedLines.filter { $0.contains("3h ago)") }.count == 2,
+      "got \(parkedLines.joined(separator: " | "))")
+// The machine the frame never listed has no host row and no label of its own in
+// the payload, so the only proof it is named is a third, distinct label.
+let frameLabels = Set([parkedLabel0,
+                       MonitorNode(host: "192.0.2.12", error: nil,
+                                   sample: MonitorSample(hostname: "node-2")).displayLabel])
+check("paused: the parked node the frame omitted adds a third, distinct label",
+      Set(parkedLines.map { $0.components(separatedBy: " · ").first ?? "" })
+          .subtracting(frameLabels).count == 1,
+      "got \(parkedLines.joined(separator: " | "))")
+check("paused: no parked line says down or idle",
+      parkedLines.allSatisfy { !$0.contains("down") && !$0.contains("idle") })
+check("paused: no parked line prints an address (§7)",
+      parkedLines.allSatisfy { !hasDottedQuad($0) && !$0.contains("192.0.2.") })
+check("paused: the block's VoiceOver line carries the verdicts too",
+      pausedTile?.accessibilityLabel.contains(DashboardFleetReading.Copy.nodePauses) == true)
+
+// The fleet fraction the title and the `nodes up` metric print: two of the four
+// listed machines are parked, so two are judged and one of those answered.
+check("paused: the pane's fleet line judges only the un-parked machines",
+      pausedTile?.fleetTally == "1/2", "got \"\(pausedTile?.fleetTally ?? "")\"")
+// Control: the unpaused live capture keeps the fraction it always printed.
+let controlTally = DashboardFleetReading.tile(from: liveControlView, response: live,
+                                              now: pauseNow)?.fleetTally ?? ""
+let controlParked = DashboardFleetReading.tile(from: liveControlView, response: live,
+                                               now: pauseNow)?.parkedLines ?? []
+check("paused: an unpaused fleet's fleet line is unchanged",
+      controlTally == "4/4", "got \"\(controlTally)\"")
+check("paused: an unpaused fleet draws no node-pauses block",
+      controlParked.isEmpty, "got \(controlParked.joined(separator: " | "))")
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

@@ -150,15 +150,25 @@ enum ClusterThroughput {
 struct ClusterC1: Equatable {
     let up: Int?
     let total: Int?
+    /// The frame minus the machines the operator parked. Owned by
+    /// `FleetVerdict` (`Sources/Shared/ClusterNodeTally.swift`) — the one pair
+    /// every `N/M up` sentence in the apps counts, now also the one CarPlay and
+    /// the macOS menu bar count. Carried here rather than recomputed so a
+    /// surface that wants the parked number asks the same projection.
+    let verdict: FleetVerdict
     /// Frame-listed nodes the operator parked. Excluded from every verdict this
     /// struct can print: a parked machine is neither evidence a fleet is
     /// answering nor evidence it is failing, so it belongs in neither side of a
     /// `up/total` sentence or of a colour.
-    let paused: Int?
+    var paused: Int? { verdict.paused }
     /// Frame-listed nodes that answered AND were not parked — the numerator the
     /// headline and the tally may use. nil when the read named no frame, which
     /// is why this is NOT `answered ?? 0` anywhere downstream.
-    let answered: Int?
+    var answered: Int? { verdict.answered }
+    /// The nodes a verdict here may judge: the frame the route listed, minus
+    /// the machines the operator parked. nil when the frame itself is nil, so
+    /// "not told" never becomes "nothing is up".
+    var judged: Int? { verdict.judged }
     let tokPerSec: Double?
     let hottestC: Double?
     let nodes: [ClusterC1Node]
@@ -169,32 +179,30 @@ struct ClusterC1: Equatable {
     let refreshMinutes: Int
     let failed: Bool
 
-    /// The nodes a verdict here may judge: the frame the route listed, minus
-    /// the machines the operator parked. nil when the frame itself is nil, so
-    /// "not told" never becomes "nothing is up".
-    var judged: Int? { total.map { $0 - (paused ?? 0) } }
-
     var headline: String {
         guard let answered, let judged else { return failed ? "Offline" : "No data" }
         // Every listed node parked: nothing is failing and nothing is serving,
         // so neither `Down` (an alarm about a choice the operator made) nor
         // `All up` (a claim about a fleet that is deliberately parked) is true.
-        if judged == 0 { return ClusterC1.pausedHeadline }
+        // `allParked` is the shared ordering — this arm MUST be asked before the
+        // `answered == 0` one, and `FleetVerdict` is what keeps that true for
+        // every surface rather than just this one.
+        if verdict.allParked { return FleetVerdict.pausedWord }
         if answered == 0 { return "Down" }
         if answered == judged { return "All up" }
         return "\(answered)/\(judged) up"
     }
 
-    /// The headline when the whole frame is parked. Title Case like the three
-    /// words beside it (`Down`, `All up`, `No data`), and it is the ONLY place
-    /// this fleet-level word is written — the per-node copy is
-    /// `FleetFormat.paused`, and the two must not drift.
-    static let pausedHeadline = "Paused"
+    /// The headline when the whole frame is parked. A name this struct keeps so
+    /// its own gate assertion binds; the word itself is owned by
+    /// `FleetVerdict.pausedWord`, next to the per-node copy in
+    /// `FleetFormat.paused`, so the two cannot drift apart.
+    static let pausedHeadline = FleetVerdict.pausedWord
 
-    var tally: String {
-        guard let answered, let judged else { return "—" }
-        return "\(answered)/\(judged)"
-    }
+    /// The `answered/judged` pair the medium column draws. The string is
+    /// `FleetVerdict.tallyText` — the same line the macOS menu bar's
+    /// `Cluster nodes up` title prints — so the two cannot drift apart.
+    var tally: String { verdict.tallyText }
 
     var tokText: String {
         guard let tokPerSec else { return "— tok/s" }
@@ -273,14 +281,10 @@ struct ClusterC1: Equatable {
         self.total = entry.fleet?.tally.nodesTotal
         // Counted from the projected rows, not from the tally's arithmetic: a
         // parked node keeps its `error`, so the only place that knows both the
-        // tag and the answer for a given machine is the row itself.
-        if let nodes = entry.fleet?.nodes {
-            self.paused = nodes.filter { $0.isPaused }.count
-            self.answered = nodes.filter { $0.isUp && !$0.isPaused }.count
-        } else {
-            self.paused = nil
-            self.answered = nil
-        }
+        // tag and the answer for a given machine is the row itself. The rule is
+        // `FleetVerdict`'s — the same projection CarPlay's headline and the
+        // macOS menu bar's title tally now count, so the three cannot disagree.
+        self.verdict = FleetVerdict(rows: entry.fleet?.nodes)
         // No rate with live backends and nothing running is an idle fleet:
         // 0 tok/s. No backend at all stays unknown.
         if let serving = entry.fleet?.serving {

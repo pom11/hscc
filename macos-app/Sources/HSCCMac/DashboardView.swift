@@ -277,9 +277,13 @@ struct DashboardView: View {
     }
 
     private var nodesText: String {
-        guard let up = dashboard.snapshot.nodesUp,
-              let total = dashboard.snapshot.nodesTotal else { return "nodes —" }
-        return "\(up)/\(total) nodes up"
+        // `answered/judged`, parked machines excluded from both sides — the same
+        // `FleetVerdict.tallyText` the menu bar title and the C1 tile print. A
+        // parked machine is not a machine that failed, so it belongs in neither
+        // half of this fraction.
+        let verdict = dashboard.snapshot.fleetVerdict
+        guard verdict.answered != nil, verdict.judged != nil else { return "nodes —" }
+        return "\(verdict.tallyText) nodes up"
     }
 
     private var modelsText: String {
