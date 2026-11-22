@@ -43,6 +43,20 @@ the directory holding ``agent/``/``hermes_cli/`` and ``venv/bin/python``.
 ``test_hermes_agent_tree_seam.py`` pins the name against those spellings so a
 rename on either side reddens here.
 
+Relationship to the daemon leg's locator (t_ce473bf0, landed in #620): production's owner
+of this question is ``hscc_daemon/hermes_import.resolve_agent_tree()`` (``HERMES_AGENT_PATH``
+then ``DEFAULT_AGENT_PATH``) and ``hscc_daemon/tests/hermes_cli_plant.py::agent_tree_root``
+is its harness twin; #620's sweep reddens a ``hscc_daemon`` test that spells the tree out of
+the home instead of asking them. This module deliberately does not import either — this leg
+spawns the tree's *interpreter* as a subprocess, so it needs an existence gate on
+``venv/bin/python`` and a repo-relative candidate for an undeclared checkout (the #604
+``SPARKRUN_SRC`` posture), and neither leg seeds the other's harness sys.path. What is
+shared is the contract: same pin, same precedence for a declared pin, same rule that a
+home-derived spelling is not an answer (the default at the end of ``agent_candidates`` is
+``hermes_import.DEFAULT_AGENT_PATH``'s value, kept as the last candidate and nothing more).
+If a third leg grows the same need, the smallest upstream addition is one harness module
+both legs import — not a third copy of this resolver.
+
 ``HERMES_HOME`` IS NOT THIS PATH and is never consulted here. Hermes exports
 ``HERMES_HOME`` at a *profile* directory (``…/profiles/<name>``) for every
 dispatched worker, so a ``$HERMES_HOME/hermes-agent`` join names a path that
