@@ -84,6 +84,9 @@ harness=(
   scripts/model_decode_check/monitor_parity.swift
   scripts/model_decode_check/cluster_small_grid.swift
   scripts/model_decode_check/monitor_tables.swift
+  # The apps 1.4.4 node-label rule (last IP octet) and the octet order, in their
+  # own file for the same reason: main.swift is append-only and collides.
+  scripts/model_decode_check/node_label.swift
   # Per-widget decode blocks: one file per widget + the generated call roster.
   # A widget card adds its own file and manifest; main.swift is not edited.
   scripts/model_decode_check/widgets.generated.swift

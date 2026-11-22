@@ -518,10 +518,10 @@ enum PauseContract {
 /// operator parked, whether or not the monitor frame reached it.
 ///
 /// `node` is the pause record's own identity — the host string the operator
-/// passed to `hscc node pause`. It is NEVER drawn: §7 allows only
-/// `MonitorNode.displayLabel`'s `.NNN` tail or a reported hostname, so every
-/// surface labels these nodes through `FleetPausedNode`, which re-derives the
-/// label with the app-wide rule.
+/// passed to `hscc node pause`. It is NEVER drawn: §7 allows only the app-wide
+/// label rule (`MonitorNode.nodeLabel` — the node's last octet, or its reported
+/// short name), so every surface labels these nodes through `FleetPausedNode`,
+/// which re-derives the label with that rule.
 struct PausedNodeEntry: Codable, Equatable {
     let node: String?
     let status: String?

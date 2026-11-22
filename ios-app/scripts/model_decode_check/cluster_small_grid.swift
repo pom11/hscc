@@ -163,8 +163,12 @@ func clusterSmallGridChecks(_ c: DecodeCheck) {
     let summary = tile.accessibilitySummary
     ck("gsmall:plain:axtotals", summary.contains("6 running") ? "yes" : "no", "yes",
        "the one-line summary carries the serving totals the tile shows")
-    ck("gsmall:plain:axhosts", summary.contains("node-1") ? "yes" : "no", "yes",
-       "the one-line summary names the hosts, not just a count")
+    ck("gsmall:plain:axhosts", summary.contains("11: ") ? "yes" : "no", "yes",
+       "the one-line summary names each host by its last octet, not just a count")
+    // The a11y line is spoken. An address in it would be a §7 leak no tile body
+    // can hide, so it is refused here rather than assumed from the row label.
+    ck("gsmall:plain:axnoaddr", summary.contains("192.0.2.") ? "no" : "yes", "yes",
+       "the one-line summary spoke an address (§7)")
 
     // Four rows fit; seven must not quietly become four.
     let crowdedHosts = hosts.isEmpty ? []
