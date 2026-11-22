@@ -71,18 +71,81 @@ own defensive hold, which is itself a bound-without-listen 8787". I could not
 attribute the single 10:50 event to a named process from host logs; the fix
 below deliberately does not depend on knowing who it was.
 
-## 3. Seal (in progress)
+## 3. Seal (implemented, `159e79fc`)
 
 Design decision: **the walk must never read a port it does not own, and a
 genuine leak must land on a port the walk DOES own.**
 
-* `Prober` picks a kernel-assigned free loopback port (`sensor_port`) and does
-  NOT hold it, so a stray server forked by a `--help` really can bind it.
-* The sandbox seed gets `~/.hscc/api.json = {"port": sensor_port, "bind":
-  "loopback"}`: the probe child resolves its api port through the sealed
-  sandbox config, never through the host's or through 8787.
-* `port_busy_at_start` becomes a *premise* (the sealed port is free at start,
-  else pick another), never a baseline for a stranger's state.
-* The 8787/8788 defensive hold stays — but strictly as defence (a stray
-  grandchild cannot squat the operator's machine). The sensor never connects
-  those ports again.
+* `Prober.sensor_port` — reserved from the kernel (`bind(port 0)`, released),
+  verified free (`connect_ex` must answer `ECONNREFUSED`; a `0`/`EAGAIN` answer
+  means a stranger and retries), deliberately **not held** (a held port cannot
+  be bound by the stray server the check looks for — that is precisely why the
+  old sensor was dead), and re-verified as the walk's baseline: a busy answer
+  raises instead of silently re-baselining.
+* `Prober._write_sealed_api_config()` seeds the sandbox `~/.hscc/api.json`
+  with `{"port": sensor_port, "bind": "loopback"}`. Every probe runs with
+  `HOME=<sandbox>` and `hscc-api/api_server.py` resolves
+  `defaults <- api.json <- explicit flags`, so a probe child resolves the
+  sealed port: a real leak binds the port the walk measures, and no probe ever
+  resolves or binds 8787.
+* `Prober._port_busy()` defaults to `sensor_port`. The 8787/8788 defensive hold
+  stays (defence: a stray grandchild cannot squat the operator's machine) but
+  the walk may no longer open a socket to either — pinned by a `connect_ex`
+  spy over a whole walk.
+* Findings carry `<SEAL_PORT>` (the number is kernel-assigned, so it must not
+  reach the bipartite expectation table as a literal) and the real number goes
+  to `report["sealed_port"]` / `report["defended_ports"]`.
+
+Measured after the change (`posture_run.py`, `~/.hermes/.../venv/bin/python`,
+this host, other agents' legs running concurrently):
+
+| posture | what the host does | result |
+|---|---|---|
+| control | nothing on 8787/8788 | **33 passed, 1 skipped**, rc 0 |
+| poisoned | a foreign process owns both defended ports for the whole walk: bound-without-listen while the walk starts (the audit's hold FAILS — the incident's precondition), then a real listener for the rest of the run | **33 passed, 1 skipped**, rc 0 (see below) |
+| leak | `hscc api start --help` mutated to fork a detached stray listener on the port the *child* resolves | **1 failed**, `NEW [D] hscc api start --help :: --help bound the sealed api port <SEAL_PORT>` (+ every later probe) |
+
+The control's 33 passed is also the proof that the seal does not buy its
+hermeticity by moving the goalposts: `test_a_counts_match_committed_table`,
+`test_findings_match_expected` and the width/style/coverage gates all still pass
+against the committed baselines, so the seeded `api.json` changed no render.
+
+Mutation probes of the seal itself (`PYTHONDONTWRITEBYTECODE=1`, byte-exact
+restore asserted, `hscc-flake-triage` step 5):
+
+| mutant | result |
+|---|---|
+| `_port_busy` default back to `API_DEFAULT_PORT` | **3 failed** — incident replay, positive control, `connect_ex` spy |
+| sandbox `api.json` seed dropped | **1 failed** — `test_probe_child_resolves_the_sealed_api_port` |
+| `port_flip` pinned to `False` | **1 failed** — the positive control (no blind-green) |
+
+Two things the first leak mutation taught, both worth keeping:
+
+1. A stray listener that **inherits the probe's stdout/stderr pipes** makes
+   `subprocess.run(capture_output=True)` block until it exits, so the probe
+   "completes" after the stray is gone and the flip is invisible — the first
+   mutant forked with `os.fork()` and reported clean while taking 40 s. The
+   mutant now detaches (`start_new_session`, stdio to `DEVNULL`) the way a real
+   server does. `hscc api start` double-forks + `setsid()` but does **not**
+   redirect fds (`hscc_daemon/api_cli.py:774-796`), so a genuine regression on
+   that path would surface as the `hung` (D) finding at 60 s *and* a flip on
+   every probe after the grandchild is abandoned — the two sensors are
+   complementary, not redundant.
+2. A "reverted" mutation that only renames the sensor's *symbol* cannot be
+   caught by text-matching the guard; the guard's premise assertions
+   (hold genuinely failed, baseline genuinely free, foreign listener genuinely
+   answering) are what make the failure real.
+
+## 4. Deliberately not done
+
+* The `--help` walk is unchanged; no baseline entry was added to
+  `scripts/tests/cli_help_expected.json` — a baseline entry would have absorbed
+  a real leak, which is the failure mode the card named.
+* `site/` untouched. The `8787` literal inside legitimate help text
+  (`hscc_daemon/api_cli.py:70` "Override the configured port (default 8787)")
+  stays: it is documentation of the default, not an execution echo, and no
+  rule in this gate reads text for ports (rule D is an *execution* sensor).
+* `hscc-daemon/tests` and `hscc-api/tests` unaffected: the change is confined
+  to `scripts/hscc_cli_help_audit.py` + its pin file. The (A)-only sibling pass
+  (`a_table`) builds its own `Prober`, so it inherits the seal for free.
+
