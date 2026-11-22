@@ -27,6 +27,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -39,6 +40,19 @@ from hscc_daemon import verify
 # so it gets its own PID + log files (distinct from daemon.pid / daemon.log).
 API_PID_FILE = os.path.expanduser("~/.hscc/api.pid")
 API_LOG_FILE = os.path.expanduser("~/.hscc/api.log")
+
+# "a stop was requested" — set by the SIGTERM/SIGINT handler below and honoured
+# by `_serve`, which is the only thing that may end this process (t_56552ecc).
+# It has to be module state rather than a local: the handlers are installed in
+# the forked child BEFORE the second fork (so the process that ends up serving
+# already has one), and `signal.signal` takes a module-level callable, which
+# cannot close over a `_serve` local that does not exist yet.
+_stop_requested = threading.Event()
+
+#: The live `_MultiServer`, published by `_serve` once it has bound one. The
+#: handler asks this to shut down; it is None for the whole of startup, which
+#: is exactly when `_stop_requested` is the only thing a stop can be.
+_served_server = None
 
 VALID_SUBCOMMANDS = ("start", "stop", "status", "install-service", "uninstall-service")
 
@@ -374,6 +388,14 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
     marked stopped so it cannot claim a server that never bound, and the full
     divergence report (requested root + every divergent root + the env) goes to
     the API log at ERROR — nothing bound, nothing written.
+
+    THE STOP CONTRACT (t_56552ecc). Returning from this function is the only way
+    out of the serving process, because the ``finally:`` below owns the gateway
+    sidecar teardown. The SIGTERM/SIGINT handler therefore does not exit the
+    process — it sets ``_stop_requested`` and asks the published server to shut
+    down, and this loop honours the flag before serving and inside the join
+    loop. The three ``os._exit`` calls above stay: they are pre-bind failures,
+    where nothing bound, no sidecar started and there is no teardown to skip.
     """
     if isinstance(binds, str):
         binds = [binds]
@@ -449,14 +471,44 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
             f"HSCC API: gateway sidecar startup skipped ({exc})",
             log_file=API_LOG_FILE, pid_file=API_PID_FILE,
         )
+    # Publish the bound server BEFORE the loops start: the handler can only ask
+    # something to shut down if it can find it, and `_MultiServer.shutdown()` is
+    # a no-op until `_started` is set — so a stop landing anywhere above this
+    # line (config resolution, the binds, the sidecar start) can only be the
+    # stop FLAG, which is why `_serve` re-checks it below before serving.
+    global _served_server
+    _served_server = server
+
     try:
-        server.serve_forever()
+        if _stop_requested.is_set():
+            # A stop was requested while the listeners were still coming up —
+            # the same window t_6eff6258 closed on the launchd entry path, and
+            # the reason the handlers are installed in the child before the
+            # second fork rather than here. Nothing is served; fall through to
+            # the same finally: so the sidecar this process may have started is
+            # torn down and the exit is the clean one, instead of an accept
+            # loop nobody asked for and a `stop` that has to escalate.
+            daemon_ops.log(
+                "HSCC API: stop requested during startup, not serving",
+                log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+            )
+        else:
+            # `stop_event` is the sliver the pre-serve check cannot cover: a
+            # stop landing after this line is passed but before the accept
+            # loops are joinable, where `shutdown()` would still be a no-op.
+            server.serve_forever(stop_event=_stop_requested)
     except Exception as exc:
         daemon_ops.log(
             f"HSCC API crashed: {exc}", "ERROR",
             log_file=API_LOG_FILE, pid_file=API_PID_FILE,
         )
     finally:
+        # This block is the ONLY way out of `_serve`, and that is the point
+        # (t_56552ecc): the stop path used to leave via `os._exit(0)` in the
+        # signal handler, which skips every `finally:` and orphaned the
+        # supervised serve. Tests in tests/test_api_cli_stop_sidecar.py pin
+        # both halves — no hard exit in the handler, teardown stays in here.
+        _served_server = None
         # Tear down the sidecar (drivers release their turn leases, then the
         # serve process is terminated). Best-effort, never blocks shutdown.
         try:
@@ -470,6 +522,12 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
         except Exception:
             pass
         daemon_ops.write_stopped(API_PID_FILE)
+        # Same closing line as `serve_main`'s teardown (t_6eff6258): an operator
+        # grepping ~/.hscc/api.log for a stop that worked has one string to
+        # look for on both entry paths, and `hscc api stop`'s own report is a
+        # message about the pid it signalled, not about the server finishing.
+        daemon_ops.log("HSCC API stopped",
+                       log_file=API_LOG_FILE, pid_file=API_PID_FILE)
 
 
 def _bridge_default_serve_port(server) -> int:
@@ -495,13 +553,36 @@ def _bridge_default_serve_port(server) -> int:
 
 
 def _sigterm_handler(signum, frame):
-    """Graceful shutdown on SIGTERM/SIGINT: remove PID file, exit."""
+    """Cooperative shutdown on SIGTERM/SIGINT: ask `_serve` to come back.
+
+    The PID-file bookkeeping is what this handler always did and it stays:
+    `hscc api status` and `hscc api stop` both read that file, and a teardown
+    that takes a moment must not leave it claiming a live server.
+
+    What changed (t_56552ecc) is the exit. It used to be `os._exit(0)`, and
+    `os._exit` does NOT run ``finally:`` blocks — so the `finally:` in `_serve`
+    that owns `_bridge2.shutdown()` never ran on the stop path, and the
+    supervised ``hermes serve`` survived holding this process's token. That is
+    the orphaned-sidecar / stale-token 403 the handler was written to prevent,
+    reached from the other door: `hscc api stop` SIGTERMs the pid-file instance
+    (see `_handle_stop`), so the ordinary stop verb produced it.
+
+    A signal handler runs on the main thread at a bytecode boundary, so it must
+    not block: set the flag, and hand the blocking part to a thread —
+    `server.shutdown()` waits for `serve_forever()` to return, so calling it
+    from here would deadlock against the accept loops it is trying to stop.
+    With no server published yet (a stop during startup) the flag is the whole
+    answer, and `_serve` acts on it before it ever serves.
+    """
     daemon_ops.log(
         f"Received signal {signum}, shutting down...",
         log_file=API_LOG_FILE, pid_file=API_PID_FILE,
     )
     daemon_ops.write_stopped(API_PID_FILE)
-    os._exit(0)
+    _stop_requested.set()
+    server = _served_server
+    if server is not None:
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
 
 def _warn_payload_drift(repo_root=None, plugins_dir=None, theme_name=None):
