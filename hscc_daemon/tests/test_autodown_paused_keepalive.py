@@ -54,6 +54,11 @@ from hscc_daemon import node_pauses
 from hscc_daemon.tests.test_autodown import _FakeKb
 
 FLEET_STOP_CMD = _serving.fleet_down_cmd()
+#: fixture-clock: 2026-08-23T12:00Z — same instant and same rule as
+#: test_autodown.py (this file imports its helpers): every keepalive/idle case
+#: passes ``now=NOW`` to ``cycle()``, so ``autodown``'s wall-clock fallback
+#: (``now = now or datetime.now(...)``) is never the clock a verdict answers to.
+#: Single-clock rule, card t_ed416771; enforced by test_single_clock_rule.py.
 NOW = _dt.datetime(2026, 8, 23, 12, 0, 0, tzinfo=_dt.timezone.utc)
 
 # The same three-unit fleet the wake-seam file uses: a two-node TP

@@ -62,6 +62,19 @@ from hscc_daemon.tests.test_dispatcher_wedge import (
     FakeKanban, Recorder, READY, RUNNING,
 )
 
+#: fixture-clock: 2026-10-17/18 (per-case, as epoch seconds) — each case passes
+#: its instant INTO the wedge as ``now=`` and fabricates its log/claim stamps
+#: from the same instant, so ``dispatcher_wedge``'s ``time.time()`` fallback is
+#: never what an assertion answers to. One clock per case; card t_ed416771;
+#: enforced by test_single_clock_rule.py.
+#:
+#: These are NAIVE instants (``datetime(...).timestamp()``), so the epoch value
+#: depends on the machine's timezone — harmless while every instant in a case
+#: shares that offset (they cancel), and checked by hand across UTC, +14 and -8
+#: (identical verdicts). Not a wall-clock bomb: a fixed instant is a fixed
+#: instant. A timezone-axis pin would be the sibling to the date sweep and is
+#: named as follow-up rather than silently assumed.
+
 FIXTURE = os.path.join(os.path.dirname(__file__),
                        "fixtures", "gateway_wedge_incident_20261017.log")
 
