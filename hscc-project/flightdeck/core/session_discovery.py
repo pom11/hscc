@@ -101,6 +101,56 @@ def _runtime_error() -> str | None:
     return None
 
 
+# The two exception types that mean "this environment could not look" — the
+# same two :func:`_runtime_error` classifies. Neither is a fact about the
+# operator's data, so neither may reach the operator as a traceback.
+_ENV_FAULTS = (_lifecycle.HermesRuntimeUnavailable, _lifecycle.RemoteRuntimeError)
+
+
+def _open_env_folded(provider, profile: str):
+    """Open ``profile``'s session db through ``provider`` as ``(db, env_fault)``.
+
+    ``provider`` is either the real :func:`_open_profile_session_db` or a test
+    seam; either can raise :class:`HermesRuntimeUnavailable` (this interpreter
+    cannot host the Hermes runtime and no delegate resolves) or
+    :class:`RemoteRuntimeError` (a delegated op failed for THIS profile — the
+    DEFAULT-profile honesty probe cannot see a per-profile failure, so the
+    probe passing does NOT mean this call is safe). Both fold into a message
+    the caller reports as ``runtime_error``.
+
+    EVERYTHING ELSE PROPAGATES, on purpose. ``UnknownProjectError`` /
+    ``OrchestratorError`` are contract errors and any other exception is a bug;
+    folding those would turn a real defect into a silently empty history, which
+    is the opposite of the honesty invariant this module is built on.
+
+    ``(None, None)`` is the provider's own "profile unresolvable / no state.db"
+    — a data fact, already handled by the callers.
+    """
+    try:
+        return provider(profile), None
+    except _ENV_FAULTS as exc:
+        return None, str(exc)
+
+
+def _unavailable_result(name: str, topic, orch_profile: str, message: str) -> dict:
+    """The honest "could not look" shape, in ONE place.
+
+    Empty lists here mean "the environment would not let us look", never
+    "nothing is there"; ``runtime_error`` is how the caller says which. Owned by
+    this module so the probe path and every fold path cannot drift apart.
+    """
+    return {
+        "project": name,
+        "topic": topic,
+        "orchestrator": None,
+        "telegram": [],
+        "telegram_unmapped": 0,
+        "orch_profile": orch_profile,
+        "telegram_profile": DEFAULT_PROFILE,
+        "runtime_error": message,
+    }
+
+
 def _session_row_summary(row: dict, source: str) -> dict:
     """Project a hermes `sessions` row dict onto the discovery shape.
 
@@ -139,18 +189,19 @@ def _load_project_topic(name: str, path: str | None) -> int | None:
     return None
 
 
-def _list_telegram_sessions(_default_db=None) -> list[dict]:
-    """Telegram sessions on the DEFAULT profile, via Hermes' own read-only API.
+def _telegram_rows_from(db) -> list[dict]:
+    """Telegram session rows from an ALREADY-OPEN DEFAULT-profile db.
 
-    Opens the DEFAULT profile's state.db through ``hermes_state.SessionDB`` in
-    READ-ONLY mode (the Hermes-native ``mode=ro``) and lists sessions with
-    ``list_sessions_rich(source='telegram')`` — the same call the ``hermes
-    sessions --source telegram`` CLI and the chat relay use. Fail-soft: no
-    readable default state.db returns ``[]`` (the note is simply omitted,
-    never an error).
+    Reads with ``list_sessions_rich(source='telegram')`` — the same call the
+    ``hermes sessions --source telegram`` CLI and the chat relay use — and is
+    fail-soft on the READ: an unreadable result is ``[]`` (the note is simply
+    omitted, never an error) and the handle is always closed.
+
+    Opening is deliberately NOT this function's job. An environment fault at
+    the OPEN is a different fact from "no telegram history", so the caller
+    opens through :func:`_open_env_folded` and reports it as ``runtime_error``;
+    folding it in here would turn "could not look" into an empty list.
     """
-    opener = _default_db if _default_db is not None else _open_profile_session_db
-    db = opener(DEFAULT_PROFILE)
     if db is None:
         return []
     try:
@@ -234,7 +285,17 @@ def list_project_sessions(
                                           # thread_id NULL — cannot own them
           "orch_profile": "<name>-orch",
           "telegram_profile": "default",
+          "runtime_error": <str | None>,  # an ENVIRONMENT fault: a message
+                                          # when the Hermes runtime could not
+                                          # be read, None when it was read
         }
+
+    ENV FAULT VS DATA (the invariant this key exists for): an unreadable Hermes
+    runtime — an interpreter that cannot host it, or a delegated op that failed
+    for the project's own profile — is reported in ``runtime_error`` and never
+    as a traceback, and never as empty lists that read as "no history". Any
+    other failure (an unknown project, a bad orchestrator binding) is a contract
+    error and propagates to the caller.
 
     ``thread_id`` comes back from hermes as a string, so it is compared to the
     registry int ``topic`` after normalisation. Telegram sessions with
@@ -263,23 +324,21 @@ def list_project_sessions(
     _rt = None if (_default_db is not None or _session_db is not None) \
         else _runtime_error()
     if _rt is not None:
-        return {
-            "project": name,
-            "topic": topic,
-            "orchestrator": None,
-            "telegram": [],
-            "telegram_unmapped": 0,
-            "orch_profile": orch_profile,
-            "telegram_profile": DEFAULT_PROFILE,
-            "runtime_error": _rt,
-        }
+        return _unavailable_result(name, topic, orch_profile, _rt)
 
     # Orchestrator session row (read-only from its own profile's db).
     orch_row = None
     orch_provider = (
         _session_db if _session_db is not None else _open_profile_session_db
     )
-    orch_db = orch_provider(orch_profile)
+    # The OPEN is folded too, not just the read under it. A half-seam caller
+    # (exactly ONE seam injected) skips the probe above, so this was the escape
+    # that reached `hscc project chat` as a traceback (t_5fe098f9); and even
+    # with no seam at all a per-profile delegated failure can raise HERE after
+    # the DEFAULT-profile probe succeeded (project_lifecycle.py:898-903).
+    orch_db, _open_fault = _open_env_folded(orch_provider, orch_profile)
+    if _open_fault is not None:
+        return _unavailable_result(name, topic, orch_profile, _open_fault)
     if orch_db is not None:
         try:
             row = _find_orchestrator_row(orch_db, orch_session)
@@ -314,7 +373,16 @@ def list_project_sessions(
     # rule 2: session_id explicitly linked to this project in the binding
     # store). The two rules are UNIONED and de-duplicated — a session that
     # matches both appears once.
-    telegram_rows = _list_telegram_sessions(_default_db=_default_db)
+    default_provider = (
+        _default_db if _default_db is not None else _open_profile_session_db
+    )
+    # The mirrored half-seam posture: `_session_db` injected and `_default_db`
+    # not skips the probe exactly as case (a) does, and this OPEN was the escape
+    # on that side. Folded the same way, for the same reason.
+    telegram_db, _open_fault = _open_env_folded(default_provider, DEFAULT_PROFILE)
+    if _open_fault is not None:
+        return _unavailable_result(name, topic, orch_profile, _open_fault)
+    telegram_rows = _telegram_rows_from(telegram_db)
     # Binding store: a session whose stored `project` equals `name` belongs
     # even when its thread_id doesn't match the topic (manual linking).
     bindings = _load_binding_store(_mapping_path)
