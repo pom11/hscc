@@ -335,12 +335,26 @@ BACKTICK = re.compile(r"`([^`]+)`")
 
 
 def inline(text: str) -> str:
-    """Escape, then render a copy card's `code` span as an HTML <code>.
+    """Render a copy card's `code` span as an HTML <code>, escaping everything once.
 
     The copy stays character-for-character what site/COPY.md says; only the
     markup convention changes, so the page cannot reword the card by accident.
+
+    The escape happens per SEGMENT — each run of prose and each captured span
+    separately — and never twice. The first form of this function escaped the
+    whole line and then escaped the captured span again on top of it, so a
+    placeholder the card wrote as `<host>` reached the page as
+    `&amp;lt;host&amp;gt;` and the browser showed the literal text `&lt;host&gt;`
+    where its sibling bullet showed `<host>`. Nothing caught it: the page agreed
+    with the card, the card agreed with the CLI, and the only reader that could
+    tell the two apart was a human looking at the rendered page.
     """
-    return BACKTICK.sub(lambda m: f"<code>{esc(m.group(1))}</code>", esc(text))
+    # One capture group, so re.split hands back [prose, span, prose, span, ...].
+    parts = BACKTICK.split(text)
+    out: list[str] = []
+    for idx, part in enumerate(parts):
+        out.append(f"<code>{esc(part)}</code>" if idx % 2 else esc(part))
+    return "".join(out)
 
 
 def key_matches(help_sig_key: str, copy_sig_key: str) -> bool:

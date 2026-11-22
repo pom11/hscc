@@ -171,6 +171,15 @@
         autodown on, and wakes it when work arrives.</p>
       </div>
       <div class="card">
+        <span class="title">⏸️ Parks one machine when you need it</span>
+        <p><code>hscc node pause &lt;host&gt;</code> frees a machine for a
+        training run without editing a template or the serving config: you confirm
+        the plan it prints before anything stops, the pause is a durable record the
+        heal, wake and fleet-up paths honour, and the widgets, the CLI and the API
+        all show it as <code>paused (reason, since)</code>.
+        <code>--until 2h</code> gives the machine back by itself.</p>
+      </div>
+      <div class="card">
         <span class="title">📋 Runs agents on boards</span>
         <p>Cards for todo / ready / running / blocked / done, per project, with a
         standup digest.</p>
@@ -309,7 +318,7 @@
 <li><code>hscc main</code><span class="say">the main orchestrator (<code>general</code> by default): bring its pane up, see whether it is busy, and edit the wake-up schedule the watcher fires into it.</span></li>
 <li><code>hscc orch inject</code><span class="say">send a message into a running agent's session.</span></li>
 <li><code>hscc orch waker</code><span class="say">the built-in orchestrator waker: <code>status</code>, <code>enable</code>, <code>disable</code>.</span></li>
-<li><code>hscc node pause &lt;host&gt;</code><span class="say">park one machine for maintenance. It prints which units it would stop and which other machines a multi-node unit would take down with it, and stops nothing until <code>--apply</code> (then <code>--span</code> for a multi-node unit, <code>--force</code> for a machine serving the orchestrator's own model). <code>hscc node resume &amp;lt;host&amp;gt;</code> starts the recorded units back up and clears the pause; <code>hscc node paused</code> lists what is parked, read-only.</span></li>
+<li><code>hscc node pause &lt;host&gt;</code><span class="say">park one machine and only that machine. It prints the plan — the host, every model it would stop, the reason, the deadline — then asks <code>Pause &lt;host&gt; and stop these N model(s)? [y/N]</code>: only <code>y</code> proceeds, Enter or <code>n</code> records nothing, <code>--yes</code> answers it for a script (without it a run with no terminal refuses), and <code>--dry-run</code> previews without asking. It refuses, recording nothing, when a model on the machine also runs on other machines — naming that model and its peers — or when the machine runs no models at all. <code>--force</code> is only for the guard on the machine your orchestrator model runs on. <code>hscc node resume &lt;host&gt;</code> confirms the same way and starts the recorded models back up; <code>hscc node paused</code> lists what is parked, read-only.</span></li>
 </ul>
 </div>
 <div class="cmdgroup">
