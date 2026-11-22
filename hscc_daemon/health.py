@@ -20,6 +20,12 @@ from . import sparkrun_bin
 from . import heal_lease
 from . import heal_breaker
 from . import launch_guard
+# t_8e5ab6cb: the durable node-pause overlay, read at the three down-repair
+# surfaces below. Stdlib-only and it imports nothing from this package at module
+# level (its daemon_ops import is lazy, inside _warn), so joining the
+# health<->lifecycle cycle here is impossible — the same argument
+# heal_breaker.py:81-85 makes for its own seam.
+from . import node_pauses
 from .desktop import emit_event, send_macos_notification
 from .daemon_ops import log
 from .state import now_iso, write_state
@@ -1912,7 +1918,7 @@ def _proxy_stall_alert(relaunch_hosts, streak, last_error, reason):
     return True, now_iso()
 
 
-def check_proxy():
+def check_proxy(pause_directory=None):
     """Keep the sparkrun LiteLLM worker proxy alive (worker load-balancer).
 
     Role-worker profiles + orchestrator subagents reach the worker GPUs through
@@ -1949,6 +1955,23 @@ def check_proxy():
     2026-10-11 shape) must not relaunch every tick. The healthy branch
     rewrites the state WITHOUT the stamp, so a recovered proxy clears the
     cooldown and a later genuine down-proxy recovers on its next tick.
+
+    PARKED NODE (t_8e5ab6cb): a node the operator parked with ``hscc node
+    pause`` keeps its own unit out of the catalogue and out of the live router,
+    so this check sees an "unhealthy" proxy for as long as the pause stands —
+    and, before the seam, answered with ``proxy start --restart`` on every
+    cooldown tick: a SIGTERM of the working LB each time, then a stall page once
+    PROXY_RELAUNCH_MAX_CONSECUTIVE of them had piled up. The repair path now
+    asks the node-pause overlay FIRST, keyed on the host its own strike is
+    keyed on: a parked node takes no lease, counts no strike and gets no
+    ``proxy start``, and the stream carries ``paused`` with the reason. A pause
+    on any other host leaves this path armed exactly as before.
+    ``pause_directory`` is ``node_pauses``' own explicit overlay-root seam
+    (``None`` = the default ``~/.hscc``), threaded down to
+    ``heal_breaker.note_heal()`` so a sandbox and the daemon read one root.
+    TRADE-OFF (intended, stated so it is not discovered the hard way): a proxy
+    that is genuinely down while the keyed host is parked is not repaired until
+    the pause is lifted.
     """
     from .state import write_state
 
@@ -2072,6 +2095,10 @@ def check_proxy():
     r = {"ok": False, "skipped": "cooldown"}
     suppressed = False
     deferred = False
+    # t_8e5ab6cb: the node-pause skip (see the PAUSE SEAM block below). Separate
+    # from `deferred` on purpose — a deferral says "another repair is in flight",
+    # a skip says "no repair belongs here", and a reader must not confuse them.
+    paused_skip = False
     attempted = False
     if since is not None and since < PROXY_RELAUNCH_COOLDOWN_S:
         suppressed = True
@@ -2090,9 +2117,36 @@ def check_proxy():
         # Claimed only here (not before the cooldown test) so a cooldown tick
         # neither claims nor releases anything, and a lease is held only for the
         # duration of an actual `proxy start`.
-        lease_ok, holder = heal_lease.acquire(
-            "proxy-relaunch", f"worker proxy on :{PROXY_PORT}")
-        if not lease_ok:
+        #
+        # PAUSE SEAM — rule 0 of this path (t_8e5ab6cb). Keyed on the SAME host
+        # the strike below is keyed on (the leading relaunch host), so the skip
+        # and the count can never disagree about which node a tick belongs to.
+        # A parked node keeps its unit out of the catalogue and out of the live
+        # router, which is exactly what makes this check see an "unhealthy" proxy
+        # forever — and `proxy start --restart` cannot fix a gap the operator
+        # made on purpose. It only SIGTERMs the working LB once per cooldown tick
+        # and, after PROXY_RELAUNCH_MAX_CONSECUTIVE of those, pages the operator
+        # about their own `hscc node pause`. No lease is taken (the conditional
+        # keeps `acquire` out of the skip path entirely), no strike, no command.
+        # TRADE-OFF (intended, stated so it is not discovered the hard way): a
+        # proxy that is genuinely down while the keyed host is parked is NOT
+        # repaired until the pause is lifted — `hscc node resume <host>`, or the
+        # expiry tick (#582) for a pause issued with `--until`. The skip lands in
+        # the stream with its reason, so the deferral is visible rather than
+        # silent, and a pause on any OTHER host leaves this path armed (below).
+        proxy_repair_key = (relaunch_hosts or ["?"])[0]
+        pause = _pause_covering_repair(proxy_repair_key, pause_directory)
+        lease_ok, holder = (
+            (False, None) if pause is not None else
+            heal_lease.acquire("proxy-relaunch",
+                               f"worker proxy on :{PROXY_PORT}"))
+        if pause is not None:
+            paused_skip = True
+            message = (f"skipped — {proxy_repair_key} is paused"
+                       f"{_pause_label(pause)} — a parked node is not a fault "
+                       f"(no lease taken, no strike counted, no `proxy start`)")
+            log(f"proxy relaunch {message}", "WARN")
+        elif not lease_ok:
             deferred = True
             message = f"deferred — heal in progress: {heal_lease.describe(holder)}"
             log(f"proxy relaunch deferred — {message}", "WARN")
@@ -2104,8 +2158,8 @@ def check_proxy():
             # storm-on-a-node is the faithful count, and tripping any single
             # host correctly stops the fleet-wide hammering.
             allowed, note = _note_heal_action(
-                (relaunch_hosts or ["?"])[0], PROXY_PORT, "proxy-relaunch",
-                f"proxy:{PROXY_PORT}")
+                proxy_repair_key, PROXY_PORT, "proxy-relaunch",
+                f"proxy:{PROXY_PORT}", pause_directory=pause_directory)
             if not allowed:
                 deferred = True
                 message = note
@@ -2174,8 +2228,10 @@ def check_proxy():
     # A relaunch/repair that came back failed must SURFACE the underlying
     # command output — every failure of this path in the 2026-10-18 window was
     # logged as bare text without the reason ("already running" etc.), and
-    # nothing downstream could alarm on it.
-    if not ok and not suppressed and not deferred:
+    # nothing downstream could alarm on it. A paused_skip tick attempted
+    # NOTHING, so it is not a failed repair and must not read as one (the same
+    # argument as `suppressed` / `deferred`, three lines below).
+    if not ok and not suppressed and not deferred and not paused_skip:
         log(f"proxy repair on :{PROXY_PORT} FAILED ({message}): "
             f"{(r.get('output') or r.get('stderr') or 'no command output')[:400]}",
             "ERROR")
@@ -2202,24 +2258,30 @@ def check_proxy():
                   "relaunch_hosts": relaunch_hosts,
                   # A deferral is not a FAILED relaunch — nothing was attempted.
                   # Same treatment as `suppressed`, so a deferred tick cannot
-                  # raise a "relaunch failed" alert.
-                  "relaunch_failed": (not ok and not suppressed and not deferred),
+                  # raise a "relaunch failed" alert. `paused` (t_8e5ab6cb) is the
+                  # same truth for a node the operator parked: no lease, no
+                  # strike, no command — and the reason is in `message`.
+                  "relaunch_failed": (not ok and not suppressed and not deferred
+                                      and not paused_skip),
                   "deferred": deferred,
+                  "paused": paused_skip,
                   "router_drift": drift["detail"],
                   "router_drift_warn": bool(drift["warn"]),
                   "unit_alias_warn": unit_alias_warn,
                   "message": message}
-    if not ok and not suppressed and not deferred:
+    if not ok and not suppressed and not deferred and not paused_skip:
         proxy_data["relaunch_error"] = (r.get("output") or r.get("stderr") or "")[:400]
     if new_streak:
         # NOT cleared by a merely-successful exit code: only the healthy
         # branch (probes pass) clears the streak. `sparkrun proxy start`
         # exiting 0 over a dead/empty proxy is a documented shape (10-11).
         proxy_data["relaunch_streak"] = new_streak
-    if suppressed or deferred:
+    if suppressed or deferred or paused_skip:
         # Carry the ORIGINAL attempt stamp forward verbatim. Re-stamping on a
-        # suppressed/deferred tick would push the window out every tick and make
-        # the cooldown perpetual (never retries, never recovers).
+        # suppressed/deferred/paused tick would push the window out every tick
+        # and make the cooldown perpetual (never retries, never recovers) — and a
+        # pause tick in particular must not buy the cooldown a fresh 300 s for a
+        # repair that was never attempted.
         stamp = _proxy_relaunch_stamp()
         if stamp:
             proxy_data["last_relaunch"] = stamp
@@ -3023,12 +3085,99 @@ def _guard_launch_or_refuse(host, port, span, actor, unit, status=None,
     return False
 
 
-def _note_heal_action(node, port, actor, label):
+# ---------------------------------------------------------------------------
+# THE PAUSE SEAM ON THE REPAIR PATHS (t_8e5ab6cb, pause family 2.17.3)
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS
+#
+# ``hscc node pause`` parks one node on purpose and edits nothing the cluster is
+# built from, so a parked node's units are simply down with no record anywhere
+# the repair paths already look that says "deliberate". The counters and the
+# watchdog learned that (#564 autoscale, #565 watchdog rule 0, #566 autodown
+# wake, #568 heal-breaker accrual). The three DOWN-REPAIR surfaces in this file
+# had not: ``auto-heal`` (a whole-template force-recreate), ``worker-relaunch``
+# (a per-unit stop + re-issue) and ``proxy-relaunch`` (a fleet-wide
+# ``sparkrun proxy start --restart``) each walked straight up to a parked node
+# and recreated or relaunched its units — on top of whatever is now using that
+# GPU. That is the one outcome the overlay's module docstring exists to remove.
+#
+# #568 is why this is urgent rather than merely untidy. Before it, a parked node
+# accrued strikes and the breaker refused further heals after HEAL_BREAKER_MAX:
+# an *accidental* backstop, arrived at by treating a pause as an outage. #568
+# stopped that accrual — correctly, because a pause is not a fault — and with it
+# removed the last thing that limited the loop. Nothing between a parked node and
+# an unbounded relaunch is the state this seam closes.
+#
+# WHY THE SEAM SITS WHERE IT SITS
+#
+# At the mutating surface, and BEFORE ``heal_lease.acquire``: a skip that takes a
+# lease first advertises "a repair is in flight" to every other repair path for a
+# repair we have decided not to perform (lifecycle.py's rule 0 makes the same
+# argument, and a lease held for a no-op also defers a real repair elsewhere).
+# Before ``_note_heal_action`` for the same truthfulness reason: a tick that does
+# nothing must not count as something. The #568 guard inside ``note_heal`` stays
+# — defence in depth for any path that grows later — but it is no longer what
+# protects a parked node from a force-recreate.
+#
+# ASK ``covering``, NEVER ``paused``
+#
+# ``node_pauses.paused(host)`` is host-keyed; the other nodes of a
+# tensor-parallel unit — stopped as one thing — appear only in the record's
+# ``span_nodes``. A seam that asked ``paused()`` would keep force-recreating the
+# sibling node of a span the operator parked. ``covering()`` follows
+# ``span_nodes``, which is what the parent module pins for every skip seam, and
+# the span-sibling test in this card's test file reddens if it is ever swapped.
+#
+# SKIP EXACTLY THE PARKED NODE
+#
+# Each site asks about the one node its own action is keyed on — the unit's node
+# at the two worker sites, and the host the proxy site keys its strike on — and
+# nothing else changes. A pause on node A must not disarm repair for node B:
+# over-suppression is the same class of bug as the false page these seams remove.
+#
+# FAIL-OPEN DIRECTION (inherited, not re-decided)
+#
+# ``node_pauses.load()`` answers "no pauses" for a missing, unreadable or
+# malformed overlay and WARNs loudly. There is deliberately no try/except here:
+# a broken overlay file must never become a reason the fleet stops healing
+# itself, and a guard that could raise into ``check_workers`` is a worse failure
+# than the pause it is looking for.
+def _pause_covering_repair(node, directory=None):
+    """The pause entry that parks ``node``, or ``None`` when nothing does.
+
+    ``directory`` is ``node_pauses``' own explicit overlay-root seam — the only
+    relocation seam that module has, and the reason this takes a parameter
+    instead of reading an env var: the CLI writes the overlay and the daemon loop
+    reads it, so a threaded root is one root both processes can agree on.
+    ``None`` is the default ``~/.hscc``, which is what every production caller
+    passes.
+    """
+    return node_pauses.covering(node, directory=directory)
+
+
+def _pause_label(entry):
+    """`" (reason)"` for a pause entry, `""` when it carries no reason.
+
+    Same helper contract as ``lifecycle._pause_label``: the reason travels with
+    the skip so a reader renders it instead of re-deciding it.
+    """
+    reason = (entry or {}).get("reason") or ""
+    return f" ({reason})" if reason else ""
+
+
+def _note_heal_action(node, port, actor, label, pause_directory=None):
     """Count one heal ACTION against `node` and honour the per-node breaker.
 
     Returns (allowed, note). When the breaker trips or is already suspended,
     the caller must NOT act — it logs `note` and moves on, exactly like the
     F2 lease deferral.
+
+    `pause_directory` (t_8e5ab6cb) is threaded down to
+    ``heal_breaker.note_heal(directory=)`` so the accrual guard and this
+    function's caller ask the OVERLAY THE SAME ROOT as the skip seam above them.
+    Two roots in one tick is how a sandbox starts passing while production
+    silently does not. `None` is the default `~/.hscc`.
 
     WHY A BREAKER ON TOP OF THE LEASE (F5, HEAL_CASCADE 2026-10-14): the lease
     makes repairs *sequential*; it does not make them *finite*. The incident's
@@ -3046,7 +3195,7 @@ def _note_heal_action(node, port, actor, label):
         return False, (f"node {node} heal-suspended for another {int(remaining)}s "
                        f"after {heal_breaker.strike_count(node)} repair actions — "
                        f"NOT attempting {actor} for {label}")
-    res = heal_breaker.note_heal(node)
+    res = heal_breaker.note_heal(node, directory=pause_directory)
     if res["tripped"]:
         # LATCH ONCE (heal_breaker.should_alert dedupes; the 2026-10-08 NAS
         # rule fired 178 notifications in 11 min by getting this wrong). A tick
@@ -3403,7 +3552,7 @@ def _operator_down():
         return None
 
 
-def check_workers():
+def check_workers(pause_directory=None):
     """Keep-alive worker check (UNIT-keyed, G1): health-check each serving.json
     keep-alive worker UNIT on its own port and relaunch a crashed one with its
     own recipe + port. A node may carry several units (co-located models) on
@@ -3508,6 +3657,10 @@ def check_workers():
     tp_peers = _tp_peer_nodes()
 
     online, relaunched, down = [], [], []
+    # t_8e5ab6cb: the down units this check LEFT ALONE because their node is
+    # parked. They are still counted `down` (they are down); the list exists so
+    # the stream can say why nothing was done about them.
+    paused_labels = []
     now_wall = time.time()
     grace_secs = VLLM_LOAD_GRACE_MINUTES * 60
     for u in units:
@@ -3565,6 +3718,22 @@ def check_workers():
                     f"never served — still loading, NOT auto-healing")
                 down.append(label)
                 continue
+            # PAUSE SEAM — rule 0 of this path (t_8e5ab6cb). A parked node is not
+            # a fault, and a force-recreate lands on top of whatever is now
+            # owning that GPU: this is the most destructive of the four repair
+            # paths and the exact outcome the overlay exists to forbid. Ahead of
+            # the lease (a skip must not advertise a repair that will not happen)
+            # and ahead of _note_heal_action (a tick that does nothing must not
+            # count as something). The unit stays counted `down` — it is down.
+            pause = _pause_covering_repair(node, pause_directory)
+            if pause is not None:
+                log(f"Auto-heal: {label} ({node}:{port}) down {streak}x but "
+                    f"{node} is paused{_pause_label(pause)} — no lease taken, no "
+                    f"strike counted, no force-recreate (hscc node resume {node} "
+                    f"lifts it)", "WARN")
+                down.append(label)
+                paused_labels.append(label)
+                continue
             # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14): this is the
             # most destructive of the four paths — it recreates units while
             # others are acting. Back off a tick rather than join the pile-up.
@@ -3580,7 +3749,8 @@ def check_workers():
                 # tick earlier attempts nothing and counts no strike). This is
                 # the most destructive path — a whole-template force-recreate —
                 # so its strikes matter most.
-                allowed, note = _note_heal_action(node, port, "auto-heal", label)
+                allowed, note = _note_heal_action(node, port, "auto-heal", label,
+                                                  pause_directory=pause_directory)
                 if not allowed:
                     log(f"Auto-heal: {note}", "WARN")
                     down.append(label)
@@ -3622,6 +3792,19 @@ def check_workers():
             down.append(label)
             log(f"Worker {label} down but no recipe in serving.json — skipping", "WARN")
             continue
+        # PAUSE SEAM — rule 0 of this path (t_8e5ab6cb). The gentle relaunch is
+        # still a stop + re-issue of the unit's whole span, so on a parked node it
+        # both disturbs whatever replaced the unit and re-occupies the GPU the
+        # operator freed. Ahead of the lease and of the strike, like the
+        # force-recreate above; the unit stays counted `down`, which is true.
+        pause = _pause_covering_repair(node, pause_directory)
+        if pause is not None:
+            log(f"Worker {label} ({node}:{port}) down but {node} is paused"
+                f"{_pause_label(pause)} — no lease taken, no strike counted, no "
+                f"stop and no relaunch (hscc node resume {node} lifts it)", "WARN")
+            down.append(label)
+            paused_labels.append(label)
+            continue
         # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14). This path fired on
         # a 60s tick against containers three other mechanisms were creating.
         # Take the lease for the stop+re-issue; back off one tick if held.
@@ -3636,7 +3819,9 @@ def check_workers():
             # finally-release. Per-UNIT relaunch has its own load-grace cooldown,
             # which cannot see this: a degrading node hammered across several of
             # its units. The breaker is the per-NODE count that closes that gap.
-            allowed, note = _note_heal_action(node, port, "worker-relaunch", label)
+            allowed, note = _note_heal_action(node, port, "worker-relaunch",
+                                              label,
+                                              pause_directory=pause_directory)
             if not allowed:
                 log(f"Worker {label}: {note}", "WARN")
                 down.append(label)
@@ -3693,13 +3878,23 @@ def check_workers():
             heal_lease.release("worker-relaunch")
 
     ok = not down
-    write_state("workers", {
+    workers_data = {
         "ok": ok, "total": len(units), "online": len(online),
         "relaunched": relaunched, "down": down, "last_check": now_iso(),
         "message": f"{len(online)}/{len(units)} online"
                    + (f", relaunched {relaunched}" if relaunched else "")
                    + (f", down {down}" if down else ""),
-    })
+    }
+    if paused_labels:
+        # TRUTHFUL STREAM (t_8e5ab6cb): these units are still down AND nothing
+        # was done about them, because their node is parked. Naming them here is
+        # what keeps "we healed nothing" distinguishable from "we tried and
+        # failed" — the shape every false page in this package starts from. The
+        # key appears only when a pause actually suppressed a repair.
+        workers_data["paused"] = paused_labels
+        workers_data["message"] += (
+            f", left down parked {paused_labels}")
+    write_state("workers", workers_data)
     log(f"Workers check: {len(online)}/{len(units)} online"
         + (f", relaunched {relaunched}" if relaunched else "")
         + (f", down {down}" if down else ""))
