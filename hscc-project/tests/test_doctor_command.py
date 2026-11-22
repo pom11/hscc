@@ -353,6 +353,38 @@ def _learning_args(tmp_path, **overrides):
     return snap
 
 
+# --------------------------------------------------------------------------- #
+# A rendering caveat the learning assertions have to respect.
+#
+# Every row here is printed through a Rich Panel, which HARD-WRAPS a long
+# `detail` at the console width — and `_theme.make_console` deliberately pins
+# that width to 200 for a pipe. So a sentence can be split across two printed
+# lines, and *where* it splits depends on the length of the data inside the row.
+# For the memory rows that data includes pytest's tmp_path, i.e. the machine.
+# Measured at bb5d2b83 with one variable (the tmp root length; CI-shaped HOME,
+# p313 so hermes_cli is unimportable as in CI's thin venv): a tmp root of
+# 60/66/120/126 chars reddens test_all_memory_files_stale_is_problem and
+# 72..114/132+ greens it, while the row carries the whole sentence in BOTH
+# cases. The CI runner's root (`/tmp/pytest-of-runner/pytest-0/…`, 62 chars)
+# sits in the reddening window; a workstation's default does not — which is why
+# this leg was red on the runner and green on the laptop, and why the CI box
+# looked like a missing verdict when only the assertion was missing.
+#
+# A content claim must not be asserted against a layout. `_flowed()` removes the
+# panel's own decoration and collapses its hard wraps, so the assertions ask
+# what the row SAYS. Nothing is relaxed: the whole phrase is still required, in
+# order — delete "— learning has stopped" from `_staleness_check` and the case
+# reddens again (mutation probe P1 on t_cc2f23ea).
+# --------------------------------------------------------------------------- #
+
+_BOX_DRAWING = str.maketrans({c: " " for c in "│╭╮╰╯─┌┐└┘"})
+
+
+def _flowed(out: str) -> str:
+    """``out`` with the panel's box-drawing removed and its hard wraps collapsed."""
+    return " ".join(out.translate(_BOX_DRAWING).split())
+
+
 def test_learning_fresh_db_ok(monkeypatch, capsys, tmp_path):
     projects, snap = _healthy_world()
     snap.update(_learning_args(tmp_path))
@@ -445,7 +477,15 @@ def test_newest_across_profiles_is_picked_and_named(monkeypatch, capsys, tmp_pat
 
 
 def test_all_memory_files_stale_is_problem(monkeypatch, capsys, tmp_path):
-    """ALL MEMORY.md files older than threshold -> learning stopped, PROBLEM."""
+    """ALL MEMORY.md files older than threshold -> learning stopped, PROBLEM.
+
+    Asserted against `_flowed(out)`: the row is Rich-rendered and its `detail`
+    hard-wraps at the pinned pipe width, so a raw substring check against the
+    boxed text asks about the *wrap position* — which moves with the length of
+    the tmp_path inside the row, i.e. with the machine. See the caveat above
+    `_flowed` and t_cc2f23ea: this is why the case was red on the CI runner and
+    green on the workstation with the same verdict on both.
+    """
     home = str(tmp_path)
     db_path = str(tmp_path / "memories.db")
     _write_mem_config(tmp_path, db_path=db_path)
@@ -462,9 +502,15 @@ def test_all_memory_files_stale_is_problem(monkeypatch, capsys, tmp_path):
     rc = cmd.cmd_doctor(_args(**snap), projects)
     assert rc == 1
     out = capsys.readouterr().out
+    # The status marker is checked on the RAW box: it is the first token of the
+    # row, so a word wrap can never split it, and checking it unflowed keeps this
+    # case honest about the row having been rendered as a row at all.
     assert "memory-stale [PROBLEM]" in out
-    assert "memory STALE" in out
-    assert "learning has stopped" in out
+    # The sentence is checked flowed: it sits far enough into the row to be
+    # wrapped, and where the wrap lands is machine state (tmp_path length).
+    flow = _flowed(out)
+    assert "memory STALE" in flow
+    assert "learning has stopped" in flow
 
 
 def test_no_readable_memory_file_is_unverified(monkeypatch, capsys, tmp_path):
