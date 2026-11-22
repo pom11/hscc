@@ -42,6 +42,15 @@ task: t_def484b1
   conftest already seals `node_pauses.HSCC_DIR` *and* `os.path.expanduser`, so
   the guard-assert reads the real home out of the passwd entry (the only witness
   a monkeypatch cannot move) before pinning that an overlay read explodes.
+- **`bash scripts/run_tests.sh` ALL GREEN — 12 legs, 11,305 passed, 10 skipped,
+  0 failed** at `0ed37eda` (bootstrap 1329 · commands 78 · roles 356 · cluster
+  1157 + 3 skipped · project 1475 · daemon 4619 + 1 skipped · sparkrun-hermes 12
+  · api 1301 + 1 skipped · memori_byodb 31 · scripts 587 + 5 skipped ·
+  .github/scripts 228 · comfyui-sparkrun 132), with no pre-existing red on the
+  reporting host this time. `scripts/readme_lint.py --strict` → **findings: 0**
+  (23 files, docs-index 223/223). Both re-checked after merging `origin/main`
+  (`6a144f39`, docs-only) into the branch: lint 0 findings, `check` rc 0, the
+  `scripts` leg re-run green (587 + 5 skipped), `test_post_boot.py` still 71.
 - **7/7 mutation probes caught, control green at 71, restore byte-verified.**
   M1 the new branch never fires (the pre-fix shape) → 5 of the new tests red.
   M2 the `ok and` gate dropped, so the label alone decides → only
