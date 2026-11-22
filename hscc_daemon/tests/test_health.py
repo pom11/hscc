@@ -2935,6 +2935,14 @@ class TestProxyRelaunchStall:
         monkeypatch.setattr(health, "_proxy_backend_probe",
                             lambda url=None, timeout=5: {"ok": False, "backends": set(),
                                                           "error": "refused"})
+        # t_f0b8051b: check_proxy's healthy path now asks for a completion
+        # THROUGH :4000. Tests here flip the catalogue probe to healthy (the
+        # recovery ticks), so stub the completion surface too — its no-evidence
+        # shape — or this rig dials the operator's live proxy.
+        monkeypatch.setattr(health, "_proxy_completion_probe",
+                            lambda url=None, model=None, timeout=None:
+                            {"ok": True, "status": None, "skipped": True,
+                             "error": ""})
         # Dep-bump guard (#40) added a THIRD read surface to check_proxy: the
         # router-drift probe. Stub it here too — this class builds its own
         # setup rather than reusing TestCheckProxy._setup, so without this line

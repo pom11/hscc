@@ -2983,7 +2983,7 @@ def check_proxy(pause_directory=None):
     # machinery below (cooldown, lease, breaker, and the plain start a running
     # proxy refuses), not this probe.
     completion_ok, completion_detail = True, (
-        "completion probe not run (catalogue verdict already failed)")
+        "completion probe not run (verdict already failed before the probe)")
     if healthy:
         completion = _proxy_completion_probe(
             model=_proxy_completion_model(expected, probe.get("models")),
