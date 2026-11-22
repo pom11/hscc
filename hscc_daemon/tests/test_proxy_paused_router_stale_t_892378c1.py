@@ -191,12 +191,11 @@ class TestPausedStaleRouterIsVisible:
         assert health._paused_router_stale_backends(absent, set()) == set()
         assert health._paused_router_stale_backends(set(), live) == set()
 
-    def test_a_parked_backend_still_in_the_router_warns(self, logs,
-                                                        monkeypatch):
+    def test_a_parked_backend_still_in_the_router_warns(self, logs):
         """THE AUDIT HOLE, closed at the unit level: the router answers with an
         endpoint whose host is parked ⇒ the operator is told, and the verdict
         still says healthy."""
-        _reset_latch(monkeypatch)
+        _reset_latch()
         live = {hp(PARKED), hp(UP)}
         _missing, _dead, absent = health._proxy_backend_drift_sets(
             live, {hp(UP)}, live, paused_nodes={PARKED})
@@ -210,9 +209,8 @@ class TestPausedStaleRouterIsVisible:
         assert "not counted as drift" in msg
         assert hp(UP) not in msg, f"an in-service backend was named: {msg}"
 
-    def test_the_warn_names_every_stale_backend_and_host(self, logs,
-                                                         monkeypatch):
-        _reset_latch(monkeypatch)
+    def test_the_warn_names_every_stale_backend_and_host(self, logs):
+        _reset_latch()
         health._note_paused_router_stale({hp(PARKED), hp(SIBLING, 8002)},
                                          {hp(PARKED), hp(SIBLING, 8002)})
         msg = [m for _l, m in logs if "still points at" in m][-1]
@@ -250,7 +248,7 @@ class TestPausedStaleRouterIsVisible:
         """Same tick, both directions: MISSING (a healthy unit the router lost)
         alongside a parked host the router still holds. The verdict is the
         MISSING verdict it has always been; the WARN is added beside it."""
-        _reset_latch(monkeypatch)
+        _reset_latch()
         rig = _Rig(tmp_hfcc_dir, monkeypatch, hosts=[UP, PARKED],
                    live={hp(PARKED)}, healthy_units={hp(UP)})
         park(PARKED, overlay, reason="training run")
@@ -276,10 +274,10 @@ class TestRealDriftStillRepairs:
         assert ok is False
         assert hp(DEAD) in reason and "dead worker" in reason
 
-    def test_no_stale_backends_prints_nothing(self, logs, monkeypatch):
+    def test_no_stale_backends_prints_nothing(self, logs):
         """The suppression half: with nothing parked — or with a parked host
         the router already dropped — the check stays silent."""
-        _reset_latch(monkeypatch)
+        _reset_latch()
         assert health._note_paused_router_stale(set(), {hp(UP)}) is None
         # Parked AND absent from the router: nothing stale to report.
         assert health._note_paused_router_stale({hp(PARKED)}, {hp(UP)}) is None
@@ -291,7 +289,7 @@ class TestRealDriftStillRepairs:
         """The control half of every pin in this file: a dead unit on a node
         nobody parked must still be drift and must still be repaired — and the
         new WARN must be the only thing that changed about the tick."""
-        _reset_latch(monkeypatch)
+        _reset_latch()
         rig = _Rig(tmp_hfcc_dir, monkeypatch, hosts=[UP, DEAD],
                    live={hp(UP), hp(DEAD)}, healthy_units={hp(UP)})
         # True here means "the tick fixed it": the DEAD verdict drove the tick
@@ -315,8 +313,8 @@ class TestRealDriftStillRepairs:
 class TestWarnIsRateLimitedOnChange:
     """A node parked for a day must cost the log one line."""
 
-    def test_repeated_ticks_print_once(self, logs, monkeypatch):
-        _reset_latch(monkeypatch)
+    def test_repeated_ticks_print_once(self, logs):
+        _reset_latch()
         for _ in range(50):
             health._note_paused_router_stale({hp(PARKED)}, {hp(PARKED),
                                                             hp(UP)})
@@ -324,8 +322,8 @@ class TestWarnIsRateLimitedOnChange:
         assert len(warns) == 1, f"{len(warns)} WARNs for one unchanged state"
         assert "still points at" in warns[0]
 
-    def test_a_change_in_the_stale_set_prints_again(self, logs, monkeypatch):
-        _reset_latch(monkeypatch)
+    def test_a_change_in_the_stale_set_prints_again(self, logs):
+        _reset_latch()
         health._note_paused_router_stale({hp(PARKED)}, {hp(PARKED)})
         health._note_paused_router_stale({hp(PARKED), hp(SIBLING)},
                                          {hp(PARKED), hp(SIBLING)})
@@ -333,12 +331,11 @@ class TestWarnIsRateLimitedOnChange:
         assert len(warns) == 2, warns
         assert hp(SIBLING) in warns[1]
 
-    def test_the_clear_prints_once_and_then_stays_silent(self, logs,
-                                                         monkeypatch):
+    def test_the_clear_prints_once_and_then_stays_silent(self, logs):
         """An alarm that can fire must be able to end: the transition back to
         'nothing stale' prints the clear line exactly once, and every later
         clean tick stays quiet."""
-        _reset_latch(monkeypatch)
+        _reset_latch()
         health._note_paused_router_stale({hp(PARKED)}, {hp(PARKED)})
         for _ in range(5):
             health._note_paused_router_stale(set(), {hp(UP)})
@@ -348,7 +345,7 @@ class TestWarnIsRateLimitedOnChange:
         assert "no longer points" in clears[0]
         # And a clean check that was never dirty prints nothing at all: fresh
         # latch AND fresh log buffer, two clean ticks.
-        _reset_latch(monkeypatch)
+        _reset_latch()
         del logs[:]
         health._note_paused_router_stale(set(), {hp(UP)})
         health._note_paused_router_stale(set(), {hp(UP)})
@@ -357,11 +354,13 @@ class TestWarnIsRateLimitedOnChange:
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
-def _reset_latch(monkeypatch):
-    """Per-test reset of the log-on-change latch (module state; without this
-    the suite would pass or fail on test ORDER)."""
-    state = dict(getattr(health, "_paused_stale_router_state", {}) or {})
-    state["signature"] = None
-    monkeypatch.setattr(health, "_paused_stale_router_state", state)
-    assert hasattr(health, "_note_paused_router_stale"), (
-        "the visibility seam does not exist yet")
+def _reset_latch():
+    """Start a rate-limit case from "nothing has been printed yet".
+
+    Uses the module's own seam (the same one `_reset_fleet_visibility_state`
+    offers its suite) rather than rebinding module state from here, so the
+    tests exercise the documented reset. `tests/conftest.py::_module_attrs`
+    rebinds the latch per test anyway, which is what stops a mutation here from
+    reaching the next test — the suite must not pass or fail on ORDER.
+    """
+    health._reset_paused_stale_router_state()
