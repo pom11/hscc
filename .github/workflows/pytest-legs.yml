@@ -57,17 +57,65 @@ name: pytest-legs
 #                                      fail OPEN on capitalisation)
 #     a leg that could not run at all fails EITHER way — see leg_verdict.sh.
 #
-# Advisory by default, per the card's decision 2. The one red this card was
-# handed (hscc-bootstrap's test_fresh_home_says_not_wired_instead_of_claiming_success,
-# owner t_ea59a6ba) measures GREEN on the first runner-side full-suite run of
-# this workflow, so flipping HSCC_TESTS_ENFORCE to true and requiring the check
-# is a one-variable change once a green full suite is on record.
+# CURRENT POSTURE — ENFORCED (t_1cb8686f decided it, t_56bd1fd2 executed it).
 #
-# To make it block, require the check "pytest-legs / legs" in branch protection
-# (PRs only, like address-guard's option b):
+# `HSCC_TESTS_ENFORCE=true` is set as a repository variable and `main` requires
+# exactly one check, `legs`, with `strict=false` and `enforce_admins=true`. A red
+# test leg therefore fails its job, fails the aggregator, and blocks the merge —
+# including for an admin, because the fleet's merge path IS the admin token and
+# a required check that admins bypass would be decorative on the only path that
+# merges (that is how #587 merged a red `hscc-roles` leg and #589 merged over it).
+# Read the live state back rather than trusting this comment:
 #
-#   gh api -X PUT repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks \
-#     -f strict=true -f contexts[]=legs
+#   gh api repos/pom11/hscc/actions/variables --jq '.variables[] | "\(.name)=\(.value)"'
+#   gh api repos/pom11/hscc/branches/main/protection --jq \
+#     '{contexts:.required_status_checks.contexts,strict:.required_status_checks.strict,enforce_admins:.enforce_admins.enabled}'
+#
+# The flip waits on a green full roster by design: enforcing while a leg is red
+# freezes every PR in the repo on somebody else's failure. The gate that let this
+# one through was `legs: FULL SUITE (12)` -> `all selected legs green` with zero
+# red-leg annotations at `94828d99`, and the block itself was proven by a
+# throwaway branch with one `assert 1 == 0` (PR #605: `leg hscc-roles` red, `legs`
+# red, `mergeStateStatus: BLOCKED` as the admin).
+#
+# REQUIRE `legs`, NEVER `leg *`. `decide_legs.sh` runs only the legs a change's
+# paths can break, so a PR reports a SUBSET — measured 2 of 12 on PR #593 and 1 of
+# 12 on PR #605. Required `leg *` therefore means ten checks that never report on
+# such a head: permanently "expected", permanently blocking, nothing ever merges.
+# `legs` is one stable name that aggregates `needs.[select,leg].result`, so it
+# carries every selected leg's verdict and still fails when a leg could not run.
+# Its context string is `legs` — "pytest-legs / legs" is only how the UI spells it.
+#
+# `strict=false` is deliberate. `strict=true` forces a rebase of every head before
+# it can merge, and this repo merges several PRs a day. The stale-head risk strict
+# exists to close is already covered from the other side: the push-to-main run of
+# this workflow is the full roster, so a wrong selection map reddens main within
+# minutes of merge instead of hiding behind a green PR (see the triggers below).
+#
+# TWO ESCAPE HATCHES, one command each — written here so nobody has to invent one
+# under pressure. Both are reversible in the same breath:
+#
+#   gh api -X PATCH repos/pom11/hscc/actions/variables/HSCC_TESTS_ENFORCE -f value=false
+#       -> legs go advisory again; re-run the leg and it is green with a ::warning::
+#   gh api -X PUT repos/pom11/hscc/branches/main/protection \
+#     -H "Accept: application/vnd.github+json" --input <protection-body.json>
+#       -> same body with "enforce_admins": false, for one emergency merge; or
+#          `DELETE .../branches/main/protection` to drop the gate entirely
+#
+# Note the second one goes through the whole-protection PUT: the dedicated
+# `PUT .../protection/enforce_admins` route returned 404 when this was set, so the
+# whole-protection write is the one that is known to work here.
+#
+# The variable does NOT bypass a harness failure. `leg_verdict.sh` reddens a leg
+# that produced no summary, or exited with anything other than pytest's
+# "some test failed" code, whatever ENFORCE says — a killed leg is not evidence
+# that the tests passed. Only re-running fixes that.
+#
+# One consequence worth knowing before you open a PR from an old branch: a
+# required check has to have REPORTED at the PR head. A head that predates this
+# workflow can never report `legs`, so that PR sits "Expected" and BLOCKED until
+# its branch is brought onto main. That is the intended reading — a head that far
+# behind is not mergeable evidence — but it is not obvious from the checks page.
 #
 # Two facts carried over from address-guard.yml: a check is only selectable once
 # it has run successfully in the repo within 7 days, and a workflow that triggers
