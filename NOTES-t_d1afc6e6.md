@@ -103,7 +103,8 @@ Interpreter: `~/.hermes/hermes-agent/venv/bin/python`, with the five
 |---|---|---|---|
 | A | re-spell the literal in `orch_waker` (`{"general-orch", …}`) | guard reddens → the file is **not** exempt | `1 failed, 22 passed` ✔ |
 | B | none (control) | both files green | `23 passed`, `31 passed` ✔ |
-| C | `legacy_general_profile()` renamed away in the resolver (an old deployed `main_orch`) | the paneless test reddens → it really reads the resolver | `1 failed, 30 passed` ✔ |
+| C | `legacy_general_profile()` renamed away in the resolver (an old deployed `main_orch`) | the paneless test reddens → the test really reads the resolver | `1 failed, 30 passed` ✔ |
+| D | same re-spell as A, run against the branch WITH the new guard message | the failure must actually print the ruling (accessor named, allowlist forbidden, this file cited) | 6/6 checks pass ✔ |
 
 ## Why it merged red — measured, not guessed
 
