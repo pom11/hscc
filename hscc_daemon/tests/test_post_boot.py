@@ -914,7 +914,7 @@ class TestStream:
 # the node AFTERWARDS leaves the parked unit listed as a relaunch candidate.
 # On that node's next reboot the pass must NOT report "relaunched [unit]" —
 # nothing was issued. Baselines still ADVANCE (there is no retry to re-decide;
-# the node is parked until `hscc node resume <host> --apply`).
+# the node is parked until `hscc node resume <host>`).
 #
 # The launched / launch-failed branches are pinned HERE on purpose: they are
 # the arms the new branch shares, so a mutation that changes the split has to

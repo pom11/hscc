@@ -758,7 +758,7 @@ def run_post_boot_pass(boot_fn=None, probe_fn=None, up_fn=None,
                 # below must not claim a launch that never happened.
                 # Baselines stay ADVANCED: the under-lock advance above stands,
                 # because there is no retry to re-decide (the node is parked
-                # until `hscc node resume <host> --apply`) and restoring them
+                # until `hscc node resume <host>`) and restoring them
                 # would re-offer the same parked unit to every later pass.
                 # LOW priority: the operator is informed, never paged about
                 # their own pause.
