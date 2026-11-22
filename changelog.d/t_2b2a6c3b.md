@@ -48,30 +48,8 @@ task: t_2b2a6c3b
   passed, 2 skipped` — the two cases run with `HOME` moved, which is exactly the
   coverage a roster-wide seal would otherwise have retired.
 ---
-kind: Changed
-order: 3
-task: t_2b2a6c3b
-
-- **`scripts/run_tests.sh` now seals `HOME` for every leg** (roster-wide, after the
-  two lines that derive a value from `HOME` and before the leg loop):
-  `HOME`+`USERPROFILE` = a fresh empty `mktemp -d` dir under `/tmp` — never `$TMPDIR`,
-  never inside the login home (refused with rc 3, because hermes resolves a home under
-  `~/.hermes` back to the live root, t_d39c720e) — and the runner **prints the path it
-  sealed** so a roster log proves its own posture. `HSCC_TEST_NO_SEAL=1` restores the
-  operator's HOME in one env var. `SPARKRUN_SRC` is **declared** from the machine's own
-  `sparkrun` checkout when the operator did not set one — the one path
-  `hscc-cluster`'s source cross-checks need, exported instead of the home, so the seal
-  does not retire them as skips. Pinned by
-  `scripts/tests/test_run_tests_home_seal.py` (10 cases: text + position in the file,
-  executed seal, escape hatch, both fail-closed refusals via a `mktemp` shim, `TMPDIR`
-  cannot move it, declaration wins/loses correctly). **DOES NOT MERGE YET** — this
-  card's two-arm roster at `96a9f38a` found four legs with deltas of their own
-  (`hscc_daemon` 1 red + 18 skips, `hscc-bootstrap` 35 skips, `scripts` 3 skips, plus
-  the two lanes already known), and a seal that lands before those are closed is a
-  seal that gets blamed for someone else's red. See the card for the gate.
----
 kind: Verified
-order: 4
+order: 2
 task: t_2b2a6c3b
 
 - Mutation probes on the seam (skill `mutation-probing`): **7 caught / 0 survived, of
