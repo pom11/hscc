@@ -1336,7 +1336,7 @@ def test_prober_still_asks_the_kernel_for_a_port_it_does_not_hold(
 # t_e5a9469e. `--help bound the api port 8787` was reported on an innocent diff
 # by a sensor that asked `connect_ex("127.0.0.1", API_DEFAULT_PORT)` whenever
 # its own defensive hold failed to acquire that port. MEASURED
-# (NOTES-t_e5a9469e.md, and re-measurable in seconds by the first test below):
+# (card t_e5a9469e, and re-measurable in seconds by the first test below):
 # while the hold is UP the check is unfireable (a port we hold cannot be bound
 # by anyone), and when the hold FAILS the answer belongs to whoever owns the
 # port — on this host that includes another audit run's own defensive hold,

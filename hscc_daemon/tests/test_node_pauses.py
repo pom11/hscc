@@ -14,6 +14,15 @@ import pytest
 
 from hscc_daemon import node_pauses
 
+#: fixture-clock: per-case literals (2026-11-20/21), never a file-wide anchor —
+#: each case names its own instant and passes it to the call under test
+#: (``pause(..., now=...)``, ``pending_resume(now, ...)``), so ``node_pauses``'
+#: wall-clock fallback (``_utc(None)``) is never what an assertion answers to.
+#: The expiry cases that DO run on the wall clock build both ends from it
+#: (``_hours_ago()``), which is the same rule seen from the other side: one
+#: clock per case. Single-clock rule, card t_ed416771; enforced by
+#: test_single_clock_rule.py.
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 

@@ -24,6 +24,12 @@ import os
 
 from hscc_daemon import stream_silence as ss
 
+#: fixture-clock: 2026-11-05 (per-case) — the incident date is the fixture, and
+#: every case hands it to the code under test (``h.tick(now)``,
+#: ``ss._default_completion(item, now, ...)``) and stamps its fabricated log
+#: lines from the SAME instant, so nothing here is age-judged by the wall clock.
+#: One clock per case; card t_ed416771; enforced by test_single_clock_rule.py.
+
 
 class Harness:
     def __init__(self, roster, completions, threshold=600, heartbeat_fresh=600,

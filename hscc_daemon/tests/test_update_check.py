@@ -265,10 +265,16 @@ class TestCacheBoundary:
                 "installed": "2.12.0", "available": True,
                 "upgrade_cmd": "brew upgrade hscc"}
 
-    # The boundary is pinned against a FIXED `now` and a FIXED stamp, so the
-    # test cannot drift by microseconds between building the entry and the
-    # assertion (an `hours_ago`-computed stamp plus a later `now()` reads
-    # 24.0000001h and fails for arithmetic reasons, not behavioural ones).
+    # fixture-clock: 2026-10-23T12:00Z — the boundary is pinned against a FIXED
+    # `now` and a FIXED stamp, so the test cannot drift by microseconds between
+    # building the entry and the assertion (an `hours_ago`-computed stamp plus a
+    # later `now()` reads 24.0000001h and fails for arithmetic reasons, not
+    # behavioural ones). Both ends answer THIS instant: every call passes
+    # ``now=self.NOW``, so ``update_check._utcnow()`` never judges a fixture
+    # stamp. The TestStatusNotice cases are the honest other shape — they stamp
+    # with `_ts()` (real now) and read through `cmd_status`, which has no clock
+    # seam, so both halves sit on the wall clock. One clock per case; card
+    # t_ed416771; enforced by test_single_clock_rule.py.
     NOW = datetime.datetime(2026, 10, 23, 12, 0, 0, tzinfo=UTC)
 
     def _entry_at(self, **delta):

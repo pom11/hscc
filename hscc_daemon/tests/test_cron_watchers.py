@@ -19,6 +19,15 @@ from hscc_daemon import cron_watchers as cw
 from hscc_daemon import state
 
 
+#: fixture-clock: 2026-11-01T12:00Z — the ONE clock every fixture-instant stamp
+#: in this file is judged by. The rule (card t_ed416771, after the
+#: ``test_node_pause_expiry`` detonation): a case runs on ONE clock, and it is
+#: the clock that WROTE the stamp. Cases here come in exactly two honest shapes
+#: — stamp at `NOW` and read with `now=NOW` (`_write_stamp`), or stamp with the
+#: real writer and read with `now=None` (`cw.stamp` / `cw.stamp_failure` own the
+#: timestamp, so only the wall clock can judge them). Mixing the two is how a
+#: green suite starts lying about age on a date nobody chose.
+#: Enforced by test_single_clock_rule.py, not by this comment.
 NOW = datetime.datetime(2026, 11, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
 
@@ -40,14 +49,40 @@ def sandbox(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _write_stamp(stream, *, ok=True, age_s=0, **fields):
-    ts = (NOW - datetime.timedelta(seconds=age_s)).isoformat()
+def _put_stamp(stream, ts, *, ok=True, **fields):
     data = {"timestamp": ts, "stream": stream, "ok": ok, "watcher": stream,
             **fields}
     os.makedirs(state.STATE_DIR, exist_ok=True)
     with open(os.path.join(state.STATE_DIR, stream + ".json"), "w") as f:
         json.dump(data, f)
     return data
+
+
+def _write_stamp(stream, *, ok=True, age_s=0, **fields):
+    return _put_stamp(stream, (NOW - datetime.timedelta(seconds=age_s)).isoformat(),
+                      ok=ok, **fields)
+
+
+def _write_real_stamp(stream, *, ok=True, age_s=0, **fields):
+    """A stamp whose timestamp the REAL clock wrote.
+
+    The file's other honest posture, and it is a rule rather than an exception:
+    THE CLOCK THAT WROTE A STAMP IS THE CLOCK THAT MUST JUDGE IT. Every other
+    case here stamps at the fixture instant ``NOW`` and reads with ``now=NOW``,
+    so both halves answer one clock. A case whose reader cannot be handed a
+    clock at all (``verify.check_daemon_streams`` takes no ``now``) stamps here
+    instead, so writer and reader meet on the wall clock and the verdict stops
+    depending on when pytest ran.
+
+    Card t_ed416771 swept exactly this: with the fixture at 2026-11-01 and the
+    operator's clock past it, an "already stale" stamp is only stale because of
+    the date the suite happens to run on.
+    """
+    return _put_stamp(
+        stream,
+        (datetime.datetime.now(datetime.timezone.utc)
+         - datetime.timedelta(seconds=age_s)).isoformat(),
+        ok=ok, **fields)
 
 
 # ── cadence / window SOT ────────────────────────────────────────────────────
@@ -201,7 +236,12 @@ def test_failing_pass_stamps_fresh_but_warns(sandbox):
     """A crash stamped by stamp_failure: fresh stamp, ok=False -> 'failing',
     distinguished from both 'dead' (stale) and 'healthy' (ok)."""
     cw.stamp_failure("dep_pr_watcher", "ValueError('bad pr payload')")
-    v = cw.verdict("dep_pr_watcher", now=NOW)
+    # `stamp_failure` stamps with the WALL clock (state.write_state owns the
+    # timestamp; there is no `now` on the writer), so this reads with the wall
+    # clock too. Judging it against the fixture `NOW` is two clocks in one test:
+    # the stamp reads as FUTURE the moment real now passes the literal, and the
+    # "failing, not dead" verdict the case exists to pin goes quiet. (t_ed416771)
+    v = cw.verdict("dep_pr_watcher", now=None)
     assert v["status"] == "failing" and v["warn"] is True
     assert "bad pr payload" in v["detail"]
 
@@ -309,8 +349,14 @@ def test_verify_still_judges_real_streams_after_the_exclusion(sandbox):
     """Negative control: the exclusion must not swallow genuine daemon-stream
     staleness sitting next to the watcher stamps."""
     from hscc_daemon import verify
-    _write_stamp("dep_pr_watcher", age_s=10)
-    _write_stamp("nas", age_s=99999)
+    # Reader has no clock seam: `check_daemon_streams` takes no `now` and ages
+    # every file against the wall clock. So the stamps come from the wall clock
+    # too — stamping them at the fixture `NOW` made the "99999s old" file stale
+    # only while real now sat AFTER 2026-11-01, and a clock set back (or a
+    # refreshed fixture literal) turns this negative control green-on-nothing.
+    # (t_ed416771 — one clock per test.)
+    _write_real_stamp("dep_pr_watcher", age_s=10)
+    _write_real_stamp("nas", age_s=99999)
     r = verify.check_daemon_streams(state_dir=state.STATE_DIR,
                                     stream_intervals={"nas": 900})
     assert r["ok"] is False and "nas" in r["detail"]
@@ -340,7 +386,11 @@ def test_a_green_sweep_pass_is_ok_and_carries_the_gate_fields(sandbox):
     idle-pass rule of GAP-B-4, in the shape this gate has."""
     assert cw.stamp("alone_sweep_gate", gate_rc=0, verdict="green",
                     interpreters=2, head="abc1234") is True
-    v = cw.verdict("alone_sweep_gate", now=NOW)
+    # Written by the real writer (wall-clock timestamp) → judged by the wall
+    # clock. `now=NOW` here made a fresh stamp read as FUTURE once real now
+    # passed the 2026-11-01 literal, so the case pinned nothing about age.
+    # (t_ed416771)
+    v = cw.verdict("alone_sweep_gate", now=None)
     assert v["status"] == "ok" and v["warn"] is False
     assert "WARN" not in v["detail"] and "hscc-alone-sweep-gate" in v["detail"]
     stamp = cw.read_stamp("alone_sweep_gate") or {}
@@ -354,7 +404,10 @@ def test_a_red_sweep_never_reads_healthy(sandbox):
         "alone_sweep_gate",
         "GATE RED: at least one file answers alone differently than inside "
         "the leg", verdict="red", gate_rc=1, head="abc1234") is True
-    v = cw.verdict("alone_sweep_gate", now=NOW)
+    # The `age_s < window_s` half of this case is an AGE claim, and the stamp
+    # came from the real writer — so it must be judged by the real clock, or the
+    # claim is only true because of the date pytest ran on. (t_ed416771)
+    v = cw.verdict("alone_sweep_gate", now=None)
     assert v["status"] == "failing" and v["warn"] is True
     assert v["detail"].startswith("WARN:")
     assert "GATE RED" in v["detail"], (
@@ -368,10 +421,15 @@ def test_a_dead_nightly_and_a_red_nightly_read_differently(sandbox):
     """The two sentences the row must keep apart: 'stopped firing' vs
     'fired, and the sweep was red'. Both warn; neither may be confused."""
     _write_stamp("alone_sweep_gate", age_s=4 * 86400)
+    # The two halves read on DIFFERENT clocks on purpose, and each half reads on
+    # the clock that wrote its own stamp: `dead` is a fixture-instant stamp
+    # (`_write_stamp`) judged at `NOW`, `red` is a real-writer stamp judged at
+    # real now. One `now=NOW` over both is what made the `red` half an accident.
+    # (t_ed416771)
     dead = cw.verdict("alone_sweep_gate", now=NOW)
     cw.stamp_failure("alone_sweep_gate", "GATE RED: one file differs",
                      verdict="red")
-    red = cw.verdict("alone_sweep_gate", now=NOW)
+    red = cw.verdict("alone_sweep_gate", now=None)
     assert dead["status"] == "stale" and red["status"] == "failing"
     assert dead["warn"] and red["warn"]
     assert "not firing" in dead["detail"] and "GATE RED" in red["detail"]

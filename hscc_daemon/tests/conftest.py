@@ -697,6 +697,24 @@ def _hermetic_sparkrun_resolution(tmp_path, monkeypatch):
     sparkrun_bin.reset_cache()
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_process_table(monkeypatch):
+    """Empty process table by default: no test walks the operator's real PIDs.
+
+    t_640be7a2 gave the proxy repair verifier a DESCENDANT walk, which reads
+    THIS machine's process table (``ps -o pid= -P``) — ambient state on exactly
+    the same footing as the real ``sparkrun`` CLI pinned directly above. Default
+    it to an empty table (fail closed: the tracked proxy has no children, which
+    is the pre-fix ``owner == tracked`` semantics), so no test can turn green or
+    red depending on what else happens to be running on the box. A test that
+    cares about process identity installs its own parent -> children table.
+    """
+    from hscc_daemon import health
+
+    monkeypatch.setattr(health, "_proc_children", lambda pid: [])
+    yield
+
+
 class _SubprocessResult:
     """Fake subprocess.CompletedProcess for controlling command output."""
 

@@ -114,7 +114,7 @@ PY = sys.executable
 #: measures. The (D) "a --help bound the api port" check used to
 #: ``connect_ex`` 127.0.0.1:8787 whenever the defensive hold below failed to
 #: acquire it, which made it a reader of the host's live api state: MEASURED
-#: (NOTES-t_e5a9469e.md) the sensor is *unfireable* while the hold is up (a
+#: (card t_e5a9469e) the sensor is *unfireable* while the hold is up (a
 #: port we hold cannot be bound by anyone else) and fires on every probe in the
 #: window when some other process owns the port and starts listening mid-walk —
 #: a concurrent audit run's own defensive hold qualifies. The same host state
