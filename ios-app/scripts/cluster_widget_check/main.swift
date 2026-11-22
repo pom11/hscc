@@ -47,8 +47,14 @@ guard let response = monitor, let fleet = FleetProjection(projecting: response) 
 }
 
 expect(group, "4 hosts listed, 4 up", fleet.tally.nodesUp == 4 && fleet.tally.nodesTotal == 4)
-expect(group, "nodes keep route order and display labels",
-       fleet.nodes.map { $0.label } == ["node-1", "node-2", "node-3", "node-4"])
+// Octet order and octet labels (apps 1.4.4): the fixture's hosts are .11-.14
+// in frame order, so this leg would still pass on frame order — the discriminating
+// order case (9 / 10 / 100) is executed in model_decode_check's node_label.swift.
+// What THIS leg proves is that the rows every surface draws are labelled by
+// octet, hostname notwithstanding.
+expect(group, "nodes come in octet order labelled by last octet, hostname notwithstanding",
+       fleet.nodes.map { $0.label } == ["11", "12", "13", "14"]
+        && fleet.nodes.map { $0.reportedName } == ["node-1", "node-2", "node-3", "node-4"])
 expect(group, "the serving table names 2 models",
        fleet.serving.models == 2 && fleet.serving.modelNames == ["model-a", "model-b"])
 expect(group, "the CLI total Gen t/s is the sum of serving[].gen_tps",
@@ -95,13 +101,13 @@ let medium = fleet.text(for: .medium)
 expect("medium", "headline + models/jobs/throughput",
        medium.headline == "4/4 up" && medium.detail == "2 models · 2 jobs · 12.3 t/s")
 expect("medium", "four compact node rows", medium.rows.count == 4)
-expect("medium", "row 1 is node-1 / model-a / up / GPU 0% / 63°C",
-       medium.rows[0].title == "node-1 · model-a"
+expect("medium", "row 1 is 11 / model-a / up / GPU 0% / 63°C",
+       medium.rows[0].title == "11 · model-a"
         && medium.rows[0].detail == "up · GPU 0% · 63°C")
 
 let large = fleet.text(for: .large)
 expect("large", "full row adds CPU temp + run/wait",
-       large.rows[2].title == "node-3 · model-b"
+       large.rows[2].title == "13 · model-b"
         && large.rows[2].detail == "up · GPU 96% · 78°C · CPU 87°C · run 3 · wait 0")
 
 let inline = fleet.text(for: .inline)
@@ -116,7 +122,7 @@ let rect = fleet.text(for: .rectangular)
 expect("rectangular", "two-line tally + detail",
        rect.headline == "4/4 up" && rect.detail == "2 models · 2 jobs · 12.3 t/s")
 expect("rectangular", "first node row is present, compact",
-       rect.rows.first?.title == "node-1 · model-a")
+       rect.rows.first?.title == "11 · model-a")
 
 // ---------------------------------------------------------------------------
 // 2b — L2 Lock Screen families (2026-11-20 operator pick). The accessory
@@ -125,8 +131,11 @@ expect("rectangular", "first node row is present, compact",
 
 let l2Entry = ClusterEntry(date: .now, fleet: fleet, configured: true, paused: false)
 let l2 = l2Entry.c1
-expect("l2", "the hottest C1 node is node-3 at its GPU reading (78 °C)",
-       l2.hottestNode?.label == "S3" && l2.hottestNode?.hostname == "node-3"
+// The label is the octet; the hostname is still the name the node reported,
+// which is exactly why ClusterC1Node keeps both — a VoiceOver user and the
+// large tile's tooltip should not lose the name because the tile got smaller.
+expect("l2", "the hottest C1 node is 13 at its GPU reading (78 °C), named node-3",
+       l2.hottestNode?.label == "13" && l2.hottestNode?.hostname == "node-3"
         && l2.hottestNode?.tempC == 78)
 expect("l2", "the circular gauge fills inside the 0...90 °C contract",
        l2.hottestGaugeValue == 78)
@@ -362,9 +371,9 @@ guard let lock = CLILockScreenMetrics(response) else {
     exit(2)
 }
 
-expect(lockGroup, "the hottest reading anywhere is node-3's CPU at 87.1 C, and says whose",
+expect(lockGroup, "the hottest reading anywhere is node 13's CPU at 87.1 C, and says whose",
        lock.hottest?.celsius == 87.1 && lock.hottest?.sensor == .cpu
-        && lock.hottest?.host == "node-3")
+        && lock.hottest?.host == "13")
 expect(lockGroup, "it scans BOTH sensors — no GPU here is that hot (max 78 C)",
        lock.hottest?.cell == "87.1 C"
         && (ClusterMonitorViewModel.project(response)?.hostRows.compactMap { $0.gpuTempC }
@@ -465,8 +474,8 @@ expect(lockGroup, "so the GPU load says 1/3 rather than reading as the fleet's",
        part.map { CLILockScreenCopy.gpuToken($0) } == "GPU avg 50% 1/3")
 expect(lockGroup, "and a partial sum of watts says 1/3 too",
        part.map { CLILockScreenCopy.wattsToken($0) } == "100 W 1/3")
-expect(lockGroup, "the temperature is still the one host that measured it",
-       part?.hottest?.cell == "70 C" && part?.hottest?.host == "node-1")
+expect(lockGroup, "the temperature is still the one host that measured it, by octet",
+       part?.hottest?.cell == "70 C" && part?.hottest?.host == "11")
 expect(lockGroup, "an unanswered serving poll is a dash, never a 0 queue",
        part?.running == nil && part?.waiting == nil
         && part.map { CLILockScreenCopy.queueHeadline($0) } == "— run")
@@ -507,8 +516,8 @@ expect("c1", "the hero throughput is the serving total",
        c1.tokText == "12 tok/s" && c1.tokPerSec.map { abs($0 - 12.3) < 0.001 } == true)
 expect("c1", "the hottest node is the max GPU temperature",
        c1.hottestC == 78 && c1.hottestText == "Hottest 78°")
-expect("c1", "nodes keep route order and carry power / tok/s",
-       c1.nodes.map { $0.label } == ["S1", "S2", "S3", "S4"]
+expect("c1", "nodes come in octet order labelled by octet and carry power / tok/s",
+       c1.nodes.map { $0.label } == ["11", "12", "13", "14"]
         && c1.nodes.map { $0.hostname } == ["node-1", "node-2", "node-3", "node-4"]
         && c1.nodes[2].powerW == 71.06 && c1.nodes[2].genTps == 3.1)
 // Idle fleet: live backends, nothing running, no rate in the serving rows. The
@@ -594,11 +603,13 @@ func row(_ fleet: FleetProjection, _ index: Int) -> FleetNodeLine? {
 }
 
 let pNodes = pausedFleet.nodes
-// `MonitorNode.shortTail` is "." + the last octet as written, so .11/.13 — the
-// app-wide rule this gate has always pinned, restated here because a parked
-// row has no sample and therefore no hostname to fall back on.
-expect(pauseGroup, "fixture shape: 4 rows in route order",
-       pNodes.map { $0.label } == [".11", "node-2", ".13", "node-4"])
+// The card's inheritance proof, in one line: these are t_3c0b54b6's parked
+// rows, and they read the SAME label path as every other row — a node paused
+// by IP with no sample and no hostname is labelled by its octet like a live one,
+// and the rows that DO report a hostname are labelled by octet too (1.4.4
+// inverted that preference). No paused-row code of its own to update.
+expect(pauseGroup, "fixture shape: 4 rows in octet order, every one labelled by octet",
+       pNodes.map { $0.label } == ["11", "12", "13", "14"])
 
 // --- the decode, both halves. Declaring a wire key WITHOUT a property default
 // is what makes these load-bearing: `let status: String? = nil` compiles, is
@@ -651,14 +662,14 @@ expect(pauseGroup, "no parked row ever draws the word down",
                           && $0.detail?.contains("down") == false })
 
 // --- the tally: the parked set leaves the down count and gets its own.
-expect(pauseGroup, "nodesDown subtracts the parked row that errored (only .13)",
-       pausedFleet.tally.nodesDown == 1 && pausedFleet.tally.downLabels == [".13"])
+expect(pauseGroup, "nodesDown subtracts the parked row that errored (only 13)",
+       pausedFleet.tally.nodesDown == 1 && pausedFleet.tally.downLabels == ["13"])
 expect(pauseGroup, "nodesPaused counts tagged rows PLUS the node the frame omitted",
        pausedFleet.tally.nodesPaused == 3)
 expect(pauseGroup, "nodesUp and nodesTotal stay the route's own numbers",
        pausedFleet.tally.nodesUp == 2 && pausedFleet.tally.nodesTotal == 4)
-expect(pauseGroup, "pausedLabels are display labels, never the pause record's host string",
-       pausedFleet.tally.pausedLabels == [".11", "node-2", ".99"])
+expect(pauseGroup, "pausedLabels are octet labels, never the pause record's host string",
+       pausedFleet.tally.pausedLabels == ["11", "12", "99"])
 expect(pauseGroup, "no parked label appears in downLabels",
        Set(pausedFleet.tally.pausedLabels).isDisjoint(with: pausedFleet.tally.downLabels))
 
@@ -667,10 +678,10 @@ expect(pauseGroup, "the parked list de-duplicates a node tagged AND named top-le
        pausedFleet.paused.count == 3
        && pausedFleet.paused.filter { $0.key == "192.0.2.11" }.count == 1)
 expect(pauseGroup, "the node the frame never listed is still in the parked list",
-       pausedFleet.paused.last?.label == ".99"
+       pausedFleet.paused.last?.label == "99"
        && pausedFleet.paused.last?.reason == "maintenance window")
-expect(pauseGroup, "the top-level entry keeps the frame row's truer label when both exist",
-       pausedFleet.paused.first?.label == ".11")
+expect(pauseGroup, "the top-level entry keeps the frame row's label when both exist",
+       pausedFleet.paused.first?.label == "11")
 expect(pauseGroup, "the parked list draws no address anywhere (§7)",
        pausedFleet.paused.allSatisfy { !$0.label.contains("192.0.2.") })
 
