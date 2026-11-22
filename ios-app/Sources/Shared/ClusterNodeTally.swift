@@ -98,6 +98,72 @@ struct ClusterNodeTally: Equatable {
 }
 
 // ---------------------------------------------------------------------------
+// The fleet-level judgement: how many nodes a surface may COUNT, once the
+// machines the operator parked are out of the arithmetic.
+//
+// `ClusterC1` wrote this rule first (t_983f177e) and its headline depends on
+// it. CarPlay and the macOS menu bar both print an `N/M up` line of their own
+// and were still feeding it the route's raw `nodesUp`/`nodesTotal`, which count
+// a parked machine as a machine that failed. That is the `down` bug one level
+// up: a fleet of nothing but parked nodes reads `Down` — an alarm about a
+// choice the operator made on purpose — and the fleet-wide tally says the fleet
+// is one quarter healthy when three quarters of it is deliberately out.
+//
+// It lives HERE rather than in `ClusterWidgetMetrics.swift` for a mechanical
+// reason, not a tidy one: neither `carplay_check.sh` nor either macOS target
+// compiles that file, so a rule written there is invisible to the two surfaces
+// that need it (the same reason `ClusterNodeTally` itself is a separate
+// Foundation-only file). This file is compiled into all four iOS targets and
+// both macOS targets, which is what lets ONE rule be executed by three gates.
+//
+// It counts the projected ROWS rather than the tally's arithmetic, for the
+// reason `ClusterC1` already documented: a parked row keeps its `error`, so the
+// row is the only place that knows both the tag and the answer for one machine.
+// ---------------------------------------------------------------------------
+
+struct FleetVerdict: Equatable {
+    /// Frame-listed nodes that answered AND were not parked. nil when the read
+    /// named no frame at all — which is why no caller may write `answered ?? 0`.
+    let answered: Int?
+    /// Frame-listed nodes the operator did NOT park: the denominator a verdict
+    /// may use. nil on the same rule as `answered`.
+    let judged: Int?
+    /// Frame-listed nodes the operator parked, carried so a surface can say how
+    /// much of the frame is out of service without recounting it.
+    let paused: Int?
+
+    init(answered: Int?, judged: Int?, paused: Int?) {
+        self.answered = answered
+        self.judged = judged
+        self.paused = paused
+    }
+
+    /// "The read told us nothing about the frame."
+    static let noAnswer = FleetVerdict(answered: nil, judged: nil, paused: nil)
+
+    /// Project the rows a surface already draws. An EMPTY frame is no answer for
+    /// the same reason `ClusterNodeTally.project` treats it as one: an empty
+    /// denominator is not a fact an operator can act on (§6 rule 1).
+    init(rows: [FleetNodeLine]?) {
+        guard let rows, !rows.isEmpty else { self = .noAnswer; return }
+        self.paused = rows.filter { $0.isPaused }.count
+        self.answered = rows.filter { $0.isUp && !$0.isPaused }.count
+        self.judged = rows.filter { !$0.isPaused }.count
+    }
+
+    /// Every node the route listed is parked: nothing is failing and nothing is
+    /// serving. Ask this BEFORE `answered == 0` — a parked frame fails both
+    /// readings, and if the order is inverted the alarm one wins by accident.
+    var allParked: Bool { judged == 0 }
+
+    /// The fleet-level word for `allParked`. Title Case like the words it sits
+    /// beside (`Down`, `All up`, `No data`), and the ONLY place that
+    /// fleet-level word is written — the per-node copy is `FleetFormat.paused`,
+    /// and the two must not drift.
+    static let pausedWord = "Paused"
+}
+
+// ---------------------------------------------------------------------------
 // The serving table, projected once for every surface.
 //
 // `hscc cluster monitor` prints one row per (backend, model): model, run/wait,
