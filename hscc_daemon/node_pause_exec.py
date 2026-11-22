@@ -1324,7 +1324,7 @@ def _doctor_check(now=None, root=None, stream_state=None, _daemon_running=None,
                 f"never stamped while the daemon runs — the {STREAM_NAME} "
                 f"stream has no readable stamp at {hint} ({note}); a pause "
                 "whose `until` passed would stay parked and nothing would "
-                "notice")
+                "notice", _DAEMON_FIX)
         if running:
             return _verdict(
                 False, False,
