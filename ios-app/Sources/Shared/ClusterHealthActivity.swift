@@ -234,8 +234,9 @@ struct ClusterHealthHostLine: Codable, Hashable {
     var gpuUtilPct: Double? = nil
 }
 
-/// One node column on the A2 Lock Screen row: the short name the spec draws
-/// (`S1`…), the temperature and the utilisation. Built from the SAME
+/// One node column on the A2 Lock Screen row: the node's shared short name
+/// (the last octet of its IP, since apps 1.4.4), the temperature and the
+/// utilisation. Built from the SAME
 /// `ClusterHealthHostLine` rows the driver pushes, so the column can never
 /// show a number the CLI did not.
 struct ClusterHealthNodeColumn: Equatable, Identifiable {
@@ -617,13 +618,17 @@ enum ClusterHealthReading {
     }
 
     /// The four node columns (or fewer when the route listed fewer), in the
-    /// route's own order. The short name is positional because the A2 layout is
-    /// a four-column row; the identity below it stays the CLI's own util cell.
+    /// order `FleetNodeOrder` gives them. The short name IS the node's shared
+    /// label — the last octet of its IP since apps 1.4.4 — because this layout
+    /// is a four-column row of `detailText` lines and a positional `S1` named a
+    /// row, not a machine: reorder the frame and the same column meant a
+    /// different host. An octet is one to three digits, so it fits the column
+    /// the positional name always fitted.
     static func nodeColumns(_ lines: [ClusterHealthHostLine]?,
                             limit: Int = 4) -> [ClusterHealthNodeColumn] {
         guard limit > 0, let lines else { return [] }
-        return lines.prefix(limit).enumerated().map { index, line in
-            ClusterHealthNodeColumn(shortName: "S\(index + 1)",
+        return lines.prefix(limit).map { line in
+            ClusterHealthNodeColumn(shortName: line.label,
                                     tempC: line.gpuTempC,
                                     utilPct: line.gpuUtilPct,
                                     tempLevel: watchTempLevel(line.gpuTempC),
