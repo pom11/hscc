@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HSCC 1.4.4 — release notes</title>
+<style>body{margin:0;padding:28px 20px 56px;background:#000;color:#fff;font:17px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",Helvetica,Arial,sans-serif}main{max-width:640px;margin:0 auto}h1,h2{color:#FF5722}a{color:#FF5722}code{font:0.93em ui-monospace,SFMono-Regular,Menlo,monospace}.foot{margin-top:36px;color:#777;font-size:.86rem}</style>
+</head>
+<body>
+<main>
+<h1>HSCC apps 1.4.4</h1><p>Ships with hscc 2.17.3 (node pause).</p><h2>Added</h2><ul><li><strong>Paused nodes.</strong> A node taken out of the fleet with <code>hscc node pause</code> shows as *paused*, with its reason and since-time, in the iOS widgets, the lock screen, the macOS desktop widgets, the menu bar and CarPlay. It is never counted as down or idle, and its stopped engine no longer counts toward &quot;backends down&quot;.</li></ul><h2>Changed</h2><ul><li><strong>Node labels are the last octet of each node&#x27;s IP</strong> (for example <code>244</code>, <code>246</code>) instead of S1–S4, derived at runtime from the fleet, in a stable order across the widgets, menu bar and CarPlay.</li></ul>
+<p class="foot"><a href="https://pom11.github.io/hscc/">HSCC</a> · 1.4.4</p>
+</main>
+</body>
+</html>

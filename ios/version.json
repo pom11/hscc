@@ -1,8 +1,8 @@
 {
-  "version": "1.4.3",
-  "build": 8,
-  "released_at": "2026-11-20T20:23:37Z",
-  "notes_url": "https://pom11.github.io/hscc/ios/notes/1.4.3.html",
+  "version": "1.4.4",
+  "build": 9,
+  "released_at": "2026-11-22T20:20:09Z",
+  "notes_url": "https://pom11.github.io/hscc/ios/notes/1.4.4.html",
   "install_url": "https://pom11.github.io/hscc/ios/",
   "min_os": "26.0"
 }

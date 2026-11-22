@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#000000">
-<title>HSCC 1.4.3 — install on iPhone</title>
+<title>HSCC 1.4.4 — install on iPhone</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -64,7 +64,7 @@
   <div class="brand">
     <img src="icons/icon-1024.png" width="112" height="112" alt="HSCC app icon">
     <h1>HSCC</h1>
-    <p class="version">Version 1.4.3 (build 8)</p>
+    <p class="version">Version 1.4.4 (build 9)</p>
   </div>
 
   <a class="install" href="itms-services://?action=download-manifest&amp;url=https://pom11.github.io/hscc/ios/manifest.plist">Install HSCC</a>
@@ -72,14 +72,15 @@
 
   <h2>What's new</h2>
   <div class="card notes">
-    <h1>HSCC apps 1.4.3</h1><h2>Added</h2><ul><li><strong>iOS: install button in Settings → About.</strong> Under &quot;Check for updates&quot;, a button opens the install page in Safari. It reads &quot;Install 1.x.y&quot; when a newer release was found, otherwise &quot;Open install page&quot;.</li></ul><p>macOS is unchanged apart from the version number.</p>
+    <h1>HSCC apps 1.4.4</h1><p>Ships with hscc 2.17.3 (node pause).</p><h2>Added</h2><ul><li><strong>Paused nodes.</strong> A node taken out of the fleet with <code>hscc node pause</code> shows as *paused*, with its reason and since-time, in the iOS widgets, the lock screen, the macOS desktop widgets, the menu bar and CarPlay. It is never counted as down or idle, and its stopped engine no longer counts toward &quot;backends down&quot;.</li></ul><h2>Changed</h2><ul><li><strong>Node labels are the last octet of each node&#x27;s IP</strong> (for example <code>244</code>, <code>246</code>) instead of S1–S4, derived at runtime from the fleet, in a stable order across the widgets, menu bar and CarPlay.</li></ul>
   </div>
-  <p><a href="https://pom11.github.io/hscc/ios/notes/1.4.3.html">Permanent link to these notes</a></p>
+  <p><a href="https://pom11.github.io/hscc/ios/notes/1.4.4.html">Permanent link to these notes</a></p>
 
   <h2>Previous versions</h2>
   <div class="card">
     <ul class="history">
-      <li><a href="https://pom11.github.io/hscc/ios/notes/1.4.2.html">1.4.2</a> <span>build 7</span></li>
+      <li><a href="https://pom11.github.io/hscc/ios/notes/1.4.3.html">1.4.3</a> <span>build 8</span></li>
+<li><a href="https://pom11.github.io/hscc/ios/notes/1.4.2.html">1.4.2</a> <span>build 7</span></li>
 <li><a href="https://pom11.github.io/hscc/ios/notes/1.4.1.html">1.4.1</a> <span>build 6</span></li>
 <li><a href="https://pom11.github.io/hscc/ios/notes/1.4.0.html">1.4.0</a> <span>build 5</span></li>
 <li><a href="https://pom11.github.io/hscc/ios/notes/1.3.0.html">1.3.0</a> <span>build 4</span></li>
