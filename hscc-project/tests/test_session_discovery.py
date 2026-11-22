@@ -828,3 +828,219 @@ def test_unimportable_runtime_reports_error_not_empty_history(monkeypatch, tmp_p
     assert result["runtime_error"], "must say the runtime was unreadable"
     assert "Hermes runtime" in result["runtime_error"]
     assert result["telegram"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Half-seam postures — an environment fault must never escape as a traceback
+# (t_5fe098f9)
+#
+# `list_project_sessions` skips its honesty PROBE when ANY db seam is injected
+# (a seamed caller controls the runtime; probing the real one would bypass the
+# fakes). That left each provider CALL — the orchestrator open and the mirrored
+# telegram open — outside every try, so the half-seam posture (exactly ONE seam
+# injected) raised `HermesRuntimeUnavailable` straight through `cmd_chat` into
+# the operator's terminal. `hscc project chat <p>` on an interpreter that cannot
+# host hermes_cli ended in a traceback instead of an honest line. The fold
+# lives in `_open_env_folded`; these cases are what keep it there.
+# --------------------------------------------------------------------------- #
+
+class BoomOpener:
+    """Stand-in for the REAL (un-seamed) opener that reports an env fault.
+
+    Raises exactly what `project_lifecycle._open_profile_session_db` raises when
+    this interpreter cannot import the Hermes runtime and no delegate resolves
+    (project_lifecycle.py:885-895) — the CI text from t_cc2f23ea's case (b).
+    Records the profile it was asked for, so a case can name the fault site.
+    """
+
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = []
+
+    def __call__(self, profile, read_only=False, create_db=False):
+        self.calls.append(profile)
+        raise self.exc
+
+
+def _seal_with_booming_opener(monkeypatch, tmp_path, name="ecofire", topic=8891):
+    """A project that resolves HERE, a sealed HOME, and a real opener that faults.
+
+    Both seals are the ones t_cc2f23ea established: `path=` so the project comes
+    from THIS fixture's registry (not the workstation's), `HOME` so no other read
+    in the path — the binding store included — can answer from the operator's
+    tree. The opener is patched rather than the interpreter so the fault is the
+    same on every machine and no test has to spawn one.
+    """
+    from flightdeck.core import project_lifecycle as pl
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    reg = _reg(tmp_path, name, topic=topic)
+    boom = BoomOpener(pl.HermesRuntimeUnavailable(
+        "cannot import the Hermes runtime (test)"))
+    monkeypatch.setattr(session_discovery, "_open_profile_sdb_ro", boom,
+                        raising=False)
+    return reg, boom
+
+
+def test_half_seam_default_db_only_folds_the_orchestrator_open(monkeypatch,
+                                                                tmp_path):
+    """`_default_db` injected, `_session_db` NOT: the open must not escape.
+
+    The posture t_cc2f23ea's `TestNoAnsiProject.test_chat_banner` used (its `_ns`
+    default injected `default_db` only) and the exact CI text it produced:
+    `project.py:712 in cmd_chat -> session_discovery.py:282 ->
+    HermesRuntimeUnavailable`. The module's invariant is that an environment
+    fault surfaces as `runtime_error` — "never as empty results" — and a
+    traceback is neither an honest line nor a data fact.
+    """
+    reg, boom = _seal_with_booming_opener(monkeypatch, tmp_path)
+
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _default_db=FakeDefaultProvider([_tg("tg-1", "8891")]),  # ONE seam only
+    )
+
+    assert boom.calls == ["ecofire-orch"], \
+        "the un-seamed orchestrator open is the fault site under test"
+    assert result["runtime_error"], "must be an honest line, not a traceback"
+    assert "Hermes runtime" in result["runtime_error"]
+    # The honest "could not look" shape — the SAME dict the probe's early return
+    # builds, so no fold path can drift from it.
+    assert result == {
+        "project": "ecofire",
+        "topic": 8891,
+        "orchestrator": None,
+        "telegram": [],
+        "telegram_unmapped": 0,
+        "orch_profile": "ecofire-orch",
+        "telegram_profile": "default",
+        "runtime_error": result["runtime_error"],
+    }
+
+
+def test_half_seam_session_db_only_folds_the_telegram_open(monkeypatch,
+                                                           tmp_path):
+    """`_session_db` injected, `_default_db` NOT: the mirrored escape, same fold.
+
+    The default-profile open sat inside `_list_telegram_sessions`, outside any
+    try, and faulted for this posture exactly as the orchestrator open does for
+    the one above. Fixing only the orchestrator side would have left this half
+    of the class tracebacking.
+    """
+    reg, boom = _seal_with_booming_opener(monkeypatch, tmp_path)
+    orch = _cli("20260921_abc", "ecofire", msgs=2, last=1700000100)
+
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider([orch]),  # ONE seam only, the other side
+    )
+
+    assert boom.calls == ["default"], \
+        "the un-seamed DEFAULT-profile open is the fault site under test"
+    assert result["runtime_error"], "must be an honest line, not a traceback"
+    assert "Hermes runtime" in result["runtime_error"]
+    # One fault on either side is reported as "could not look" for the WHOLE
+    # discovery — the caller must never render a half-read history as if the
+    # unreadable half had been read (it prints `cannot read session history`).
+    assert result == {
+        "project": "ecofire",
+        "topic": 8891,
+        "orchestrator": None,
+        "telegram": [],
+        "telegram_unmapped": 0,
+        "orch_profile": "ecofire-orch",
+        "telegram_profile": "default",
+        "runtime_error": result["runtime_error"],
+    }
+
+
+def test_half_seam_still_never_probes_the_real_runtime(monkeypatch, tmp_path):
+    """One seam is still a seam: the honesty PROBE stays skipped.
+
+    Option (i) on this card — gate the probe on BOTH seams so a half-seam caller
+    gets it too — was REJECTED for this reason. It hands the operator's live
+    runtime back to a test that asked for one seam of control (the machine-state
+    coupling t_cc2f23ea / t_bb057914 / t_a6aa9a2e spent this suite removing), and
+    it would not have closed the class anyway: a per-profile `RemoteRuntimeError`
+    passes a DEFAULT-profile probe and still blows up the orchestrator open. The
+    honesty comes from folding the open instead, which needs no probe.
+    """
+    reg, _boom = _seal_with_booming_opener(monkeypatch, tmp_path)
+    probes = []
+    monkeypatch.setattr(session_discovery, "_runtime_error",
+                        lambda: probes.append("probe"), raising=False)
+
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg, _default_db=FakeDefaultProvider([]))
+
+    assert probes == [], "a seamed caller must never reach the real runtime"
+    assert result["runtime_error"], "and the fault must still surface honestly"
+
+
+def test_non_environment_opener_failure_still_propagates(monkeypatch, tmp_path):
+    """The fold is CLOSED: only the two environment types fold.
+
+    A `ValueError` out of the opener is a bug in our code, not a fact about the
+    environment. Swallowing it — the `except Exception` version of the fold —
+    would dress a real defect in the honest `runtime_error` label and report an
+    empty history, which is the exact false negative this module exists to
+    prevent.
+    """
+    reg = _reg(tmp_path, "ecofire", topic=8891)
+
+    class BuggyOpener:
+        def __call__(self, profile, read_only=False, create_db=False):
+            raise ValueError("opener bug")
+
+    monkeypatch.setattr(session_discovery, "_open_profile_sdb_ro", BuggyOpener(),
+                        raising=False)
+    with pytest.raises(ValueError, match="opener bug"):
+        session_discovery.list_project_sessions("ecofire", path=reg)
+
+
+def test_half_seam_folds_a_per_profile_remote_runtime_error(monkeypatch,
+                                                            tmp_path):
+    """The OTHER environment type: a delegated op that failed for THIS profile.
+
+    This is the case that decided the card. `HermesRuntimeUnavailable` is a
+    global fact — an interpreter that cannot host the runtime fails the
+    DEFAULT-profile probe too — so gating the probe on both seams would have
+    caught it. `RemoteRuntimeError` is not: it is raised per profile, after the
+    probe succeeded (project_lifecycle.py:898-903), so only folding the OPEN
+    covers it. Without this case the reasoning for choosing the fold would be
+    an argument, not a pin.
+    """
+    from flightdeck.core import project_lifecycle as pl
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    reg = _reg(tmp_path, "ecofire", topic=8891)
+    boom = BoomOpener(pl.RemoteRuntimeError(
+        "transport", "delegated open_check failed for ecofire-orch (test)"))
+    monkeypatch.setattr(session_discovery, "_open_profile_sdb_ro", boom,
+                        raising=False)
+
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg, _default_db=FakeDefaultProvider([]))
+
+    assert boom.calls == ["ecofire-orch"]
+    assert result["runtime_error"], "a failed LOOK is never an empty history"
+    assert "open_check failed" in result["runtime_error"]
+    assert result["telegram"] == [] and result["orchestrator"] is None
+
+
+def test_unknown_project_still_raises_under_an_unusable_runtime(monkeypatch,
+                                                                tmp_path):
+    """`resolve_orchestrator` failures stay contract errors, not env faults.
+
+    `project chat` turns `UnknownProjectError` into exit 2 plus the list of
+    valid projects; a fold wide enough to catch it would silently downgrade that
+    to "cannot read session history" and the operator would lose the answer.
+    The fault is planted so this cannot pass by never reaching the fold.
+    """
+    from orchestrators import UnknownProjectError
+
+    reg, boom = _seal_with_booming_opener(monkeypatch, tmp_path)
+
+    with pytest.raises(UnknownProjectError):
+        session_discovery.list_project_sessions("no-such-project", path=reg)
+    assert boom.calls == [], "the contract error must precede any runtime read"
