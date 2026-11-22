@@ -260,8 +260,9 @@ def _worker_recipe_for(node, serving):
     return None
 
 
-def vllm_stop_cmd(node=None, recipe=None, port=None):
-    """``sparkrun stop <TARGET> --hosts <node>`` — an EXPLICIT target, or None.
+def vllm_stop_cmd(node=None, recipe=None, port=None, tp=None,
+                  served_model_name=None):
+    """``sparkrun stop <TARGET> --hosts <node> [intent flags]`` — or None.
 
     The bare ``sparkrun stop --hosts <node>`` form this module used to emit is
     not a stop at all: sparkrun rejects it with ``Error: Must specify TARGET or
@@ -275,6 +276,19 @@ def vllm_stop_cmd(node=None, recipe=None, port=None):
     ``--all`` is deliberately NOT a fallback: it would take the whole fleet
     down to restart one unit.
 
+    The TARGET alone is ALSO not enough (t_8ad06a53, the 2.17.3 pause that
+    "stopped" a node and left the container running): ``sparkrun stop`` does not
+    match a workload by target+host, it matches by the INTENT HASH sparkrun
+    recomputes from the recipe plus ``--port`` / ``--served-model-name`` /
+    ``--tp`` (cli/_stop_logs.py's stop options → cli/_common.py
+    ``build_cluster_id_overrides`` → orchestration/job_metadata.py
+    ``generate_intent_id``). An omitted flag computes a DIFFERENT intent, sparkrun
+    answers ``No running workload matches intent …`` and nothing stops. So every
+    flag the launch carried has to ride on the stop; callers pass them from
+    :func:`_unit_intent` (a declared unit) or
+    :func:`stop_flags_from_run_argv` (a built start command) — never by hand,
+    so this stays the ONE argv formatter and the values have one source.
+
     Returns None when no explicit target can be resolved (no recipe known) —
     callers must ABORT, never fall back to a broader stop.
     """
@@ -283,10 +297,94 @@ def vllm_stop_cmd(node=None, recipe=None, port=None):
     recipe = os.path.expanduser(recipe) if recipe else ""
     if not recipe or not node:
         return None
-    cmd = ["sparkrun", "stop", recipe, "--hosts", node]
-    if port is not None:
-        cmd.extend(["--port", str(port)])
+    cmd = ["sparkrun", "stop", recipe]
+    # Emission order mirrors `_unit_run_cmd`'s (hosts, port, then the served
+    # name / parallelism pair) so the two commands for one unit read alike.
+    for flag, value in (("--hosts", node), ("--port", port),
+                        ("--served-model-name", served_model_name),
+                        ("--tp", tp)):
+        if value is None or value == "":
+            continue
+        cmd.extend([flag, str(value)])
     return cmd
+
+
+def _unit_intent(unit):
+    """The argv pairs that pin one unit's sparkrun INTENT, in emission order.
+
+    ``[(flag, value), …]``: ``--hosts`` (the unit's WHOLE span — stopping one
+    member of a span unit means stopping the span), ``--port``,
+    ``--served-model-name`` (``_served_model_name``'s ``<concrete> <alias>``
+    string) and ``--tp`` (tp=1 EXPLICIT, for the reason spelled out in
+    :func:`_unit_run_cmd`).
+
+    This is the SINGLE place those values are derived. :func:`_unit_run_cmd`
+    splices them into the ``sparkrun run`` argv and :func:`unit_stop_cmd`
+    splices the SAME pairs into the ``sparkrun stop`` argv, so the two commands
+    for one declared unit cannot drift apart — and they must not, because
+    ``sparkrun stop`` finds its workload through the intent hash these flags
+    feed (see :func:`vllm_stop_cmd`). The 2.17.3 pause built its stop from
+    recipe/hosts/port only, sparkrun computed another intent, printed ``No
+    running workload matches intent <hash>`` and the container stayed up
+    while the CLI reported ``1 unit(s) stopped``.
+
+    ``-o`` recipe overrides are deliberately ABSENT: they are serve args, which
+    sparkrun does not hash into the intent (job_metadata.generate_intent_id —
+    deliberately narrow, so ``stop``/``status``/``logs`` keep matching a
+    workload relaunched with a tweaked flag), and ``sparkrun stop`` has no
+    ``-o``/``--option`` option at all — smuggling one in would make sparkrun
+    exit 2 and turn a working stop into a hard failure.
+    """
+    pairs = [("--hosts", ",".join(n for n in (unit.get("nodes") or []) if n))]
+    port = unit.get("port")
+    if port is not None:
+        pairs.append(("--port", str(port)))
+    smn = _served_model_name(unit)
+    if smn:
+        pairs.append(("--served-model-name", smn))
+    tp = unit.get("tp")
+    pairs.append(("--tp", str(int(tp)) if tp is not None else "1"))
+    return pairs
+
+
+def unit_stop_cmd(unit):
+    """The ``sparkrun stop`` argv that matches what ``_unit_run_cmd(unit)`` starts.
+
+    Both argvs are built from the SAME declared unit and the SAME
+    :func:`_unit_intent` pairs — that identity is the whole point (t_8ad06a53).
+    Pass the placement-overridden unit exactly as the resume path does, e.g.
+    ``unit_stop_cmd(dict(declared, nodes=nodes, port=port, tp=tp))``.
+
+    Returns None when no explicit TARGET can be resolved (no recipe, or no
+    node): callers must ABORT — ``--all`` is never the answer.
+    """
+    unit = unit or {}
+    recipe = os.path.expanduser(unit.get("recipe") or "")
+    if not recipe or not [n for n in (unit.get("nodes") or []) if n]:
+        return None
+    cmd = ["sparkrun", "stop", recipe]
+    for flag, value in _unit_intent(unit):
+        if value is None or value == "":
+            continue
+        cmd.extend([flag, value])
+    return cmd
+
+
+def stop_flags_from_run_argv(run_argv):
+    """The intent flags a stop needs to match ``run_argv`` — kwargs for
+    :func:`vllm_stop_cmd`.
+
+    For the caller whose launch command is a built CONSTANT rather than a
+    serving.json unit (the watchdog's ``VLLM_START_CMD``): the flags are read
+    back out of that very argv with the same ``_flag_after`` the drift canary
+    uses, so the stop mirrors the start even if the constant later gains, loses
+    or renames a flag. Nothing is invented — an absent flag stays absent, which
+    is what the launch did.
+    """
+    argv = list(run_argv or [])
+    return {"port": _flag_after(argv, "--port"),
+            "served_model_name": _flag_after(argv, "--served-model-name"),
+            "tp": _flag_after(argv, "--tp")}
 
 
 def _rebuild_vllm_cmds():
@@ -305,11 +403,21 @@ def _rebuild_vllm_cmds():
     primary = _topo_value("PRIMARY_NODE")
     recipe = _topo_value("VLLM_RECIPE")
     VLLM_HEALTH_URL = f"http://{primary}:{VLLM_PORT}/health"
-    VLLM_STOP_CMD = vllm_stop_cmd(node=primary, recipe=recipe) or [
-        "sparkrun", "stop", "--hosts", primary]
     VLLM_START_CMD = ["sparkrun", "run", recipe,
                       "--cluster", HSCC_CLUSTER, "--hosts", primary,
                       "--port", str(VLLM_PORT), "--no-follow", "--ensure"]
+    # The stop MIRRORS the start built immediately above (t_8ad06a53): sparkrun's
+    # stop re-derives the intent hash from the recipe plus the flags the launch
+    # passed, so a stop that dropped one of them computes another intent, matches
+    # nothing and stops nothing while the caller logs a stop. Reading the flags
+    # back out of VLLM_START_CMD keeps the pair in lockstep by construction —
+    # if this constant ever carries `--served-model-name` or `--tp`, so does the
+    # stop, and if it never does, the argv below is byte-identical to the one
+    # this function emitted before the fix.
+    VLLM_STOP_CMD = vllm_stop_cmd(
+        node=primary, recipe=recipe,
+        **stop_flags_from_run_argv(VLLM_START_CMD)) or [
+        "sparkrun", "stop", "--hosts", primary]
 
 
 def _env_keepalive_nodes():
@@ -607,10 +715,22 @@ def _unit_run_cmd(unit):
     ``unit`` needs ``recipe``, ``nodes``, ``port``, and (for the served name /
     parallelism) ``model``, ``role``, ``tp``. ``fleet_up_plan``'s plan entries
     and ``keepalive_units``' per-node entries both provide these.
+
+    The intent flags come from :func:`_unit_intent` — the same pairs
+    :func:`unit_stop_cmd` splices into ``sparkrun stop``. A unit's run argv and
+    stop argv are therefore built from ONE derivation (t_8ad06a53).
     """
-    nodes = [n for n in (unit.get("nodes") or []) if n]
+    pairs = dict(_unit_intent(unit))
     cmd = ["sparkrun", "run", unit["recipe"], "--cluster", HSCC_CLUSTER,
-           "--hosts", ",".join(nodes), "--port", str(unit["port"]),
+           "--hosts", pairs["--hosts"],
+           # `--port` here, not `pairs["--port"]`: a unit whose port key exists
+           # but is None used to reach sparkrun as `--port None`, and the stop's
+           # builder drops that pair (a stop with no port is honest about not
+           # knowing it). The launch's garbage-in behaviour is preserved rather
+           # than quietly changing a launch argv in flight — `fleet_up_plan`
+           # always fills the port, so the two builders still agree for every
+           # real unit.
+           "--port", pairs.get("--port", str(unit["port"])),
            "--no-follow", "--ensure"]
     # --served-model-name <concrete> <role-alias>: carry the served model
     # names through from the unit into the start command, the SAME way the
@@ -618,16 +738,16 @@ def _unit_run_cmd(unit):
     # This is what makes vLLM (re)started by a wake serve the alias, so the
     # 38 role profiles that pin worker-model / orchestrator-model keep
     # working after an autodown cycle. The names come from the unit's own
-    # fields (role → alias, model/recipe → concrete), NEVER from serve_cmd.
-    smn = _served_model_name(unit)
-    if smn:
-        cmd.extend(["--served-model-name", smn])
-    # ALWAYS emit --tp, tp=1 included, because cluster_template._render_serve_cmd
-    # does. Omitting it for tp=1 made this builder's argv differ from the
-    # applied template's for every single-node unit, which is precisely the
-    # intent-hash divergence the docstring above warns about.
-    tp = unit.get("tp")
-    cmd.extend(["--tp", str(int(tp)) if tp is not None else "1"])
+    # fields (role → alias, model/recipe → concrete), NEVER from serve_cmd —
+    # and so does the stop's copy of them (`unit_stop_cmd` / `_unit_intent`).
+    # --tp rides with it, ALWAYS emitted, tp=1 included, because
+    # cluster_template._render_serve_cmd does. Omitting it for tp=1 made this
+    # builder's argv differ from the applied template's for every single-node
+    # unit, which is precisely the intent-hash divergence the docstring above
+    # warns about.
+    for flag in ("--served-model-name", "--tp"):
+        if flag in pairs:
+            cmd.extend([flag, pairs[flag]])
     # Then the recipe overrides, LAST — the same position
     # cluster_template._render_serve_cmd puts them in, so a recorded serve_cmd
     # and a derived wake command for one unit read alike.

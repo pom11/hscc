@@ -1725,15 +1725,29 @@ def _node_pause(argv):
         print(f"  {node_pauses.overlay_path()} is NOT updated — re-run "
               f"'hscc node pause {host}' before leaving this node.")
         return 1
-    # The report names every model it stopped, so the operator (and the agent
-    # tool, which reports this text verbatim) never has to re-read the overlay
-    # to know what came down.
+    # ── the report: what actually came down, per unit ──────────────────────
+    # "N unit(s) stopped" is a claim about the fleet, so it prints ONLY when
+    # every stop confirmed (t_8ad06a53: sparkrun had matched no intent, had
+    # stopped nothing, and this line still claimed the stop one line before its
+    # own WARNING said otherwise). The overlay keeps the record either way —
+    # that is docs/ops/node-pause.md's ordering rule: a failed stop still PARKS
+    # the node, because the heal paths must skip it even with a unit up — but a
+    # parked node whose unit is still running is reported as exactly that, with
+    # each unit's own outcome and sparkrun's reason.
+    failed = [r for r in res["units"] if not r["ok"]]
+    if failed:
+        print(f"paused {host}: pause RECORDED with stopped=False — "
+              f"{len(failed)} of {len(recorded)} unit(s) did not stop cleanly; "
+              f"overlay at {node_pauses.overlay_path()}")
+        for r in res["units"]:
+            print(f"  {r['unit_id']}: "
+                  + ("stopped" if r["ok"] else f"NOT stopped — {r['error']}"))
+        print("  WARNING: the node is parked but at least one unit may still be "
+              "running on it — nothing here counts it as down. Fix the stop and "
+              f"re-run 'hscc node pause {host}', or stop that unit by hand.")
+        return 1
     print(f"paused {host}: {len(recorded)} unit(s) stopped — "
           f"{', '.join(recorded)}; overlay at {node_pauses.overlay_path()}")
-    if not res["ok"]:
-        print(f"WARNING: at least one unit did not stop cleanly — the pause "
-              f"is recorded with stopped=False.")
-        return 1
     return 0
 
 

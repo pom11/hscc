@@ -800,9 +800,14 @@ class TestCommands:
     def test_stop_cmd_names_every_node_of_a_span_unit(self):
         plan = npe.plan(W1, serving_dict=SERVING,
                         status_reader=reader(payload_for_host(W1)))
+        # The intent flags ride on the stop too (t_8ad06a53): `--hosts`/`--port`
+        # alone make sparkrun recompute a DIFFERENT intent, answer "No running
+        # workload matches intent …" and stop nothing.
         assert unit_of(plan, "wspan")["stop_cmd"] == [
             "sparkrun", "stop", SPAN_RECIPE, "--hosts", f"{W1},{W2}",
-            "--port", "8200"]
+            "--port", "8200",
+            "--served-model-name", "meta-llm/Work-8B worker-model",
+            "--tp", "2"]
 
     def test_resume_cmd_is_the_keepalive_ensure_command(self):
         """Byte-identical to the sanctioned relaunch builder, so --ensure
