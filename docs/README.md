@@ -115,10 +115,12 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   pause|resume|paused` (dry-run by default, `--apply` opt-IN, and the `--span` /
   `--force` / `--until` rules with the refusal strings quoted from the code), what a
   pause leaves byte-identical (templates, `serving.json`, the applied-template
-  record, kanban caps, autodown, proxy config), which repair loops skip a parked
-  node (watchdog auto-heal, the heal breaker, autoscale, the autodown wake) and which
-  do not yet (keepalive supervision, `hscc cluster up`), the span rules, the
-  orchestrator-model refusal, and why a past `--until` is not a resume. **live**
+  record, kanban caps, autodown, proxy config), which loops skip a parked node
+  (watchdog auto-heal, the heal breaker, autoscale, the autodown wake,
+  `hscc_daemon/health.py`'s keepalive and proxy repair paths, and `hscc cluster up`
+  with the post-boot, recovery and API paths that call it), why there is no
+  `--include-paused`, the span rules, the orchestrator-model refusal, and how the
+  daemon keeps a past `--until` as a timer. **live**
 - `docs/ops/orch-waker.md` — the built-in orchestrator waker: the eight wake-worthy
   events, batch/debounce/rate rules, skip rules, `~/.hscc/orch_waker.json` config,
   `hscc orch waker status|enable|disable` verbs, state + audit schemas, the doctor
