@@ -90,7 +90,8 @@ def test_registry_exists_and_covers_the_feature_rows():
     keys = [r.key for r in doctor.FEATURE_CHECK_ROWS]
     assert keys == ["orch_waker", "cron_watchers", "supervision",
                     "kanban_enforce", "main_board", "main_wakeups",
-                    "budget_hook", "node_pauses"], "registry order is row order"
+                    "budget_hook", "node_pauses",
+                    "node_pause_expiry"], "registry order is row order"
 
 
 def test_every_registry_entry_is_well_formed():
@@ -127,7 +128,8 @@ def test_registry_seam_names_match_the_run_doctor_signature():
     assert declared <= registered
     assert registered - declared == {"_main_board_check",
                                      "_main_wakeups_check",
-                                     "_node_pauses_check"}
+                                     "_node_pauses_check",
+                                     "_node_pause_expiry_check"}
     assert "_main_board_check" not in declared, \
         "a new row must not add a keyword to run_doctor()'s signature"
 
@@ -383,10 +385,11 @@ def test_row_fn_path_resolves_the_hook_per_call(tmp_path, monkeypatch):
 def test_the_daemon_state_rows_declare_no_root_context():
     """The wiring half of t_be690204, stated as a registry fact.
 
-    Every writer of what these two rows read resolves from HOME — the waker's
-    config, the ``orch_waker``/``kanban_enforce`` stream stamps through
-    ``state.STATE_DIR``, the paused-policy document through
-    ``kanban_pause.STATE_PATH``, the pid through ``daemon_ops`` — and none of
+    Every writer of what these rows read resolves from HOME — the waker's
+    config, the ``orch_waker``/``kanban_enforce``/``node_pause_expiry`` stream
+    stamps through ``state.STATE_DIR``, the paused-policy document through
+    ``kanban_pause.STATE_PATH``, the node-pause overlay and the expiry stamp's
+    root through their own modules' HOME-derived constants — and none of
     them reads ``HSCC_DIR``. A root taken from that variable is therefore not a
     relocation of this state; it is a read of a directory nothing writes to, and
     the row reported absence as a fact about a live host (a pid file at that root
@@ -399,7 +402,8 @@ def test_the_daemon_state_rows_declare_no_root_context():
     test_doctor_orch_waker.py / test_doctor_kanban_enforce.py.
     """
     by_key = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}
-    for key in ("orch_waker", "kanban_enforce"):
+    for key in ("orch_waker", "kanban_enforce", "node_pauses",
+                "node_pause_expiry"):
         assert by_key[key].row_kwargs == (), (
             f"the {key} row must declare no per-row context: a handed root "
             "splits the reader from writers that resolve from HOME (t_be690204)")

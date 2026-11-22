@@ -50,6 +50,10 @@ different intent id and launches a parallel duplicate of a live unit.
 from __future__ import annotations
 
 import json
+import os
+import re
+import sys
+from datetime import datetime
 
 from . import node_pauses, serving, util
 
@@ -972,3 +976,426 @@ def check_node_pause_expiry():
         except Exception:
             pass
         return False
+
+
+# ── doctor row: is the operator's schedule actually being honoured? ─────────
+#
+# WHY THIS ROW EXISTS (t_005e87fd)
+# --------------------------------
+# ``check_node_pause_expiry`` above is a supervised stream: ``hscc verify`` sees
+# it (``verify._live_stream_intervals`` reads ``daemon_ops.PERIODIC_INTERVALS``),
+# so a stream that went dark is detectable. What nothing said was the OTHER
+# half — the stream is RED exactly when the operator's own promise is not being
+# kept (``kept``: a due pause whose restart failed; ``skipped``: a due pause
+# another pause still holds part of), and ``hscc doctor`` — the surface an
+# operator runs to ask "why is this machine still parked" — had no row for it.
+# ``kanban_enforce`` shipped its row in the same card that made it a stream
+# (t_51931733); this is that half for this stream, split out rather than
+# smuggled into the stream's own PR.
+#
+# THE VERDICTS, IN THE ORDER THE OPERATOR NEEDS THEM
+# ---------------------------------------------------
+#   1. no stamp while the daemon runs           -> RED, fatal (the orch-waker
+#      class: the wiring itself is broken, so a past-due pause is parked
+#      forever and nothing is even looking);
+#   2. newest stamp ``ok: false``               -> RED, not fatal: the pass ran
+#      and could not end a pause. Names the hosts out of ``kept``/``skipped``,
+#      the ``checked_at`` the pass judged against, and the tick's own message;
+#   3. stamp older than 2*cadence+slack         -> warn: the loop is not
+#      reaching this stream (or the daemon is not running any more);
+#   4. stamp written before this build          -> warn (upgrade race: the
+#      running daemon has no such stream yet; the restart later in bootstrap
+#      starts it) — never fatal, so a Stage-1 gate never aborts an install for
+#      a race it causes itself;
+#   5. daemon down / anything else unreadable   -> warn. Doctor is bootstrap's
+#      Stage-1 gate and runs before a daemon exists, so only the "something is
+#      ticking and this stream has never stamped" class may be fatal.
+#
+# ONE ROOT, AND IT IS THE WRITERS' ROOT
+# --------------------------------------
+# The row reads two artefacts — the stamp (``state.read_state(STREAM_NAME)``,
+# i.e. ``state.STATE_DIR``) and the overlay (``node_pauses.list_pauses``) — and
+# BOTH of their writers resolve from HOME at import, with no ``HSCC_DIR``
+# override anywhere. So this row takes a root only from an explicit ``root=``
+# caller, one root per call (the stamp at ``<root>/state``, the overlay at
+# ``node_pauses.overlay_path(root)``, the pid at ``<root>/daemon.pid``), and the
+# registry entry declares ``row_kwargs=()``: a root lifted from the environment
+# is a directory no writer can reach, and a row aimed at it answers "nothing is
+# parked, nothing is ticking" about a live daemon — the t_adb66608 / t_be690204
+# class, measured twice before. The parameter is deliberately NOT called
+# ``hscc_dir``: that name is what invited the env wiring those two cards removed.
+#
+# WHY THE OVERLAY, WHEN THE STAMP ALREADY SAYS ``ok``
+# ---------------------------------------------------
+# The stamp is the verdict; the overlay is what makes the verdict readable.
+# "the stream is healthy" means nothing to an operator with four parked nodes
+# until the row says how many are parked and how many are past due *right now*,
+# and the never-stamped RED is only actionable when it can name the schedule it
+# is failing. The count comes from the same ``_due_entries`` predicate the tick
+# itself uses, over one snapshot, so the row and the tick cannot disagree about
+# what "past due" means. Corruption is NOT re-detected here — the sibling
+# ``node pauses`` row owns that (it listens to ``node_pauses``' own warnings);
+# this row only says when its own overlay read was not clean.
+
+#: The row's printed name. One constant for the row, its refusal and the
+#: doctor-module fallback, so the three can never print three spellings.
+CHECK_NAME = "node pause expiry (durable-until stream)"
+
+#: Freshness slack on top of two stream cycles — the same shape as
+#: ``kanban_pause.DOCTOR_SLACK_S`` / ``orch_waker.DOCTOR_SLACK_S``, because a
+#: stream that skipped exactly one tick (a slow sparkrun call inside a resume)
+#: is drift at three cycles, not a fault at two.
+DOCTOR_SLACK_S = 90
+
+#: Fallback cadence if ``daemon_ops.PERIODIC_INTERVALS`` cannot be read
+#: (defensive only — the dict is a constant and the real cadence lives there).
+_STREAM_CADENCE_FALLBACK = 60
+
+#: The two leaves this row resolves under a root. ``daemon.pid`` belongs to
+#: ``daemon_ops`` but is read from the SAME root, and is only ever used to tell
+#: "nothing ticks" from "something ticks and it is not this stream".
+_STATE_SUBDIR = "state"
+_PID_FILENAME = "daemon.pid"
+
+#: How much of the tick's own message the RED row quotes — same cap as
+#: ``kanban_pause._doctor_check``'s, because a row nobody can read is a row
+#: nobody acts on, and the full text is in the stamp file.
+_MAX_QUOTED_MESSAGE = 160
+
+#: Fractional seconds only, and a REGEX rather than ``split(".")``: the
+#: ``+00:00`` offset must survive, or a UTC stamp reads as something local
+#: (the same reasoning as ``doctor_node_pauses._FRACTIONAL_SECONDS``).
+_FRACTIONAL_SECONDS = re.compile(r"\.\d+")
+
+#: What the row says when it cannot be evaluated at all — a warn, never an
+#: exception out of ``run_doctor()`` and never a silent green.
+_UNVERIFIABLE = "the {} row could not be evaluated"
+
+#: The one fix every "the stream is not running" verdict offers.
+_DAEMON_FIX = ("restart the hscc daemon (`hscc start`) and re-run `hscc "
+               "doctor`; if it stays red check ~/.hscc/daemon.log for a "
+               "node-pause-expiry error")
+
+
+def stream_cadence() -> int:
+    """The daemon loop's cadence for this stream (the SOT that ``verify`` reads).
+
+    Read from ``daemon_ops.PERIODIC_INTERVALS`` rather than restated, so the
+    cadence, ``verify``'s staleness math and this row's freshness budget cannot
+    drift apart. Imported inside the function: ``daemon_ops`` imports THIS module
+    for its ``CHECKS`` table, so a module-level import the other way would only
+    work by accident (``kanban_pause.stream_cadence`` does the same).
+    """
+    try:
+        from .daemon_ops import PERIODIC_INTERVALS
+        return int(PERIODIC_INTERVALS[STREAM_NAME])
+    except Exception:  # noqa: BLE001 - defensive; the dict is a constant
+        return _STREAM_CADENCE_FALLBACK
+
+
+def doctor_freshness_limit_s() -> float:
+    """The freshness budget for a stream ticking every :func:`stream_cadence`."""
+    return 2 * float(stream_cadence()) + DOCTOR_SLACK_S
+
+
+def _stamp_path_for(root) -> str:
+    """Absolute path of the stream's stamp under ``root`` (``root`` required).
+
+    ``<root>/state/<STREAM_NAME>.json`` is exactly where
+    ``state.write_state(STREAM_NAME, entry, directory=<root>/state)`` puts it,
+    which is the shape ``expiry_tick(state_dir=...)`` writes.
+    """
+    return os.path.join(os.path.expanduser(root), _STATE_SUBDIR,
+                        f"{STREAM_NAME}.json")
+
+
+def _pid_path_for(root) -> str:
+    """The daemon pid file of the root the WRITERS resolve to.
+
+    With no ``root`` this is derived from ``state.STATE_DIR`` — the same
+    constant ``write_state`` stamps through — rather than from a second
+    ``expanduser("~/.hscc")`` literal, so the row's liveness probe and the
+    stream's stamp can never split into two roots (the t_adb66608 rule: derive
+    the root from the writer's own constant, never restate it).
+    """
+    if root is not None:
+        base = os.path.expanduser(root)
+    else:
+        from . import state as _state
+        base = os.path.dirname(os.path.abspath(_state.STATE_DIR))
+    return os.path.join(base, _PID_FILENAME)
+
+
+def _daemon_pid_alive(pid_file=None) -> bool:
+    """Is the pid in the daemon pid file a live process? (injected in tests)."""
+    try:
+        with open(pid_file or _pid_path_for(None)) as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _daemon_predates_build(pid_file=None, build_file=None) -> bool:
+    """Did the RUNNING daemon start before this build of the expiry stream?
+
+    The upgrade race a fatal verdict must never mis-fire on, verbatim in intent
+    from ``kanban_pause._daemon_predates_build``: doctor is bootstrap's Stage-1
+    gate and the daemon restart is a later stage, so during an upgrade the live
+    daemon was started from code with no ``node_pause_expiry`` stream at all.
+    The pid file is written at daemon start, so ``pid mtime >= this file's
+    mtime`` means the daemon could have stamped and did not (broken wiring);
+    an older pid means it never could (upgrade). Either stat failing answers
+    False — an unverdictable check must not sink an install.
+    """
+    try:
+        started = os.path.getmtime(pid_file or _pid_path_for(None))
+        built = os.path.getmtime(build_file or __file__)
+    except OSError:
+        return False
+    return started < built
+
+
+def _read_stamp(root=None) -> dict:
+    """The stream's stamp (``{}`` when absent, unreadable or not an object).
+
+    No ``root`` goes through ``state.read_state`` — the exact funnel
+    ``expiry_tick`` writes through, including its test-time redirect. A
+    malformed stamp returns ``{}``, which lands on the never-stamped branch:
+    fail-LOUD, because a stamp nobody can parse is not evidence of a healthy
+    stream (and the sibling overlay row reports the corruption itself).
+    """
+    if root is None:
+        from .state import read_state
+        try:
+            data = read_state(STREAM_NAME)
+        except Exception:  # noqa: BLE001 - read_state is local and never raises
+            return {}
+        return data if isinstance(data, dict) else {}
+    path = _stamp_path_for(root)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _read_overlay(root=None):
+    """``(pauses, read_was_dirty)`` — the overlay plus whether IT complained.
+
+    ``node_pauses.load`` never raises: a truncated or malformed overlay reads as
+    "no pauses" and says so only through ``_warn``. That fail-open is right for
+    a repair path and wrong for a count, so the row listens to the reader's own
+    warning instead of re-implementing its validation (the
+    ``doctor_node_pauses._read`` precedent) and marks the count it printed as
+    one the reader could not vouch for. The swap is restored in ``finally``.
+    """
+    collected: list = []
+    real = getattr(node_pauses, "_warn", None)
+    if not callable(real):  # a core with no hook cannot be listened to
+        pauses = node_pauses.list_pauses(root)
+        return (pauses if isinstance(pauses, dict) else {}), True
+
+    def _capture(msg):
+        collected.append(str(msg))
+
+    node_pauses._warn = _capture
+    try:
+        pauses = node_pauses.list_pauses(root)
+    except Exception:  # noqa: BLE001 - load() is documented never to raise
+        return {}, True
+    finally:
+        node_pauses._warn = real
+    return (pauses if isinstance(pauses, dict) else {}), bool(collected)
+
+
+def _stamp_age(stamp, clock):
+    """Seconds since ``state.write_state`` wrote the stamp; None if it proves
+    nothing. ``timestamp`` is the ISO field every stream has (the same one
+    ``verify`` parses); an unparseable one is NOT a fresh stream."""
+    raw = stamp.get("timestamp")
+    parsed = node_pauses._parse_iso(raw) if isinstance(raw, str) else None
+    if parsed is None:
+        return None
+    return (clock - parsed).total_seconds()
+
+
+def _iso_note(value) -> str:
+    """A stamp for display, microseconds trimmed, offset kept."""
+    if not isinstance(value, str) or not value.strip():
+        return "unknown"
+    trimmed = value.strip()
+    return _FRACTIONAL_SECONDS.sub("", trimmed)
+
+
+def _names(value) -> list:
+    """The host list a stamp carries, filtered to printable strings."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(h).strip() for h in value if isinstance(h, str) and h.strip()]
+
+
+def _pause_note(pauses, clock) -> str:
+    """``"no node pauses parked"`` / ``"2 pause(s) parked, 1 past due"``.
+
+    The past-due count uses :func:`_due_entries` — the predicate the tick itself
+    applies to the same snapshot — so the row cannot claim a pause is past due
+    when the pass that just ran disagrees.
+    """
+    if not pauses:
+        return "no node pauses parked"
+    due = len(_due_entries(pauses, clock))
+    return (f"{len(pauses)} pause(s) parked, "
+            + (f"{due} past due" if due else "none past due"))
+
+
+def refused_check() -> dict:
+    """The in-suite verdict when no root was supplied and no seam was injected.
+
+    A default-root read inside a suite is a read of the operator's
+    ``~/.hscc/state/node_pause_expiry.json`` and ``~/.hscc/node_pauses.json``,
+    which would let whatever the fleet happens to be doing decide what the
+    suite asserts. An ERROR naming the seam, never a silent pass.
+    """
+    return {
+        "name": CHECK_NAME, "ok": False, "fatal": False,
+        "detail": "node-pause-expiry check refused inside a pytest process — "
+                  "inject _node_pause_expiry_check or pass root=",
+        "fix": "Call node_pause_exec.doctor_check(root=<tmp ~/.hscc-shaped "
+               "root>) for the real read path, or inject "
+               "_node_pause_expiry_check=lambda: {...} to pin the row's "
+               "routing; a suite must never read the operator's stamp or "
+               "overlay.",
+    }
+
+
+def _doctor_check(now=None, root=None, stream_state=None, _daemon_running=None,
+                  _predates_build=None) -> dict:
+    """The five-field verdict: is the durable-until schedule being honoured?
+
+    ``root`` is the ONE root for all three reads (stamp, overlay, pid) and is
+    never taken from the environment — see the module comment above. Every
+    probe is injectable so no test has to reach a daemon, a node, or the
+    operator's ``~/.hscc``.
+    """
+    if root is None and "pytest" in sys.modules:
+        return refused_check()
+
+    # One clock for the whole verdict: the age arithmetic and the past-due
+    # question must be answered against the same instant.
+    clock = node_pauses._parse_iso(now) if isinstance(now, str) else None
+    if clock is None:
+        clock = now if isinstance(now, datetime) else node_pauses._utc(None)
+
+    pid_file = _pid_path_for(root)
+    if _daemon_running is None:
+        _daemon_running = lambda: _daemon_pid_alive(pid_file)  # noqa: E731
+    if _predates_build is None:
+        _predates_build = lambda: _daemon_predates_build(pid_file)  # noqa: E731
+
+    stamp = stream_state if stream_state is not None else _read_stamp(root)
+    pauses, dirty = _read_overlay(root)
+    note = _pause_note(pauses, clock)
+    if dirty:
+        note += ("; the pause overlay was not readable cleanly — see the "
+                 "'node pauses' row")
+
+    age = _stamp_age(stamp, clock)
+    limit = doctor_freshness_limit_s()
+    hint = (_stamp_path_for(root) if root
+            else f"~/.hscc/{_STATE_SUBDIR}/{STREAM_NAME}.json")
+    running = _daemon_running()      # probed ONCE: a restart mid-check must not
+    # make the liveness bit and the age comparison describe two different worlds.
+
+    def _verdict(ok, fatal, detail, fix=""):
+        return {"name": CHECK_NAME, "ok": ok, "fatal": fatal,
+                "detail": detail, "fix": fix}
+
+    if age is None:
+        # (1) The orch-waker class, and the only fatal this row may raise.
+        if running and not _predates_build():
+            return _verdict(
+                False, True,
+                f"never stamped while the daemon runs — the {STREAM_NAME} "
+                f"stream has no readable stamp at {hint} ({note}); a pause "
+                "whose `until` passed would stay parked and nothing would "
+                "notice", _DAEMON_FIX)
+        if running:
+            return _verdict(
+                False, False,
+                f"the RUNNING daemon predates this build — the "
+                f"{STREAM_NAME} stream has never stamped ({note}); the daemon "
+                "restart later in bootstrap starts it", _DAEMON_FIX)
+        return _verdict(
+            False, False,
+            f"the daemon is not running — nothing ends an expired pause "
+            f"({note}; start it with `hscc start`)", _DAEMON_FIX)
+
+    # (2) The stamped RED: the pass ran and did NOT end what was due. Checked
+    # before staleness on purpose (the card's priority): "a pause is past due
+    # and still parked" is the actionable fact, and the age is printed with it,
+    # so a stamp that is BOTH red and stale still says how old it is.
+    if stamp.get("ok") is False:
+        kept, skipped = _names(stamp.get("kept")), _names(stamp.get("skipped"))
+        bits = []
+        if kept:
+            bits.append(f"restart FAILED on {', '.join(kept)}")
+        if skipped:
+            bits.append(f"span HELD by another pause on {', '.join(skipped)}")
+        if not bits:
+            bits.append("the last pass reported ok=False")
+        message = str(stamp.get("message") or "").strip()[:_MAX_QUOTED_MESSAGE]
+        return _verdict(
+            False, False,
+            f"PAST DUE, STILL PARKED: {'; '.join(bits)} (checked_at "
+            f"{_iso_note(stamp.get('checked_at'))}, last pass {age:.0f}s ago "
+            f"of a {limit:.0f}s budget; {note})"
+            + (f" — {message}" if message else ""),
+            "end the pause by hand once the cause is fixed "
+            "(`hscc node resume <host> --apply`); the stream re-tries every "
+            f"{stream_cadence()}s so this clears on its own")
+
+    # (3) Fresh enough to trust, but the loop is not reaching this stream.
+    if age > limit:
+        return _verdict(
+            False, False,
+            f"stale: last expiry pass {age:.0f}s ago (budget {limit:.0f}s = "
+            f"2*{stream_cadence()}s+{DOCTOR_SLACK_S}s; {note})", _DAEMON_FIX)
+
+    # (4/5) Green: the pass ran recently and nothing is stuck. A deferred host
+    # is not a fault (the per-tick limit drained it onto the next tick), but it
+    # is named, because "green" that hides a backlog reads as "nothing waiting".
+    detail = (f"expiry stream healthy: last pass {age:.0f}s ago (budget "
+              f"{limit:.0f}s); {note}")
+    deferred = _names(stamp.get("deferred"))
+    if deferred:
+        detail += f"; {len(deferred)} deferred to the next tick"
+    resumed = _names(stamp.get("resumed"))
+    if resumed:
+        detail += f"; last pass resumed {', '.join(resumed)}"
+    return _verdict(True, False, detail, "")
+
+
+def doctor_check(now=None, root=None, stream_state=None, _daemon_running=None,
+                 _predates_build=None) -> dict:
+    """The doctor row for the ``node_pause_expiry`` stream. Never raises.
+
+    Thin guard around :func:`_doctor_check`: doctor is a report, and a report
+    that throws takes the rest of ``hscc doctor`` down with it. An exception
+    here becomes a warn naming itself — the same rule every other feature row
+    follows ("a check that did not run prints that it did not run").
+    """
+    try:
+        return _doctor_check(now=now, root=root, stream_state=stream_state,
+                             _daemon_running=_daemon_running,
+                             _predates_build=_predates_build)
+    except Exception as e:  # noqa: BLE001 - a row must never break the report
+        return {"name": CHECK_NAME, "ok": False, "fatal": False,
+                "detail": _UNVERIFIABLE.format(STREAM_NAME)
+                          + f" ({type(e).__name__}: {e})",
+                "fix": _DAEMON_FIX}

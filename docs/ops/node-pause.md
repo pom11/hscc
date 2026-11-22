@@ -291,6 +291,34 @@ operator who resumes early and a daemon resuming on schedule cannot drift apart.
 `--until` as a timer that the daemon keeps — and `hscc verify`'s `node_pause_expiry` row
 as the place a timer that missed its deadline stops being quiet.
 
+### `hscc doctor` reports the schedule it is honouring
+
+`hscc verify` answers "did the stream run". `hscc doctor`'s
+`node pause expiry (durable-until stream)` row answers the question an operator
+actually asks — *is my deadline being kept?* — in this order:
+
+- **the stream has never stamped while the daemon runs** → FATAL, the only fatal this
+  row may raise: the wiring itself is broken, so a past-due pause would park forever
+  and nothing would notice;
+- **the newest stamp is `ok: false`** → warn: a pause is past due and still parked. The
+  row names the hosts out of the stamp — `restart FAILED on …` (the resume was refused)
+  and `span HELD by another pause on …` (another pause still holds part of its span) —
+  together with the `checked_at` the pass judged against and the tick's own message;
+- **the stamp is older than `2×60 s + 90 s`** → warn: the loop is not reaching this
+  stream any more (and if the daemon is not running at all, the row says so and names
+  `hscc start`);
+- **the stamp predates this build** → warn, never fatal: doctor is bootstrap's Stage 1
+  and the daemon restart that starts the stream is a later stage, so aborting an install
+  over that race would blame the upgrade for the upgrade.
+
+A green row still says what it saw — `1 pause(s) parked, 1 past due`, the age of the
+last pass, and a deferred backlog if the per-tick limit pushed work onto the next one.
+Counts, not faults: a parked node is your decision, and a doctor that called it a
+failure would train you to ignore the row. The row reads the two files the feature
+writes (the stamp through `state.STATE_DIR`, the overlay through `node_pauses`) and
+takes its freshness budget from `PERIODIC_INTERVALS`, so it cannot drift from the stream
+it reports on — and it never reads a root its writers cannot write to.
+
 ## Where else the pause shows up
 
 A parked node is a choice, not a fault, and the fleet read routes now say so:
