@@ -65,21 +65,32 @@ SERVING = {
 }
 
 #: The single clock every case is judged against, so "expired" and "future" are
-#: facts about the fixture, not about when pytest ran. Anchored to IMPORT time for
-#: exactly that reason: a literal timestamp made the whole file decay — every
-#: `at(3600)` neighbour pause turned into a past-due record the moment the wall
-#: clock passed that literal hour, `resume_host`'s span guard (`continue` on an
-#: expired other pause, node_pause_exec.py) stepped aside as designed, and the two
-#: span-refusal tests went red on an unchanged tree (observed live: CI leg
-#: hscc_daemon green on main at 12:45 UTC, red at 14:14 UTC on an unrelated PR,
-#: with `{'action': 'resumed', 'ok': True}` where the refusal was asserted).
+#: facts about the fixture, not about when pytest ran.
 #:
-#: The anchoring matters most for the two span-guard cases (verb-side and
-#: policy-side): they take the PRODUCTION default clock, because the CLI cannot
-#: hand a clock to the policy (it reads its own; that IS the contract), so the
-#: only thing keeping "W2's pause is still in force" true is that `at(3600)` is
-#: measured from a moving `_T0`.
-_T0 = datetime.now(timezone.utc).replace(microsecond=0)
+#: It is a FIXED instant on purpose, and that is safe for exactly one reason:
+#: ``TestFixtureClockIsTheOnlyClock`` below reddens this file if any case lets the
+#: real wall clock answer one of its questions. The two halves of the history are
+#: the argument for choosing the pin rather than the anchor:
+#:
+#:   * a fixed instant WITHOUT such a pin decays. Every ``at(3600)`` neighbour
+#:     pause became a past-due record the moment the wall clock passed the literal
+#:     hour, ``resume_host``'s span guard (``continue`` on an expired other pause,
+#:     node_pause_exec.py) stepped aside exactly as designed, and the two
+#:     span-refusal cases went red on an unchanged tree — CI leg hscc_daemon green
+#:     on main at 12:45 UTC, red at 14:14 UTC on an unrelated PR, with
+#:     ``{'action': 'resumed', 'ok': True}`` where the refusal was asserted.
+#:   * anchoring the instant to IMPORT time instead (PR #617) does hide that
+#:     decay, but it makes the fixture clock *equal* the wall clock, and the two
+#:     cases that let ``resume_host`` take a clock of their own go quiet: an
+#:     omitted clock then agrees with the wall clock by construction, so the case
+#:     keeps passing with nothing pinned inside it. Card t_3c11f9d1 rejected that
+#:     trade; the source guard in ``TestFixtureClockIsTheOnlyClock`` keeps it
+#:     rejected, because no behavioural arm can see that particular move.
+#:
+#: So the anchor stays put, every case hands the policy a clock of its own (the
+#: ``now=NOW`` argument, or the pinned fallback below), and the pin — not the
+#: anchor, and not this comment — is what keeps that honest.
+_T0 = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
 NOW = _T0.isoformat()
 
 
@@ -87,6 +98,98 @@ def at(seconds):
     """An ISO ``until`` this file can read out loud: ``at(-1)`` is one second
     past due, ``at(3600)`` is an hour from now."""
     return (_T0 + timedelta(seconds=seconds)).isoformat()
+
+
+# ── the two clock seams a case can be wrong about ───────────────────────────
+# ``node_pauses.is_expired(entry, now)`` asks ``_utc(now)``, and ``_utc`` is the
+# only place the overlay reads the wall clock (node_pauses.py:116-132): every
+# other value it handles was handed to it. So a case has exactly two ways to be
+# honest, and they are different patches — which is why both are named here
+# rather than in prose.
+class _AnchorIsNotImportTime(type(datetime)):
+    """Keeps ``isinstance(x, _WallClock)`` true for a REAL datetime.
+
+    Without it, replacing the name ``datetime`` in ``node_pauses`` would make
+    ``_utc``'s ``isinstance(value, datetime)`` arm reject real datetimes, and a
+    pin that redirects one read would silently break two others.
+    """
+
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, datetime)
+
+
+class _WallClock(datetime, metaclass=_AnchorIsNotImportTime):
+    """The wall clock, answering a chosen instant.
+
+    A SUBCLASS so ``fromisoformat``, ``astimezone`` and comparisons keep working
+    — the point is to move ONE read (``datetime.now``), never to replace the type.
+    """
+
+    _at = None
+
+    @classmethod
+    def now(cls, tz=None):
+        assert cls._at is not None, "the pin must install an instant"
+        return cls._at if tz is None else cls._at.astimezone(tz)
+
+
+#: The instant the pin pretends the wall clock reads: eight decades past the
+#: FIXTURE, not an absolute year. Absolute would be weaker and the reason matters.
+#: A guard hard-coded to 2099 stops biting the moment anyone moves ``_T0`` past
+#: it — and "just bump ``_T0`` forward" is the exact fix card t_3c11f9d1 calls "the
+#: same bomb with a longer fuse". Derived instead, it is always a decade's worth
+#: of past due for every ``at(N)`` this file can write, wherever the anchor sits,
+#: so it catches that fix too instead of relying on a reviewer to.
+#:
+#: 2099 is kept as an asserted FLOOR below, so "the wall clock is driven past
+#: 2099" stays a checked fact rather than a comment.
+WALL_FAR_FUTURE = _T0 + timedelta(days=365 * 80)
+assert WALL_FAR_FUTURE >= datetime(2099, 1, 1, tzinfo=timezone.utc), (
+    "the pin no longer drives the wall clock past 2099 — the fixture anchor has "
+    "moved and this file's far-future instant moved with it, which is the point, "
+    "but the floor below is what the guard's name promises")
+
+
+def drive_the_wall_clock(monkeypatch, instant=WALL_FAR_FUTURE):
+    """Move ``node_pauses``' wall clock to ``instant``.
+
+    This is the clock the fixture cannot name — the one that answers
+    ``_utc(None)`` when a caller brought no clock of its own. Applied by the pin
+    class below, so the cases there run as if pytest were executed long after
+    every deadline this file can seed.
+
+    Must be applied BEFORE :func:`pin_the_fallback_clock`, which is what hides
+    this read from a case that has been given a clock; the guard-assert below is
+    the reason, and it fails loudly if the order is ever reversed.
+    """
+    stub = type("_PinnedWallClock", (_WallClock,), {"_at": instant})
+    monkeypatch.setattr(node_pauses, "datetime", stub)
+    assert node_pauses._utc(None) == instant, (
+        "the wall clock was NOT redirected — a pin using this would be judging "
+        "the real clock, and its green would mean nothing")
+    return stub
+
+
+def pin_the_fallback_clock(monkeypatch):
+    """Make the overlay's no-clock fallback answer THE FIXTURE clock.
+
+    ``resume_host`` documents that "a caller that has none (the CLI) lets this
+    function take one read of its own" — that read is ``_utc(None)``. A verb-level
+    case cannot pass ``now=`` (``hscc node resume`` takes no clock, and adding a
+    test-only one to the verb would be product code bending to the test), so this
+    is the seam: it redirects ``None`` to ``_T0`` and delegates every other arm
+    — parse, naive-is-UTC, normalise — to the real ``_utc`` untouched.
+
+    It is not a way to make a case pass. It is the same statement ``now=NOW``
+    makes, for the one caller that has no way to make it.
+    """
+    real = node_pauses._utc
+
+    def fixture_clock(value):
+        return _T0 if value is None else real(value)
+
+    monkeypatch.setattr(node_pauses, "_utc", fixture_clock)
+    return fixture_clock
 
 
 def _group(cid, recipe, hosts, port, tp=None):
@@ -239,49 +342,113 @@ def cli(*argv):
     return rc, out.getvalue()
 
 
-# ── the fixture clock itself, checked against the clock the policy uses ─────
-class TestFixtureClock:
-    """The executable half of the comment above the anchor.
+# ── the pin: the fixture clock is the ONLY clock these cases can be judged by ─
+class TestFixtureClockIsTheOnlyClock:
+    """Supersedes #617's ``TestFixtureClock``, and keeps its promise.
 
-    The anchor's comment explains why ``_T0`` is captured at import, and prose is
-    how that got written down the first time — it did not stop the file from
-    decaying once, and it will not stop it again. This class is what does: the
-    same three questions the decay answers wrongly, asked on every run through
-    the very call the span guard makes
-    (``node_pauses.is_expired(other, now=None)`` → the real wall clock).
+    #617's own fragment states the goal exactly: *"prose did not stop the file
+    from decaying once and will not stop it again — nothing in the leg reddened
+    if someone set* ``_T0`` *back to a literal instant."* This class keeps the
+    goal and changes the target, because the anchor is not the defect. The
+    defect is a case letting ``_utc(None)`` — the wall clock — answer a question
+    about the fixture. Pin THAT and a literal anchor is harmless; pin the anchor
+    and the wall clock stays load-bearing in exactly the two cases that broke.
 
-    Only the cases that let ``resume_host`` take its own clock can see the decay
-    — every other case in this file hands the policy ``now=NOW``, so it judges
-    its own fixture and stays honest whatever the anchor says. That is why two
-    failures were the whole symptom and not twenty-seven, and why the guard below
-    asks the guard's own question rather than comparing datetimes here.
+    The proof is the direction of the bite. #617's probe reddened the file when
+    someone made the anchor fixed. These cases redden when someone makes a case
+    *ask the wall clock* — by removing a ``now=`` argument or a fallback pin, the
+    two edits that are actually load-bearing here — and they bite wherever the
+    anchor sits, because :data:`WALL_FAR_FUTURE` is derived from it rather than
+    written next to it.
+
+    The fixed anchor is still the half that makes the rest cheap. With a fixed
+    instant, the shipped cases are self-policing: drop one of their injections and
+    it is red on the next run, not on some future date. With an import-time anchor
+    they are self-*silencing* — an omitted clock agrees with the wall clock by
+    construction, so the case keeps passing while nothing in it is pinned, and only
+    the two scenarios duplicated below stay protected. Hence both halves, and the
+    source guard at the end of this class for the one move no behavioural arm sees.
     """
 
-    def test_a_negative_offset_is_past_due_on_the_real_clock(self):
-        assert node_pauses.is_expired({"until": at(-1)}) is True, (
-            "at(-1) is not past due against the real clock — the anchor is a "
-            "fixed instant ahead of now, so every 'expired' case here resumes "
-            "nothing and passes vacuously")
+    def test_the_fixture_clock_answers_what_the_wall_clock_used_to(self):
+        """The honest descendants of #617's two real-clock cases.
 
-    def test_an_hour_out_is_still_held_on_the_real_clock(self):
-        assert node_pauses.is_expired({"until": at(3600)}) is False, (
-            "at(3600) has become the past: _T0 is a fixed instant, not 'now'. "
-            "The span guard then reads a still-parked neighbour as released and "
-            "resumes half a span — the 2026-11-22T13:00Z red, reproduced.")
-
-    def test_the_import_anchor_has_not_drifted_off_the_real_clock(self):
-        """The one timing dependency this file has, stated as a bound.
-
-        Offsets are relative to import, so a case is only as honest as the gap
-        between import and the assertion. The leg runs in ~3 min; half an hour is
-        twice that and still a tenth of the ``at(3600)`` margin — so the bound
-        catches a stalled or sharded collection long before the margin does, and
-        nobody has to re-derive the dependency from the fixture to trust it.
+        Same two questions — is ``at(-1)`` past due, is ``at(3600)`` still
+        held — now asked of the clock the cases are actually judged by. Against
+        the real clock they could only ever agree with the anchor by
+        construction; against ``NOW`` they are facts about the fixture, which is
+        what the anchor's comment always claimed they were.
         """
-        drift = (datetime.now(timezone.utc) - _T0).total_seconds()
-        assert 0 <= drift < 1800, (
-            f"{drift:.0f}s of pytest between import and this assert; the at() "
-            "offsets no longer describe the fleet they seed")
+        assert node_pauses.is_expired({"until": at(-1)}, NOW) is True, (
+            "at(-1) is not past due against the fixture clock — every 'expired' "
+            "case here resumes nothing and passes vacuously")
+        assert node_pauses.is_expired({"until": at(3600)}, NOW) is False, (
+            "at(3600) is not held against the fixture clock — the span guard "
+            "reads a still-parked neighbour as released")
+
+    def test_the_verb_still_refuses_when_the_wall_clock_reads_past_2099(
+            self, fleet, live_root, monkeypatch):
+        """The CLI's arm: the same refusal, with pytest running past 2099.
+
+        The CLI cannot bring a clock, so :func:`pin_the_fallback_clock` is what
+        stands between this verb and the wall clock. Drop that one call and this
+        case goes red — the fallback answers the far-future clock instead,
+        ``at(3600)`` is ancient history, W2 stops counting as held, and the verb
+        resumes half a span exactly as it did on 2026-11-22 at 13:00Z.
+        """
+        drive_the_wall_clock(monkeypatch)
+        pin_the_fallback_clock(monkeypatch)
+        seed(live_root, W1, until=at(-1), span_nodes=(W1, W2))
+        seed(live_root, W2, until=at(3600), units=["wspan"],
+             span_nodes=(W1, W2))
+        rc, out = cli("resume", W1, "--yes")
+        assert rc == 1 and "REFUSED" in out and W2 in out, (
+            f"the wall clock decided this one, not the fixture: rc={rc} {out}")
+        assert fleet.calls == [], "a refused span must not run anything"
+
+    def test_the_policy_still_refuses_when_the_wall_clock_reads_past_2099(
+            self, fleet, overlay, monkeypatch):
+        """The direct-policy arm: same refusal, wall clock past 2099.
+
+        Here the clock arrives as ``now=NOW`` — the argument a third caller
+        (a plugin tool, a future verb) passes. Delete that argument and this case
+        goes red for the same reason, by way of ``_utc(None)`` instead of the
+        CLI. No fallback pin is installed in this arm on purpose: it would mask
+        the very mutation this case exists to catch.
+        """
+        drive_the_wall_clock(monkeypatch)
+        seed(overlay, W1, until=at(-1), span_nodes=(W1, W2))
+        seed(overlay, W2, until=at(3600), units=["wspan"],
+             span_nodes=(W1, W2))
+        entry = node_pauses.paused(W1, directory=overlay)
+        res = npe.resume_host(W1, entry, apply=True, directory=overlay,
+                              echo=Lines(), run=fleet, now=NOW)
+        assert res["action"] == npe.RESUME_KEPT and res["ok"] is False, (
+            f"the wall clock answered the span question: {res}")
+        assert fleet.calls == []
+
+    def test_the_anchor_is_a_literal_the_file_owns_not_a_clock_reading(self):
+        """#617's protection, running the other way — stated structurally.
+
+        Anchoring ``_T0`` to import hides the decay by putting the fixture ON the
+        wall clock, which is the trade this file refuses, and it is a quiet
+        trade: the span cases keep passing while nothing in them is pinned. The
+        two cases above still bite under that anchor (their far-future instant is
+        derived from it, not written next to it), so this is the only arm that
+        sees the move at all — and it is read off the source, the one place the
+        choice is actually made.
+        """
+        source = Path(__file__).read_text(encoding="utf-8").splitlines()
+        anchors = [ln for ln in source if ln.startswith("_T0 = ")]
+        assert len(anchors) == 1, (
+            f"expected exactly one anchor line to guard, found {len(anchors)}")
+        assert ".now(" not in anchors[0], (
+            "the fixture clock is being READ from the wall clock again "
+            "(PR #617's shape) — that makes every `now=` injection in this file "
+            "unpinnable: the two 2099 cases above stop biting the moment it is "
+            "done, while staying green.")
+        assert "datetime(" in anchors[0], (
+            "the anchor is no longer a literal instant this file owns")
 
 
 # ── ACCEPT 1: an expired pause resumes, clears, and unsuspends the node ─────
@@ -517,7 +684,8 @@ class TestSpanGuard:
         assert node_pauses.paused(W2, directory=overlay) is not None
         assert "another pause" in lines.text
 
-    def test_the_verb_refuses_to_resume_half_a_span(self, fleet, live_root):
+    def test_the_verb_refuses_to_resume_half_a_span(self, fleet, live_root,
+                                                   monkeypatch):
         """The same rule, from the operator's side of the seam.
 
         ``hscc node resume W1 --yes`` re-issues the whole declared workload, so
@@ -526,7 +694,17 @@ class TestSpanGuard:
         refusal lives in ``resume_host``, shared with the tick. `--yes` is what
         gets the verb past its own confirmation gate, so this proves the span
         guard is NOT the question — an answer cannot unlock it either.
+
+        The verb brings no clock of its own, so the fixture supplies one through
+        :func:`pin_the_fallback_clock` — otherwise the guard's own
+        ``is_expired(other, None)`` reads the wall clock, and this case is a fact
+        about when pytest ran. It passed for exactly that reason on 2026-11-22:
+        the fixture clock had gone past ``at(3600)``, W2 stopped counting as
+        held, and the refusal this case demands could no longer fire.
+        ``TestFixtureClockIsTheOnlyClock`` is what stops that from being possible
+        again.
         """
+        pin_the_fallback_clock(monkeypatch)
         seed(live_root, W1, until=at(-1), span_nodes=(W1, W2))
         seed(live_root, W2, until=at(3600), units=["wspan"],
              span_nodes=(W1, W2))
@@ -545,6 +723,12 @@ class TestSpanGuard:
         ``resume_host``, so without this case the guard underneath the skip would be
         dead code that a green suite happily keeps green. Calling the policy
         directly is how any third caller — a plugin tool, a future verb — meets it.
+
+        ``now=NOW`` is the clock this case is judged by, and it is not decoration:
+        the span guard asks ``is_expired(other, now)``, and an omitted ``now``
+        falls through to the wall clock (``node_pauses._utc(None)``), which made
+        W2's ``at(3600)`` look released on any day past the fixture. The pin class
+        near the top of this file reddens if this argument is dropped.
         """
         seed(overlay, W1, until=at(-1), span_nodes=(W1, W2))
         seed(overlay, W2, until=at(3600), units=["wspan"], span_nodes=(W1, W2))
@@ -776,99 +960,3 @@ class TestNoInMemoryTimers:
         later = npe.auto_resume_expired(now=at(120), directory=overlay,
                                         echo=Lines(), run=fleet)
         assert later["resumed"] == [W1], later
-
-
-class TestTheTickBudget:
-    """How much of a backlog ONE tick may spend (t_09708c17 DEFECT 3).
-
-    Both bounds here are stream-safety, not tidiness: a launch client that has
-    to be cut loose costs the stream thread up to ``SPARKRUN_LAUNCH_WAIT_TIMEOUT``
-    (the client is not coming back on its own), and ``verify``'s staleness floor
-    is what the stream must stay inside. A pass that walked a whole backlog of
-    detached launches would breach it, so: a fixed number of resumes per tick,
-    and a hard stop at ONE resume once a client had to be detached. Neither is
-    visible in a one-host test, which is why they run against a stub ``resume``
-    here — the budget is the thing under test, not the executor.
-    """
-
-    #: Ascending, all two-digit, so overlay order and this list agree.
-    HOSTS = [f"192.0.2.{n}" for n in range(20, 26)]
-
-    @staticmethod
-    def _stub_resume(detached_on=None):
-        calls = []
-
-        def resume(host, entry, **kw):
-            calls.append(host)
-            return {"action": npe.RESUME_RESUMED, "ok": True, "host": host,
-                    "detached": host == detached_on}
-
-        return calls, resume
-
-    def _seed_backlog(self, overlay):
-        for host in self.HOSTS:
-            seed(overlay, host=host, until=at(-1), span_nodes=(host,))
-
-    def test_a_backlog_is_walked_four_per_tick_and_the_rest_defer(self,
-                                                                   overlay,
-                                                                   fleet):
-        """The budget is the constant, and the default is the budget.
-
-        Deliberately no ``limit=`` here: that is what makes this the pin on
-        ``MAX_RESUMES_PER_TICK`` itself — raise the constant and this goes red,
-        so the ceiling cannot be quietly widened by someone who wants a "faster"
-        tick.
-        """
-        assert npe.MAX_RESUMES_PER_TICK == 4, \
-            "widen this test's expectation with the constant, and say why"
-        self._seed_backlog(overlay)
-        calls, resume = self._stub_resume()
-        res = npe.auto_resume_expired(now=NOW, directory=overlay,
-                                      echo=Lines(), resume=resume, run=fleet)
-        budgeted = self.HOSTS[:npe.MAX_RESUMES_PER_TICK]
-        rest = self.HOSTS[npe.MAX_RESUMES_PER_TICK:]
-        assert calls == budgeted, "the tick spent more launches than it owns"
-        assert res["resumed"] == budgeted
-        assert res["deferred"] == rest
-        assert res["ok"] is True
-        # No claim about the overlay here on purpose: with ``resume`` stubbed,
-        # "the deferred pause is still recorded" would be true of every host and
-        # prove nothing. Clearing belongs to ``resume_host`` and is pinned where
-        # the real one runs (the one-host pass above asserts the resumed host's
-        # record is gone); "a deferred host is a delay, not a drop" is pinned by
-        # the pass never calling ``expiry_pass`` — see the kept-and-retried cases.
-
-    def test_a_pass_that_had_to_cut_a_client_loose_stops_at_one(self, overlay,
-                                                                fleet):
-        """The second bound: after one detach, nothing else launches this tick.
-
-        The first resume is the one that had to be cut loose, so a second launch
-        would spend the same bound again in the same stream tick — the exact
-        shape that carries the stream past the staleness floor. The rest are
-        deferred and SAY so.
-        """
-        first, rest = self.HOSTS[0], self.HOSTS[1:]
-        self._seed_backlog(overlay)
-        calls, resume = self._stub_resume(detached_on=first)
-        lines = Lines()
-        res = npe.auto_resume_expired(now=NOW, directory=overlay, echo=lines,
-                                      resume=resume, run=fleet)
-        assert calls == [first], \
-            "a pass that detached a client must not launch another one"
-        assert sorted(res["deferred"]) == sorted(rest)
-        assert res["ok"] is True
-        assert any("cut loose" in line for line in lines.lines), lines.text
-        assert any("deferring" in line and "next tick" in line
-                   for line in lines.lines), lines.text
-
-    def test_one_launch_never_outlives_the_stream_staleness_floor(self):
-        """The bound exists to sit INSIDE ``verify``'s 600 s floor: one launch
-        must be cut loose before the stream can be called stale for waiting on
-        it. A constant raised past the floor silently un-safes the whole design,
-        so it is pinned rather than commented."""
-        assert npe.SPARKRUN_LAUNCH_WAIT_TIMEOUT < 600, \
-            "a launch wait at or past the staleness floor makes a resume that " \
-            "is cut loose look like a stream that died"
-        assert npe.SPARKRUN_LAUNCH_WAIT_TIMEOUT > npe.SPARKRUN_CONTROL_TIMEOUT, \
-            "a cold model start is not a control call; sharing the bound would " \
-            "abort real launches"
