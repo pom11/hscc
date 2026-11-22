@@ -64,28 +64,16 @@ SERVING = {
     ],
 }
 
-#: The single clock every case is judged against — captured from the real clock
-#: at import, NOT pinned to a fixed instant.
-#:
-#: Pinning it looks safer ("the fixture owns the clock, so a case cannot drift")
-#: and it is a time-bomb instead. ``resume_host``'s span guard asks
-#: ``node_pauses.is_expired(other, now)`` with ``now=None`` on every path where
-#: the caller has no clock of its own — the CLI verb, and any third caller that
-#: forgets the argument (``test_the_rule_is_in_the_policy_not_only_in_the_tick``
-#: exists precisely to cover that caller). ``None`` means *the real wall clock*,
-#: which is the right answer for a verb a human runs, and the one answer this
-#: fixture cannot fake with a constant. So a fixed ``_T0`` does not freeze the
-#: case: it ages it. ``at(3600)`` silently stops being "an hour from now" and
-#: becomes a timestamp in the past, W2's pause reads as expired, the guard stops
-#: firing, and the resume proceeds — a green suite until the moment arrives, then
-#: red on every host at once. That is what happened to this file at
-#: 2026-11-22T13:00Z (``_T0`` + 3600 s), which read as a CI-only red because the
-#: last local run had been earlier the same day.
-#:
-#: Anchoring to now keeps every relation in this file intact (all of them are
-#: offsets through :func:`at`) and makes "past due" and "an hour away" true
-#: whenever pytest runs. ``TestFixtureClock`` below re-asserts it on every run.
-_T0 = datetime.now(timezone.utc)
+#: The single clock every case is judged against, so "expired" and "future" are
+#: facts about the fixture, not about when pytest ran. Anchored to IMPORT time for
+#: exactly that reason: a literal timestamp made the whole file decay — every
+#: `at(3600)` neighbour pause turned into a past-due record the moment the wall
+#: clock passed that literal hour, `resume_host`'s span guard (`continue` on an
+#: expired other pause, node_pause_exec.py) stepped aside as designed, and the two
+#: span-refusal tests went red on an unchanged tree (observed live: CI leg
+#: hscc_daemon green on main at 12:45 UTC, red at 14:14 UTC on an unrelated PR,
+#: with `{'action': 'resumed', 'ok': True}` where the refusal was asserted).
+_T0 = datetime.now(timezone.utc).replace(microsecond=0)
 NOW = _T0.isoformat()
 
 
@@ -247,45 +235,47 @@ def cli(*argv):
 
 # ── the fixture clock itself, checked against the clock the policy uses ─────
 class TestFixtureClock:
-    """The self-check the two span-guard verb cases were missing.
+    """The executable half of the comment above the anchor.
 
-    ``resume_host`` judges "is that other pause still held?" with
-    ``node_pauses.is_expired(other, now)`` and lets ``now`` default to the real
-    wall clock whenever the caller has none. Every case in this file that passes
-    its own clock (``expiry_tick(now=NOW)``) is therefore immune to how the
-    fixture is anchored, and the two that do not — the verb case and the
-    direct-policy case — are not. Those two are the whole reason this class
-    exists: they are the only places where the fixture's offsets meet real time,
-    so they are the only places where a stale anchor can be seen.
+    The anchor's comment explains why ``_T0`` is captured at import, and prose is
+    how that got written down the first time — it did not stop the file from
+    decaying once, and it will not stop it again. This class is what does: the
+    same three questions the decay answers wrongly, asked on every run through
+    the very call the span guard makes
+    (``node_pauses.is_expired(other, now=None)`` → the real wall clock).
 
-    Asking through :func:`node_pauses.is_expired` rather than comparing datetimes
-    here is deliberate: it is the same call, with the same ``now=None``, that the
-    guard makes. If the anchor ever drifts back to a fixed instant, this reddens
-    with them instead of leaving them to be explained as a CI-only failure.
+    Only the cases that let ``resume_host`` take its own clock can see the decay
+    — every other case in this file hands the policy ``now=NOW``, so it judges
+    its own fixture and stays honest whatever the anchor says. That is why two
+    failures were the whole symptom and not twenty-seven, and why the guard below
+    asks the guard's own question rather than comparing datetimes here.
     """
 
     def test_a_negative_offset_is_past_due_on_the_real_clock(self):
         assert node_pauses.is_expired({"until": at(-1)}) is True, (
-            "at(-1) is not past due against the real clock — the fixture anchor "
-            "is pinned in the future, so every 'expired' case here is vacuous")
+            "at(-1) is not past due against the real clock — the anchor is a "
+            "fixed instant ahead of now, so every 'expired' case here resumes "
+            "nothing and passes vacuously")
 
     def test_an_hour_out_is_still_held_on_the_real_clock(self):
         assert node_pauses.is_expired({"until": at(3600)}) is False, (
             "at(3600) has become the past: _T0 is a fixed instant, not 'now'. "
-            "The span guard reads a still-parked node as released and resumes "
-            "half a span — the 2026-11-22T13:00Z red, reproduced.")
+            "The span guard then reads a still-parked neighbour as released and "
+            "resumes half a span — the 2026-11-22T13:00Z red, reproduced.")
 
     def test_the_import_anchor_has_not_drifted_off_the_real_clock(self):
         """The one timing dependency this file has, stated as a bound.
 
         Offsets are relative to import, so a case is only as honest as the gap
-        between import and the assertion. The suite runs in ~3 min; half an hour
-        is 10x that and still a tenth of the ``at(3600)`` margin.
+        between import and the assertion. The leg runs in ~3 min; half an hour is
+        twice that and still a tenth of the ``at(3600)`` margin — so the bound
+        catches a stalled or sharded collection long before the margin does, and
+        nobody has to re-derive the dependency from the fixture to trust it.
         """
         drift = (datetime.now(timezone.utc) - _T0).total_seconds()
         assert 0 <= drift < 1800, (
-            f"{drift:.0f}s of pytest between import and this assert; the "
-            "at() offsets no longer describe the fleet they seed")
+            f"{drift:.0f}s of pytest between import and this assert; the at() "
+            "offsets no longer describe the fleet they seed")
 
 
 # ── ACCEPT 1: an expired pause resumes, clears, and unsuspends the node ─────
