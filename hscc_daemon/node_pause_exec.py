@@ -57,11 +57,25 @@ from datetime import datetime
 
 from . import node_pauses, serving, util
 
-#: Shell-out cap for ONE lifecycle command (a stop, or a --ensure resume).
-#: These are single-host sparkrun control calls, not a fleet sweep, so they sit
-#: well under health.SPARKRUN_STATUS_TIMEOUT (the sweep budget must stay above
+#: Shell-out cap for ONE lifecycle command (a stop). These are single-host
+#: sparkrun control calls, not a fleet sweep, so they sit well under
+#: health.SPARKRUN_STATUS_TIMEOUT (the sweep budget must stay above
 #: its own worst case — t_614f4cac — and a control call must not inherit that).
 SPARKRUN_CONTROL_TIMEOUT = 120
+
+#: Bounded wait for ONE relaunch client (t_09708c17, DEFECT 3). Longer than a
+#: control call because it covers a real launch, and deliberately well under
+#: verify's 600 s stream-staleness floor: the expiry tick runs this in a
+#: supervised stream thread and cannot hand the stream to a wedged client. The
+#: wait usually ends far earlier than this — the moment the unit answers its own
+#: /v1/models the client is cut loose and the restart is reported as verified by
+#: the health probe (which is the ONLY honest success signal for a
+#: ``sparkrun run`` client that hangs on its child ssh session after the
+#: container is already serving: the operator's .246 launch sat 40 min on a
+#: machine whose model answered in 10). The endpoint is re-asked every couple of
+#: seconds (``util.run_cmd``'s poll cadence); a unit takes minutes to load, so a
+#: faster poll would only buy requests.
+SPARKRUN_LAUNCH_WAIT_TIMEOUT = 240
 
 #: The alias the orchestrator unit advertises (serving._role_alias). Used only
 #: as LIVE corroboration of the serving config, never as the primary source.
@@ -587,16 +601,28 @@ def _unit_record(live, declared, host, serving_dict):
     resume_cmd = None
     resume_blocked = None
     if declared and declared.get("recipe"):
-        # The keepalive relaunch command, verbatim: recipe, --cluster, --hosts,
-        # --port, --no-follow, --ensure, --served-model-name, --tp and the
-        # recorded -o overrides. The declared unit is passed to the SAME builder
-        # health's keepalive relaunch uses, with only the placement overridden
-        # (nodes/port/tp), so a resume from one node of a span re-issues the
-        # whole declared workload. Swapping in the live recipe here instead would
-        # change sparkrun's intent hash and launch a PARALLEL DUPLICATE of the
-        # unit rather than re-issuing it (t_e1ff0e8e).
+        # The resume command: recipe, --cluster, --hosts, --port, --no-follow,
+        # --ensure, --served-model-name, --tp and the recorded -o overrides.
+        # The declared unit goes to the SAME builder ``hscc cluster up`` uses,
+        # with only the placement overridden (nodes/port/tp), so a resume from
+        # one node of a span re-issues the whole declared workload. Swapping in
+        # the live recipe here instead would change sparkrun's intent hash and
+        # launch a PARALLEL DUPLICATE of the unit rather than re-issuing it
+        # (t_e1ff0e8e).
+        #
+        # ``prefer_serve_cmd`` is the resume half of the operator's 11-22 ruling
+        # (t_09708c17): a resume must reproduce the EXACT argv the unit was
+        # launched with, so the recorded serve_cmd wins when the unit carries
+        # one. Without it the builder derives the served names from this unit's
+        # own fields, and a uniform_pool unit's fields cannot rebuild what the
+        # apply path advertised — the .246 resume came back with two names where
+        # the running unit served three, which is a different intent hash, so
+        # ``--ensure`` started a DIFFERENT workload and the node left the
+        # orchestrator pool. A record whose placement (recipe/hosts/port)
+        # disagrees is refused inside the builder and the derived argv is used.
         resume_cmd = serving._unit_run_cmd(dict(declared, nodes=nodes,
-                                                port=port, tp=tp))
+                                                port=port, tp=tp),
+                                           prefer_serve_cmd=True)
     elif declared:
         resume_blocked = ("the serving.json unit declares no recipe — the "
                           "launch command cannot be reproduced")
@@ -878,7 +904,52 @@ def pause_eligibility(host, plan=None, serving_dict=None, status_reader=None):
 
 
 # ── stop / resume ──────────────────────────────────────────────────────────
-def _run_units(units, apply, key, verb, run, echo):
+def unit_is_serving(node, port, timeout=5):
+    """True when this unit's OWN endpoint answers ``/v1/models`` (t_09708c17).
+
+    The health probe, not the client, is what proves a relaunch worked: a
+    ``sparkrun run`` client can wedge on its child ssh session while the
+    container it launched is already serving. Asking the unit itself is also the
+    only check here that does not go through sparkrun at all, so a wedged
+    sparkrun cannot make it lie in either direction.
+
+    Deliberately a plain HTTP GET of the unit's own port — NOT the proxy and NOT
+    an alias comparison: the requirement is "container up and answering", and
+    alias coverage is ``declaration_agreement``'s leg 5's job. Unreachable,
+    refused, or a non-200 answer is simply False ("not up yet"), never an
+    exception — the caller polls this until its bound expires, and a probe that
+    could raise would turn a slow node into an aborted launch.
+    """
+    try:
+        res = util.http_check("http://%s:%s/v1/models" % (node, port),
+                              timeout=timeout)
+    except Exception:  # noqa: BLE001 — "cannot ask" IS the answer "not up"
+        return False
+    return bool(res.get("ok")) and res.get("status") == 200
+
+
+def _ready_probe_for(is_serving):
+    """The ``ready`` callable factory :func:`_run_units` asks per unit.
+
+    Returns ``None`` for a unit it cannot ask about (no nodes, no port) — the
+    caller then takes the plain bounded wait, exactly the shape every other
+    lifecycle command uses. A span unit is ready only when EVERY node it spans
+    answers: declaring a restart verified while a node of the same model is down
+    is a lie the resume must not tell.
+    """
+    def ready_for(unit):
+        nodes = _hosts_of(unit.get("nodes"))
+        port = unit.get("port")
+        if not nodes or port in (None, ""):
+            return None
+
+        def ready():
+            return all(is_serving(str(node), port) for node in nodes)
+        return ready
+    return ready_for
+
+
+def _run_units(units, apply, key, verb, run, echo, ready_for=None):
     """Shared dry-run/apply driver for stop_units and resume_units.
 
     ``key`` is the per-unit argv (``stop_cmd`` / ``resume_cmd``). Dry-run is the
@@ -886,6 +957,14 @@ def _run_units(units, apply, key, verb, run, echo):
     through ``run`` (default ``util.run_cmd``, which resolves the sparkrun
     argv). A unit with no command, or one whose node set is unknown, is refused
     and counted as a failure — never skipped silently, and never guessed.
+
+    ``ready_for`` (resume only, t_09708c17) turns the launch into a BOUNDED wait
+    that ends as soon as the WORKLOAD is up instead of waiting for the CLIENT to
+    come back: given a unit it returns the zero-arg probe (or None), the probe
+    rides into ``run`` as ``ready=``, and a result that had to cut the client
+    loose is reported with ``detached`` plus a printed line saying plainly that
+    the health probe — not the client — proved the restart. Never a silent kill
+    and never a false "relaunch failed".
     """
     results = []
     for unit in (units or []):
@@ -899,14 +978,34 @@ def _run_units(units, apply, key, verb, run, echo):
                             "ok": False, "skipped": True, "error": why})
             continue
         if apply:
+            ready = ready_for(unit) if ready_for else None
+            bound = (SPARKRUN_LAUNCH_WAIT_TIMEOUT if ready is not None
+                     else SPARKRUN_CONTROL_TIMEOUT)
             echo(f"{verb.upper()} {unit_id} on {', '.join(nodes)}: {' '.join(cmd)}")
             try:
-                res = run(cmd, timeout=SPARKRUN_CONTROL_TIMEOUT)
+                res = run(cmd, timeout=bound, ready=ready)
             except Exception as e:  # noqa: BLE001 — a shell-out must not abort the batch
                 res = {"ok": False, "output": "", "stderr": str(e)}
             ok = bool(res and res.get("ok"))
+            detached = bool(res and res.get("detached"))
+            verified_by = (res or {}).get("verified_by")
+            if detached:
+                # The operator's rule for this shape: say what was cut loose and
+                # what actually proved the outcome. A launch we had to detach and
+                # could NOT verify is still a failure — and says so, without ever
+                # pretending the kill itself was the verdict.
+                if ok:
+                    echo(f"  the launch client did not exit within {bound}s and "
+                         f"was cut loose; the restart is verified by the "
+                         f"{verified_by or 'health probe'} ({', '.join(nodes)} "
+                         f"answering /v1/models), not by the client")
+                else:
+                    echo(f"  the launch client did not exit within {bound}s and "
+                         f"was cut loose; the unit never answered the health "
+                         f"probe either, so this restart is NOT confirmed")
             results.append({"unit_id": unit_id, "cmd": cmd, "nodes": nodes,
                             "applied": True, "ok": ok,
+                            "detached": detached, "verified_by": verified_by,
                             "error": None if ok else (
                                 (res or {}).get("stderr")
                                 or (res or {}).get("output") or "command failed")})
@@ -917,7 +1016,8 @@ def _run_units(units, apply, key, verb, run, echo):
                 echo(f"  (not observed in the latest sweep — {verb} is a no-op "
                      "if it is not running)")
             results.append({"unit_id": unit_id, "cmd": cmd, "nodes": nodes,
-                            "applied": False, "ok": True, "error": None})
+                            "applied": False, "ok": True, "error": None,
+                            "detached": False, "verified_by": None})
     return {
         "applied": bool(apply),
         "ok": all(r["ok"] for r in results),
@@ -939,18 +1039,35 @@ def stop_units(units, apply=False, run=None, echo=print):
                       run or util.run_cmd, echo)
 
 
-def resume_units(units, apply=False, run=None, echo=print):
+def resume_units(units, apply=False, run=None, echo=print,
+                 serving_probe=None):
     """Restart the recorded units via sparkrun's ``--ensure`` path.
 
     Same recipe, same flags, same ``--cluster`` as recorded at pause time: the
-    commands are ``serving._unit_run_cmd``'s — the exact argv the keepalive
-    relaunch issues — so ``--ensure`` re-issues the declared workload instead of
-    deriving a different intent id and launching a duplicate. Dry-run by
-    default; ``apply=True`` executes. A unit whose recipe was never recorded is
-    refused with the reason printed.
+    commands are ``serving._unit_run_cmd``'s built with ``prefer_serve_cmd`` —
+    the recorded launch argv itself when the unit carries one, so a resume
+    reproduces EXACTLY what was running (t_09708c17: the field rebuild dropped a
+    uniform_pool unit's third served name and ``--ensure`` started a different
+    workload). Dry-run by default; ``apply=True`` executes. A unit whose recipe
+    was never recorded is refused with the reason printed.
+
+    The wait is BOUNDED and the success signal is the workload, not the client
+    (t_09708c17 DEFECT 3): ``sparkrun run`` can sit on its child ssh session for
+    tens of minutes after the container it started is serving, and a resume that
+    waited for that client would report a working restart as a failure and keep
+    the node parked. Each launch is therefore cut loose as soon as the unit
+    answers its own ``/v1/models`` (``SPARKRUN_LAUNCH_WAIT_TIMEOUT`` is the hard
+    backstop), and the printed line says plainly that the health probe verified
+    it and the client was detached — never a silent kill, and never a false
+    "relaunch failed" for a unit that came up.
+
+    ``serving_probe`` is that check, injectable for tests: ``(node, port) ->
+    bool``. The default is :func:`unit_is_serving`.
     """
     return _run_units(units, apply, "resume_cmd", "resume",
-                      run or util.run_cmd, echo)
+                      run or util.run_cmd, echo,
+                      ready_for=_ready_probe_for(serving_probe
+                                                 or unit_is_serving))
 
 
 # ── the resume policy (ONE implementation for the CLI and the daemon tick) ──
@@ -982,7 +1099,8 @@ RESUME_DRY_RUN = "dry_run"
 
 
 def resume_host(host, entry, apply=False, directory=None, echo=print,
-                reason=None, run=None, pauses=None, now=None, confirm=None):
+                reason=None, run=None, pauses=None, now=None, confirm=None,
+                serving_probe=None):
     """Restart the units ``entry`` recorded, then end the pause.
 
     This IS the resume policy — ``hscc node resume`` and the daemon's
@@ -1032,7 +1150,7 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
     a half-started machine. A kept pause is simply retried by the next call.
 
     Returns ``{"host", "ok", "action", "error", "pause_cleared",
-    "strikes_cleared", "restarts"}``::
+    "strikes_cleared", "restarts", "detached"}``::
 
         RESUME_DRY_RUN  ok=True   would restart; nothing changed
         RESUME_RESUMED  ok=True   restart clean; pause ended, strikes cleared
@@ -1041,6 +1159,9 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
     ``ok`` is "this call would exit 0" — the CLI maps it straight to its exit
     code, the tick logs a WARN when it is False. ``error`` is a one-liner for a
     log row; the human-readable detail is already in ``echo``'s output.
+    ``detached`` names the units whose launch CLIENT never came back and had to
+    be cut loose — a RESUME_RESUMED with a non-empty ``detached`` is a restart
+    the health probe proved rather than the client (t_09708c17).
     """
     from . import heal_breaker, node_pauses
 
@@ -1055,6 +1176,9 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
         "pause_cleared": False,
         "strikes_cleared": False,
         "restarts": None,
+        # unit_ids whose launch client had to be cut loose (t_09708c17) — empty
+        # unless a launch actually ran and had to be detached.
+        "detached": [],
     }
 
     echo(f"{host}: pause recorded {len(recorded)} unit(s)"
@@ -1137,8 +1261,15 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
                  f"clear the pause.")
             return res
         units = [by_id[uid] for uid in recorded]
-        out = resume_units(units, apply=apply, run=run, echo=echo)
+        out = resume_units(units, apply=apply, run=run, echo=echo,
+                           serving_probe=serving_probe)
         res["restarts"] = out["units"]
+        # Which launches had to be cut loose because their CLIENT never returned
+        # (t_09708c17). Reaching the clear below means every one of them was then
+        # verified by the health probe, so this is a "how it was proved" note for
+        # the log and the operator line, never a failure marker.
+        res["detached"] = [r["unit_id"] for r in out["units"]
+                           if r.get("detached")]
         if not apply:
             res["action"] = RESUME_DRY_RUN
             res["ok"] = True
@@ -1179,6 +1310,15 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
         return res
     res["pause_cleared"] = True
     echo(f"pause for {host} cleared.")
+    if res["detached"]:
+        # The operator's rule (t_09708c17): when a client had to be cut loose,
+        # say so plainly and name what actually proved the restart. Silent here
+        # would leave a log that reads like the client returned, which is how a
+        # wedged sparkrun client gets mistaken for a broken node.
+        echo(f"  note: the launch client(s) for {', '.join(res['detached'])} "
+             f"never returned and were cut loose — the restart was verified by "
+             f"the health probe (the unit answering /v1/models), not by the "
+             f"client.")
     if heal_breaker.clear(
             host, reason=reason or f"hscc node resume {host}"):
         heal_breaker.reset_alert(host)
@@ -1223,12 +1363,14 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
 #: ``hscc verify`` reports. One name for all three, like every other stream.
 STREAM_NAME = "node_pause_expiry"
 
-#: Pauses resumed per tick. Each resume is one sparkrun control call with a
-#: ``SPARKRUN_CONTROL_TIMEOUT`` (120 s) budget, run sequentially in THIS stream
-#: thread, so an unbounded pass on a large backlog could gate the stream for
-#: many minutes and let verify's 600 s floor cry wolf on a healthy daemon. Four
-#: per tick (the merge queue's one-PR-per-project-per-tick shape) drains four
-#: nodes a minute, longest-waiting first, and defers the rest visibly.
+#: Pauses resumed per tick. Each resume is one sparkrun launch with a
+#: ``SPARKRUN_LAUNCH_WAIT_TIMEOUT`` (240 s) budget, run sequentially in THIS
+#: stream thread, so an unbounded pass on a large backlog could gate the stream
+#: for many minutes and let verify's 600 s floor cry wolf on a healthy daemon.
+#: Four per tick (the merge queue's one-PR-per-project-per-tick shape) drains four
+#: nodes a minute, longest-waiting first, and defers the rest visibly. A pass
+#: that had to CUT A LAUNCH CLIENT LOOSE stops at one and defers the remainder —
+#: a wedged client costs the full bound, and a pass must not spend it twice.
 MAX_RESUMES_PER_TICK = 4
 
 
@@ -1273,7 +1415,8 @@ def _nodes_still_held(pauses, now):
 
 
 def auto_resume_expired(now=None, directory=None, apply=True, echo=None,
-                        resume=None, run=None, limit=MAX_RESUMES_PER_TICK):
+                        resume=None, run=None, limit=MAX_RESUMES_PER_TICK,
+                        serving_probe=None):
     """End every pause whose ``until`` has passed. Reports; never raises.
 
     One pass:
@@ -1320,7 +1463,7 @@ def auto_resume_expired(now=None, directory=None, apply=True, echo=None,
     due = _due_entries(pauses, now)
     still_held = _nodes_still_held(pauses, now)
 
-    for host, entry in due:
+    for due_index, (host, entry) in enumerate(due):
         # The candidate's own host is subtracted, so `blocked` can only name
         # nodes some OTHER pause owns: expired entries are not in `still_held`
         # at all, so two pauses that are both due never block each other.
@@ -1342,7 +1485,7 @@ def auto_resume_expired(now=None, directory=None, apply=True, echo=None,
             # The SAME snapshot and clock, handed down: the pass must not ask a
             # second read whether the span is clear after deciding from the first
             # that this host was due.
-            pauses=pauses, now=now)
+            pauses=pauses, now=now, serving_probe=serving_probe)
         results.append(res)
         if res.get("action") == RESUME_RESUMED:
             resumed.append(host)
@@ -1350,6 +1493,23 @@ def auto_resume_expired(now=None, directory=None, apply=True, echo=None,
             kept.append((host, res.get("error") or "restart refused"))
             say(f"AUTO-RESUME FAILED for {host}: {res.get('error')}; the pause "
                 f"stays recorded and will be retried next tick")
+        if res.get("detached"):
+            # One launch per pass is the honest bound once a sparkrun client has
+            # to be cut loose (t_09708c17): that client is not returning on its
+            # own, so each further launch would cost this stream thread up to
+            # SPARKRUN_LAUNCH_WAIT_TIMEOUT and could carry the stream past
+            # verify's staleness floor while it waited. The rest of the queue
+            # waits for the next tick — visible in the stamp as deferred, never
+            # silently dropped.
+            rest = [h for h, _e in due[due_index + 1:]
+                    if h not in [r["host"] for r in results]]
+            if rest:
+                deferred.extend(rest)
+                say(f"  deferring {len(rest)} further expired pause(s) to the "
+                    f"next tick: {', '.join(rest)} — the launch client on "
+                    f"{host} had to be cut loose and a pass does not spend "
+                    f"that bound twice")
+            break
 
     ok = not kept and not skipped
     if kept or skipped:

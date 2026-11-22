@@ -66,7 +66,17 @@ SERVING = {
 
 #: The single clock every case is judged against, so "expired" and "future" are
 #: facts about the fixture, not about when pytest ran.
-_T0 = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+#:
+#: Anchored to the real clock AT IMPORT, deliberately (t_09708c17, pre-existing
+#: at main aac069d0): two cases here — the verb-side and policy-side span guards
+#: — take the production default clock, because the CLI cannot hand a clock to
+#: the policy (it reads its own; that IS the contract). A FIXED ``_T0`` therefore
+#: made "W2's pause is still in force" true only until ``_T0 + 3600`` passed in
+#: the real world: from 13:00Z on the day that literal was written the guard
+#: correctly saw W2 as past due, skipped it, resumed the span, and the two cases
+#: went red on main for everyone. Relative offsets, real anchor: still entirely
+#: about the fixture, and it cannot rot.
+_T0 = datetime.now(timezone.utc).replace(microsecond=0)
 NOW = _T0.isoformat()
 
 

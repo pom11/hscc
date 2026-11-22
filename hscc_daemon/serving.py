@@ -523,18 +523,46 @@ def _max_num_seqs_from(unit):
     return val if val >= 1 else None
 
 
-def _serve_cmd_mismatch(u, cmd):
-    """'' if unit's serve_cmd agrees with its authoritative fields, else a reason.
+def _recorded_launch_cmd(u):
+    """The unit's recorded ``serve_cmd`` as a launch argv, or None.
 
-    ``serve_cmd`` in serving.json is a RECORDED artifact (the template apply
-    writes it for drift comparison) and is NEVER an execution source on the
-    wake path — ``fleet_up_plan`` always builds each start command from the
-    unit's real ``recipe``/``nodes``/``port``. But a ``serve_cmd`` that
-    disagrees with those fields is a red flag (a rehosted unit, a changed
-    alias, a stale record) that must be surfaced loudly rather than silently
-    diverging. Compare the fields that materially decide WHERE/WHAT is started:
-    the recipe path, the ``--hosts`` node set, and ``--port``. Returns the first
-    mismatch found, or '' when they agree (or the unit has no serve_cmd).
+    A usable record is the argv list the apply path wrote
+    (``cluster_template._render_serve_cmd``): ``["sparkrun", "run", <recipe>,
+    ...]``. Anything else — absent, a string, a non-run argv, a record with a
+    non-string token — is None, i.e. "no usable record", which sends the caller
+    to the field rebuild rather than to a half-trusted argv.
+
+    The recipe token is ``expanduser``-ed HERE too (t_09708c17): the record is
+    copied out of serving.json as written, and the command is executed WITHOUT a
+    shell, so a recorded ``~/…`` would reach sparkrun as a literal tilde and it
+    would answer "Recipe '~…' not found". Same rule as every other recipe read
+    in this module (:func:`_concrete_model`'s callers, :func:`_serve_cmd_mismatch`).
+    """
+    sc = u.get("serve_cmd")
+    if (not isinstance(sc, list) or len(sc) < 3
+            or not all(isinstance(tok, str) for tok in sc)
+            or sc[0] != "sparkrun" or sc[1] != "run"):
+        return None
+    cmd = list(sc)
+    cmd[2] = os.path.expanduser(cmd[2])
+    return cmd
+
+
+def _serve_cmd_placement_mismatch(u):
+    """'' when the recorded serve_cmd's PLACEMENT matches the unit's fields.
+
+    Placement = the fields that decide WHERE a workload starts: the recipe path,
+    the ``--hosts`` node set, the ``--port``. This is the half of
+    :func:`_serve_cmd_mismatch` that a caller must clear before it is willing to
+    EXECUTE a recorded command: a record whose placement is stale could start a
+    model on the wrong node, so it is refused. Its flags (``--served-model-name``
+    / ``--tp`` / ``-o``) are deliberately NOT compared here — that half is the
+    drift CANARY, which exists to report a derived command that disagrees with
+    the record; on the resume path the record IS the authority (see
+    :func:`_unit_run_cmd`), so a flag the unit's own fields dropped must not
+    read as a reason to discard the record.
+
+    '' also answers a unit with no record, meaning "nothing to refuse".
     """
     sc = (u.get("serve_cmd") or [])
     if not isinstance(sc, list) or not sc:
@@ -553,6 +581,29 @@ def _serve_cmd_mismatch(u, cmd):
         sc_port = _flag_after(sc, "--port", "")
         if sc_port and sc_port != port:
             return f"serve_cmd --port {sc_port!r} != unit port {port!r}"
+    return ""
+
+
+def _serve_cmd_mismatch(u, cmd):
+    """'' if unit's serve_cmd agrees with its authoritative fields, else a reason.
+
+    ``serve_cmd`` in serving.json is a RECORDED artifact (the template apply
+    writes it for drift comparison) and is NEVER an execution source on the
+    fleet-up wake path — ``fleet_up_plan`` always builds each start command from
+    the unit's real ``recipe``/``nodes``/``port``. But a ``serve_cmd`` that
+    disagrees with those fields is a red flag (a rehosted unit, a changed
+    alias, a stale record) that must be surfaced loudly rather than silently
+    diverging. The placement half (recipe path, ``--hosts`` node set,
+    ``--port``) is :func:`_serve_cmd_placement_mismatch`, shared with the one
+    caller that DOES execute a record; the rest is compared here. Returns the
+    first mismatch found, or '' when they agree (or the unit has no serve_cmd).
+    """
+    sc = (u.get("serve_cmd") or [])
+    if not isinstance(sc, list) or not sc:
+        return ""
+    mism = _serve_cmd_placement_mismatch(u)
+    if mism:
+        return mism
     # The flags sparkrun folds into its INTENT HASH beyond recipe/hosts/port.
     # The apply path (cluster_template._render_serve_cmd) records them in
     # serve_cmd; this module derives them independently for the wake path. If
@@ -593,7 +644,7 @@ def _serve_cmd_mismatch(u, cmd):
     return ""
 
 
-def _unit_run_cmd(unit):
+def _unit_run_cmd(unit, prefer_serve_cmd=False):
     """The ``sparkrun run`` command that (re)starts a unit AS DEFINED.
 
     SINGLE source of truth for the launch command, shared by ``fleet_up_plan``
@@ -607,9 +658,41 @@ def _unit_run_cmd(unit):
     ``unit`` needs ``recipe``, ``nodes``, ``port``, and (for the served name /
     parallelism) ``model``, ``role``, ``tp``. ``fleet_up_plan``'s plan entries
     and ``keepalive_units``' per-node entries both provide these.
+
+    ``prefer_serve_cmd=True`` (the node-resume path only, t_09708c17) returns
+    the unit's RECORDED ``serve_cmd`` verbatim when it carries a usable one,
+    because a resume has to reproduce the EXACT argv the unit was launched with:
+    the field rebuild below derives the served names from the unit's own fields,
+    and for a ``uniform_pool`` unit those fields cannot reconstruct what the
+    apply path actually advertised — two names instead of three is a different
+    intent hash, so ``--ensure`` launches a DIFFERENT workload and the node
+    leaves the pool. The record is refused (and the rebuild used) when its
+    PLACEMENT disagrees with the unit's fields — see
+    :func:`_serve_cmd_placement_mismatch`; starting a model on the wrong node is
+    never what a stale record should cause. Every other caller leaves this False
+    and keeps the field rebuild, so the autodown-cycle rule that a bogus
+    ``serve_cmd`` must not be able to move the fleet still holds on those paths.
     """
+    if prefer_serve_cmd:
+        recorded = _recorded_launch_cmd(unit)
+        if recorded is not None:
+            why = _serve_cmd_placement_mismatch(unit)
+            if not why:
+                return recorded
+            _serving_warn(f"_unit_run_cmd: recorded serve_cmd for unit "
+                          f"{unit.get('id')!r} refused ({why}); derived "
+                          f"command issued")
     nodes = [n for n in (unit.get("nodes") or []) if n]
-    cmd = ["sparkrun", "run", unit["recipe"], "--cluster", HSCC_CLUSTER,
+    # expanduser the recipe (t_09708c17): serving.json is operator-editable and
+    # stores "~/…" for some units, but this argv is executed WITHOUT a shell, so
+    # a literal tilde reaches sparkrun and it answers "Recipe '~…' not found".
+    # Every other recipe read in this module already expands; this builder was
+    # the gap. Non-string values pass through untouched (a unit with no recipe
+    # must fail the way it fails today, not here).
+    recipe = unit["recipe"]
+    if isinstance(recipe, str):
+        recipe = os.path.expanduser(recipe)
+    cmd = ["sparkrun", "run", recipe, "--cluster", HSCC_CLUSTER,
            "--hosts", ",".join(nodes), "--port", str(unit["port"]),
            "--no-follow", "--ensure"]
     # --served-model-name <concrete> <role-alias>: carry the served model
@@ -617,8 +700,11 @@ def _unit_run_cmd(unit):
     # sanctioned template path renders them (cluster_template._render_serve_cmd).
     # This is what makes vLLM (re)started by a wake serve the alias, so the
     # 38 role profiles that pin worker-model / orchestrator-model keep
-    # working after an autodown cycle. The names come from the unit's own
-    # fields (role → alias, model/recipe → concrete), NEVER from serve_cmd.
+    # working after an autodown cycle. On the derived path the names come from
+    # the unit's own fields (role → alias, model/recipe → concrete) — never from
+    # serve_cmd. The resume path that DOES take the record
+    # (``prefer_serve_cmd``, above) is the operator's 11-22 ruling for resume
+    # only: reproduce the original launch, record included.
     smn = _served_model_name(unit)
     if smn:
         cmd.extend(["--served-model-name", smn])

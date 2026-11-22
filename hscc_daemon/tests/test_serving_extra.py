@@ -960,3 +960,161 @@ class TestFleetUpMaxNumSeqs:
         assert "max_num_seqs=8" not in cmd
         err = capsys.readouterr().err
         assert "serve_cmd" in err and "max_num_seqs" in err
+
+
+class TestResumeReproducesTheLaunchArgv:
+    """A node RESUME replays the unit's recorded launch argv (t_09708c17).
+
+    Two defects shipped in one argv on the operator's .246 resume, both produced
+    by the field rebuild in ``serving._unit_run_cmd``:
+
+    * **literal ``~``** — serving.json stored ``"~/…"`` for that unit and the
+      argv runs WITHOUT a shell, so sparkrun received a tilde character and
+      answered ``Recipe '~…' not found``;
+    * **the dropped alias** — the unit lives on a ``uniform_pool: true`` serving
+      and served concrete + ``worker-model`` + ``orchestrator-model``, but the
+      resume record is the serving.json unit AS STORED, which carries no
+      ``uniform_pool`` key (fleet_up_plan stamps it from the top level; the
+      resume path does not). Two names instead of three is a different intent
+      hash, so ``--ensure`` started a DIFFERENT workload and the node left the
+      orchestrator pool.
+
+    The operator's ruling for resume: reproduce the EXACT original launch argv,
+    so prefer the recorded ``serve_cmd`` when the unit carries one (the same
+    argv the apply path ran), and fall back to the field rebuild when it does
+    not. The fallback stays byte-identical so a unit without a record cannot
+    move, and every NON-resume consumer keeps deriving — ``serve_cmd`` must not
+    be able to move the fleet on the cluster-up / autodown paths (t_e1ff0e8e).
+
+    The recipe is a fake; the node is a documentation placeholder (RFC 5737).
+    """
+
+    RECIPE_TILDE = "~/sparkrun-local/recipes/local-fixed/lab-flash-solo-vllm.yaml"
+    RECIPE_ABS = os.path.expanduser(RECIPE_TILDE)
+    NODE = "192.0.2.246"
+    #: The serving.json unit AS STORED for the .246 shape: a ``~`` recipe, no
+    #: per-unit ``uniform_pool`` key (that flag is top-level), and a cap.
+    UNIT = {"id": "wk1", "role": "worker", "nodes": [NODE], "port": 8003,
+            "recipe": RECIPE_TILDE, "model": "lab/Flash-Next-NVFP4", "tp": 1,
+            "max_num_seqs": 5}
+    #: What the template apply actually launched: absolute recipe, all THREE
+    #: served names, the cap last (``cluster_template._render_serve_cmd``).
+    LAUNCH = ["sparkrun", "run", RECIPE_ABS, "--cluster", "hscc",
+              "--hosts", NODE, "--port", "8003", "--no-follow", "--ensure",
+              "--served-model-name",
+              "lab/Flash-Next-NVFP4 worker-model orchestrator-model",
+              "--tp", "1", "-o", "max_num_seqs=5"]
+
+    def test_resume_argv_is_the_recorded_launch_argv_byte_for_byte(self):
+        """The acceptance pin: resume argv == the original launch argv."""
+        from hscc_daemon import serving
+        got = serving._unit_run_cmd(dict(self.UNIT, serve_cmd=self.LAUNCH),
+                                    prefer_serve_cmd=True)
+        assert got == self.LAUNCH
+        # Byte-level, not just structural: this is the argv that gets exec'd.
+        assert " ".join(got).encode("utf-8") == \
+            " ".join(self.LAUNCH).encode("utf-8")
+        # And the defect, in one line: the SAME unit rebuilt from its own
+        # fields lost the orchestrator alias, which is a different intent hash.
+        assert serving._flag_after(got, "--served-model-name") == \
+            "lab/Flash-Next-NVFP4 worker-model orchestrator-model"
+        assert serving._flag_after(serving._unit_run_cmd(dict(self.UNIT)),
+                                   "--served-model-name") == \
+            "lab/Flash-Next-NVFP4 worker-model"
+
+    def test_a_literal_tilde_never_reaches_the_argv_derived(self):
+        """DEFECT 1's regression pin, builder side: no record ⇒ rebuild, and
+        the rebuild must still hand sparkrun a path it can open."""
+        from hscc_daemon import serving
+        got = serving._unit_run_cmd(dict(self.UNIT))
+        assert "~" not in " ".join(got)
+        assert got[2] == self.RECIPE_ABS
+
+    def test_a_recorded_tilde_recipe_is_expanded_too(self):
+        """A record written with ``~`` in it is copied with the path opened up:
+        preferring the record must not re-import DEFECT 1 through the door the
+        fix came in by."""
+        from hscc_daemon import serving
+        recorded = list(self.LAUNCH)
+        recorded[2] = self.RECIPE_TILDE
+        got = serving._unit_run_cmd(dict(self.UNIT, serve_cmd=recorded),
+                                    prefer_serve_cmd=True)
+        assert "~" not in " ".join(got)
+        assert got[2] == self.RECIPE_ABS
+
+    def test_the_fallback_rendering_is_pinned(self):
+        """No record ⇒ the field rebuild, EXACTLY as it rendered before this
+        card. Pinning it verbatim is what lets the record-preferring change be
+        reviewed as a non-change for every unit that has no record."""
+        from hscc_daemon import serving
+        expected = ["sparkrun", "run", self.RECIPE_ABS, "--cluster",
+                    serving.HSCC_CLUSTER, "--hosts", self.NODE, "--port",
+                    "8003", "--no-follow", "--ensure", "--served-model-name",
+                    "lab/Flash-Next-NVFP4 worker-model", "--tp", "1",
+                    "-o", "max_num_seqs=5"]
+        assert serving._unit_run_cmd(dict(self.UNIT)) == expected
+        assert serving._unit_run_cmd(dict(self.UNIT),
+                                     prefer_serve_cmd=True) == expected
+
+    def test_a_stale_placement_record_is_refused_and_said_loudly(self,
+                                                                 capsys):
+        """The record is trusted for WHAT was launched, never for WHERE.
+
+        A record whose ``--hosts``/``--port``/recipe no longer match the unit's
+        fields is a rehosted or stale unit; executing it could start a model on
+        a node nobody declared. So the placement half is refused, the derived
+        command is issued, and the reason is printed — the same
+        "refuse a corrupt record, stay loud" rule ``fleet_up_plan`` applies.
+        """
+        from hscc_daemon import serving
+        stale = list(self.LAUNCH)
+        stale[stale.index("--hosts") + 1] = "192.0.2.247"
+        got = serving._unit_run_cmd(dict(self.UNIT, serve_cmd=stale),
+                                    prefer_serve_cmd=True)
+        assert serving._flag_after(got, "--hosts") == self.NODE
+        assert got != stale
+        err = capsys.readouterr().err
+        assert "serve_cmd" in err and "refused" in err and "--hosts" in err
+
+    def test_a_record_that_is_not_a_usable_launch_argv_is_not_executed(self):
+        """Half-records are NOT half-trusted: anything that is not a
+        ``["sparkrun", "run", <recipe>, …]`` argv of strings goes to the rebuild
+        rather than into a child process."""
+        from hscc_daemon import serving
+        bad = ["sparkrun run x.yaml", ["sparkrun", "stop", "x.yaml"],
+               ["sparkrun", "run"], ["sparkrun", "run", None],
+               {"recipe": "x.yaml"}, 0]
+        for record in bad:
+            got = serving._unit_run_cmd(dict(self.UNIT, serve_cmd=record),
+                                        prefer_serve_cmd=True)
+            assert got[2] == self.RECIPE_ABS, record
+            assert serving._flag_after(got, "--hosts") == self.NODE, record
+
+    def test_the_alias_drift_canary_still_reports_a_differing_record(self):
+        """The canary survives the new trust: for the paths that DERIVE, a
+        record whose served names disagree is still reported — that comparison
+        is what makes this whole class of drift visible in the first place."""
+        from hscc_daemon import serving
+        derived = serving._unit_run_cmd(dict(self.UNIT))
+        assert serving._serve_cmd_mismatch(
+            dict(self.UNIT, serve_cmd=self.LAUNCH), derived) == \
+            "serve_cmd --served-model-name 'lab/Flash-Next-NVFP4 worker-model " \
+            "orchestrator-model' != derived 'lab/Flash-Next-NVFP4 worker-model'"
+
+    def test_every_other_consumer_still_derives(self, capsys):
+        """``fleet_up_plan`` (``hscc cluster up``, autodown's wake) must NOT
+        start trusting the record: the autodown-cycle rule that a bogus
+        ``serve_cmd`` cannot move the fleet holds there, and only resume
+        prefers it."""
+        from hscc_daemon import serving
+        bogus = list(self.LAUNCH)
+        bogus[bogus.index("--served-model-name") + 1] = "not-what-was-declared"
+        plan = serving.fleet_up_plan({"version": 3, "uniform_pool": True,
+                                      "units": [dict(self.UNIT,
+                                                     serve_cmd=bogus)]})
+        cmd = plan[0]["cmd"]
+        assert "not-what-was-declared" not in " ".join(cmd)
+        assert serving._flag_after(cmd, "--served-model-name") == \
+            "lab/Flash-Next-NVFP4 worker-model orchestrator-model"
+        err = capsys.readouterr().err
+        assert "serve_cmd refused" in err

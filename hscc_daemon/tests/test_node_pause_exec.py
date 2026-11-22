@@ -21,6 +21,7 @@ import inspect
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -1009,10 +1010,30 @@ def fake_fleet(tmp_path, monkeypatch):
     call_log.write_text("")
 
     cli = bin_dir / "sparkrun"
+    # The fake is STRICTER than the real CLI in one way, on purpose
+    # (t_09708c17): a literal '~' in any argv token exits non-zero, the way
+    # sparkrun answers ``Recipe '~…' not found`` when a shell never expanded it.
+    # Every recipe-bearing argv in this feature must therefore be tilde-free
+    # before it reaches a child — that is DEFECT 1's regression pin, and the
+    # fake's bite is proven by TestTildeIsRejectedByTheFakeCli.
+    # ``FAKE_HANG`` reproduces DEFECT 3: a client that never returns while the
+    # container it launched is already serving. It records its pid into
+    # ``FAKE_PID_FILE`` the moment it reaches the hang, which is how a test can
+    # tell "the client got as far as hanging" (the stand-in for the unit being
+    # up and answering) from "the client never started".
     cli.write_text("#!" + sys.executable + "\n"
-                   "import os, sys\n"
+                   "import os, sys, time\n"
                    "with open(os.environ['FAKE_CALL_LOG'], 'a') as f:\n"
-                   "    f.write('sparkrun ' + ' '.join(sys.argv[1:]) + '\\n')\n")
+                   "    f.write('sparkrun ' + ' '.join(sys.argv[1:]) + '\\n')\n"
+                   "tilde = [a for a in sys.argv[1:] if '~' in a]\n"
+                   "if tilde:\n"
+                   "    sys.stderr.write('Recipe not found: %s\\n' % tilde[0])\n"
+                   "    sys.exit(3)\n"
+                   "if os.environ.get('FAKE_HANG'):\n"
+                   "    if os.environ.get('FAKE_PID_FILE'):\n"
+                   "        with open(os.environ['FAKE_PID_FILE'], 'w') as f:\n"
+                   "            f.write(str(os.getpid()))\n"
+                   "    time.sleep(float(os.environ['FAKE_HANG']))\n")
     cli.chmod(0o755)
     assert os.path.realpath(shutil.which("sparkrun") or "") != \
         os.path.realpath(str(cli)), \
@@ -1151,4 +1172,317 @@ class TestNoLocalDockerFallback:
         code = self._code_only(inspect.getsource(npe))
         assert "_SPARKRUN_STATUS_SCRIPT" in code
         assert "_sparkrun_venv_python" in code
+
+
+# ── t_09708c17: the resume argv must BE the launch argv ────────────────────
+#: A uniform_pool node, as the operator's live report describes it. RFC 5737;
+#: the recipe name is a fake (the operator's real one must not be committed).
+#: Prefixed RESUME_ rather than POOL_ because this file already has a
+#: uniform_pool fixture set (POOL_SERVING/pool_plan) that these must not shadow.
+RESUME_NODE = "192.0.2.16"
+RESUME_RECIPE_TILDE = \
+    "~/sparkrun-local/recipes/local-fixed/lab-flash-solo-vllm.yaml"
+RESUME_RECIPE_ABS = os.path.expanduser(RESUME_RECIPE_TILDE)
+RESUME_SERVED = "lab/Flash-Next-NVFP4 worker-model orchestrator-model"
+#: The unit AS serving.json stores it for a uniform_pool fleet: a ``~`` recipe,
+#: and no per-unit ``uniform_pool`` key (that flag is top-level, and the resume
+#: record is the unit as stored — which is exactly why the field rebuild dropped
+#: the orchestrator alias).
+RESUME_UNIT = {"id": "pool1", "role": "worker", "nodes": [RESUME_NODE],
+               "port": 8003, "recipe": RESUME_RECIPE_TILDE,
+               "model": "lab/Flash-Next-NVFP4", "tp": 1, "max_num_seqs": 5}
+#: The argv the template apply really launched (the shape
+#: ``cluster_template._render_serve_cmd`` records).
+RESUME_LAUNCH = ["sparkrun", "run", RESUME_RECIPE_ABS, "--cluster", "hscc",
+                 "--hosts", RESUME_NODE, "--port", "8003", "--no-follow",
+                 "--ensure", "--served-model-name", RESUME_SERVED, "--tp", "1",
+                 "-o", "max_num_seqs=5"]
+
+
+def resume_pool_payload():
+    groups = {}
+    groups.update(group("cid_pool", RESUME_RECIPE_ABS, [RESUME_NODE], 8003,
+                        model="lab/Flash-Next-NVFP4", served=RESUME_SERVED,
+                        tp=1))
+    return status_payload(groups=groups, idle=[RESUME_NODE])
+
+
+def resume_pool_plan(serve_cmd=None):
+    """The plan for the uniform_pool node, with or without a stored record."""
+    unit = dict(RESUME_UNIT)
+    if serve_cmd is not None:
+        unit["serve_cmd"] = list(serve_cmd)
+    return npe.plan(RESUME_NODE,
+                    serving_dict={"version": 3, "uniform_pool": True,
+                                  "units": [unit]},
+                    status_reader=reader(resume_pool_payload()))
+
+
+class TestResumeReplaysTheRecordedLaunchArgv:
+    """The .246 resume, at the executor seam (DEFECTS 1 and 2)."""
+
+    def _unit(self, serve_cmd=None):
+        return unit_of(resume_pool_plan(serve_cmd), "pool1")
+
+    def test_resume_cmd_is_the_recorded_launch_argv_byte_for_byte(self):
+        """The acceptance pin: what resume runs == what was originally run."""
+        u = self._unit(RESUME_LAUNCH)
+        assert u["resume_cmd"] == RESUME_LAUNCH
+        assert " ".join(u["resume_cmd"]).encode("utf-8") == \
+            " ".join(RESUME_LAUNCH).encode("utf-8")
+        assert "~" not in " ".join(u["resume_cmd"])
+        # All THREE names ride, so --ensure re-issues the same workload instead
+        # of starting a different one and dropping the node out of the pool.
+        assert serving._flag_after(u["resume_cmd"],
+                                   "--served-model-name") == RESUME_SERVED
+
+    def test_the_record_is_what_carries_the_alias_the_fields_cannot(self):
+        """Rebuilt from this unit's own fields the argv serves TWO names — the
+        defect. The record is the only place the third name exists for a stored
+        uniform_pool unit, which is the operator's reason resume replays it."""
+        u = self._unit(RESUME_LAUNCH)
+        rebuilt = serving._unit_run_cmd(dict(RESUME_UNIT,
+                                             nodes=[RESUME_NODE], port=8003,
+                                             tp=1))
+        assert serving._flag_after(rebuilt, "--served-model-name") == \
+            "lab/Flash-Next-NVFP4 worker-model"
+        assert u["resume_cmd"] != rebuilt
+
+    def test_a_unit_with_no_record_still_gets_an_openable_path(self):
+        """DEFECT 1 is fixed on the fallback too, not only on the record path:
+        a ``~`` in serving.json must never reach a child process.
+
+        The residual this case deliberately does NOT bless: with no record the
+        fallback still serves two names for a stored uniform_pool unit, so such
+        a unit resumes out of the pool. Flagged on the card — it needs the
+        operator's ruling on stamping ``uniform_pool`` into the resume record.
+        """
+        u = self._unit()
+        assert "~" not in " ".join(u["resume_cmd"])
+        assert u["resume_cmd"][2] == RESUME_RECIPE_ABS
+
+
+class TestTildeIsRejectedByTheFakeCli:
+    """DEFECT 1's regression pin at the transport: the planted CLI refuses a
+    literal ``~`` the way sparkrun does, so an argv that still carries one
+    cannot pass — through the production exec path, not a mocked one."""
+
+    def test_the_planted_cli_rejects_a_literal_tilde(self, fake_fleet):
+        """The pin bites: same CLI, same argv shape, tilde in ⇒ exit 3."""
+        import subprocess
+        bad = subprocess.run([str(fake_fleet["cli"]), "run",
+                              RESUME_RECIPE_TILDE], capture_output=True,
+                             text=True, timeout=60)
+        assert bad.returncode == 3
+        assert "Recipe not found" in bad.stderr
+        good = subprocess.run([str(fake_fleet["cli"]), "run",
+                               RESUME_RECIPE_ABS], capture_output=True,
+                              text=True, timeout=60)
+        assert good.returncode == 0
+
+    def test_an_applied_resume_never_hands_the_cli_a_literal_tilde(
+            self, fake_fleet):
+        """The real path: unit stored with a ``~`` recipe, no record ⇒ derived
+        argv, executed through ``util.run_cmd``'s sparkrun resolution. The strict
+        fake answers 0 only because the path arrived expanded."""
+        u = unit_of(resume_pool_plan(), "pool1")
+        res = npe.resume_units([u], apply=True, echo=Lines(),
+                               serving_probe=lambda node, port: False)
+        assert res["ok"] is True, res["units"][0]["error"]
+        log = fake_fleet["log"].read_text()
+        runs = [line for line in log.splitlines()
+                if line.startswith("sparkrun run")]
+        assert len(runs) == 1
+        assert "~" not in log
+        assert RESUME_RECIPE_ABS in runs[0]
+
+    def test_the_pin_bites_an_argv_that_still_carries_a_tilde(self,
+                                                             fake_fleet):
+        """The control for the case above: a resume argv that DOES carry the
+        tilde fails through the same call, so the green case is not vacuous."""
+        broken = list(RESUME_LAUNCH)
+        broken[2] = RESUME_RECIPE_TILDE
+        units = [{"unit_id": "pool1", "nodes": [RESUME_NODE], "port": 8003,
+                  "resume_cmd": broken}]
+        res = npe.resume_units(units, apply=True, echo=Lines(),
+                               serving_probe=lambda node, port: False)
+        assert res["ok"] is False
+        assert "Recipe not found" in res["units"][0]["error"]
+
+
+# ── t_09708c17 DEFECT 3: a wedged launch client must not wedge the resume ───
+class TestBoundedLaunchWait:
+    """``sparkrun run`` is a CLIENT, and a client can sit on its child ssh
+    session for tens of minutes after the container it launched is serving
+    (the operator's .246 launch: up in 10 min, client killed at 40).
+
+    So the resume's success signal is the unit answering its own ``/v1/models``,
+    the wait is bounded, and a client that had to be cut loose is reported as
+    such — never a silent kill, never a false "relaunch failed".
+    """
+
+    @staticmethod
+    def _units(nodes=(RESUME_NODE,), port=8003):
+        return [{"unit_id": "pool1", "nodes": list(nodes), "port": port,
+                 "resume_cmd": RESUME_LAUNCH, "observed": False}]
+
+    @staticmethod
+    def _wedged_client(cmd, timeout=None, ready=None, **kw):
+        """A ``run`` standing in for a client that never returns: the only ways
+        out are the probe turning true or the bound expiring."""
+        deadline = time.monotonic() + (timeout or 0)
+        while time.monotonic() < deadline:
+            if ready is not None and ready():
+                return {"ok": True, "output": "", "stderr": "",
+                        "detached": True, "timed_out": False,
+                        "verified_by": "health probe"}
+            time.sleep(0.02)
+        return {"ok": False, "output": f"Command timed out after {timeout}s",
+                "stderr": "", "detached": True, "timed_out": True}
+
+    def test_a_wedged_client_is_cut_loose_and_the_probe_proves_the_restart(
+            self, fake_fleet, monkeypatch, tmp_path):
+        """The card's case: a REAL child that never exits, and a fake container
+        that answers only once it is up.
+
+        The planted CLI hangs forever and writes its pid the moment it reaches
+        the hang — the stand-in for "the container has come up and answers
+        ``/v1/models``", so the probe is driven by the fake unit, not by the
+        test waving it true.
+        """
+        monkeypatch.setenv("FAKE_HANG", "300")
+        up = tmp_path / "wedged-pid"
+        monkeypatch.setenv("FAKE_PID_FILE", str(up))
+        # A bound well above the ~2 s the fake takes to reach its hang, and far
+        # below production's: a regression that ignores the probe fails the
+        # early-exit assertion in 30 s instead of 240.
+        monkeypatch.setattr(npe, "SPARKRUN_LAUNCH_WAIT_TIMEOUT", 30)
+        asked = []
+
+        def probe(node, port):
+            asked.append((str(node), port))
+            return up.exists()
+
+        lines = Lines()
+        started = time.monotonic()
+        res = npe.resume_units(self._units(), apply=True, echo=lines,
+                               serving_probe=probe)
+        assert res["ok"] is True, res["units"][0]["error"]
+        assert res["units"][0]["detached"] is True
+        assert res["units"][0]["verified_by"] == "health probe"
+        assert res["units"][0]["error"] is None
+        # The client really was the planted fake, really reached its hang, and
+        # really ran the argv the record supplied.
+        assert up.exists(), "the client never reached its hang"
+        assert res["units"][0]["cmd"] == RESUME_LAUNCH
+        assert [l for l in fake_fleet["log"].read_text().splitlines()
+                if l.startswith("sparkrun run")]
+        # The probe ended the wait, not the bound — and no real endpoint was
+        # asked: the probe only ever saw the placeholder node and its port.
+        assert time.monotonic() - started < 10
+        assert asked and set(asked) == {(RESUME_NODE, 8003)}
+        assert any("cut loose" in line and "health probe" in line
+                   for line in lines.lines), lines.text
+        assert any("not by the client" in line for line in lines.lines)
+        # The signal reached the CLIENT and nothing else: the fake is gone.
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(up.read_text()), 0)
+
+    def test_a_wedged_client_with_no_answer_is_unconfirmed_never_a_hang(
+            self, fake_fleet, monkeypatch):
+        """Same child, unit never answers: the resume fails — and says what it
+        cut loose and what it could not prove, rather than hanging or quietly
+        killing."""
+        monkeypatch.setenv("FAKE_HANG", "300")
+        monkeypatch.setattr(npe, "SPARKRUN_LAUNCH_WAIT_TIMEOUT", 3)
+        lines = Lines()
+        started = time.monotonic()
+        res = npe.resume_units(self._units(), apply=True, echo=lines,
+                               serving_probe=lambda node, port: False)
+        assert res["ok"] is False
+        assert time.monotonic() - started < 30
+        row = res["units"][0]
+        assert row["detached"] is True
+        assert "timed out after 3s" in row["error"]
+        assert any("NOT confirmed" in line for line in lines.lines), lines.text
+
+    def test_the_launch_gets_the_launch_bound_and_the_probe(self):
+        """The plumbing contract on the ``run`` seam: resume passes the bounded
+        launch wait plus the readiness probe; a stop does not."""
+        calls = []
+
+        def run(cmd, timeout=None, ready=None, **kw):
+            calls.append({"timeout": timeout, "ready_given": ready is not None})
+            return {"ok": True, "output": "", "stderr": ""}
+
+        npe.resume_units(self._units(), apply=True, echo=Lines(), run=run,
+                         serving_probe=lambda node, port: True)
+        assert calls == [{"timeout": npe.SPARKRUN_LAUNCH_WAIT_TIMEOUT,
+                          "ready_given": True}]
+        calls.clear()
+        npe.stop_units([{"unit_id": "pool1", "nodes": [RESUME_NODE],
+                         "port": 8003,
+                         "stop_cmd": ["sparkrun", "stop", RESUME_RECIPE_ABS]}],
+                       apply=True, echo=Lines(), run=run)
+        assert calls == [{"timeout": npe.SPARKRUN_CONTROL_TIMEOUT,
+                          "ready_given": False}]
+
+    def test_a_span_is_only_verified_when_every_node_it_spans_answers(self,
+                                                                       monkeypatch):
+        """Declaring a restart verified while one node of the same model is
+        down would be a lie, so all of them have to answer."""
+        monkeypatch.setattr(npe, "SPARKRUN_LAUNCH_WAIT_TIMEOUT", 3)
+
+        def probe(node, port):
+            return str(node) == W1
+
+        row = npe.resume_units(self._units(nodes=(W1, W2)), apply=True,
+                               echo=Lines(), run=self._wedged_client,
+                               serving_probe=probe)["units"][0]
+        assert row["ok"] is False and row["detached"] is True
+
+    def test_a_unit_the_probe_cannot_ask_about_keeps_the_plain_wait(self):
+        """No port ⇒ no probe ⇒ the control-call bound and today's shape."""
+        calls = []
+
+        def run(cmd, timeout=None, ready=None, **kw):
+            calls.append({"timeout": timeout, "ready_given": ready is not None})
+            return {"ok": True, "output": "", "stderr": ""}
+
+        units = [{"unit_id": "pool1", "nodes": [RESUME_NODE], "port": None,
+                  "resume_cmd": RESUME_LAUNCH}]
+        assert npe.resume_units(units, apply=True, echo=Lines(),
+                                run=run)["ok"] is True
+        assert calls == [{"timeout": npe.SPARKRUN_CONTROL_TIMEOUT,
+                          "ready_given": False}]
+
+    def test_the_probe_is_a_plain_get_of_the_units_own_endpoint(
+            self, monkeypatch):
+        """``unit_is_serving`` asks the unit, over HTTP, and nothing else: not
+        the proxy, not sparkrun, not an alias comparison."""
+        asked = []
+
+        def fake_http_check(url, timeout=5):
+            asked.append(url)
+            return {"ok": True, "status": 200}
+
+        monkeypatch.setattr(util, "http_check", fake_http_check)
+        assert npe.unit_is_serving(RESUME_NODE, 8003) is True
+        assert asked == [f"http://{RESUME_NODE}:8003/v1/models"]
+
+    def test_an_endpoint_that_is_not_200_is_not_serving(self, monkeypatch):
+        monkeypatch.setattr(util, "http_check",
+                            lambda url, timeout=5: {"ok": True, "status": 503})
+        assert npe.unit_is_serving(RESUME_NODE, 8003) is False
+        monkeypatch.setattr(util, "http_check",
+                            lambda url, timeout=5: {"ok": False,
+                                                    "output": "refused"})
+        assert npe.unit_is_serving(RESUME_NODE, 8003) is False
+
+        def explode(url, timeout=5):
+            raise OSError("no route to host")
+
+        monkeypatch.setattr(util, "http_check", explode)
+        assert npe.unit_is_serving(RESUME_NODE, 8003) is False, \
+            "a probe that cannot ask must answer 'not up', never raise"
 
