@@ -75,7 +75,9 @@ task: t_eec97ea8
   §3.1 wake-claim skip. Targeted trio `test_autodown.py` +
   `test_autodown_paused_wake.py` + the new file: **239 passed** (221 pre-existing
   + 18 new), including `test_only_the_wake_path_consults_the_overlay`, which was
-  left intact rather than relaxed.
+  left intact rather than relaxed. The delta is exactly the new file: the same
+  leg on a detached `origin/main` worktree at `abcc9004` measures **4501 passed,
+  1 skipped in 180.13s**, so 4501 + 18 = 4519 with the skip count unchanged.
 - **Red at base: 18 of 18.** The new file run against a detached `origin/main`
   worktree at `abcc9004` fails every item (`TypeError: unexpected keyword
   argument 'pauses_directory'` / the exemption absent) — the whole file is the
