@@ -40,6 +40,7 @@ from contextlib import redirect_stdout
 import pytest
 from rich.errors import MarkupError
 
+from rich_layout import _says
 from flightdeck.commands import _theme
 from flightdeck.commands import archive as archive_cmd
 from flightdeck.commands import daemon as daemon_cmd
@@ -77,6 +78,30 @@ def _run(fn):
 
 def _assert_literal(out, value=MARK_CLOSE):
     assert value in out, f"markup not rendered literally: {out!r}"
+
+
+def _assert_literal_folded(out, anchor, value=MARK_CLOSE):
+    """``_assert_literal`` for a value that sits INSIDE a machine path.
+
+    A repo path / roadmap path is printed inside a Panel body, so the position
+    where Rich breaks the row is set by the data in the row — and on these
+    commands the data is ``tmp_path``. Once the path is longer than the render
+    width is wide, Rich FOLDS it mid-token: no space at the break, so the value
+    is on the page but not contiguous, and a raw ``in`` goes red while the row
+    still says it. Measured at t_89804ce6 (verbatim tee of the render — pytest's
+    own ``E`` line middle-elides the repr, which is what made this look like a
+    clip): ``repo[`` ⏎ ``/bold]/ROADMAP.md`` and ``…/repoa`` ⏎
+    ``[bold]b[/bold]c/ROADMAP.md.bak``.
+
+    ``anchor`` stays RAW: it is a short word of the same row that nothing can
+    fold, and it is the proof the view rendered at all. A reflowed assert is
+    never allowed to be the only evidence. The escape guarantee itself is still
+    enforced by the caller — an unescaped ``[/bold]`` raises ``MarkupError``
+    through ``_run`` before any assert runs.
+    """
+    assert anchor in out, f"view did not render (anchor missing): {out!r}"
+    assert _says(out, value), \
+        f"markup not rendered literally, not even folded: {out!r}"
 
 
 def _assert_no_swallow(out, marker=MARK_BOTH):
@@ -301,7 +326,11 @@ def test_roadmap_add_path_and_heading_survive(monkeypatch, tmp_path):
     args = argparse.Namespace(project="alpha", item="a new item",
                               section="now", apply=True, func=roadmap_cmd.cmd_add)
     out = _run(lambda: roadmap_cmd.run(args, reg))
-    _assert_literal(out)
+    # The path and the heading share one panel row, so a deep tmp root folds the row
+    # inside the path (`repo[` ⏎ `/bold]/ROADMAP.md` at tmp root 190) — the `[/bold]`
+    # is printed, just across the break. See _assert_literal_folded for why the fold
+    # needs _says and why the anchor stays raw.
+    _assert_literal_folded(out, "added a new item")
 
 
 def test_roadmap_adopt_backup_path_survives(tmp_path):
@@ -321,9 +350,14 @@ def test_roadmap_adopt_backup_path_survives(tmp_path):
     args = argparse.Namespace(project="alpha", apply=True,
                               func=roadmap_cmd.cmd_adopt)
     out = _run(lambda: roadmap_cmd.run(args, reg))
-    _assert_literal(out, MARK_BOTH)
+    # Both the value and the `.bak` line are paths inside a panel row, so a deep tmp
+    # root folds them mid-token — measured: `…/repoa` ⏎ `[bold]b[/bold]c/ROADMAP.md.bak`
+    # (red at tmp roots 161..163 and 176..190; the break falls inside the value at
+    # those lengths and outside it elsewhere, which is why the raw assert flickered).
+    # "backed up" is the backup row's own leading words and never folds.
+    _assert_literal_folded(out, "backed up", MARK_BOTH)
     # the .bak line is a second path render and must survive too
-    assert ".bak" in out, f"backup line missing: {out!r}"
+    assert _says(out, ".bak"), f"backup line missing: {out!r}"
 
 
 def test_archive_sessions_counts_and_index_path_survive(monkeypatch, tmp_path):
