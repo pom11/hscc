@@ -124,6 +124,11 @@ hscc-roles/tests/test_main_orch.py:206: AssertionError
 and #589 merged over it, and why the sibling card had to explain a failure it
 did not cause in its own PR body.
 
+The same CI leg at this branch (`leg hscc-roles`, run 44997073173) reads
+`1 failed, 345 passed, 10 skipped` with only
+`test_resolver_env_registry_override` named — the guard case is green in CI too,
+and the arithmetic is exactly the one failure this card owned.
+
 Two things follow, both deliberately left out of this card:
 
 - **Flipping `HSCC_TESTS_ENFORCE` to `true`** (and requiring the check) is a
@@ -136,7 +141,10 @@ Two things follow, both deliberately left out of this card:
   registry and not the 'general' sentinel`, raised at `orchestrators.py:160`).
   It passes in the local roster posture — it is one of the 356 above — and
   fails only in CI's, where `hermes_cli` is not importable (the source of the
-  leg's 10 skips). Cause **not** investigated here; filed as a follow-up card.
+  leg's 10 skips). Cause **not** investigated here; filed as follow-up card
+  **t_4b70e8d4**, with the enforcement decision itself on **t_1cb8686f**
+  (assignee @hscc-orch, gated on t_4b70e8d4 so a gate is not switched on while a
+  CI-only failure is still standing).
 
 ## Follow-ups noticed, deliberately not done here
 
