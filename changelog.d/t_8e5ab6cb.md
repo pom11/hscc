@@ -36,4 +36,39 @@ task: t_8e5ab6cb
   thread `node_pauses`' own explicit overlay-root seam through to the seam and
   on into `heal_breaker.note_heal()`, so the daemon (reader) and the CLI
   (writer) agree on one root instead of each reading an env var per process.
-  `None` is the default `~/.hscc`.
+  `None` is the default `~/.hscc`, which is what the daemon's dispatch table
+  passes.
+---
+kind: Verified
+task: t_8e5ab6cb
+
+* 23 new tests in `hscc_daemon/tests/test_health_repair_node_pause_t_8e5ab6cb.py`
+  pin both directions on all three paths: a parked node takes no lease, counts no
+  strike and gets no force-recreate, no `sparkrun stop` + re-issue and no
+  `proxy start`; the same node with no pause — and a node beside the parked one —
+  is repaired exactly as before. The lease is asserted separately from the heal,
+  so a seam that skipped only *after* acquiring the lease (still deferring real
+  repairs elsewhere in the fleet) cannot pass. Three span-sibling cases assert
+  `paused()` and `covering()` disagree on that node and that the behaviour
+  follows `covering`, so swapping the two reddens this file — the same pin #565
+  and #568 make. The overlay is asserted read-only, the workers and proxy streams
+  are asserted truthful (`paused`, reason, not-a-failed-relaunch, cooldown stamp
+  carried forward rather than re-stamped), and the fail-open half is pinned from
+  both sides: a malformed overlay leaves the repair armed and its WARN reaches
+  the log. Default-root cases (the daemon's own configuration, no
+  `pause_directory`) guard-assert the root is conftest's tmp dir before writing.
+  All hosts TEST-NET-1 (192.0.2.0/24); no node, sparkrun, ssh or real `~/.hscc`
+  touched; the file is green run alone as well as in-leg.
+* Mutation-probed on a copy of the worktree, one mutant at a time, pristine
+  restored and verified byte-for-byte afterwards: 10/10 load-bearing mutants
+  caught. Deleting the auto-heal seam (7 red), the relaunch seam (3), or the
+  proxy seam (1); `covering()` → `paused()` reddening exactly the three
+  span-sibling pins; "any pause disarms every node" over-suppression reddening
+  the pause-elsewhere pins (5); the seam moved below the lease (7); the workers
+  stream no longer naming the skip (1); the proxy `paused` key hardcoded (1); a
+  pause tick re-stamping the durable cooldown (1); fail-open inverted so a
+  corrupt overlay freezes the repair (6). One probe is reported as
+  expected-survived rather than hidden: dropping the threaded root from
+  `heal_breaker.note_heal()` inside `_note_heal_action` stays green, because
+  #568's accrual guard behind it is already suppressed for a parked node — that
+  threading is defence-in-depth for a future caller, not the load-bearing gate.

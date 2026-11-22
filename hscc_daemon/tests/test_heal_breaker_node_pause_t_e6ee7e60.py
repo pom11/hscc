@@ -331,11 +331,13 @@ class TestFailOpenDirection:
 
 
 class TestDefaultRootIsTheOneTheDaemonUses:
-    """``health._note_heal_action()`` calls ``note_heal(node)`` with NO
-    directory — production reads the default root. A seam that only worked when
-    a caller threaded a directory would be a seam nobody uses, so the default
-    path is pinned too, including the guard that the root under test is the
-    conftest-sealed tmp root and not the operator's real ``~/.hscc``."""
+    """``health._note_heal_action()`` reaches ``note_heal`` with the overlay root
+    the daemon has — which in production is ``None``, i.e. the default root
+    (t_8e5ab6cb added the threading; it changed no production root). Production
+    reads the default root. A seam that only worked when a caller threaded a
+    directory would be a seam nobody uses, so the default path is pinned too,
+    including the guard that the root under test is the conftest-sealed tmp root
+    and not the operator's real ``~/.hscc``."""
 
     def test_a_pause_at_the_default_root_suppresses_accrual(self, ledger,
                                                             tmp_hfcc_dir,
