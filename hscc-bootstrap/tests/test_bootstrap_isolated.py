@@ -9,51 +9,52 @@ installer.
 
 Isolation is HERMES_HOME / HSCC_DIR / HERMES_SCRIPTS pointed into tmp.
 
-HOME is deliberately NOT faked HERE, even though that would contain a helper that
-still hardcodes `expanduser("~/.hscc/...")`. What the seal does to that choice is
-worth stating, because it changed under t_5b560adf: the roster-wide HOME seal in
-`scripts/run_tests.sh` (PR #606) moves HOME for every leg, so this file DOES run under
-a fake home on a sealed roster — and preflight must then *survive* what it cannot see
-rather than assume the operator's machine. It now does: `sparkrun cluster default
---json` answers the literal `null` when there is no `~/.config/sparkrun`, and
-`doctor._sparkrun_default_cluster_matches_serving` treats a document that is not a
-mapping as "nothing to compare — skipped" instead of crashing (the crash is what made
-four cases here red the moment the leg stopped skipping them). Two controls still cover
-the helper-hardcoding gap this note is about:
-  * preventive: ``test_helpers_do_not_hardcode_the_home_paths`` fails on a new
-    hardcoded path, before it can ever run;
-  * detective: the live-state checksum assertion below fails if a run did
-    reach outside the sandbox.
+HERMES_BIN IS sealed, at a stub that refuses, and so is `sparkrun` — at a stub that
+answers with a fabricated cluster. Both are on the child's PATH/lookup order for the
+same reason: the run must not inherit the operator's machine.
 
-HERMES_BIN IS sealed, at a stub that refuses — and that seal is what keeps the
-fresh-home premise true at the stage that asserts it. `Install: main orchestrator
-board` shells out to the real Hermes CLI (`main_board.find_hermes_bin` →
-`hermes kanban boards create`), and that CLI initialises HERMES_HOME on first
-run: measured on this host, the stage alone wrote `<sandbox>/.hermes/config.yaml`
-(109 bytes: `_config_version` + the browser block) plus `kanban/`, SOUL.md and the
-cache dirs. Six stages later the wiring stage would then find a config.yaml that
-exists, wire it and print "config wired (...)" — true of that home, but not the
-fresh, never-installed home this test is named for. So the CLI is sealed off for
-the isolated run and the home stays config-less until the wiring stage looks at
-it. What the stub gives up is nothing this file asserts: the board stage's own
-contract — create-then-switch, idempotence, the HERMES_BIN/venv lookup order, and
-a real fake-CLI subprocess run — is pinned in test_main_board.py.
+`sparkrun` is the newer of the two seals (t_5b560adf). `doctor._sparkrun_cluster_ok`
+is FATAL and the installer's preflight runs before any stage, so the isolated run used
+to succeed only because the child inherited `PATH` and found the *operator's* real
+sparkrun with a cluster configured (`~/.config/sparkrun`). That is a home path: the
+roster-wide HOME seal (PR #606) removes it, and the four `@needs_runtime` cases here
+went red on `✗ FAILED: sparkrun cluster` the moment the leg stopped skipping them. The
+stub answers `cluster list` with TEST-NET placeholder hosts (the same shape
+`test_bootstrap_dry_run.py::_make_home` already uses), so preflight sees a configured
+cluster on every host and `--skip-node-recovery` no longer has to be the only thing
+standing between a pytest run and the live fleet.
+
+`HERMES_BIN` is the older one, and why that seal is load-bearing for
+``test_fresh_home_says_not_wired_instead_of_claiming_success`` is worth keeping in
+mind, because it is not obvious: `Install: main orchestrator board` shells out to the
+real Hermes CLI (`main_board.find_hermes_bin` → `hermes kanban boards create`), and
+that CLI initialises HERMES_HOME on first run: measured on this host, the stage alone
+wrote `<sandbox>/.hermes/config.yaml` (109 bytes: `_config_version` + the browser
+block) plus `kanban/`, SOUL.md and the cache dirs. Six stages later the wiring stage
+would then find a config.yaml that exists, wire it and print "config wired (...)" —
+true of that home, but not the fresh, never-installed home this test is named for. So
+the CLI is sealed off for the isolated run and the home stays config-less until the
+wiring stage looks at it. What the stub gives up is nothing this file asserts: the
+board stage's own contract — create-then-switch, idempotence, the HERMES_BIN/venv
+lookup order, and a real fake-CLI subprocess run — is pinned in test_main_board.py.
 
 Skipped steps and why:
   --skip-cli             installs a console script INTO the Hermes venv (shared, real)
   --skip-patches         patches the hermes-agent git checkout (shared, real)
   --skip-daemon          installs launchd/systemd units and restarts the live daemon
   --skip-node-recovery   SSHes the LIVE fleet to install panic-to-reboot sysctls
-                         (t_1fc3fe83: the isolated run has the operator's real
-                         sparkrun config, so without this flag a pytest run
-                         would arm reboot-on-panic on the actual nodes) and to
-                         arm the systemd hardware watchdog (t_ebbe38d1: same
-                         reason — a sandboxed test must never escalate to root
-                         over ssh on the operator's nodes)
+                         (t_1fc3fe83: a pytest run must never arm reboot-on-panic on
+                         the actual nodes) and to arm the systemd hardware watchdog
+                         (t_ebbe38d1: same reason — a sandboxed test must never
+                         escalate to root over ssh on the operator's nodes). Since
+                         t_5b560adf the child's `sparkrun` is a sandbox stub, so this
+                         flag is defence in depth rather than the only seal — the
+                         stage no longer has the real cluster to ssh to.
 Those four are the only steps that intentionally write outside the home.
 """
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -65,6 +66,14 @@ import hermes_tree
 
 REPO = Path(__file__).resolve().parent.parent.parent
 BOOTSTRAP = REPO / "hscc-bootstrap" / "bootstrap.sh"
+
+#: What the sealed `sparkrun` stub reports for `cluster list`: a cluster that exists
+#: only inside this sandbox. TEST-NET addresses (RFC 5737), never a real host — the
+#: same shape `test_bootstrap_dry_run.py::FAKE_CLUSTER` uses, so the two files cannot
+#: drift into one pinning a routable host and the other a placeholder.
+FAKE_CLUSTER = json.dumps([
+    {"name": "fabricated", "hosts": ["192.0.2.1"], "user": "op",
+     "cache_dir": "", "default": True}])
 
 #: What this file needs from the machine, in one place, so the collection-time
 #: gate and the call-time resolvers below state the SAME thing (hermes_tree).
@@ -116,12 +125,45 @@ def sandbox(tmp_path):
     # relocates sys.prefix and the venv's packages (rich, yaml) disappear.
     (hermes / "hermes-agent").symlink_to(hermes_tree.agent_dir_or_skip(CAPABILITY))
     return {"home": home, "hermes": hermes, "hscc": hscc,
-            "hermes_bin": _sealed_hermes_bin(home)}
+            "hermes_bin": _sealed_hermes_bin(home),
+            "sparkrun_bin": _sealed_sparkrun_bin(home)}
+
+
+def _sealed_sparkrun_bin(home: Path) -> Path:
+    """An executable `sparkrun` stand-in that answers with a fabricated cluster.
+
+    `_env` puts this directory FIRST on the child's PATH, so the installer's
+    preflight consults it instead of the operator's sparkrun. Why that is not
+    optional any more: `_sparkrun_cluster_ok` is FATAL, and a cluster lives under
+    `~/.config/sparkrun` — a home path — so an isolated run that inherited PATH was
+    only green on a machine that happened to have a cluster configured. The roster-wide
+    HOME seal (PR #606) makes every leg such a machine, and these four cases went red on
+    `✗ FAILED: sparkrun cluster`. The stub keeps the check *running* (it is a real
+    check, and a real install with no cluster must still fail it) while removing the
+    dependency on the operator's config. It answers only `cluster list`, like the
+    dry-run stub it is copied from; every other sparkrun call exits 0 with no output,
+    which doctor reads as "nothing to compare" and reports, not as a failure.
+    """
+    stub = home / "bin" / "sparkrun"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text(
+        "#!/bin/sh\n"
+        "# Sealed for the hscc-bootstrap isolated-install tests (t_5b560adf):\n"
+        "# the real sparkrun resolves the OPERATOR's cluster config under the home,\n"
+        "# so preflight would pass or fail on the machine rather than on the code.\n"
+        'if [ "$1" = cluster ] && [ "$2" = list ]; then\n'
+        f"  printf '%s' '{FAKE_CLUSTER}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    return stub
 
 
 def _env(sandbox):
     """The installer child's environment — every home-ish input pointed at the
-    sandbox, and the real Hermes CLI sealed (module docstring).
+    sandbox, and the real Hermes CLI and sparkrun both sealed (module docstring).
 
     Split out of ``_run`` so ``test_the_sandbox_seals_every_input_the_stages_shell_out_to``
     can assert the seal list without paying for an installer run.
@@ -133,6 +175,12 @@ def _env(sandbox):
         "HSCC_DIR": str(sandbox["hscc"]),
         "HERMES_SCRIPTS": str(sandbox["hermes"] / "scripts"),
         "HERMES_BIN": str(sandbox["hermes_bin"]),
+        # Sandbox bin FIRST: `sparkrun` resolves to the sealed stub, everything else
+        # (bash, git, uv, brew, tmux…) still resolves as it always has. Prepending
+        # rather than narrowing keeps the stages that legitimately need system tools
+        # working — the dry-run file narrows PATH because it fabricates a whole tree,
+        # this one runs the repo's real installer.
+        "PATH": f'{sandbox["home"] / "bin"}{os.pathsep}{env.get("PATH", "")}',
     })
     return env
 
@@ -258,6 +306,12 @@ def test_the_sandbox_seals_every_input_the_stages_shell_out_to(sandbox):
 
     HOME is asserted UNSEALED on purpose (module docstring): pinning it here
     would be a lie about the one input the run deliberately shares.
+
+    PATH is asserted with the sandbox bin FIRST (t_5b560adf): `sparkrun` was the
+    second input this file lost a green leg over — its cluster config is a home path,
+    so with PATH inherited the preflight's FATAL `sparkrun cluster` row passed or
+    failed on the operator's machine. The stub answers with a fabricated cluster, so
+    the check runs everywhere and passes nowhere by accident.
     """
     env = _env(sandbox)
     for key in ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS", "HERMES_BIN"):
@@ -272,6 +326,24 @@ def test_the_sandbox_seals_every_input_the_stages_shell_out_to(sandbox):
                        capture_output=True, text=True, timeout=60)
     assert r.returncode != 0, "the sealed Hermes CLI claimed success it did not earn"
     assert "sealed" in (r.stderr or ""), r.stderr
+    # sparkrun: first on PATH, inside the sandbox, and it is the stub that answers.
+    first = Path(str(env["PATH"]).split(os.pathsep)[0])
+    assert first == sandbox["home"] / "bin", \
+        f"PATH does not lead with the sandbox bin: {first}"
+    spark = first / "sparkrun"
+    assert spark.is_file() and spark.stat().st_mode & 0o111, \
+        "no executable sparkrun stub — preflight would resolve the operator's cluster"
+    r = subprocess.run([str(spark), "cluster", "list"],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, f"the sealed sparkrun failed cluster list: {r.stderr[:200]!r}"
+    assert json.loads(r.stdout) == json.loads(FAKE_CLUSTER), \
+        "the sealed sparkrun must answer with EXACTLY the fabricated cluster, no " \
+        f"real host in it: {r.stdout[:200]!r}"
+    # And the stub is what the child's shell finds, i.e. the real one is shadowed.
+    which = subprocess.run(["sh", "-c", "command -v sparkrun"],
+                           capture_output=True, text=True, timeout=60, env=env)
+    assert which.stdout.strip() == str(spark), \
+        f"the child would resolve sparkrun outside the sandbox: {which.stdout.strip()!r}"
     assert env.get("HOME") == os.environ.get("HOME"), \
         "HOME must stay exactly as inherited — sealing it is the deliberate choice " \
         "this file's docstring argues against"
