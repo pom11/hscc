@@ -286,11 +286,20 @@ class _Rig:
         # `state_mod` is only needed for the seed helpers below.
         self._state_dir = state_dir
 
-    def seed(self, **fields):
-        """Pre-write the proxy stream state (cooldown stamp, streak, window)."""
+    def age_last_relaunch(self, seconds):
+        """Move ONLY the attempt stamp back in time, leaving the rest of the
+        state — above all the ``cooldown_s`` the code itself wrote — untouched.
+
+        Seeding a window would test the reader, not the writer: the value under
+        test must be the one ``check_proxy`` produced.
+        """
         import json
-        self._state_dir.mkdir(parents=True, exist_ok=True)
-        (self._state_dir / "proxy.json").write_text(json.dumps(fields))
+        from datetime import datetime, timedelta, timezone
+        st = json.loads((self._state_dir / "proxy.json").read_text())
+        st["last_relaunch"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+        (self._state_dir / "proxy.json").write_text(json.dumps(st))
+        return st
 
     def state(self):
         import json
@@ -468,21 +477,23 @@ class TestRepairNeverLeavesTheProxyDown:
 
     def test_a_down_repair_retries_inside_the_old_300s_window(
             self, tmp_hfcc_dir, monkeypatch, fake_sparkrun):
-        """THE 5-MINUTES-BECOMES-90-SECONDS PIN. 90 s after a repair that left
-        :4000 down, the old window suppressed the retry; the down-window must
-        let this tick try again."""
+        """THE 5-MINUTES-BECOMES-90-SECONDS PIN. A repair that leaves :4000 down
+        writes its own short window; 90 s later — inside the old 300 s cooldown
+        — the next tick must try again instead of sleeping on a dead entrypoint.
+
+        The window is what the FIRST tick wrote, not what this test seeded: a
+        seeded value would pin the reader and leave the writer free to keep
+        stamping 300 s."""
         port = _FakePort(monkeypatch, refuse_plain_start=True,
                          restart_works=False)
         rig = _Rig(tmp_hfcc_dir, monkeypatch, hosts=[UP, DEAD],
                    live={hp(UP), hp(DEAD)}, healthy_units={hp(UP)}, port=port)
         monkeypatch.setenv("FAKE_REFUSE_PLAIN_START", "1")
-        from datetime import datetime, timedelta, timezone
-        stamp = (datetime.now(timezone.utc)
-                 - timedelta(seconds=90)).isoformat()
-        rig.seed(ok=False, last_relaunch=stamp, relaunch_streak=1,
-                 cooldown_s=health.PROXY_RELAUNCH_DOWN_COOLDOWN_S)
+        assert health.check_proxy() is False          # tick 1: left the port down
+        assert rig.state()["cooldown_s"] == health.PROXY_RELAUNCH_DOWN_COOLDOWN_S
+        rig.age_last_relaunch(90)                     # 90 s later, still < 300 s
         before = len(start_argvs(fake_sparkrun))
-        health.check_proxy()
+        health.check_proxy()                          # tick 2
         assert len(start_argvs(fake_sparkrun)) > before, (
             "a down proxy was left suppressed by a 300 s cooldown 90 s in "
             f"(cmds: {sparkrun_log(fake_sparkrun)})")
