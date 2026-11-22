@@ -48,8 +48,11 @@ task: t_5b560adf
   `24a25f2e`), canonical `HSCC_TEST_LEGS=hscc-bootstrap bash scripts/run_tests.sh -rsf`:
   sealed **1344 passed, 0 skipped, 0 failed** (249.57 s leg, rc 0) and
   `HSCC_TEST_NO_SEAL=1` **1344 passed, 0 skipped** (261.60 s). **The leg is delta-free:
-  the seal now costs this leg nothing.** The runner's own log line proves the declaration
-  reached the child (`HOME seal: declared HERMES_AGENT_PATH=…`).
+  the seal now costs this leg nothing.** Re-measured after merging main `c934fb12`
+  (which brought #620's daemon-side locator sweep) at the merged tree `fc160ff2`
+  (seal `58653473` + branch `431f547f`): sealed **1344 passed, 0 skipped** in 246.35 s,
+  unsealed **1344 passed, 0 skipped** in 235.09 s. The runner's own log line proves the
+  declaration reached the child (`HOME seal: declared HERMES_AGENT_PATH=…`).
   Two more arms, same tree, to show what the gate was buying: the same tree with a *bogus*
   pin retires the coverage in **71.07 s** (1309 passed, 35 skipped — every reason naming
   the bogus pin), and #606 without this seam sealed to **1296 passed / 35 skipped in
