@@ -1198,6 +1198,8 @@ def test_chat_runtime_unreadable_exits_three_before_ensuring(tmp_path, capsys,
     assert "cannot read session history" in err
     assert "cannot import the Hermes runtime" in err, "name the runtime at fault"
     assert "retry under the Hermes venv" in err, "say what to do about it"
+    assert "project chat hscc" in err, \
+        "the retry hint must name THIS project (plain stderr print, never wrapped)"
     assert boom.calls == ["hscc-orch"], "discovery is the site that saw the fault"
     assert ensure_calls == [], \
         "the short-circuit must run BEFORE ensure_session, not after it raises"
