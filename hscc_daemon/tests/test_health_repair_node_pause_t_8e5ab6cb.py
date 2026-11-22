@@ -261,6 +261,13 @@ class _ProxyRig:
                             lambda url=None, timeout=5: {
                                 "ok": False, "backends": set(),
                                 "error": "stubbed — drift check skipped"})
+        # t_f0b8051b added a through-proxy completion probe to check_proxy's
+        # healthy path — stub its no-evidence shape so this rig never dials the
+        # operator's live :4000 (the real probe is covered in test_health.py).
+        monkeypatch.setattr(health, "_proxy_completion_probe",
+                            lambda url=None, model=None, timeout=None:
+                            {"ok": True, "status": None, "skipped": True,
+                             "error": ""})
         self.calls = {"leases": [], "cmds": []}
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: self.calls["cmds"].append(args)
