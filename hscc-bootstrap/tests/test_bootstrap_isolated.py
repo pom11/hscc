@@ -55,14 +55,18 @@ from pathlib import Path
 
 import pytest
 
+import hermes_tree
+
 REPO = Path(__file__).resolve().parent.parent.parent
 BOOTSTRAP = REPO / "hscc-bootstrap" / "bootstrap.sh"
-REAL_VENV_PY = Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
-REAL_HERMES_AGENT = Path.home() / ".hermes" / "hermes-agent"
 
+#: What this file needs from the machine, in one place, so the collection-time
+#: gate and the call-time resolvers below state the SAME thing (hermes_tree).
+CAPABILITY = ("test_bootstrap_isolated — running the isolated installer with the "
+              "real Hermes venv interpreter")
 needs_runtime = pytest.mark.skipif(
-    not REAL_VENV_PY.is_file(),
-    reason="needs the real Hermes venv interpreter to run the installer")
+    not hermes_tree.runtime_available(),
+    reason=hermes_tree.runtime_skip_reason(CAPABILITY))
 
 
 def _md5(p: Path):
@@ -104,7 +108,7 @@ def sandbox(tmp_path):
         d.mkdir(parents=True)
     # Symlink the DIRECTORY, not the python binary: symlinking the binary
     # relocates sys.prefix and the venv's packages (rich, yaml) disappear.
-    (hermes / "hermes-agent").symlink_to(REAL_HERMES_AGENT)
+    (hermes / "hermes-agent").symlink_to(hermes_tree.agent_dir_or_skip(CAPABILITY))
     return {"home": home, "hermes": hermes, "hscc": hscc,
             "hermes_bin": _sealed_hermes_bin(home)}
 
