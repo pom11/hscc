@@ -213,6 +213,29 @@ def test_restart_mid_green_logs_the_anchor_once_not_a_transition(hp):
     assert "->" not in hp.verdicts()[0][1]
 
 
+def test_a_multi_line_reason_cannot_split_the_line(hp):
+    """`grep "proxy verdict:"` is only a timeline if every event is ONE line.
+
+    No reason builder reachable today emits a newline, so this pins the helper
+    directly rather than through a fake that would have to lie about the probes:
+    a reason carrying newlines and runs of spaces still lands flat, and the
+    stored text stays bounded.
+    """
+    hp.tick(green=True)                      # durable record: GREEN
+    hp.logs = []
+    block = health._proxy_verdict_tick(
+        False, "probe failed:\n  ConnectionError   upstream\n  retry exhausted")
+    assert len(hp.logs) == 1
+    level, line = hp.logs[0]
+    assert level == "WARN" and "\n" not in line
+    assert line.startswith("proxy verdict: GREEN -> UNHEALTHY")
+    assert "ConnectionError upstream retry exhausted" in line
+    assert "\n" not in block["reason"]
+    # And a pathological reason stays bounded in the state file.
+    assert len(health._proxy_verdict_tick(True, "x" * 5000)["reason"]) \
+        <= health.PROXY_VERDICT_REASON_MAX
+
+
 # ── the anchor that motivated the card ──────────────────────────────────────
 
 def test_a_long_green_streak_gets_positive_anchors_not_a_line_per_tick(hp):

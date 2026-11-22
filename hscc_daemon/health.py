@@ -1636,7 +1636,12 @@ def _proxy_verdict_tick(healthy, reason, heartbeat_every=None):
     prev_verdict = (prior or {}).get("verdict")
     every = (PROXY_VERDICT_HEARTBEAT_TICKS if heartbeat_every is None
              else heartbeat_every)
-    reason = str(reason or "")[:PROXY_VERDICT_REASON_MAX]
+    # One line per tick is the whole contract — a reader greps it and a parser
+    # may split on it — so the reason is flattened even though every reason
+    # builder reachable today (`_proxy_models_healthy`, `_proxy_backend_drift`)
+    # is already single-line. Cheap insurance against the day one of them
+    # interpolates a multi-line probe error into the line that has to stay flat.
+    reason = " ".join(str(reason or "").split())[:PROXY_VERDICT_REASON_MAX]
 
     if not _proxy_verdict_logged_this_run:
         # Cold start: an OBSERVATION, never a transition — see the docstring.
