@@ -18,38 +18,62 @@ else.
 ## The verbs
 
 ```
-hscc node pause  <host> [--reason <text>] [--until <duration>] [--span] [--force] [--apply]
-hscc node resume <host> [--apply]
+hscc node pause  <host> [--reason <text>] [--until <duration>] [--force] [--yes] [--dry-run]
+hscc node resume <host> [--yes] [--dry-run]
 hscc node paused [--json]
 ```
 
 Host names are what sparkrun calls them (`192.0.2.13`, or its alias). There is no
 address or alias normalisation: a pause is keyed by the exact string you typed,
-because guessing that `node-3` and `192.0.2.13` are the same box would invent a
+because guessing that `node-3` and `192.0.2.14` are the same box would invent a
 pause nobody made.
 
-**Dry-run is the default and `--apply` is opt-IN** (rule #478). `pause` and
-`resume` plan, print and change nothing unless you pass `--apply`; `paused` is
-read-only always. Note the polarity: this group is *opt-in to mutate*, which is
-the opposite of `hscc cluster up|down [--dry-run]` — those are opt-out of a
-mutation. When you script against either, read the flags again.
+**The question is the mutation safety** (operator rule 11-22, which retired
+`--apply`). `pause` and `resume` print the whole plan, then ask; only a literal
+`y` (or `Y`) at that prompt changes anything. `paused` is read-only always. The
+polarity to remember is not opt-in/opt-out at all — it is *nothing happens until
+you answer*:
+
+| What you type | `pause` | `resume` |
+|---|---|---|
+| `y` / `Y` | stops the units, records the pause | restarts the recorded units, clears the pause |
+| bare Enter, `n`, `yes`, anything else | `Aborted:` — exit `1`, nothing stopped, nothing recorded | `Aborted:` — exit `1`, nothing restarted, the pause stays |
+| nothing (no terminal) | `REFUSED: no terminal to ask` | `REFUSED: no terminal to ask` |
+| `--yes` | acts, and prints `note: --yes given — proceeding without asking.` | acts |
+| `--dry-run` | prints the plan, never asks, records nothing | prints the commands it would issue, never asks, keeps the pause |
+
+`--yes` and `--dry-run` together are refused as contradicting: one says "do it",
+the other says "only look", and a CLI that quietly picked one would be guessing
+about a mutation.
+
+A non-terminal stdin — a pipe, cron, launchd, `ssh -T`, the agent tool — is a
+**refusal**, not a no-answer. `hscc node pause 192.0.2.13 > /tmp/out.txt` stops
+nothing; a script that means it passes `--yes`. That is the half that keeps a
+cron entry from parking a node nobody meant to park.
 
 ### `hscc node pause <host>`
 
 Enumerates the node's units through the executor (sparkrun's structured status
-query — the only sanctioned reader of fleet facts), prints every unit **and every
-node a stop would touch**, then — with `--apply` — stops them and records the
-pause.
+query — the only sanctioned reader of fleet facts), prints every unit and every
+node the stop would take down, runs the two guards below, and then asks:
+
+```
+Pause 192.0.2.13 and stop these 2 model(s)? [y/N]
+```
+
+The question is printed after the plan and lists the same count the plan listed,
+so what you are confirming is what you just read. `hscc node resume` asks the same
+question in its own shape: `Resume 192.0.2.13 and restart these 2 model(s)? [y/N]`.
 
 | Flag | Meaning |
 |---|---|
 | `--reason <text>` | Free text recorded on the pause and shown by `hscc node paused`. Nothing reads it. |
 | `--until <duration>` | A deadline recorded on the pause. Open-ended without it. See “`--until` records a deadline”. |
-| `--span` | Accept that stopping a multi-node unit also stops it on every node it spans. Required **with `--apply`**. |
-| `--force` | Pause a host the serving config says serves the orchestrator model, which the verb otherwise refuses. |
-| `--apply` | Do it. Without it nothing stops and nothing is written. |
+| `--force` | Override the **orchestrator guard** only — a host the applied template declares as the orchestrator node, or the last healthy server of the orchestrator model. It unlocks nothing else, and above all not a shared model: see “Which node is pausable”. |
+| `--yes` | Answer the question for it, the way a script must. Prints a note saying it did. |
+| `--dry-run` | Print the plan and both guards' verdicts, then stop. Never asks, never writes. |
 
-**Order is the contract:** with `--apply` the stop happens **first**, then the
+**Order is the contract:** after a `y` the stop happens **first**, then the
 overlay is written. So the record's `stopped` flag means “the units are confirmed
 down”, not “we intended to”. A stop that failed still records the pause with
 `stopped=false` and exits non-zero — the node *is* parked, and the heal paths must
@@ -63,6 +87,22 @@ Restarts the units the pause recorded — through sparkrun's `--ensure` path, so
 same recipe and flags re-issue the declared workload instead of deriving a
 different intent id and launching a parallel duplicate — then, and only then,
 clears the pause and that node's heal strikes.
+
+It lists first and asks second, exactly like `pause`:
+
+```
+192.0.2.13: pause recorded 2 unit(s)
+  worker-8b
+  worker-tp
+  every node this affects: 192.0.2.13, 192.0.2.14
+Resume 192.0.2.13 and restart these 2 model(s)? [y/N]
+```
+
+Answering `n` (or nothing, or no terminal) costs the fleet **nothing at all** —
+not even the status sweep the restart command has to be rebuilt from, because the
+gate sits ahead of that rebuild. The daemon's own expiry tick calls the same
+function without a gate: a pause whose `--until` has passed ends on its own
+schedule, and nobody is standing at a terminal to ask.
 
 The overlay stores unit **ids**, not commands, so resume rebuilds each launch argv
 from `serving.json`. Two refusals keep the pause in force on purpose:
@@ -79,9 +119,10 @@ from `serving.json`. Two refusals keep the pause in force on purpose:
 On success it prints `pause for <host> cleared.` and clears the node's heal
 strikes (the same `heal-clear` pairing), so a later breaker trip can alert again.
 
-A host that is only *inside* another pause's span is not resumable on its own — the
-span stops and starts as one thing, so the command names the owner and tells you to
-resume that instead.
+A host that is only *inside* another pause's `span_nodes` is not resumable on its
+own — that record stops and starts as one thing, so the command names the owner and
+tells you to resume that instead. (A record with a span is a legacy or hand-written
+one: a pause created under today's rule can only ever name the one node it parks.)
 
 ### `hscc node paused`
 
@@ -97,18 +138,30 @@ object per host: `host` plus the overlay's entry keys (`units`, `reason`, `since
 
 ### Exit codes
 
-`0` — the dry run completed, or the mutation succeeded, or the host was simply not
-paused. `1` — a refusal, a bad flag, an unreadable plan, a failed stop, a failed
-restart. A refusal always prints `Nothing stopped and nothing recorded.` (or names
-what stayed recorded) and exits `1`; a dry run of the same host exits `0`.
+`0` — a `--dry-run` completed, or a confirmed mutation succeeded, or the host was
+simply not paused. `1` — a refusal (eligibility, orchestrator guard, unreadable
+plan), an answer that was not `y`, a prompt with no terminal to ask it on, a bad
+flag, a failed stop, a failed restart. A refusal always prints
+`Nothing stopped and nothing recorded.` (or names what stayed recorded) and exits
+`1`; `--dry-run` of the same host exits `0`. Script against the exit code, not the
+prose: an aborted pause and a refused one both exit `1` and both changed nothing.
 
 ### Agent tools
 
 The same three verbs exist as declared agent tools — `node_pause` and
-`node_resume` (execution requires confirmation) and `node_paused` (read). Each
-handler calls the unified CLI's own verb function in-process rather than
-re-implementing the guards, so an agent has no path around the dry-run default
-that the operator does not have, and there is exactly one safety policy.
+`node_resume` (both require `confirm: true` to execute) and `node_paused` (read).
+Each handler calls the unified CLI's own verb function in-process rather than
+re-implementing the guards, so an agent has no path around the safety policy that
+the operator does not have, and there is exactly one policy in the tree.
+
+`confirm` is the agent's spelling of the terminal question: `confirm: true` maps to
+`--yes`, and its absence maps to `--dry-run` — never to an unguarded mutation. The
+tool surface has no terminal, so without `confirm` there is nothing to answer and
+the CLI's refusal is what the agent gets back, in `report`. A confirmed `node_pause`
+result carries `stopped: [ … ]` — the unit ids the record says came down, read back
+through the CLI's own `node paused --json`, because “something happened” is not an
+answer an agent should act on. There is no `span` argument any more, on either
+surface, and no tool argument that unlocks a multi-node model.
 
 ## What a pause never touches
 
@@ -171,7 +224,7 @@ exactly what a stale post-boot marker hands this verb. `--dry-run` previews the 
 — a parked unit is already out of its `dry-run: N unit(s) would start` count, and
 nothing is launched and no `expected_up` marker written — and it keeps its own
 polarity: `success` is `False` on every dry run, pause or no pause, while the CLI
-still exits `0`. Ending a pause is `hscc node resume <host> --apply`, never a fleet
+still exits `0`. Ending a pause is `hscc node resume <host> --yes`, never a fleet
 up.
 
 ## What a pause still does not do
@@ -190,7 +243,7 @@ recovery and API paths that call it. What a pause still cannot do:
   you cannot read is not a pause.
 - **It can defer a fleet-wide repair that is keyed on the parked host.** `check_proxy`
   keys its strike on one host, so a proxy that is genuinely down while that host is
-  parked waits until the record ends — `hscc node resume <host> --apply`, or the
+  parked waits until the record ends — `hscc node resume <host> --yes`, or the
   `--until` tick. The skip lands in the stream with its reason, so the deferral is
   visible rather than silent, and a pause on any other host leaves that path armed.
 
@@ -212,38 +265,87 @@ capacity. A flag that outranks the record is not an escape hatch, it is a second
 source of truth. `hscc-cluster/hscc.py` points at this page for exactly that answer,
 and a signature test pins the flag's absence so it cannot arrive by accident.
 
-The way back in is to end the record: `hscc node resume <host> --apply` restarts the
+The way back in is to end the record: `hscc node resume <host> --yes` restarts the
 units the pause recorded, through sparkrun's `--ensure` path, then clears the pause
 and that node's heal strikes. If what you want gone is the workload rather than the
 node, take the unit's declaration down deliberately — a pause and a `serving.json`
 edit are different decisions with different undo paths, and only one of them is
 supposed to survive a fleet up.
 
-## Span rules
+## Which node is pausable
 
-A unit can span several nodes (tensor-parallel across hosts). Stopping it stops it
-everywhere, so:
+One function decides, and only one: `node_pause_exec.pause_eligibility(host, plan)`.
+`hscc node pause` prints its verdict verbatim and so does the `node_pause` agent
+tool, which calls the verb — neither surface carries a rule of its own, and a
+source-grep test fails if either ever grows one.
 
-- `pause` prints `every node this affects:` — the union of the observed placement
-  and the intent-recorded hosts, so a span whose sibling node did not answer the
-  sweep is still reported as a span and the unverified sibling is named.
-- With `--apply`, a multi-node unit needs `--span`. The refusal names the siblings
-  it would also have taken down:
+**The rule (operator 11-22, which retired `--span` and the #561/#567 opt-in):**
+a node may be paused when **every model on it runs only on that node**.
+
+- **Allowed — one model on the node, alone.** `tp=1`, placed on this host and no
+  other. The whole node goes down in one call.
+- **Allowed — several models side by side, each alone.** Colocated single-node
+  models are not a problem: a node running three `tp=1` models is pausable and all
+  three are stopped together, listed in the plan and named in the report. The rule
+  is about *span*, never about count — a fleet that packs several small models on
+  one box is exactly what the pause is for.
+- **Refused — any model that spans other nodes.** If even one unit is tensor-parallel
+  across hosts (`tp > 1`, or placed on more than one node), the whole call refuses.
+  Nothing on this node is stopped, nothing is recorded, and the refusal names the
+  model and the other nodes it lives on:
 
   ```
-  REFUSED: 192.0.2.13 hosts multi-node unit(s): tp-pair-b.
-    A span unit stops as a whole, so stopping it here also stops it on: 192.0.2.14
-    Pass --span to accept that, together with --apply.
+  REFUSED: 192.0.2.13 runs a multi-node unit — a node pause stops only units that run on this node alone.
+    tp-pair-b: spans 192.0.2.13, 192.0.2.14 (other node(s): 192.0.2.14)
+    Stopping it here also stops it on: 192.0.2.14
+    No flag overrides this: park the node when its models are all single-node, or stop the shared model on every node it lives on.
   Nothing stopped and nothing recorded.
   ```
 
-- **The opt-in guards the stop, not the reading of the plan.** A plain dry run of a
-  span host previews the blast radius and exits `0`; `--span` without `--apply`
-  prints `note: --span without --apply still stops nothing (dry-run is the
-  default).` and changes nothing. Refusing the dry run would make the verb unusable
-  for the one thing `--span` exists to let you accept.
-- `resume` follows the same shape: the span starts as one thing, so a host named
-  only in another pause's `span_nodes` is pointed at the owner.
+  When the sweep shows the unit on one host but the declaration says `tp=2`, the
+  declaration wins and the refusal says so — the safer reading of a disagreement is
+  "this model is split across processes":
+
+  ```
+    tp-pair-b: declares tp=2 on 192.0.2.13 — a model split across processes is not a single-node model
+  ```
+
+- **Refused — nothing running.** A node with no units has nothing to park, and
+  recording a pause there would create a shield over a machine nothing stops:
+
+  ```
+  REFUSED: 192.0.2.13 runs nothing — nothing to pause.
+  Nothing stopped and nothing recorded.
+  ```
+
+- **Refused — the plan could not be read.** A pause that cannot enumerate what it is
+  stopping is not a pause, it is a guess: `REFUSED: <host>: its units could not be
+  enumerated — a pause must know what it is stopping.`, with the underlying status
+  error on the next line.
+
+**There is no override.** Not `--span` (the flag is gone from the parser, the help,
+the agent-tool schema and this page — typing it is an `unknown flag` refusal like
+any other), not `--force`, not `confirm: true`, not a second call. `--force` belongs
+to the orchestrator guard below and to nothing else. The way to take a box that
+hosts a shared model is to stop that model deliberately on every node it lives on
+(`hscc cluster stop <id>`), or to move it off first.
+
+A refusal costs the fleet nothing at all: the plan is printed above the verdict, so
+you always see what *would* have gone down, and the refusal is the last line the
+verb writes — the overlay is byte-identical afterwards, including for every other
+host in it. The refusal is also not a question: an ineligible node never reaches the
+confirmation prompt, so there is no answer that unlocks it.
+
+**The two guards compose in this order:** eligibility first, then the orchestrator
+guard. Either refusal stops everything, and an ineligible node never reaches the
+orchestrator question. `--force` is an answer to the second guard alone.
+
+The blast radius is still printed for a node that passes: `every node this affects:`
+is the union of the observed placement and the intent-recorded hosts, so a sibling
+that did not answer the sweep is named rather than assumed away. `resume` keeps the
+matching rule for records that predate this one: a host named only in another
+pause's `span_nodes` is pointed at the owner, because that record stops and starts
+as one thing.
 
 ## Orchestrator-model guard
 
@@ -305,11 +407,14 @@ fail-closed answer rests on.)
 The guard **fails closed**: when the status read or the serving config is
 unavailable it refuses with `reason: cannot_rule_out` and says it could not rule
 the host out, rather than allowing a pause it cannot justify. That asymmetry is
-deliberate: unlike the `--span` guard, this one refuses a dry run too, because "I
-cannot prove this node is safe to park" is exactly what a dry run should surface.
-`--force` overrides either refusal and announces which ground it overrode; on a
-node that needed no override it prints the ordinary `note: --force given, but this
-host is not flagged as serving the orchestrator model.`
+deliberate, and it is the posture of both guards: each one prints its verdict for a
+`--dry-run` too, because "I cannot prove this node is safe to park" is exactly what
+a dry run should surface. An operator looking at a plan is entitled to hear that
+the plan is a bad idea before being asked to confirm it. `--force` overrides either
+orchestrator-ground refusal and announces which ground it overrode; on a node that
+needed no override it prints the ordinary `note: --force given, but this
+host is not flagged as serving the orchestrator model.` It has nothing to say to
+the eligibility guard, and prints nothing there.
 
 ## `--until` records a deadline, and the daemon honours it
 
@@ -347,7 +452,7 @@ wired in `daemon_ops.PERIODIC_INTERVALS`) per tick
   start units on a node you have not released. That skip is logged, counted, and makes
   the stream red: a schedule that is not being honoured is not silently healthy;
 * resumes the rest through the **same** `resume_host()` that
-  `hscc node resume <host> --apply` runs — same rebuild-or-refuse rule, same "clear the
+  `hscc node resume <host> --yes` runs — same rebuild-or-refuse rule, same "clear the
   pause only once the units are back" ordering, same heal-strike reset;
 * stamps `~/.hscc/state/node_pause_expiry.json` on every path, so `hscc verify` can tell
   "nothing was due" from "the stream died".
@@ -362,7 +467,7 @@ sparkrun call, no `serving.json` read, no subprocess — which is why a 60 s cad
 cheap enough to be invisible.
 
 `hscc node paused` still flags a past-due deadline, and `hscc node resume <host>
---apply` still ends a pause by hand: the verb and the tick call the same function, so an
+--yes` still ends a pause by hand: the verb and the tick call the same function, so an
 operator who resumes early and a daemon resuming on schedule cannot drift apart. Treat
 `--until` as a timer that the daemon keeps — and `hscc verify`'s `node_pause_expiry` row
 as the place a timer that missed its deadline stops being quiet.
