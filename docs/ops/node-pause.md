@@ -68,10 +68,11 @@ The overlay stores unit **ids**, not commands, so resume rebuilds each launch ar
 from `serving.json`. Two refusals keep the pause in force on purpose:
 
 - no launch command can be rebuilt for a recorded unit (nothing is known about how
-  it was started) → `REFUSED`, **the pause stays recorded**; start the unit by hand
-  (`hscc cluster up` / `hscc template apply`) and then clear the pause. A guessed
-  `sparkrun run` would derive a different intent id and run a duplicate next to a
-  live unit.
+  it was started) → `REFUSED`, **the pause stays recorded**; put the unit back
+  through an apply (`hscc template apply`) or start it by hand, then clear the pause.
+  `hscc cluster up` is not that workaround any more — it skips a unit a live record
+  still holds (see the skip table below). A guessed `sparkrun run` would derive a
+  different intent id and run a duplicate next to a live unit.
 - a restart fails → the pause stays recorded, because the heal paths must not walk
   units onto a node that is half up.
 
@@ -148,8 +149,10 @@ Two rules hold across all of them:
 | Heal breaker | `hscc_daemon/heal_breaker.py` (`note_heal`) | A parked node accrues nothing: no strike, no ledger write, `tripped` false — so your own `hscc node pause` cannot trip the breaker or page you. Only *accrual* is suppressed: `suspended()` still reports an existing suspension, strikes earned before the pause still count after the resume, and a pause on an unrelated node leaves the breaker armed. |
 | Autoscale | `hscc_daemon/autoscale.py` (`decide_scale`) | A parked node is neither capacity nor a candidate: the paused hosts a snapshot measured drop out of capacity and their queue counters leave the fleet totals, and the ceiling becomes `max_workers` minus every node the overlay holds. When no unpaused slot is left the answer is `none`, naming the pause as the reason. The decision carries `capacity` and `paused_excluded` so you can see a pause shaped the answer. |
 | Autodown wake | `hscc_daemon/autodown.py` (`autoup` → `_parked_nodes` / `_partition_wake_plan`) | A wake never `--ensure`s a parked node. The wake plan is split before anything starts and every record that could relaunch the unit later — readiness wait, post-boot footprint, reported wake set — runs on the startable half. Skipped unit ids are reported under `paused`, so "not started, parked" cannot read as "failed to start". If the whole plan is parked the wake reports `all-paused` and changes nothing. |
+| Keepalive supervision and proxy relaunch | `hscc_daemon/health.py` (`check_workers`' auto-heal and `worker-relaunch`, `check_proxy`'s `proxy-relaunch`, each through `_pause_covering_repair`) | A parked node takes no heal lease, counts no strike and gets no force-recreate, no stop-and-re-issue and no `proxy start`. Each site asks `covering()` at the mutating surface — ahead of `heal_lease.acquire`, ahead of the strike — so a skip never advertises "a repair is in flight" and a tick that did nothing never counts as something. The unit stays counted `down`, because it is down; the workers stream gains `paused` with those labels and the proxy stream gains `paused` with the reason, recorded as neither a failed relaunch nor a fresh cooldown stamp. Each site asks only about the node its own action is keyed on, so a pause on one node leaves repair everywhere else armed. |
+| Fleet up | `hscc-cluster/hscc.py` (`cmd_cluster_up` → `_parked_nodes` / `_partition_up_plan`) | The widest way to undo a park: every entry it issues is `sparkrun run` with `--ensure`, whose whole point is to make the declared workload exist again. The plan is partitioned against `paused_nodes()` (resolved ONCE per pass) before anything launches, and a unit with even ONE parked node in its span is parked WHOLE rather than half-started around its own missing member. A parked unit is never launched and never enters `issued`; `units` and `plan` carry the startable half, and the skipped ids ride out under one additive `paused` key (`[]` when nothing was skipped, so an unparked fleet returns the identical dict). `success` stays `True` — post-boot and recovery read exactly that boolean, and a `False` there pages you about your own pause. The `expected_up` marker is written from the STARTABLE plan, so a parked unit stops being a relaunch candidate at its source instead of only at the launch seam. When every unit of the pass is parked the result carries `result: "all-paused"` at exit `0`. |
 
-Two consequences worth internalising:
+Three consequences worth internalising:
 
 **Only starts skip.** Teardown still stops parked units — refusing a stop would
 leave a unit *running* on a node you parked, which is the mirror image of the bug.
@@ -158,32 +161,63 @@ leave a unit *running* on a node you parked, which is the mirror image of the bu
 the rest of the fleet: a serving or gateway failure the pause did not cause still
 counts, still latches, still pages.
 
-## What does NOT skip a parked node yet
+**One verb, four entry points.** `hscc cluster up` is the start path for the CLI, for
+the post-boot relaunch (`hscc_daemon/post_boot.py`), for the recovery path
+(`hscc_daemon/recover.py`) and for `POST /v1/cluster/up` (`hscc-api/routes_ops.py`).
+The skip lives inside the verb, so all four inherit it and none carries its own
+overlay read that could drift from the others. `nodes=` scoping is **not** an
+opt-out: narrowing the launch to a parked host still skips it, and that narrowing is
+exactly what a stale post-boot marker hands this verb. `--dry-run` previews the skips
+— a parked unit is already out of its `dry-run: N unit(s) would start` count, and
+nothing is launched and no `expected_up` marker written — and it keeps its own
+polarity: `success` is `False` on every dry run, pause or no pause, while the CLI
+still exits `0`. Ending a pause is `hscc node resume <host> --apply`, never a fleet
+up.
+
+## What a pause still does not do
 
 Named here because a docs page that promised otherwise would be worse than no page.
-Two surfaces the overlay's own contract lists as skip seams have no overlay read
-today:
+Every seam the overlay's own contract lists as a skip seam now reads the record:
+watchdog auto-heal, the heal breaker, autoscale, the autodown wake, the keepalive and
+proxy repair paths in `hscc_daemon/health.py`, and the fleet up with the post-boot,
+recovery and API paths that call it. What a pause still cannot do:
 
-- **The keepalive supervision loop** — `hscc_daemon/health.py` (`check_workers`).
-  It probes the keepalive units and relaunches a down one through
-  `serving._unit_run_cmd`. Its gates are the autodown window, the deliberate-down
-  record, the heal lease and the heal breaker — and the breaker does *not* stop it:
-  on a paused node `note_heal` returns `tripped` false, so the relaunch proceeds. A
-  keepalive unit on a parked node can therefore be brought back by the daemon.
-- **`hscc cluster up`** — `hscc-cluster/hscc.py` (`cmd_cluster_up`), and with it the
-  post-boot relaunch (`hscc_daemon/post_boot.py`) and the recovery path
-  (`hscc_daemon/recover.py`), which both call it. It builds the full
-  `serving.json` plan and has no overlay read, so a fleet-up starts a parked node's
-  units.
+- **It does not survive being unreadable.** Every one of those seams inherits
+  `node_pauses.load()`'s fail-open direction: a missing or malformed
+  `~/.hscc/node_pauses.json` reads as "no pauses" — quietly when missing, loudly
+  WARNed when corrupt, and on the fleet-up path as an `ERROR` naming the risk and the
+  file to check — and the repair or the launch then proceeds UNFILTERED. A pause
+  you cannot read is not a pause.
+- **It can defer a fleet-wide repair that is keyed on the parked host.** `check_proxy`
+  keys its strike on one host, so a proxy that is genuinely down while that host is
+  parked waits until the record ends — `hscc node resume <host> --apply`, or the
+  `--until` tick. The skip lands in the stream with its reason, so the deferral is
+  visible rather than silent, and a pause on any other host leaves that path armed.
 
-Practical rule until those land: a pause keeps a node down against auto-heal, the
-breaker, autoscale and the autodown wake. Do not rely on it across a `hscc cluster
-up`, a reboot of a node holding keepalive units, or a keepalive tick on a unit that
-autodown would not have restored — if you need the node *stayed* down across those,
-bring the fleet down deliberately or tear the unit's declaration down instead. Both
-seams are tracked as follow-up work (`t_0f0a433f` for the keepalive loop,
-`t_f17b1ae3` for `hscc cluster up` and the paths that call it); when one lands, its
-bullet moves to the table above.
+This section used to name two seams with no overlay read: the keepalive supervision
+loop (`t_8e5ab6cb`) and `hscc cluster up` (`t_3b909c61`, with `t_f17b1ae3` for the
+post-boot and recovery halves). All three landed and are in the table above. A loop
+that learns to start or heal units is a new skip seam, and belongs here until it
+reads the overlay.
+
+## There is no `--include-paused`
+
+`hscc cluster up` has no flag that starts a unit under a live pause record, and that
+is a decision rather than an omission. A start that ignored the record would make the
+overlay false for every other consumer at once: the health API would project
+`paused(reason, since)` on a node that is serving traffic, the watchdog would keep its
+stream at `ok: false` and suppress its own heal, the heal breaker would refuse to
+accrue strikes for a machine that is live, and autoscale would keep deducting its
+capacity. A flag that outranks the record is not an escape hatch, it is a second
+source of truth. `hscc-cluster/hscc.py` points at this page for exactly that answer,
+and a signature test pins the flag's absence so it cannot arrive by accident.
+
+The way back in is to end the record: `hscc node resume <host> --apply` restarts the
+units the pause recorded, through sparkrun's `--ensure` path, then clears the pause
+and that node's heal strikes. If what you want gone is the workload rather than the
+node, take the unit's declaration down deliberately — a pause and a `serving.json`
+edit are different decisions with different undo paths, and only one of them is
+supposed to survive a fleet up.
 
 ## Span rules
 
