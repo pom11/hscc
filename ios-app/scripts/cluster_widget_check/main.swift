@@ -685,6 +685,167 @@ expect(pauseGroup, "the top-level entry keeps the frame row's label when both ex
 expect(pauseGroup, "the parked list draws no address anywhere (§7)",
        pausedFleet.paused.allSatisfy { !$0.label.contains("192.0.2.") })
 
+// --- the LOCK SCREEN's backend tally: the same reduction, one layer down.
+//
+// The node tally above takes the parked row out of `nodesDown`; the lock
+// screen's sentence has to do the SAME for the ENGINES, or a machine the
+// operator parked with `hscc node pause` keeps alarming as `1 backend down` on
+// the one surface they read before opening the app. `CLIMonitorServingRow.isDown`
+// stays `error != nil` — the CLI keeps a parked row's error, prints its verdict
+// in the Model cell, and the committed parity golden pins that `down` byte — so
+// the split belongs in `CLILockScreenMetrics`, and these legs are the proof it
+// happens there and ONLY there.
+//
+// The committed capture's three backends all ANSWER, and a parked box whose
+// engine is up has nothing to hide (`serving_table` consults the overlay only
+// inside its `if r.get("error")` branch), so the errored-on-a-parked-machine row
+// is planted here on TEST-NET-1 hosts — the same shape the dropdown gate plants
+// for its Model cell. One ANSWERING backend rides along on purpose: a payload
+// with no live backend prints `— run` and no backend clause at all (§6 rule 1),
+// which would make every clause below vacuous.
+let lockBackendGroup = "lock-backend"
+
+/// The one backend that answers, on the one host that answers: without it every
+/// clause below would be a dash and the leg would prove nothing.
+let lockAnsweringHost = MonitorNode(host: "192.0.2.12", error: nil,
+                                    sample: MonitorSample(hostname: "node-2"),
+                                    workloads: nil)
+
+/// A machine whose engine stopped answering — parked when `tagged`, a real
+/// fault otherwise. Same host shape both ways, so the ONLY difference a leg
+/// reads is the pause overlay's tag.
+func lockEngineHost(_ address: String, tagged: Bool) -> MonitorNode {
+    MonitorNode(host: address, error: "collect failed", sample: nil, workloads: nil,
+                status: tagged ? PauseContract.status : nil,
+                paused_reason: tagged ? "training run" : nil,
+                paused_since: tagged ? "2026-11-21T10:00:00+00:00" : nil)
+}
+
+/// One lock-screen read: `running`/`waiting` on one answering backend, plus one
+/// dead backend per entry of `tagged` (true = the machine is parked).
+func lockBackendPayload(tagged: [Bool], running: Int, waiting: Int) -> MonitorResponse {
+    var hosts = [lockAnsweringHost]
+    var serving = [ServingRow(node: "192.0.2.12", port: "8001", model: "org/model-a",
+                              routes: nil, running: running, waiting: waiting, kv: nil,
+                              gen_tps: nil, prompt_tps: nil, prompt_total: nil,
+                              gen_total: nil, error: nil)]
+    for (offset, isTagged) in tagged.enumerated() {
+        let address = "192.0.2.\(20 + offset)"
+        hosts.append(lockEngineHost(address, tagged: isTagged))
+        serving.append(ServingRow(node: address, port: "8002", model: "org/model-b",
+                                  routes: nil, running: nil, waiting: nil, kv: nil,
+                                  gen_tps: nil, prompt_tps: nil, prompt_total: nil,
+                                  gen_total: nil, error: "engine unreachable"))
+    }
+    return MonitorResponse(json: MonitorPayload(timestamp: nil, hosts: hosts),
+                           serving: serving, speak: "")
+}
+
+// The fixture first, because it is the capture the route actually sent: its
+// parked box .012 has a backend that ANSWERS, and a parked box whose engine is
+// up is not a paused backend under the CLI's rule either.
+let lockFixtureCase = CLILockScreenMetrics(pausedResponse)
+expect(lockBackendGroup, "the paused fixture's 3 backends answer: neither count moves",
+       lockFixtureCase?.backendsDown == 0 && lockFixtureCase?.backendsPaused == 0
+        && lockFixtureCase?.backendsReporting == 3)
+expect(lockBackendGroup, "a parked box whose engine answers is not a paused backend either",
+       ClusterMonitorViewModel.project(pausedResponse, now: pauseNow)?.backendRows
+           .allSatisfy { !$0.isPaused } == true)
+
+// The bug this card is about: the engine is stopped AND the machine is parked.
+if let parkedBackend = CLILockScreenMetrics(lockBackendPayload(tagged: [true],
+                                                               running: 1, waiting: 0)) {
+    expect(lockBackendGroup, "a parked machine's stopped engine leaves backendsDown",
+           parkedBackend.backendsDown == 0)
+    expect(lockBackendGroup, "and lands in backendsPaused instead",
+           parkedBackend.backendsPaused == 1)
+    expect(lockBackendGroup, "the queue still covers the one backend that answered",
+           parkedBackend.backendsReporting == 1 && parkedBackend.running == 1)
+    expect(lockBackendGroup, "the rectangular line states the pause, never a fault",
+           CLILockScreenCopy.queueToken(parkedBackend) == "1 run · 0 wait · 1 backend paused")
+    expect(lockBackendGroup, "and no down byte survives that sentence",
+           !CLILockScreenCopy.queueToken(parkedBackend).contains("down"))
+    expect(lockBackendGroup, "the voice sentence names the pause, not the fault",
+           CLILockScreenCopy.voice(parkedBackend).contains("1 backend paused")
+            && !CLILockScreenCopy.voice(parkedBackend).contains("down"))
+} else {
+    expect(lockBackendGroup, "the parked-backend payload projects", false)
+}
+// With nothing queued, the paused clause is the WHOLE inline line — the branch
+// that used to read `1 backend down` at 07:00 for a machine nobody is running.
+if let parkedIdle = CLILockScreenMetrics(lockBackendPayload(tagged: [true],
+                                                            running: 0, waiting: 0)) {
+    expect(lockBackendGroup, "an empty queue on a parked engine headlines the pause",
+           CLILockScreenCopy.queueHeadline(parkedIdle) == "1 backend paused")
+    expect(lockBackendGroup, "the inline line carries exactly that verdict",
+           CLILockScreenCopy.text(for: .inline, parkedIdle)?.headline
+            == "— C · 1 backend paused")
+    expect(lockBackendGroup, "a parked engine is never called idle",
+           CLILockScreenCopy.queueHeadline(parkedIdle) != "idle")
+} else {
+    expect(lockBackendGroup, "the parked-idle payload projects", false)
+}
+
+// THE CONTROL. The same row shape on a machine nobody parked is the committed
+// sentence byte for byte — the reason the parent card left `isDown` alone.
+if let controlBackend = CLILockScreenMetrics(lockBackendPayload(tagged: [false],
+                                                                running: 1, waiting: 0)) {
+    expect(lockBackendGroup, "CONTROL: an untagged errored backend is still counted down",
+           controlBackend.backendsDown == 1 && controlBackend.backendsPaused == 0)
+    expect(lockBackendGroup, "CONTROL: its rectangular line is the committed bytes",
+           CLILockScreenCopy.queueToken(controlBackend) == "1 run · 0 wait · 1 backend down")
+    expect(lockBackendGroup, "CONTROL: its voice clause is the committed bytes",
+           CLILockScreenCopy.voice(controlBackend).contains(", 1 backend down"))
+} else {
+    expect(lockBackendGroup, "the control payload projects", false)
+}
+if let controlIdle = CLILockScreenMetrics(lockBackendPayload(tagged: [false],
+                                                             running: 0, waiting: 0)) {
+    expect(lockBackendGroup, "CONTROL: its headline is the committed bytes",
+           CLILockScreenCopy.queueHeadline(controlIdle) == "1 backend down")
+} else {
+    expect(lockBackendGroup, "the control-idle payload projects", false)
+}
+
+// Both at once: the two counts stay separate, and a real fault outranks a
+// deliberate stop wherever only one word fits. The headline half needs an EMPTY
+// queue — a live `running` answer outranks BOTH clauses (the CLI's own order:
+// work being turned away, then work running, then why nothing is running), so a
+// busy payload would never reach the branch this leg is about.
+let lockBothPayload = lockBackendPayload(tagged: [true, false], running: 1, waiting: 0)
+if let bothBackends = CLILockScreenMetrics(lockBothPayload) {
+    expect(lockBackendGroup, "a parked AND a faulting engine are two separate counts",
+           bothBackends.backendsDown == 1 && bothBackends.backendsPaused == 1)
+    expect(lockBackendGroup, "and no errored row is counted twice",
+           bothBackends.backendsDown + bothBackends.backendsPaused == 2)
+    expect(lockBackendGroup, "the rectangular line states both, fault first",
+           CLILockScreenCopy.queueToken(bothBackends)
+            == "1 run · 0 wait · 1 backend down · 1 backend paused")
+    expect(lockBackendGroup, "the two tallies agree: the parked machine is down nowhere",
+           FleetProjection(projecting: lockBothPayload)?.tally.nodesDown == 1
+            && FleetProjection(projecting: lockBothPayload)?.tally.nodesPaused == 1
+            && bothBackends.backendsPaused == 1)
+} else {
+    expect(lockBackendGroup, "the both-backends payload projects", false)
+}
+if let bothIdle = CLILockScreenMetrics(lockBackendPayload(tagged: [true, false],
+                                                          running: 0, waiting: 0)) {
+    expect(lockBackendGroup, "with nothing queued the fault outranks the choice",
+           CLILockScreenCopy.queueHeadline(bothIdle) == "1 backend down")
+    expect(lockBackendGroup, "and only the fault reaches the inline line",
+           CLILockScreenCopy.text(for: .inline, bothIdle)?.headline == "— C · 1 backend down")
+} else {
+    expect(lockBackendGroup, "the both-idle payload projects", false)
+}
+// The phrase has ONE owner: the verdict word this file speaks IS the shared
+// `FleetFormat.pausedWord`, and the expectation is composed THROUGH it — a
+// second phrase invented here (a state the route never sent) fails this leg by
+// name, the same way the label legs compare through the shared label path.
+expect(lockBackendGroup, "the paused clause speaks the shared verdict word, not a new one",
+       CLILockScreenMetrics(lockBackendPayload(tagged: [true], running: 0, waiting: 0))
+        .map { CLILockScreenCopy.queueToken($0) }
+        == "0 run · 0 wait · 1 backend " + FleetFormat.pausedWord)
+
 // --- the alert styling is gone, both the per-node heat and the headline.
 expect(pauseGroup, "a parked node's heat is unknown, never hot",
        row(pausedFleet, 0).map { ClusterMetricHeat.node($0) } == .unknown)
