@@ -65,7 +65,11 @@ command; this module must never execute a mutating verb):
     t_bf9f1909 made ``cmd_api`` intercept ``--help`` before dispatch — they
     print the verb help and fork/bind/write nothing. The port tripwire below
     stays armed as a regression guard: if that intercept ever regresses, the
-    probe fails here on (D) sensors (port flip / new files / hang).
+    probe fails here on (D) sensors (port flip / new files / hang). Since
+    t_e5a9469e the tripwire measures a per-walk sealed port that the sandbox
+    ``~/.hscc/api.json`` pins for every probe child, never the operator's 8787:
+    a real leak lands on the port the walk owns, and host state on the product
+    port can neither arm it nor silence it.
 
 Usage:
   python3 scripts/hscc_cli_help_audit.py                 # audit repo root
@@ -80,6 +84,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import io
 import json
 import os
@@ -105,8 +110,21 @@ WIDTHS_ALL = WIDTHS_WRAP + (WIDTH_WIDE,)
 # expectations file (t_cfdcefa9 / GATE-313 — the gate was red on 3.13 only).
 PY = sys.executable
 
-API_DEFAULT_PORT = 8787   # hscc-api/api_server.py DEFAULT_PORT (tripwire)
-API_SMOKE_PORT = 8788     # scripts/api_smoke.py default (defensive second hold)
+#: The api ports the walk DEFENDS — and, since t_e5a9469e, NOT the ports it
+#: measures. The (D) "a --help bound the api port" check used to
+#: ``connect_ex`` 127.0.0.1:8787 whenever the defensive hold below failed to
+#: acquire it, which made it a reader of the host's live api state: MEASURED
+#: (NOTES-t_e5a9469e.md) the sensor is *unfireable* while the hold is up (a
+#: port we hold cannot be bound by anyone else) and fires on every probe in the
+#: window when some other process owns the port and starts listening mid-walk —
+#: a concurrent audit run's own defensive hold qualifies. The same host state
+#: was silent when the listener was up at audit start (``port_busy_at_start``
+#: short-circuits) and loud when it appeared later, which is how one innocent
+#: diff cost a base-control re-run to attribute. The sensor now measures only
+#: ``Prober.sensor_port``, a port this walk reserves and pins into the sandbox
+#: config its children read; these two stay hold-only.
+API_DEFAULT_PORT = 8787   # hscc-api/api_server.py DEFAULT_PORT (hold only)
+API_SMOKE_PORT = 8788     # scripts/api_smoke.py default (hold only)
 API_PLIST_NAME = "com.hscc.api.plist"
 
 # Launch-class verbs: a REGRESSED help intercept on these would fork a
@@ -503,26 +521,49 @@ def make_canary_dir(root: Path) -> Path:
 class Prober:
     """Executes help invocations under a sandbox HOME; snapshots side effects."""
 
-    def __init__(self, sandbox: Path, canary: Path, real_home: Path):
+    def __init__(self, sandbox: Path, canary: Path, real_home: Path,
+                 sensor_port: int | None = None):
         self.sandbox = sandbox
         self.canary = canary
         self.real_home = real_home
         self._cache = {}
-        # port -> the socket this Prober itself holds. Populated by the hold
-        # below; `port_busy_at_start` runs BEFORE it, when nothing is held, so
-        # that first reading still comes from the kernel.
+        # port -> the socket this Prober itself holds (the defensive hold at the
+        # bottom of this method). The (D) port sensor does NOT read them.
         self._held_ports: dict = {}
+        # ── the seal (t_e5a9469e) ────────────────────────────────────────────
+        # `sensor_port` is the ONLY port the (D) "a --help bound the api port"
+        # check may measure, and the only port a probe child can resolve as "the
+        # api port", because `_write_sealed_api_config()` pins it into the
+        # sandbox HOME every probe gets. Nothing outside this walk knows the
+        # number, so a flip can only be this walk's own doing — which is what
+        # makes the finding attributable, and what stops the operator's live api
+        # (or a sibling audit's hold) from turning an innocent `--help` into a
+        # "regression". It is deliberately NOT held: a hold would make a real
+        # leak unfireable, which is exactly the dead sensor the old code had.
+        self.sensor_port = (sensor_port if sensor_port is not None
+                            else self._sealed_api_port())
+        self._write_sealed_api_config()
+        # The baseline, measured and asserted: the flip means "free when the
+        # walk starts, bound while it runs". A sealed port that already answers
+        # busy was taken in the window between reserving it and asking about it
+        # — a premise failure is an error, never a finding and never a silent
+        # re-baseline.
         self.port_busy_at_start = self._port_busy()
-        # Defensive hold: bind (WITHOUT listen) the api ports for the whole
-        # audit. A `--help` probe must never fork a server (t_bf9f1909 made
-        # cmd_api intercept --help before dispatch); if that intercept ever
-        # regresses, a stray grandchild here dies on EADDRINUSE instead of
-        # staying bound to the operator's machine. A port already in use
+        if self.port_busy_at_start:
+            raise RuntimeError(
+                f"sealed api port {self.sensor_port} is not free: the (D) "
+                f"port-flip baseline cannot be established (t_e5a9469e)")
+        # Defensive hold: bind (WITHOUT listen) the operator's api ports for the
+        # whole audit. A `--help` probe must never fork a server (t_bf9f1909
+        # made cmd_api intercept --help before dispatch); if that intercept ever
+        # regresses, a stray grandchild dies on EADDRINUSE instead of staying
+        # bound to the operator's machine. Pure defence — a port already in use
         # (operator's live API, or a concurrent audit) degrades to holding
-        # nothing — and only then does `_port_busy` ask the kernel.
+        # nothing, and since t_e5a9469e that costs the sensor nothing at all,
+        # because the sensor no longer asks these ports.
         #
-        # This comment used to add "no listen() means connect_ex still reports
-        # 'refused', so the port_flip sensor below keeps its exact semantics".
+        # Why "ask the hold, do not probe it" stays true: this comment used to
+        # assert "no listen() means connect_ex still reports 'refused'".
         # MEASURED FALSE on macOS (t_4c9feb44, pinned by
         # scripts/tests/test_cli_help_surface.py::
         # test_bound_without_listen_does_not_report_refused): a port bound
@@ -533,10 +574,9 @@ class Prober:
         # asks once per probe and paid 0.232 s x 961 probes = 223 s of a 308 s
         # audit wall (host load 2.1; 60 s with the hold closed, identical
         # report), which is what made the `scripts` leg look hung from test
-        # ~233. It also never told us anything: while this hold is up a stray
-        # server cannot bind the port, so `port_flip` is unfireable by
-        # construction and a regression surfaces as a hang/new_files finding —
-        # exactly as the sentence above already says.
+        # ~233. The sealed sensor port is never held, so it never has: a free
+        # loopback port answers ECONNREFUSED in 0.000 s, which is also why the
+        # per-probe cost of the sensor no longer depends on host state.
         for port in (API_DEFAULT_PORT, API_SMOKE_PORT):
             s = socket.socket()
             try:
@@ -546,6 +586,60 @@ class Prober:
             else:
                 self._held_ports[port] = s
         self._tripwire_socks = list(self._held_ports.values())
+
+    def _sealed_api_port(self, attempts: int = 5) -> int:
+        """Reserve a loopback port only this walk knows about.
+
+        The kernel picks it (port 0) and the reservation is released, because a
+        held port cannot be bound by the very stray server this sensor looks
+        for. Released-then-used is a real window — another process could take
+        the number between reserving it and probing it — so the answer is
+        verified free before it is returned, retried, and re-verified at the
+        call site (`port_busy_at_start`), which raises rather than measuring
+        someone else's state. That residual is the same one the whole hscc-api
+        suite runs on ("servers bind an ephemeral loopback port ... so these
+        cases are parallel-safe"); the difference from the old sensor is that
+        8787 is a well-known product port the fleet and the operator actively
+        use, and this number is nobody's default.
+        """
+        last: int | str = "no attempt made"
+        for _ in range(attempts):
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            with socket.socket() as probe:
+                probe.settimeout(0.25)
+                rc = probe.connect_ex(("127.0.0.1", port))
+            if rc == errno.ECONNREFUSED:
+                # Nothing is bound there: the kernel's answer is an instant RST.
+                # rc == 0 would be a LISTENER (taken), and the black-holed
+                # EAGAIN/EINPROGRESS of t_4c9feb44 is a bound-without-listen
+                # port — a stranger either way, so both retry.
+                return port
+            last = errno.errorcode.get(rc, rc)
+        raise RuntimeError(
+            f"cannot reserve a free loopback api sensor port ({attempts} "
+            f"attempts, last answer {last}) — the (D) port check has no "
+            f"hermetic port to measure (t_e5a9469e)")
+
+    def _write_sealed_api_config(self) -> None:
+        """Pin what a probe child resolves as "the api port" (the seal).
+
+        Every probe runs with ``HOME=<sandbox>``, so ``~/.hscc/api.json`` is
+        the child's own file, and `hscc-api/api_server.py` resolves
+        ``defaults <- api.json <- explicit flags``: this seed therefore outranks
+        ``DEFAULT_PORT = 8787`` for a probe the same way the operator's own
+        ``api.json`` outranks it on a real box. Two consequences, both wanted:
+        a genuine ``--help`` leak lands on the port this walk is measuring
+        (teeth), and no probe ever resolves or binds the operator's api port
+        (seal). ``bind: loopback`` keeps the listener on 127.0.0.1, where the
+        sensor looks.
+        """
+        hscc = self.sandbox / ".hscc"
+        hscc.mkdir(parents=True, exist_ok=True)
+        (hscc / "api.json").write_text(
+            json.dumps({"port": self.sensor_port, "bind": "loopback"}))
+
 
     def _env(self, width: int) -> dict:
         env = {k: v for k, v in os.environ.items()
@@ -572,24 +666,25 @@ class Prober:
         return (self.canary / "trips.log").read_text().splitlines()
 
     def _port_busy(self, port: int | None = None) -> bool:
-        """Is a server listening on `port`? Cheap, and honest about the hold.
+        """Is a server listening on `port`? Default: this walk's sealed port.
 
-        A port this Prober holds itself can never be reported busy by a
-        connect, and asking is not free: a bound-but-not-listening port drops
-        the SYN, so `connect_ex` answers EAGAIN/EINPROGRESS only after the whole
-        `settimeout` window (measured 0.252 s; an unbound port answers
-        ECONNREFUSED in 0.000 s — see the hold in __init__ and the pin in
-        scripts/tests/test_cli_help_surface.py, t_4c9feb44). The answer for a
-        held port is therefore read off the hold instead of bought with a
-        timeout per probe. When the bind FAILED (live api / concurrent audit)
-        the port is not held and the sensor probes for real, exactly as before.
+        The default is `sensor_port`, never `API_DEFAULT_PORT` (t_e5a9469e): the
+        sealed port is free when the walk starts and is known to nobody else, so
+        "busy" here means a probe of this walk bound it. It is also never held by
+        us, which is what keeps this cheap — asking is free on a free port
+        (ECONNREFUSED in 0.000 s), and the black-hole cost t_4c9feb44 measured
+        came from asking a port this Prober itself holds. The hold short-circuit
+        stays because it is still true of any port we do hold: a port we hold can
+        never be reported busy by a connect, and asking it costs the whole
+        `settimeout` window (measured 0.252 s — see the hold in __init__ and the
+        pin in scripts/tests/test_cli_help_surface.py).
 
         `port` is resolved at CALL time, not in the signature, so a test can
-        move the sensor onto a throwaway loopback port instead of fighting the
-        running audit for the real one.
+        drive the sensor from a throwaway loopback port instead of racing the
+        walk for its sealed one.
         """
         if port is None:
-            port = API_DEFAULT_PORT
+            port = self.sensor_port
         if port in self._held_ports:
             return False
         with socket.socket() as s:
@@ -623,6 +718,7 @@ class Prober:
             "trips": self._trips()[trips_before:],
             "plist_created": (not plist_before) and self._plist(),
             "port_flip": (not self.port_busy_at_start) and self._port_busy(),
+            "sensor_port": self.sensor_port,
         }
         self._cache[key] = result
         return result
@@ -1250,8 +1346,17 @@ def audit(repo=None) -> dict:
     def add(group, command, kind, detail, fix):
         # Normalise probe-environment noise so findings are deterministic and
         # never leak the runner's private temp paths: sandbox root -> <SANDBOX>,
-        # daemon-log timestamps -> <TS>.
+        # daemon-log timestamps -> <TS>, this walk's sealed api port ->
+        # <SEAL_PORT>. The port is kernel-assigned per run, so it must not reach
+        # the bipartite expectation table as a literal number: matching a rule
+        # against a number that changes every run would make a (D) port finding
+        # impossible for a fix card to absorb (and the sealed number belongs in
+        # report["sealed_port"], where an operator can read it).
+        # The whole phrase is replaced, not the bare digits, so a coincidental
+        # number inside help text can never be normalised away by accident.
         detail = detail.replace(str(tmp), "<SANDBOX>")
+        detail = detail.replace(f"api port {prober.sensor_port}",
+                                "api port <SEAL_PORT>")
         detail = re.sub(r"\[\d{4}-\d\d-\d\dT[^\]]+\]", "[<TS>]", detail)
         key = (command, kind, detail)
         if key in seen_findings:
@@ -1380,7 +1485,7 @@ def audit(repo=None) -> dict:
                         "intercept --help before writing the LaunchAgent")
                 if r["port_flip"]:
                     add(group, name, "D",
-                        f"--help bound the api port {API_DEFAULT_PORT}",
+                        f"--help bound the sealed api port {r['sensor_port']}",
                         "intercept --help before forking the server")
                 if r["rc"] not in (0, None) and not r["hung"]:
                     add(group, name, "D-rc",
@@ -1438,6 +1543,11 @@ def audit(repo=None) -> dict:
         "examples_total": examples_total,
         "examples_failed": examples_failed,
         "widths": list(WIDTHS_ALL),
+        # The (D) port check's sealed posture, recorded so a report says which
+        # port the walk measured and which ports it merely defended. A (D)
+        # port finding's detail carries <SEAL_PORT>; this is the number.
+        "sealed_port": prober.sensor_port,
+        "defended_ports": sorted(prober._held_ports),
     }
 
 
