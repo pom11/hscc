@@ -543,7 +543,10 @@ class TestSpanGuard:
         seed(overlay, W1, until=at(-1), span_nodes=(W1, W2))
         seed(overlay, W2, until=at(3600), units=["wspan"], span_nodes=(W1, W2))
         entry = node_pauses.paused(W1, directory=overlay)
-        res = npe.resume_host(W1, entry, apply=True, directory=overlay,
+        # `now` is named, not defaulted, for the same reason #616 anchors _T0: a
+        # caller that reads the wall clock makes a fixture judgement about WHEN the
+        # suite ran. resume_host takes now= for exactly this (node_pause_exec.py).
+        res = npe.resume_host(W1, entry, now=NOW, apply=True, directory=overlay,
                               echo=Lines(), run=fleet)
         assert res["action"] == npe.RESUME_KEPT and res["ok"] is False, res
         assert fleet.calls == []
