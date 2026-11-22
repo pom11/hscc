@@ -112,8 +112,10 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   via the fleet's `openai_compat` plugin — plus the revert. Client-side companion
   to `docs/design/media-serving.md`; no fleet action lives here. **live**
 - `docs/ops/node-pause.md` — the node-pause overlay's operator surface: `hscc node
-  pause|resume|paused` (dry-run by default, `--apply` opt-IN, and the `--span` /
-  `--force` / `--until` rules with the refusal strings quoted from the code), what a
+  pause|resume|paused` (the plan, then the `y/N` question that replaced `--apply`,
+  with `--yes` for scripts and `--dry-run` to look; the every-model-runs-alone
+  eligibility rule, `--force` / `--until`, refusal strings quoted from the code),
+  what a
   pause leaves byte-identical (templates, `serving.json`, the applied-template
   record, kanban caps, autodown, proxy config), which loops skip a parked node
   (watchdog auto-heal, the heal breaker, autoscale, the autodown wake,
