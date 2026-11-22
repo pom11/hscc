@@ -23,6 +23,8 @@ import argparse
 
 import pytest
 
+from rich_layout import _says
+
 from flightdeck.commands import init as init_cmd
 
 
@@ -92,8 +94,14 @@ def test_apply_creates_dir_and_both_files(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "created" in out
-    assert "config.yaml" in out
-    assert "registry.yaml" in out
+    # The two seeded config PATHS are printed inside the init panel's rows, so their
+    # break position is set by how long tmp_path is: at a deep tmp root Rich FOLDS them
+    # mid-token (`registry.yaml` folds from tmp-root length 178, `config.yaml` from 189
+    # — window 48..210, t_f2382c78). A fold prints no space, so `_flowed`'s word
+    # reflow cannot recover them; `_says` does. "created" stays raw — it is the row's
+    # leading word, measured never to split, and it is the proof the row rendered.
+    assert _says(out, "config.yaml")
+    assert _says(out, "registry.yaml")
     assert (home / "config.yaml").exists()
     assert (home / "registry.yaml").exists()
     assert (home / "templates").is_dir()
@@ -192,9 +200,13 @@ def test_dry_run_creates_nothing(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "would create" in out
-    assert "config.yaml" in out
-    assert "registry.yaml" in out
-    assert "templates/" in out
+    # Same fold as test_apply_creates_dir_and_both_files: these are machine paths
+    # printed inside the panel's rows. Measured (`t_f2382c78`, tmp-root 48..210):
+    # `registry.yaml` folds from 178, `config.yaml` and `templates/` from 189. The
+    # row's leading words stay raw as the proof the row was rendered at all.
+    assert _says(out, "config.yaml")
+    assert _says(out, "registry.yaml")
+    assert _says(out, "templates/")
     assert not home.exists()  # nothing was written
 
 
