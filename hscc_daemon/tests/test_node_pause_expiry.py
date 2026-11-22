@@ -90,6 +90,11 @@ SERVING = {
 #: So the anchor stays put, every case hands the policy a clock of its own (the
 #: ``now=NOW`` argument, or the pinned fallback below), and the pin — not the
 #: anchor, and not this comment — is what keeps that honest.
+#: fixture-clock: 2026-11-22T12:00Z — see the block above: this instant is the
+#: ONLY clock this file's cases are judged by, and
+#: ``TestFixtureClockIsTheOnlyClock`` reddens the file if the wall clock ever
+#: answers one of its questions. Single-clock rule, card t_ed416771; also
+#: swept by test_single_clock_rule.py (±400 days, both directions).
 _T0 = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
 NOW = _T0.isoformat()
 

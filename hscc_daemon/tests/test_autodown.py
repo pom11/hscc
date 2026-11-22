@@ -1141,6 +1141,14 @@ class TestIntentionalWindow:
 
 import datetime as _dt
 
+#: fixture-clock: 2026-08-23T12:00Z — the instant the cycle()/wake-seam cases
+#: are judged by. The idle cases hand it over explicitly (``now=NOW``); the
+#: wake-seam cases that call ``cycle()`` with no clock compare one fixture stamp
+#: against ANOTHER fixture stamp (activity after ``down_since``), so the claim is
+#: relative and the wall clock decides nothing in them — which is exactly what
+#: test_single_clock_rule.py now proves instead of asserting: shift the wall
+#: clock ±400 days and no verdict in this file may move. Single-clock rule, card
+#: t_ed416771: a case runs on the clock that wrote its data.
 NOW = _dt.datetime(2026, 8, 23, 12, 0, 0, tzinfo=_dt.timezone.utc)
 
 #: The wake seam's floor — the ``down_since`` the wake-seam case below seeds. The

@@ -48,8 +48,13 @@ W1 = "192.0.2.12"
 W2 = "192.0.2.13"
 W3 = "192.0.2.14"
 
-#: One fixed clock for every age assertion, so "fresh" and "stale" are facts
-#: about the fixture and not about when pytest ran.
+#: fixture-clock: 2026-11-22T12:00Z — the age assertions below are judged by
+#: THIS instant: ``ask()`` hands ``now=NOW_ISO`` to the row, so the doctor's
+#: freshness verdict is a fact about the fixture. The two tick-driven cases are
+#: the deliberate exception and say so beside themselves (``park_real_clock``):
+#: they let the REAL ``expiry_tick`` run, which stamps and judges on the wall
+#: clock, so they seed from the wall clock too — one clock per case, never two.
+#: Single-clock rule, card t_ed416771; enforced by test_single_clock_rule.py.
 NOW = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
 NOW_ISO = NOW.isoformat()
 
