@@ -1699,7 +1699,12 @@ def make_paneless_checker(profiles_dir=None, hermes_home=None, repl=None,
         already cleared every other delivery gate — a quiet board pays nothing;
       * a profile's ``SOUL.md`` is read only once the sweep has CONFIRMED no
         pane for it, and the answer is cached per instance, so healthy boards
-        never touch a profile file at all.
+        never touch a profile file at all;
+      * the identity answer is cached per ``(board, profile)`` — the pair the
+        verdict is about. A board-keyed cache would let one profile borrow
+        another's "this is the retired cluster identity" answer, which silences
+        a lane that was never retired (pinned by
+        ``test_the_identity_verdict_never_leaks_between_profiles_of_one_board``).
 
     Blindness is sticky and never skips: no ``repl`` module, or a sweep that
     raised (no socket, or the ambiguous two-servers refusal ``repl_inject``
@@ -1708,6 +1713,12 @@ def make_paneless_checker(profiles_dir=None, hermes_home=None, repl=None,
     """
     cache: dict = {"panes": None, "blind": None}
     retired_cache: dict = {}
+    #: Keyed by the PAIR this seam answers for. ``check(board, profile)`` is
+    #: public (``tick(paneless=...)``) and ``legacy_cluster_identity`` reads BOTH
+    #: halves, so a board-keyed cache would hand a second profile of the same
+    #: board the first profile's identity verdict — i.e. SKIP a live lane because
+    #: some other name on that board is the retired cluster identity, and
+    #: attribute the skip to a retirement record that is not about it.
     legacy_cache: dict = {}
 
     def _panes_by_profile():
@@ -1748,9 +1759,10 @@ def make_paneless_checker(profiles_dir=None, hermes_home=None, repl=None,
             retired = retired_cache[name] = profile_is_retired(
                 name, profiles_dir, hermes_home)
         if not retired:
-            if board not in legacy_cache:
-                legacy_cache[board] = legacy_cluster_identity(name, board, hscc_dir)
-            if not legacy_cache[board]:
+            key = (str(board), name)
+            if key not in legacy_cache:
+                legacy_cache[key] = legacy_cluster_identity(name, board, hscc_dir)
+            if not legacy_cache[key]:
                 return None                  # (B) fails: a pane IS expected
         return paneless_reason(count, retired=retired,
                                legacy_identity=not retired)
