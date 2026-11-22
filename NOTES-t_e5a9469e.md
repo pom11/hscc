@@ -170,6 +170,16 @@ Two things the first leak mutation taught, both worth keeping:
   `d23b0ea3`, **593 passed, 5 skipped** at `bb5d2b83` (the delta in `scripts/` was
   `gen_site_commands.py` + `test_site_landing.py`, i.e. NOT byte-for-byte equal,
   so the leg was re-run rather than assumed).
+* CI on PR #598 (`leg scripts`, Linux runner, head `29da7c4a`): **581 passed,
+  17 skipped** — read from the job log, not from the green check, and there is no
+  `leg_verdict.sh` warning annotation. The five pins this diff adds all run there
+  too — the file's only Linux skips are `:547` (no sibling interpreter), `:1195`
+  (the pre-existing macOS-only black-hole pin) and `:1515` (the artifact writer),
+  none of them mine. So the seal is tested on both OSes: a held port reads "free"
+  on macOS as `EAGAIN` after the window (measured above) and, per that pin's own
+  reason string, "Linux answers a SYN to a bound-but-not-listening port with an
+  RST" — different errno, same wrong conclusion, which is why the guard asserts the
+  sensor's verdict rather than an errno.
 * The one thing a reviewer should re-check above all: that sealing the port does
   not weaken the check. It cannot —
   `test_port_flip_fires_when_a_probe_binds_the_sealed_port` is the positive
