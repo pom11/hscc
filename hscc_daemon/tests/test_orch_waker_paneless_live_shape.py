@@ -370,6 +370,44 @@ def test_a_sweep_that_refuses_never_skips_the_lane_end_to_end(tmp_path,
     assert skip_rec(state_path) is None
 
 
+# ── the seam's own contract: one verdict per (board, profile) ───────────────
+
+def test_the_identity_verdict_never_leaks_between_profiles_of_one_board(tmp_path):
+    """The checker's cache must be keyed by the pair it answers for.
+
+    ``check(board, profile)`` is the public seam (``tick(paneless=...)``), and its
+    contract is one verdict per PAIR. The identity half was cached per BOARD, so a
+    second profile asked about the same board in the same tick inherited the first
+    profile's "this name is the retired cluster identity" answer — and inherited it
+    in the dangerous direction: a live, un-retired orchestrator with no pane got a
+    SKIP, attributed to a retirement record that is not about it. ``tick`` happens
+    to resolve one target per board per pass, so the leak is latent there; the
+    seam itself is where it is reachable, and the direction of the bug (silencing
+    a lane instead of retrying it) is the one thing the two-conditions rule exists
+    to make impossible.
+
+    Both orders are pinned: the live lane must never borrow the skip, and the
+    retired lane must not lose its reason because a live profile was asked first.
+    """
+    pdir = make_profiles(tmp_path, **{TARGET: LIVE_SOUL, "grid-orch": LIVE_SOUL})
+    hsc = main_orch_doc(tmp_path, MAIN)
+
+    # retired name first, live name second: the live one must NOT inherit.
+    repl = FakeRepl(panes=busy_server())
+    check = ow.make_paneless_checker(profiles_dir=pdir, repl=repl, hscc_dir=hsc)
+    assert check(BOARD, TARGET) == ow.REASON_LEGACY_IDENTITY
+    assert check(BOARD, "grid-orch") is None
+
+    # live name first, retired name second: the retired one keeps its verdict.
+    check2 = ow.make_paneless_checker(profiles_dir=pdir, repl=FakeRepl(
+        panes=busy_server()), hscc_dir=hsc)
+    assert check2(BOARD, "grid-orch") is None
+    assert check2(BOARD, TARGET) == ow.REASON_LEGACY_IDENTITY
+
+    # and one sweep still covers the whole pass for all of it (cost rule intact)
+    assert repl.sweeps == 1
+
+
 # ── the vocabulary: the card's "no generic catch-all reason" rule ───────────
 
 def test_the_skip_vocabulary_is_only_the_two_named_reasons():
