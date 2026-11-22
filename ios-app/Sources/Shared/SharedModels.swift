@@ -625,24 +625,70 @@ struct MonitorNode: Codable, Identifiable {
     /// metric gap on a live host, not a host that is down.
     var isUp: Bool { error == nil }
 
-    /// The node's display label: the sample hostname when the API carried one,
-    /// otherwise the last octet of `host` — never the whole address (§7). This is
-    /// the single rule every surface uses; `MonitorViews` used to carry its own
-    /// copy of it. A configured label beats it.
+    /// The node's display label. THE one rule, and the only label path any
+    /// surface draws a node by — widget, desktop widget, menu bar, CarPlay row,
+    /// Live Activity column, parked row and all. It delegates to
+    /// `nodeLabel(host:reportedHostname:)` so no surface can hold a private
+    /// spelling of a node's identity.
     var displayLabel: String {
-        if let hostname = sample?.hostname, !hostname.isEmpty { return hostname }
-        return Self.shortTail(host)
+        Self.nodeLabel(host: host, reportedHostname: sample?.hostname)
     }
 
-    /// Last octet of the first dotted-quad, as ".NN". Same derivation as
-    /// `shortTail` in scripts/widget_datapath_live/template.swift, so widget,
-    /// Live Activity and live probe can never disagree on a node's identity.
-    static func shortTail(_ line: String) -> String {
-        let ips = line.split(whereSeparator: { !$0.isNumber && $0 != "." })
+    // MARK: - The node label (apps 1.4.4 operator rule)
+    //
+    // The operator's own words: a node is named by the LAST OCTET of its IP —
+    // `244`, `246` — never by a positional row-number name. Derived at runtime
+    // from the host address the route already returns, so a fifth node labels
+    // itself and a renumbered fleet needs no app change.
+    //
+    // Why the octet beats a reported hostname: the positional name was numbered
+    // by where sparkrun happened to put the row, so it changed meaning when the
+    // frame reordered, and the operator could not tell which machine a tile
+    // meant. The last octet is the same answer every time for the same machine.
+    // A hostname is only useful when there is no IPv4 to read, so it becomes the
+    // fallback rather than the preference it was before 1.4.4 — and when it is
+    // used it is the short name the current derivation yields, never a new
+    // truncation rule invented here.
+    //
+    // §7 still holds: the label carries no dotted quad. One octet is not an
+    // address any more than a house number is a postcode.
+
+    /// THE node label rule. The last dot-separated component of an IPv4 host,
+    /// as digits (`10` for `192.0.2.10`, `2` for `192.0.2.2`). A host with no
+    /// IPv4 in it falls back to the reported hostname, then to `host` itself —
+    /// whatever the existing short-name derivation yields, unchanged.
+    /// Never empty, never a dotted quad.
+    static func nodeLabel(host: String, reportedHostname: String?) -> String {
+        if let octet = lastOctet(of: host) { return octet }
+        if let reportedHostname, !reportedHostname.isEmpty { return reportedHostname }
+        return host.isEmpty ? "?" : host
+    }
+
+    /// The last dot-separated component of the first IPv4 dotted-quad in a
+    /// string, as written (`"10"` for `192.0.2.10`). nil when the string carries
+    /// no dotted quad at all, which is what makes a hostname fall through to
+    /// `nodeLabel`'s fallback instead of being mangled.
+    ///
+    /// This is the file's ONLY IPv4 parse: `shortTail` is expressed through it,
+    /// so the label and the identity tail can never disagree about which
+    /// machine a host string names.
+    static func lastOctet(of text: String) -> String? {
+        let ips = text.split(whereSeparator: { !$0.isNumber && $0 != "." })
             .map(String.init).filter { $0.split(separator: ".").count == 4 }
-        guard let ip = ips.first else { return line.isEmpty ? "?" : line }
-        let tail = ip.split(separator: ".").last.map(String.init) ?? ip
-        return "." + tail
+        guard let ip = ips.first,
+              let tail = ip.split(separator: ".").last.map(String.init),
+              !tail.isEmpty, tail.allSatisfy({ $0.isNumber }) else { return nil }
+        return tail
+    }
+
+    /// The same octet, dot-prefixed (`.244`), for the places that use it as an
+    /// IDENTITY tail rather than as a label — matching a serving row's `node`
+    /// against a host row, naming a history series. Unchanged since before
+    /// 1.4.4 on purpose: those comparisons pair two strings produced by this
+    /// one function, and a label change must not become a matching change.
+    static func shortTail(_ line: String) -> String {
+        if let tail = lastOctet(of: line) { return "." + tail }
+        return line.isEmpty ? "?" : line
     }
 }
 

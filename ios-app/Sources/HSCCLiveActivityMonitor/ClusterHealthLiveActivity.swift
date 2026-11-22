@@ -12,7 +12,8 @@ import ActivityKit
 /// operator picked on 2026-11-20:
 ///
 ///   * Lock Screen — `CLUSTER · <model>` + as-of, four node columns
-///     (`72°` over `S1 · 34%`), then the tok/s · daemon · autodown footer.
+///     (`72°` over `11 · 34%`, the short name being the node's last octet),
+///     then the tok/s · daemon · autodown footer.
 ///   * compact     — a state dot + `4/4`, and `72° · 231 t/s`.
 ///   * minimal     — the hottest temperature (or the tally when none was told).
 ///   * expanded    — the Lock Screen layout.
