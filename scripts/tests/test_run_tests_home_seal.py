@@ -238,3 +238,34 @@ def test_no_checkout_means_no_declaration(tmp_path):
     assert "SPARKRUN_SRC=<unset>" in r.stdout, (
         "inventing a path that does not exist would turn an honest 'no checkout' "
         "skip into a FileNotFoundError at the first read")
+
+
+def test_agent_source_declared_only_when_the_tree_is_there(tmp_path):
+    """`HERMES_AGENT_PATH` is the seam the skip reason itself names.
+
+    Cases that read the live `hermes_cli` / kanban board (measured:
+    `hscc-project/tests/test_mcp_server.py:176`, three `hscc_daemon` cases) resolve
+    `~/.hermes/hermes-agent` by default; the seal removes the DEFAULT, not the
+    capability, and the reason literally says "Set HERMES_AGENT_PATH if it lives
+    elsewhere" — so the runner declares the machine's tree. Path, never home.
+    """
+    home = _home(tmp_path)
+    (home / ".hermes" / "hermes-agent" / "hermes_cli").mkdir(parents=True)
+    r = _run(_block(), _env(tmp_path), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert f"HERMES_AGENT_PATH={home}/.hermes/hermes-agent" in r.stdout
+
+    # An operator's own value wins, exactly as for SPARKRUN_SRC.
+    mine = tmp_path / "someone-elses-agent"
+    mine.mkdir()
+    r = _run(_block(), _env(tmp_path, HERMES_AGENT_PATH=str(mine)), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "HERMES_AGENT_PATH" not in r.stdout, (
+        "declaring over an operator's pin would point a deliberate run at a tree "
+        "they did not choose")
+
+    # And a host with no agent tree gets no declaration — never a phantom path.
+    r = _run(_block(), _env(tmp_path / "bare"), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "HERMES_AGENT_PATH" not in r.stdout, (
+        "a declared path that does not exist turns an honest skip into a crash")

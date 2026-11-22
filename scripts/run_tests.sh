@@ -221,6 +221,24 @@ else
     export SPARKRUN_SRC="$SUITE_REAL_HOME/sparkrun/src/sparkrun"
     echo "HOME seal: declared SPARKRUN_SRC=$SPARKRUN_SRC (this machine's sparkrun checkout)"
   fi
+  # The Hermes AGENT SOURCE tree, same rule and same reasoning as SPARKRUN_SRC above.
+  # Cases that consult the live `hermes_cli` / kanban board resolve it from
+  # `~/.hermes/hermes-agent` by default, and their own skip reason says "Set
+  # HERMES_AGENT_PATH if it lives elsewhere" — the seam already exists and is honoured in
+  # production (hscc-roles/hscc.py:398, hscc-cluster/workflow.py:594,
+  # hscc_daemon/autodown.py:875). What a seal removes is the DEFAULT, not the capability,
+  # so the runner declares the machine's tree. Measured at 96a9f38a without this line:
+  # `hscc-project/tests/test_mcp_server.py:176` (standup's watermark read) and three
+  # `hscc_daemon` cases retire as skips under the seal. The path, never the home.
+  if [ -z "${HERMES_AGENT_PATH:-}" ] && [ -n "$SUITE_REAL_HOME" ]; then
+    for _agent_candidate in "$SUITE_REAL_HOME/.hermes/hermes-agent" "$SUITE_REAL_HOME/src/hermes-agent"; do
+      if [ -d "$_agent_candidate/hermes_cli" ]; then
+        export HERMES_AGENT_PATH="$_agent_candidate"
+        echo "HOME seal: declared HERMES_AGENT_PATH=$HERMES_AGENT_PATH (this machine's Hermes agent source)"
+        break
+      fi
+    done
+  fi
 fi
 
 # ── leg heartbeat: make "slow" readable as distinct from "stopped" ──────────
