@@ -6,16 +6,26 @@ its ``finally:`` (``_load_gateway_bridge()`` -> ``_bridge2.shutdown()``, then
 ``api.clear_api_state()``). But ``_sigterm_handler`` answered SIGTERM/SIGINT
 with ``daemon_ops.write_stopped(...)`` followed by ``os._exit(0)``, and
 ``os._exit`` does not run ``finally:`` blocks. So the stop path — the ordinary
-``hscc api stop`` verb, which SIGTERMs the pid-file instance at
-``api_cli.py:874`` whenever the unit is not launchd-managed — never ran the
-teardown: the supervised serve survived holding the API process's token, which
-is the orphaned-sidecar / stale-token 403 outcome the handler was written to
-prevent, reached from the other entry point.
+``hscc api stop`` verb, which SIGTERMs the pid-file instance in
+``api_cli._handle_stop`` whenever the unit is not launchd-managed — never ran
+the teardown: the supervised serve survived holding the API process's token,
+which is the orphaned-sidecar / stale-token 403 outcome the handler was written
+to prevent, reached from the other entry point.
 
 The fix makes the stop path COOPERATIVE (the shape t_6eff6258 gave
-``api_server.serve_main``): the handler sets a stop flag and asks the live
-server to shut down, ``_serve`` honours the flag before serving and inside the
-serving loop, and the teardown stays in the one ``finally:``.
+``api_server.serve_main``): the handler sets a stop flag, ``_serve`` honours the
+flag before serving and inside the serving loop, and the teardown stays in the
+one ``finally:``. What the leg run then caught is the other half of the shape,
+and it is why the handler here is allowed to do nothing but set that flag: a
+signal handler runs on the thread it interrupts, so any work it does that takes
+a lock can be a lock that thread already held — ``daemon_ops.log`` holds
+``daemon_ops._handlers_lock`` (a plain non-reentrant ``threading.Lock``) while
+it resolves the rotating handler, and a stop landing there deadlocked the
+process, lost the stop, and left the sidecar for the escalation SIGKILL. The
+blocking part (log line, PID-file bookkeeping, the shutdown request) therefore
+lives on a helper thread, and the flag is a lock-free ``_StopFlag`` rather than
+a ``threading.Event``, whose ``set()``/``is_set()`` take a lock the serving loop
+holds on every pass.
 
 WHAT IS RUN FOR REAL here: the actual ``hscc_daemon.api_cli`` verbs, in a
 child process with a redirected HOME, a fixture token and an ephemeral loopback
@@ -45,6 +55,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -214,6 +225,51 @@ if verb == "serve":
 
     _api = api_cli._load_api_server()
     api_cli._serve(_api, ["127.0.0.1"], False, int(rest[0]))
+    print("@@SERVE_RETURNED@@", flush=True)
+    raise SystemExit(0)
+
+if verb == "serve-lograce":
+    # The state a stop has to survive: the signal lands while THIS thread is
+    # inside a log write. `daemon_ops.log` -> `append_rotating` -> `_get_logger`
+    # holds `daemon_ops._handlers_lock`, a plain non-reentrant `threading.Lock`,
+    # and a signal handler runs on the thread it interrupts — so a handler that
+    # logs (as `api_cli._sigterm_handler` did until t_56552ecc measured the
+    # trap) waits on a lock only its own thread can release. Nothing else in the
+    # stop path then happens: no flag, no return from `_serve`, no sidecar
+    # teardown, and `hscc api stop` escalates to SIGKILL, which skips the
+    # teardown too.
+    #
+    # Not a pretend log write: it takes the same lock the real write takes. It
+    # fires on the FIRST log line of startup, which is where a stop from the
+    # ordinary `stop` verb actually lands — the API logs several times before an
+    # accept loop exists, and the leg run that first caught this hit exactly
+    # that window. `_serve` then goes on to bind and start the sidecar, so the
+    # teardown still has a real child to kill, and the stop flag the handler set
+    # is what keeps the accept loops from ever starting.
+    import signal as _signal
+    import time as _time
+    from hscc_daemon import daemon_ops
+
+    _signum = getattr(_signal, rest[1])
+    _real_log = daemon_ops.log
+    _fired = []
+
+    def _log(msg, *a, **kw):
+        if not _fired:
+            _fired.append(str(msg))
+            with daemon_ops._handlers_lock:   # exactly where the real write stands
+                _signal.raise_signal(_signum)  # the stop lands here, on this thread
+                _time.sleep(0.4)              # a handler that waits, waits here
+            print("@@INTERRUPTED-INSIDE-LOG@@", flush=True)
+        return _real_log(msg, *a, **kw)
+
+    daemon_ops.log = _log
+    _signal.signal(_signal.SIGTERM, api_cli._sigterm_handler)
+    _signal.signal(_signal.SIGINT, api_cli._sigterm_handler)
+
+    _api = api_cli._load_api_server()
+    api_cli._serve(_api, ["127.0.0.1"], False, int(rest[0]))
+    daemon_ops.log = _real_log
     print("@@SERVE_RETURNED@@", flush=True)
     raise SystemExit(0)
 
@@ -614,6 +670,79 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
             proc.wait(timeout=10)
 
 
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
+    """A stop arriving mid-log-write must still tear the sidecar down.
+
+    The stop path is a signal handler, and a handler runs on the thread it
+    interrupted. `daemon_ops.log` holds `daemon_ops._handlers_lock` — a plain,
+    NON-reentrant `threading.Lock` — while `_get_logger` resolves the rotating
+    handler, so a handler that logs (as this file's did) waits on a lock only its
+    own thread can release. Measured at the base of this card, both signals hang
+    the child there forever: the flag is never set, `_serve` never returns, and
+    the SIGKILL that `hscc api stop` escalates to then skips the teardown the
+    card exists to guarantee.
+
+    This is the case the leg run wrote itself: `..._being_cut_short`'s SIGINT arm
+    failed once in ~4800 items with exactly that signature — the child's log
+    ending at its startup lines, no `Received signal` line, the sidecar alive. The
+    window is milliseconds wide (a few log writes during startup) and the
+    scheduler decides, so the harness takes the lock on purpose instead of waiting
+    for the lottery.
+
+    What stays production-shaped afterwards: the binds happen, the fake sidecar
+    really starts, the stop flag the handler set is what keeps the accept loops
+    from starting, and the `finally:` still has a real child to kill.
+    """
+    port = _free_port()
+    proc = _popen(sandbox, "serve-lograce", str(port), sig.name)
+    try:
+        try:
+            out = proc.communicate(timeout=25)[0]
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out = proc.communicate()[0]
+            pytest.fail(
+                f"{sig.name} arriving inside a log write never stopped the "
+                f"process — the handler is blocked on a lock its own thread holds "
+                f"(`daemon_ops._handlers_lock`), so the stop flag was never set "
+                f"and the sidecar teardown was never reached."
+                f"\nchild output: {out}\n{_describe(sandbox)}")
+        assert "@@INTERRUPTED-INSIDE-LOG@@" in out, (
+            "the signal never landed inside a log write, so this case says "
+            f"nothing about that window.\nchild output: {out}\n"
+            f"{_describe(sandbox)}")
+        assert proc.returncode == 0, (
+            f"{sig.name} landed inside a log write and the process left by a "
+            f"door other than `_serve`: rc={proc.returncode}.\n{out}\n"
+            f"{_describe(sandbox)}")
+        assert SERVE_RETURNED in out, (
+            f"the run ended without returning through `_serve`, so the "
+            f"finally: that owns the sidecar was skipped.\n{out}\n"
+            f"{_describe(sandbox)}")
+        assert _have(sandbox, SIDECAR_STARTED, timeout=5), (
+            "the sidecar never started, so a teardown here would prove nothing "
+            f"about the stop path: {_describe(sandbox)}")
+        sidecar_pid = _read_int(sandbox["sidecar_pid"])
+        assert _have(sandbox, SIDECAR_SHUTDOWN, timeout=5), (
+            f"{sig.name} arrived inside a log write and the sidecar teardown was "
+            f"never reached: {_describe(sandbox)}")
+        assert sidecar_pid is not None and not _alive(sidecar_pid), (
+            f"the sidecar (pid {sidecar_pid}) survived a {sig.name} that arrived "
+            f"inside a log write: {_describe(sandbox)}")
+        # The closing line is written by `_serve`'s finally:, on the thread that
+        # was interrupted. The handler's own line is written by the helper thread
+        # and is best-effort by construction — this is the one an operator has a
+        # right to find, so it is the one pinned here.
+        assert "HSCC API stopped" in sandbox["log"].read_text(), (
+            "no closing line in the API log: the teardown did not finish, or it "
+            f"moved off the guaranteed path: {_describe(sandbox)}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
 # --------------------------------------------------------------------------- #
 # the shape, pinned at source level (the behavioural cases cannot enforce it)
 # --------------------------------------------------------------------------- #
@@ -740,17 +869,130 @@ class TestStopPathIsCooperative:
             f"handshake would not be the same object")
 
     def test_the_handler_keeps_the_pid_file_bookkeeping(self):
-        """The bookkeeping the handler already did stays (the card's condition).
+        """The bookkeeping the handler always did stays (the card's condition).
 
-        `hscc api stop` reads the pid file and `hscc api status` answers from
-        it; making the stop cooperative must not quietly turn "stopped" into
-        "still claims a server" while the teardown runs.
+        `hscc api stop` reads the pid file and `hscc api status` answers from it;
+        making the stop cooperative must not quietly turn "stopped" into "still
+        claims a server" while the teardown runs.
+
+        It moved out of the handler in the same commit as the fix, and this pin
+        moved with it on purpose rather than being loosened: the handler may not
+        do this work itself (see
+        `test_the_handler_holds_nothing_the_serving_thread_holds`), so the
+        bookkeeping lives in the helper thread the handler hands the stop to. The
+        invariant the card set — a stop must still mark the pid file stopped — is
+        unchanged; only the function that owns it is.
+        """
+        body = self._body(api_cli._request_stop)
+        assert self._calls(body, "write_stopped"), (
+            "nothing in the stop path marks the pid file stopped: a stop that "
+            "takes a moment to tear the sidecar down would leave the pid file "
+            "claiming a live server (`hscc api status` answers from that file)")
+
+    def test_the_handler_holds_nothing_the_serving_thread_holds(self):
+        """The handler body is two operations, and neither one may block.
+
+        A signal handler runs on the thread it interrupts, so anything it does
+        that takes a lock can be a lock that thread was already holding. That is
+        not hypothetical in this file: the handler opened with `daemon_ops.log`,
+        which holds `daemon_ops._handlers_lock` (a plain non-reentrant
+        `threading.Lock`) while `_get_logger` resolves the rotating handler, and a
+        stop landing there deadlocked the process — the flag was never set,
+        `_serve` never returned, and the sidecar was orphaned by the escalation
+        SIGKILL. The behavioural case
+        `test_a_signal_landing_inside_a_log_write_still_stops` reaches that state;
+        this pin is what keeps a third operation from being added back.
+
+        So the body is allowed exactly two statements: set the stop flag, and
+        start a thread. Nothing else — no logging, no pid-file write, no
+        `server.shutdown()` — and the flag is deliberately not a
+        `threading.Event`, whose `set()` / `is_set()` take a lock the serving
+        loop holds on every pass.
         """
         body = self._body(api_cli._sigterm_handler)
-        assert self._calls(body, "write_stopped"), (
-            "_sigterm_handler no longer marks the pid file stopped: a stop "
-            "that takes a moment to tear the sidecar down would leave the pid "
-            "file claiming a live server")
+        # `_body` parses the function's own source, so the module it lands in has
+        # the def in it — the statements to judge are the FunctionDef's body.
+        fn = body.body[0]
+        assert isinstance(fn, ast.FunctionDef), (
+            "the excerpt of `_sigterm_handler` no longer parses to a function, so "
+            "this pin is reading something else")
+        stmts = list(fn.body)
+        if (stmts and isinstance(stmts[0], ast.Expr)
+                and isinstance(stmts[0].value, ast.Constant)
+                and isinstance(stmts[0].value.value, str)):
+            stmts = stmts[1:]                     # the docstring, not a statement
+
+        def _is_flag_set(node):
+            return (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "set"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "_stop_requested")
+
+        def _is_thread_start(node):
+            return (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "start"
+                    and isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Attribute)
+                    and node.func.value.func.attr == "Thread")
+
+        def _thread_target_name(node):
+            """The `target=` name of `threading.Thread(target=f, ...).start()`."""
+            func = node.func if isinstance(node, ast.Call) else None
+            if not isinstance(func, ast.Attribute):
+                return None
+            inner = func.value
+            if not isinstance(inner, ast.Call):
+                return None
+            for kw in inner.keywords:
+                if kw.arg == "target" and isinstance(kw.value, ast.Name):
+                    return kw.value.id
+            return None
+
+        def _callee(calls):
+            """Readable names for a failure message, without assuming the shape."""
+            names = []
+            for c in calls:
+                func = c.func if isinstance(c, ast.Call) else None
+                if isinstance(func, ast.Attribute):
+                    names.append(func.attr)
+                elif isinstance(func, ast.Name):
+                    names.append(func.id)
+                else:
+                    names.append(type(func).__name__)
+            return names
+
+        calls = [n.value for n in stmts if isinstance(n, ast.Expr)]
+        assert len(calls) == len(stmts) == 2, (
+            f"_sigterm_handler is {len(stmts)} statement(s) "
+            f"({[type(n).__name__ for n in stmts]}); the body is exactly two "
+            "calls — set the stop flag, then hand the rest to a helper thread. A "
+            "handler runs on the thread it interrupts, so any call that blocks or "
+            "takes a lock (`daemon_ops.log`, `write_stopped`, "
+            "`server.shutdown()`) can wait on a lock that thread already holds: "
+            "the stop is lost and the sidecar is orphaned — the defect measured "
+            "at t_56552ecc")
+        flag = [c for c in calls if _is_flag_set(c)]
+        starts = [c for c in calls if _is_thread_start(c)]
+        assert len(flag) == 1 and len(starts) == 1, (
+            "the two calls must be `_stop_requested.set()` and starting one "
+            f"helper thread, not {_callee(calls)}: "
+            "the flag is the only thing a stop can be before a server exists, and "
+            "everything else (the log line, the pid-file bookkeeping, "
+            "`shutdown()`) belongs on the thread")
+        targets = {_thread_target_name(s) for s in starts}
+        assert targets == {"_request_stop"}, (
+            f"the helper thread runs {sorted(map(str, targets))}, not "
+            "`_request_stop` — the "
+            "bookkeeping pin above would then be inspecting a function the stop "
+            "path never calls")
+        assert not isinstance(api_cli._stop_requested, threading.Event), (
+            "`_stop_requested` is a threading.Event again: Event.set()/is_set() "
+            "take the event's internal lock, and the serving loop calls is_set() "
+            "on every pass — a stop landing there would have the handler wait on "
+            "a lock its own thread holds, which is the deadlock this pin exists "
+            "for. `_StopFlag` is the lock-free answer")
 
     def test_the_serving_process_is_given_the_handler(self):
         """The process that serves must HAVE the handler in the first place.
