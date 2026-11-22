@@ -71,7 +71,7 @@ own defensive hold, which is itself a bound-without-listen 8787". I could not
 attribute the single 10:50 event to a named process from host logs; the fix
 below deliberately does not depend on knowing who it was.
 
-## 3. Seal (implemented, `159e79fc`)
+## 3. Seal (implemented, `8d06074d` on `wt/t_e5a9469e-r1`)
 
 Design decision: **the walk must never read a port it does not own, and a
 genuine leak must land on a port the walk DOES own.**
@@ -136,7 +136,23 @@ Two things the first leak mutation taught, both worth keeping:
    (hold genuinely failed, baseline genuinely free, foreign listener genuinely
    answering) are what make the failure real.
 
-## 4. Deliberately not done
+## 4. Delivery and what a reviewer should re-check
+
+* Branch `wt/t_e5a9469e` (pre-rebase, base `d23b0ea3`) and **`wt/t_e5a9469e-r1`**
+  (rebased onto `origin/main` `bb5d2b83`, head `5813970f`) are both pushed;
+  PR **https://github.com/pom11/hscc/pull/598** is from `-r1`. The force-push that
+  would have updated the first branch is refused in single-query mode, so the
+  rebased line went to a new ref instead — merge `-r1`, not `wt/t_e5a9469e`.
+* `scripts` leg on the exact tested bytes: **591 passed, 5 skipped** at
+  `d23b0ea3`, **593 passed, 5 skipped** at `bb5d2b83` (the delta in `scripts/` was
+  `gen_site_commands.py` + `test_site_landing.py`, i.e. NOT byte-for-byte equal,
+  so the leg was re-run rather than assumed).
+* The one thing a reviewer should re-check above all: that sealing the port does
+  not weaken the check. It cannot —
+  `test_port_flip_fires_when_a_probe_binds_the_sealed_port` is the positive
+  control, and the leak posture above is the full-audit version of the same proof.
+
+## 5. Deliberately not done
 
 * The `--help` walk is unchanged; no baseline entry was added to
   `scripts/tests/cli_help_expected.json` — a baseline entry would have absorbed
