@@ -320,6 +320,18 @@ REASON_DECLARED_NODE = "declared_orchestrator_node"
 REASON_NO_HEALTHY_SERVER = "no_healthy_orchestrator_server"
 REASON_UNREADABLE = "cannot_rule_out"
 
+#: The verdicts :func:`pause_eligibility` can reach, and the reason strings
+#: behind a refusal. Same vocabulary as the orchestrator guard above: both
+#: entry points print ``verdict`` + ``lines`` verbatim and compose (eligibility
+#: first, then the orchestrator guard), so neither the CLI nor the agent tool
+#: may word a refusal of its own.
+ELIG_ALLOW = "allow"
+ELIG_REFUSE = "refuse"
+
+REASON_ZERO_UNITS = "nothing_to_pause"
+REASON_MULTI_NODE = "multi_node_unit"
+REASON_PLAN_UNREADABLE = "plan_unreadable"
+
 
 def _declared_orchestrator_node(applied_state=None):
     """The applied template's declared orchestrator node, or None.
@@ -732,6 +744,137 @@ def plan(host, serving_dict=None, status_reader=None):
 #: parameter, which shadows the enumerator inside its own body — so the
 #: "caller handed me no plan" fallback path calls it through this name.
 _plan_enumerate = plan
+
+
+# ── THE eligibility rule (the only one) ────────────────────────────────────
+#: OPERATOR RULE (11-22, supersedes the ``--span`` semantics of #561/#567):
+#: a node may be paused only when EVERY model on it runs on that node ALONE.
+#: Several single-node models colocated on one machine are FINE — a pause stops
+#: all of them together, which is the point of parking a machine. What is never
+#: paused is a model that lives on more than one node: stopping it here stops it
+#: over there too, on a node nobody released. So the rule is about SPAN, not
+#: about count, and there is no opt-in for it any more — ``--span`` is gone and
+#: no flag (not ``--force``, which belongs to the orchestrator guard alone)
+#: overrides this refusal.
+def _multi_node_units(units):
+    """The units of a plan that are NOT confined to one node.
+
+    Two proofs of "not alone", either one enough: the unit's node set holds more
+    than one node (``plan`` already merges the observed placement with the
+    serving.json declaration, so a sibling that did not answer the sweep still
+    shows up), or it declares ``tp`` > 1 — a model split across more than one
+    process is not a single-node model, whatever a partial sweep reports.
+    """
+    out = []
+    for unit in (units or []):
+        nodes = _hosts_of(unit.get("nodes"))
+        tp = _as_int(unit.get("tp"))
+        if len(nodes) > 1 or (tp is not None and tp > 1):
+            out.append(unit)
+    return out
+
+
+def pause_eligibility(host, plan=None, serving_dict=None, status_reader=None):
+    """THE node-pause eligibility rule. One function, both entry points.
+
+    It answers one question — *does every model on this node live on this node
+    alone?* — and refuses on three grounds:
+
+    ``plan_unreadable``
+        the fleet or the node could not be read. Fail-closed, like the
+        orchestrator guard: an unreadable node is not a verified-empty node, and
+        "I could not enumerate it" must never become "it runs nothing".
+    ``nothing_to_pause``
+        the node runs zero units. There is nothing to stop, so a pause would
+        only be a record of an idle machine — which is what the heal paths
+        already do nothing about. (The operator's rule; the pre-11-22 verb
+        allowed it.)
+    ``multi_node_unit``
+        ANY unit spans other nodes (or declares ``tp`` > 1). The refusal names
+        that unit and its other nodes — the operator has to see the whole blast
+        radius from the refusal alone.
+
+    Everything else is an ALLOW, including several colocated single-node units:
+    they are stopped together, which is what parking a machine means.
+
+    ``--force`` deliberately is NOT a parameter here. It belongs to
+    :func:`orchestrator_pause_guard` and to nothing else; a caller that passed
+    it through would turn "this model is shared with another node" into a
+    warning, which is exactly the semantics the operator retired.
+
+    Args:
+        host: the host about to be paused.
+        plan: the caller's :func:`plan` result, re-used so one pause never
+            sweeps the fleet twice. Computed when not given.
+        serving_dict / status_reader: only used on the "no plan handed in" path.
+
+    Returns a dict: ``verdict``, ``reason``, ``lines`` (the exact lines to
+    print — callers print them, they do not compose their own), ``units`` (every
+    unit id the plan found), ``multi_node`` (the offending unit ids) and
+    ``peers`` (the other nodes a stop would reach).
+    """
+    host = (host or "").strip()
+    if plan is None:
+        # Only this path reads anything; with a plan handed in the check works
+        # from the sweep the caller already has.
+        if serving_dict is None:
+            serving_dict = serving.load_serving()
+        plan = _plan_enumerate(host, serving_dict=serving_dict,
+                               status_reader=status_reader)
+
+    units = list(plan.get("units") or [])
+    ids = [u.get("unit_id") or u.get("cluster_id") or "?" for u in units]
+    offenders = _multi_node_units(units)
+    peers = sorted({n for u in offenders for n in _hosts_of(u.get("nodes"))}
+                   - {host})
+    out = {"host": host, "verdict": ELIG_ALLOW, "reason": None, "lines": [],
+           "units": ids, "multi_node": [u.get("unit_id") or "?"
+                                        for u in offenders],
+           "peers": peers}
+
+    def _refuse(reason, lines):
+        out["verdict"] = ELIG_REFUSE
+        out["reason"] = reason
+        out["lines"] = lines + ["Nothing stopped and nothing recorded."]
+
+    if not plan.get("ok"):
+        _refuse(REASON_PLAN_UNREADABLE, [
+            f"REFUSED: {host}: its units could not be enumerated — a pause must "
+            f"know what it is stopping.",
+            f"  why: {plan.get('error') or 'the fleet status read failed'}",
+        ])
+        return out
+    if not units:
+        _refuse(REASON_ZERO_UNITS, [
+            f"REFUSED: {host} runs nothing — nothing to pause.",
+        ])
+        return out
+    if offenders:
+        lines = [f"REFUSED: {host} runs a multi-node unit — a node pause stops "
+                 f"only units that run on this node alone."]
+        for unit in offenders:
+            nodes = _hosts_of(unit.get("nodes"))
+            tp = _as_int(unit.get("tp"))
+            others = [n for n in nodes if n != host]
+            if others:
+                lines.append(f"  {unit.get('unit_id')}: spans "
+                             f"{', '.join(nodes)} (other node(s): "
+                             f"{', '.join(others)})")
+            else:
+                # tp > 1 reported on one node: the declaration and the sweep
+                # disagree, and the declaration is the safer reading.
+                lines.append(f"  {unit.get('unit_id')}: declares tp={tp} on "
+                             f"{', '.join(nodes)} — a model split across "
+                             f"processes is not a single-node model")
+        if peers:
+            lines.append(f"  Stopping it here also stops it on: "
+                         f"{', '.join(peers)}")
+        lines.append("  No flag overrides this: park the node when its models "
+                     "are all single-node, or stop the shared model on every "
+                     "node it lives on.")
+        _refuse(REASON_MULTI_NODE, lines)
+    return out
+
 
 
 # ── stop / resume ──────────────────────────────────────────────────────────
