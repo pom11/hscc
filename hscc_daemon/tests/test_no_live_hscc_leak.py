@@ -140,6 +140,13 @@ def test_suite_never_writes_live_hscc(tmp_path):
         # `pauses_directory=` argument would read (and a CLI-style test could
         # write) the operator's real pause record.
         "test_autodown_paused_wake.py",
+        # t_411401a0: the CLI-side twin of that wake seam. ``_cmd_wake`` starts
+        # with ``record_activity("cli")`` — a WRITE of autodown.json — and the
+        # all-paused branch reads the config back for the machine view, so this
+        # is exactly the CLI-style test the note above means: if its
+        # ``AUTODOWN_FILE`` seal were ever dropped, the planted tree is what
+        # catches the rewrite of the operator's own state.
+        "test_autodown_cli_paused_wake.py",
     ]
     paths = [os.path.join(tests_dir, t) for t in targets]
 
