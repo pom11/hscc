@@ -796,7 +796,7 @@ def cmd_cluster_up(dry_run=False, nodes=None):
     A skip is NOT a failure: ``success`` stays True (post-boot reads that one
     boolean and would otherwise page the operator about their own pause).
     Naming a parked host in ``nodes=`` does not override this — naming is
-    scoping, not an opt-out; ``hscc node resume <host> --apply`` is the only
+    scoping, not an opt-out; ``hscc node resume <host>`` is the only
     resume path and it does not go through this verb. There is no
     ``--include-paused`` by design (see docs/ops/node-pause.md): a flag that
     started a unit under a live pause record would make the overlay false for
@@ -868,7 +868,7 @@ def cmd_cluster_up(dry_run=False, nodes=None):
         print(f"Unit {entry['unit_id']} SKIPPED — {names} "
               f"{'is' if len(blocked) == 1 else 'are'} parked by node_pauses"
               f"{f' ({reason})' if reason else ''}; not launched. "
-              f"Put it back with: hscc node resume {blocked[0]} --apply")
+              f"Put it back with: hscc node resume {blocked[0]}")
     if parked and not plan:
         print(f"cluster up: every unit in the plan is parked by node_pauses — "
               f"{len(parked)} unit(s) skipped, nothing launched "

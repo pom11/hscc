@@ -3,7 +3,8 @@
 The tools delegate to ``hscc_daemon.hscc``'s own verb functions, so these
 tests are mostly about the DELEGATION contract: the dry-run default survives
 the trip through the tool surface, ``confirm`` is the agent's spelling of
-``--apply``, the refusal reaches the agent as ``refused`` (not as a silent
+``--yes`` (the CLI's confirmation question, which replaced ``--apply`` on
+11-22), the refusal reaches the agent as ``refused`` (not as a silent
 empty result), and there is no argument combination by which a tool call
 mutates something the CLI would refuse.
 
@@ -31,6 +32,11 @@ from hscc_daemon import node_pauses, serving, util
 ORCH = "192.0.2.11"
 W1 = "192.0.2.12"
 W2 = "192.0.2.13"
+# W3 runs TWO single-node models side by side: the operator's 11-22 rule allows
+# this and stops both together, so the tool's allowed path needs a host that is
+# not one-unit-per-node. W4 is the plain one-model case.
+W3 = "192.0.2.14"
+W4 = "192.0.2.15"
 
 SERVING = {
     "port": 8000,
@@ -44,6 +50,15 @@ SERVING = {
         {"id": "wspan", "role": "worker", "nodes": [W1, W2], "port": 8200,
          "recipe": "/srv/recipes/worker-tp.yaml",
          "model": "meta-llm/Work-8B", "tp": 2},
+        {"id": "w3a", "role": "worker", "nodes": [W3], "port": 8300,
+         "recipe": "/srv/recipes/worker.yaml",
+         "model": "meta-llm/Work-8B", "tp": 1},
+        {"id": "w3b", "role": "worker", "nodes": [W3], "port": 8310,
+         "recipe": "/srv/recipes/worker.yaml",
+         "model": "meta-llm/Work-9B", "tp": 1},
+        {"id": "w4", "role": "worker", "nodes": [W4], "port": 8400,
+         "recipe": "/srv/recipes/worker.yaml",
+         "model": "meta-llm/Work-7B", "tp": 1},
     ],
 }
 
@@ -112,6 +127,14 @@ def fleet(monkeypatch):
                      served="meta-llm/Work-8B worker-model"),
             **_group("cid_span", "/srv/recipes/worker-tp.yaml", [W1, W2],
                      8200, tp=2, served="meta-llm/Work-8B worker-model"),
+            **_group("cid_w3a", "/srv/recipes/worker.yaml", [W3], 8300,
+                     served="meta-llm/Work-8B worker-model"),
+            **_group("cid_w3b", "/srv/recipes/worker.yaml", [W3], 8310,
+                     model="meta-llm/Work-9B",
+                     served="meta-llm/Work-9B worker-model"),
+            **_group("cid_w4", "/srv/recipes/worker.yaml", [W4], 8400,
+                     model="meta-llm/Work-7B",
+                     served="meta-llm/Work-7B worker-model"),
         },
         "solo_entries": [], "errors": {}, "idle_hosts": [],
         "preparing_hosts": [], "pending_ops": [], "total_containers": 0,
@@ -124,14 +147,16 @@ def fleet(monkeypatch):
 # ── the dry-run default survives the tool surface ──────────────────────────
 class TestDryRunDefault:
     def test_pause_without_confirm_previews_and_changes_nothing(self, fleet):
-        out = npt.node_pause({"host": W1})
+        out = npt.node_pause({"host": W3})
         assert out["executed"] is False
         assert out["preview"] is True
         assert fleet.calls == [], "a preview must not stop anything"
-        assert node_pauses.paused(W1) is None
+        assert node_pauses.paused(W3) is None
         assert "confirm=true" in out["note"]
-        # The plan itself is what the operator would have seen.
-        assert "w1" in out["report"] and W2 in out["report"]
+        # The plan itself is what the operator would have seen — both colocated
+        # models listed, because the whole node goes down in one call.
+        assert "w3a" in out["report"] and "w3b" in out["report"]
+        assert W3 in out["report"]
 
     def test_resume_without_confirm_previews_and_changes_nothing(self, fleet):
         node_pauses.pause(W1, units=["w1", "wspan"], span_nodes=[W1, W2])
@@ -141,13 +166,40 @@ class TestDryRunDefault:
         assert node_pauses.paused(W1) is not None
         assert "WOULD RESUME" in out["report"]
 
-    def test_confirm_is_the_agents_spelling_of_apply(self, fleet):
-        out = npt.node_pause({"host": W1, "span": True, "confirm": True})
+    def test_confirm_is_the_agents_spelling_of_yes(self, fleet):
+        """`confirm: true` → `--yes`, and the answer is the SAME answer the CLI
+        gives a typed y: everything on the node stops in one call.
+
+        W3 carries two single-node models on purpose (operator 11-22: colocated
+        solos are fine and ALL get paused), so this also proves the tool is not
+        quietly one-unit-only.
+        """
+        out = npt.node_pause({"host": W3, "confirm": True})
         assert out["executed"] is True and out["ok"] is True
         assert len(fleet.calls) == 2, fleet.calls
-        entry = node_pauses.paused(W1)
+        entry = node_pauses.paused(W3)
         assert entry is not None and entry["stopped"] is True
-        assert entry["units"] == ["w1", "wspan"]
+        assert entry["units"] == ["w3a", "w3b"]
+        assert out["stopped"] == ["w3a", "w3b"], (
+            "the result must say what came down, not just that something did")
+
+    def test_a_refusal_never_reports_a_stopped_list(self, fleet):
+        """`stopped` is a claim about the fleet. A refused or previewed call has
+        stopped nothing, so it must not carry the key at all."""
+        for args in ({"host": W3}, {"host": W1, "confirm": True}):
+            out = npt.node_pause(args)
+            assert "stopped" not in out, out
+            assert fleet.calls == []
+
+    def test_the_stopped_list_comes_from_the_record_not_the_prose(self):
+        """Structural pin for the line above: the list is read back through the
+        CLI's own read-only verb, so it cannot be re-derived from a sentence (or
+        from the overlay module directly — one door, see the delegation test)."""
+        import inspect
+        src = inspect.getsource(npt._recorded)
+        assert "_node_paused" in src, (
+            "_recorded stopped asking the CLI, so it is reading state by "
+            "hand again — through the overlay module or by parsing prose")
 
 
 class TestNoAgentEscapeHatch:
@@ -166,18 +218,41 @@ class TestNoAgentEscapeHatch:
         assert out["executed"] is True
         assert node_pauses.paused(ORCH) is not None
 
-    def test_span_unit_needs_span_even_with_confirm(self, fleet):
+    def test_a_multi_node_model_is_refused_and_no_argument_unlocks_it(self,
+                                                                      fleet):
+        """The old `span: true` door is GONE: W1 hosts one model that spans W2,
+        so the pause is refused outright — confirm included, and whatever the
+        agent calls.
+
+        Rewritten from `test_span_unit_needs_span_even_with_confirm` (the #561/
+        #567 opt-in, dropped by the operator on 11-22). The old test proved the
+        opt-in was REQUIRED; this proves the opt-in does not EXIST.
+        """
         out = npt.node_pause({"host": W1, "confirm": True})
-        assert out["refused"] is True
+        assert out["refused"] is True and out["executed"] is False
+        assert "wspan" in out["report"], "the refusal names the blocking model"
+        assert W2 in out["report"], "and the peer node it shares it with"
         assert fleet.calls == []
         assert node_pauses.paused(W1) is None
 
+    def test_span_is_not_an_argument_anymore_on_either_surface(self, fleet):
+        """No `--span` in the schema, and passing it is inert: it must not turn a
+        refusal into a stop. The flag is gone from the CLI too (help audit), so
+        a schema that still advertised it would promise a door the parser
+        rejects."""
+        for schema in (npt.NODE_PAUSE_SCHEMA, npt.NODE_RESUME_SCHEMA):
+            assert "span" not in schema["properties"], schema["properties"]
+        # Inert AND refused: the extra key changes nothing about the verdict.
+        # (`fleet` is not decoration: without the patched status read this call
+        # sweeps the real fleet for a verdict it never uses.)
+        out = npt.node_pause({"host": W1, "span": True, "confirm": True})
+        assert out["refused"] is True and out["executed"] is False
+
     def test_bad_until_is_refused_rather_than_parking_forever(self, fleet):
-        out = npt.node_pause({"host": W1, "span": True, "confirm": True,
-                              "until": "2days"})
+        out = npt.node_pause({"host": W3, "confirm": True, "until": "2days"})
         assert out["ok"] is False and out["executed"] is False
         assert "not a duration" in out["report"]
-        assert node_pauses.paused(W1) is None
+        assert node_pauses.paused(W3) is None
 
 
 class TestResumeTool:
@@ -241,10 +316,11 @@ class TestDelegationIsTheWholeDesign:
         from hscc_daemon import hscc as unified
         import io
         from contextlib import redirect_stdout
+        tool_args = {"host": W3}
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = unified._node_pause([W1])
-        out = npt.node_pause({"host": W1})
+            rc = unified._node_pause(cli_argv_for(tool_args))
+        out = npt.node_pause(tool_args)
         assert out["report"] == buf.getvalue().strip()
         assert out["rc"] == rc
 
@@ -357,6 +433,26 @@ def cli_pause(argv_tail):
     return rc, buf.getvalue().strip()
 
 
+def cli_argv_for(tool_args):
+    """The CLI argv the tool builds for these args, derived — not hand-written.
+
+    The tool's no-confirm door IS `--dry-run` and its confirm door IS `--yes`.
+    Writing the two spellings out side by side in every test is how this file
+    stayed green while the two doors had already diverged (the `--apply` era
+    compared a bare CLI argv against a tool call that sent a flag), so the CLI
+    side is computed from the tool's own mapping here.
+    """
+    argv = [tool_args["host"]]
+    if tool_args.get("reason"):
+        argv += ["--reason", str(tool_args["reason"])]
+    if tool_args.get("until"):
+        argv += ["--until", str(tool_args["until"])]
+    if tool_args.get("force"):
+        argv.append("--force")
+    argv.append("--yes" if tool_args.get("confirm") else "--dry-run")
+    return argv
+
+
 class TestBothEntryPointsSayTheSameThing:
     """One guard, two doors: identical verdict AND identical bytes on every case.
 
@@ -364,18 +460,17 @@ class TestBothEntryPointsSayTheSameThing:
     sees because only the CLI prints it — is the failure mode this pins.
     """
 
-    #: (verb argv tail, tool args, must the pause be refused?)
+    #: (tool args, must the pause be refused?)
     CASES = [
-        ([POOL_B], {"host": POOL_B}, False),                       # replica
-        ([POOL_A], {"host": POOL_A}, True),                        # declared
-        ([POOL_D], {"host": POOL_D}, False),                       # replica
+        ({"host": POOL_B}, False),                                 # replica
+        ({"host": POOL_A}, True),                                  # declared
+        ({"host": POOL_D}, False),                                 # replica
     ]
 
-    @pytest.mark.parametrize("argv,tool_args,refused", CASES)
-    def test_verdict_and_report_are_identical(self, pool, argv, tool_args,
-                                              refused):
-        rc, text = cli_pause(argv)
-        out = npt.node_pause(tool_args)
+    @pytest.mark.parametrize("tool_args,refused", CASES)
+    def test_verdict_and_report_are_identical(self, pool, tool_args, refused):
+        rc, text = cli_pause(cli_argv_for(tool_args))
+        out = npt.node_pause(dict(tool_args))
         assert out["report"] == text, "the agent must see the operator's report"
         assert out["rc"] == rc
         assert out["refused"] is refused
@@ -417,19 +512,44 @@ class TestBothEntryPointsSayTheSameThing:
     def test_force_agrees_in_both_doors_and_overrides_either_ground(self, pool):
         """POOL_A is refused by the declaration, so --force must be announced;
         POOL_B needed no override, so --force must NOT invent an override note —
-        both doors have to say the same thing in both cases."""
-        for argv, tool_args, expect in (
-                ([POOL_A, "--force"], {"host": POOL_A, "force": True},
+        both doors have to say the same thing in both cases.
+
+        The byte comparison runs on PREVIEW pairs only. A confirmed pair is not
+        comparable byte-for-byte by construction: the first door to run stops
+        the node and writes the record, and the second door is then answering a
+        different question ("this node is already parked"). Those pairs are
+        compared on VERDICT here and driven separately, which is what the
+        `--force` override claim actually needs.
+        """
+        for tool_args, expect in (
+                ({"host": POOL_A, "force": True},
                  "note: --force given, but this host is the applied "
                  "template's declared orchestrator node."),
-                ([POOL_B, "--force"], {"host": POOL_B, "force": True},
+                ({"host": POOL_B, "force": True},
                  "note: orchestrator-model stays served by 3 other node(s)")):
-            rc, text = cli_pause(argv)
-            out = npt.node_pause(tool_args)
+            rc, text = cli_pause(cli_argv_for(tool_args))
+            out = npt.node_pause(dict(tool_args))
             assert out["report"] == text and out["rc"] == rc
             assert out["refused"] is False and rc == 0, text
             assert expect in text, text
-        assert pool.calls == [], "--force without confirm is still a dry run"
+            assert out["executed"] is False, text
+        assert pool.calls == [], "--force without confirm is still a preview"
+
+        # The override is real on both surfaces, not just printed. Each door
+        # gets a clean overlay: POOL_A is the host the declaration refuses, so
+        # a `--force` that did not override would exit 1 and record nothing.
+        for tool_args in ({"host": POOL_A, "force": True, "confirm": True},
+                          {"host": POOL_B, "force": True, "confirm": True}):
+            node_pauses.clear(tool_args["host"])
+            rc, text = cli_pause(cli_argv_for(tool_args))
+            assert rc == 0 and "REFUSED" not in text, text
+            assert node_pauses.paused(tool_args["host"]) is not None
+            node_pauses.clear(tool_args["host"])
+            out = npt.node_pause(dict(tool_args))
+            assert out["rc"] == 0 and out["refused"] is False, out["report"]
+            assert out["executed"] is True, out["report"]
+            assert node_pauses.paused(tool_args["host"]) is not None
+        assert len(pool.calls) == 4, pool.calls
 
     def test_the_tool_decides_nothing_about_the_orchestrator_itself(self):
         """Structural pin: this handler delegates and reports. If a guard ever

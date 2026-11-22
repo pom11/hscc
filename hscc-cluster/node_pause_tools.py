@@ -4,22 +4,29 @@ Parity with `hscc node pause|resume|paused`, and deliberately NO second
 implementation: every handler here calls the unified CLI's own verb function
 in-process and reports what it printed. The reasons are the fleet's own rules:
 
-  * one source of truth for the safety policy. The orchestrator guard, the
-    ``--span`` opt-in, "stop the units BEFORE recording the overlay", and the
+  * one source of truth for the safety policy. The eligibility rule (a node
+    parks only when EVERY model on it runs on that node alone), the
+    orchestrator guard, "stop the units BEFORE recording the overlay", and the
     "keep the pause when a restart fails" rule all live behind the unified CLI
-    (the orchestrator guard itself lives one level down, in the executor's
-    ``orchestrator_pause_guard`` — ONE function, so the verb and this surface
-    cannot disagree). Copying them here would make the
-    agent a second policy to keep in sync — and the copy is the one nobody tests
+    — the two guards themselves live one level down, in the executor's
+    ``pause_eligibility`` and ``orchestrator_pause_guard`` (ONE function each,
+    so the verb and this surface cannot disagree). Copying them here would make
+    the agent a second policy to keep in sync — and the copy is the one nobody tests
     against the fleet.
-  * no agent-only escape hatch from the #478 dry-run rule. There is literally
+  * no agent-only escape hatch from the confirmation rule (operator 11-22,
+    which replaced ``--apply``). There is literally
     no other path to the executor from this plugin, so a tool call cannot
     mutate what the CLI would refuse to mutate.
   * the agent sees the operator's own report, so a screenshot of a chat and a
     terminal transcript describe the same decision.
 
-``confirm`` is this plugin's established spelling of the CLI's ``--apply``
-(:func:`clusterlib.confirm_gate`); both default to "print, do not touch".
+``confirm`` is this plugin's established spelling of the CLI's confirmation
+(:func:`clusterlib.confirm_gate`); both default to "print, do not touch". An
+agent has no terminal to answer the CLI's ``Pause <host> and stop these N
+model(s)? [y/N]`` question, so ``confirm=true`` maps to ``--yes`` (the verb
+proceeds, and says so in the report) and its absence maps to ``--dry-run`` —
+never to an unguarded mutation. Without a terminal AND without ``--yes`` the
+verb refuses, which is the posture a cron entry must land in too.
 
 The import of ``hscc_daemon.hscc`` is lazy and inside the handlers: the
 unified CLI locates this plugin as a sibling directory, so importing it back
@@ -46,22 +53,22 @@ NODE_PAUSE_SCHEMA = {
                                  "1d3h, 45 = seconds) or an ISO timestamp. "
                                  "Omit for open-ended (only node_resume ends "
                                  "it)."},
-        "span": {"type": "boolean", "default": False,
-                 "description": "Accept stopping a multi-node (tensor-parallel) "
-                                "unit across EVERY node it spans. Required "
-                                "with confirm when the node hosts such a unit."},
         "force": {"type": "boolean", "default": False,
-                  "description": "Override the orchestrator guard: park the "
-                                 "applied template's declared orchestrator "
+                  "description": "Override the orchestrator guard ONLY: park "
+                                 "the applied template's declared orchestrator "
                                  "node, or park a node whose pause would "
                                  "leave no healthy unit serving the "
-                                 "orchestrator model. Both are refused "
-                                 "without this. Any other node is allowed "
-                                 "either way, with a note naming the replicas "
-                                 "that keep serving the alias."},
+                                 "orchestrator model. It does NOT unlock a "
+                                 "node that runs a model spanning other "
+                                 "nodes — that pause is refused with no "
+                                 "override at all."},
         "confirm": {"type": "boolean", "default": False,
-                    "description": "Execute. Without it this is a DRY RUN: the "
-                                   "plan is returned, nothing stops."},
+                    "description": "Execute. This is the agent's answer to the "
+                                   "CLI's confirmation question ('Pause <host> "
+                                   "and stop these N model(s)? [y/N]'): "
+                                   "required for anything to stop. Without it "
+                                   "this is a DRY RUN — the plan is returned, "
+                                   "nothing stops."},
     },
     "required": ["host"], "additionalProperties": False,
 }
@@ -100,20 +107,27 @@ def _run(fn, argv):
     return rc, buf.getvalue().strip()
 
 
-def _outcome(rc, report):
+def _outcome(rc, report, confirmed=False, stopped=None):
     """The tool-side shape of one CLI run.
 
     ``executed`` is the plugin-wide key the mutating tools already use
     (``stop_model`` etc.); ``preview`` is ``confirm_gate``'s key, kept so an
     agent that learned the guard vocabulary anywhere else reads this the same
-    way. ``refused`` is the CLI's own REFUSED line — the WHY is in ``report``.
+    way. ``refused`` is the CLI's own REFUSED/Aborted line — the WHY is in
+    ``report``.
+
+    ``confirmed`` is what the CALLER asked for, not something read back out of
+    the prose: an agent must never learn that a mutation happened because a
+    sentence happened to contain (or omit) the words "Dry run".
     """
-    refused = "REFUSED" in report
-    out = {"executed": rc == 0 and "Dry run" not in report,
+    refused = "REFUSED" in report or "Aborted:" in report
+    out = {"executed": bool(confirmed) and rc == 0,
            "ok": rc == 0,
            "rc": rc,
            "refused": refused,
            "report": report}
+    if stopped is not None:
+        out["stopped"] = stopped
     if not out["executed"]:
         out["preview"] = True
         out["note"] = ("Nothing was changed. Re-call with confirm=true to "
@@ -123,30 +137,61 @@ def _outcome(rc, report):
     return out
 
 
+def _recorded(host):
+    """What the pause record holds for ``host`` afterwards — the authoritative
+    list of what this call stopped.
+
+    Read through the CLI's OWN read-only verb (`node paused --json`), not by
+    importing the overlay module: the report is prose for a human, the record
+    is the fact an agent should act on, and this plugin must keep exactly one
+    door to the node-pause state (see
+    ``test_the_module_holds_no_executor_call_of_its_own``). A read that cannot
+    be parsed reports "unknown" (an empty list) rather than inventing units.
+    """
+    rc, report = _run(_cli()._node_paused, ["--json"])
+    if rc != 0:
+        return []
+    try:
+        payload = json.loads(report)
+    except ValueError:
+        return []
+    for row in payload.get("pauses") or []:
+        if row.get("host") == host:
+            return list(row.get("units") or [])
+    return []
+
+
 def node_pause(args, **kwargs):
-    """Park one node: stop its units and record the pause."""
+    """Park one node: stop its models and record the pause."""
     argv = [args["host"]]
     if args.get("reason"):
         argv += ["--reason", str(args["reason"])]
     if args.get("until"):
         argv += ["--until", str(args["until"])]
-    if args.get("span"):
-        argv.append("--span")
     if args.get("force"):
         argv.append("--force")
     if args.get("confirm"):
-        argv.append("--apply")
+        # The tool call IS the confirmation; --yes is the CLI's spelling of
+        # "answered already, by a script that means it".
+        argv.append("--yes")
+    else:
+        argv.append("--dry-run")
     rc, report = _run(_cli()._node_pause, argv)
-    return _outcome(rc, report)
+    stopped = _recorded(args["host"]) if (rc == 0 and args.get("confirm")) \
+        else None
+    return _outcome(rc, report, confirmed=bool(args.get("confirm")),
+                    stopped=stopped)
 
 
 def node_resume(args, **kwargs):
     """Restart the units a pause recorded, then clear it and the heal strikes."""
     argv = [args["host"]]
     if args.get("confirm"):
-        argv.append("--apply")
+        argv.append("--yes")
+    else:
+        argv.append("--dry-run")
     rc, report = _run(_cli()._node_resume, argv)
-    return _outcome(rc, report)
+    return _outcome(rc, report, confirmed=bool(args.get("confirm")))
 
 
 def node_paused(args, **kwargs):

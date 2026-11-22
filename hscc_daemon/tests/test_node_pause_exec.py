@@ -31,6 +31,11 @@ from hscc_daemon import serving, sparkrun_bin, util
 ORCH = "192.0.2.11"
 W1 = "192.0.2.12"
 W2 = "192.0.2.13"
+#: Two single-node models colocated on one machine — the shape the 11-22 rule
+#: ALLOWS (every model on it lives there alone, so all of them park together).
+W3 = "192.0.2.14"
+#: One single-node model and nothing else — the plain allowed case.
+W4 = "192.0.2.15"
 #: A host no serving.json unit declares — the shape of a foreign container.
 FOREIGN = "192.0.2.20"
 
@@ -47,6 +52,12 @@ SERVING = {
          "recipe": WORKER_RECIPE, "model": "meta-llm/Work-8B", "tp": 1},
         {"id": "wspan", "role": "worker", "nodes": [W1, W2], "port": 8200,
          "recipe": SPAN_RECIPE, "model": "meta-llm/Work-8B", "tp": 2},
+        {"id": "w3a", "role": "worker", "nodes": [W3], "port": 8300,
+         "recipe": WORKER_RECIPE, "model": "meta-llm/Work-8B", "tp": 1},
+        {"id": "w3b", "role": "worker", "nodes": [W3], "port": 8310,
+         "recipe": WORKER_RECIPE, "model": "meta-llm/Work-9B", "tp": 1},
+        {"id": "w4", "role": "worker", "nodes": [W4], "port": 8400,
+         "recipe": WORKER_RECIPE, "model": "meta-llm/Work-7B", "tp": 1},
     ],
 }
 
@@ -101,6 +112,15 @@ def payload_for_host(host):
                         served="meta-llm/Work-8B worker-model"))
     groups.update(group("cid_span", SPAN_RECIPE, [W1, W2], 8200, tp=2,
                         served="meta-llm/Work-8B worker-model"))
+    groups.update(group("cid_w3a", WORKER_RECIPE, [W3], 8300,
+                        model="meta-llm/Work-8B",
+                        served="meta-llm/Work-8B worker-model"))
+    groups.update(group("cid_w3b", WORKER_RECIPE, [W3], 8310,
+                        model="meta-llm/Work-9B",
+                        served="meta-llm/Work-9B worker-model"))
+    groups.update(group("cid_w4", WORKER_RECIPE, [W4], 8400,
+                        model="meta-llm/Work-7B",
+                        served="meta-llm/Work-7B worker-model"))
     return status_payload(groups=groups, idle=[host])
 
 
@@ -619,6 +639,160 @@ class TestOrchestratorPauseGuard:
         assert sorted(u["nodes"][0] for u in units) == [P1, P2, P3]
         assert all(u["observed"] for u in units)
         assert [u["role"] for u in units if u["nodes"] == [P1]] == ["orchestrator"]
+
+
+# ── THE eligibility rule: ONE check, both entry points (operator rule 11-22) ─
+# The rule: a node parks only when EVERY model on it lives on that node ALONE.
+# Several colocated single-node models park TOGETHER (that is the point of
+# parking a machine); ANY multi-node model refuses outright, with no opt-in —
+# `--span` is gone and `--force` belongs to the orchestrator guard alone.
+# Placeholders only (nolive-rule.txt); the status read is injected.
+class TestPauseEligibility:
+    """The verdict, through the same injectable seams the guard uses."""
+
+    def _elig(self, host, **payload_kw):
+        plan = npe.plan(host, serving_dict=SERVING,
+                        status_reader=reader(payload_for_host(host)))
+        return npe.pause_eligibility(host, plan)
+
+    def test_one_single_node_unit_is_allowed(self):
+        v = self._elig(W4)
+        assert v["verdict"] == npe.ELIG_ALLOW
+        assert v["units"] == ["w4"] and v["multi_node"] == []
+        assert v["lines"] == [], "an allow prints nothing of its own"
+
+    def test_colocated_single_node_units_are_allowed_together(self):
+        """The 11-22 amendment: colocated is FINE. Count is not the rule —
+        span is. Both models are the pause's, and the refusal machinery must
+        not fire just because a second unit shares the machine."""
+        v = self._elig(W3)
+        assert v["verdict"] == npe.ELIG_ALLOW
+        assert v["units"] == ["w3a", "w3b"]
+        assert v["multi_node"] == [] and v["peers"] == []
+
+    def test_a_colocated_mix_refuses_and_names_the_multi_node_one(self):
+        """W1 runs a single-node unit AND a TP pair: the refusal names the pair
+        and its other node — and nothing else about the node is paused."""
+        v = self._elig(W1)
+        assert v["verdict"] == npe.ELIG_REFUSE
+        assert v["reason"] == npe.REASON_MULTI_NODE
+        assert v["multi_node"] == ["wspan"], "the solo unit is not the offender"
+        joined = "\n".join(v["lines"])
+        assert "wspan" in joined, "the refusal names the model"
+        assert W2 in joined, "the refusal names the other node it lives on"
+        assert f"other node(s): {W2}" in joined
+        assert "multi-node" in joined
+        assert v["lines"][-1] == "Nothing stopped and nothing recorded."
+
+    def test_the_refusal_is_the_same_from_the_sibling_node(self):
+        """The blast radius reads the same whichever side the operator starts
+        from — the sibling names the node left behind."""
+        v = self._elig(W2)
+        assert v["verdict"] == npe.ELIG_REFUSE
+        assert v["multi_node"] == ["wspan"]
+        assert W1 in "\n".join(v["lines"])
+        assert v["peers"] == [W1]
+
+    def test_a_span_unit_that_is_alone_on_the_node_still_refuses(self):
+        """The case #561/#567 let through with --span: exactly ONE unit on the
+        node, but it lives on two nodes. There is no flag for it any more."""
+        serving = {"units": [{"id": "wspan", "role": "worker",
+                              "nodes": [W1, W2], "port": 8200,
+                              "recipe": SPAN_RECIPE,
+                              "model": "meta-llm/Work-8B", "tp": 2}]}
+        groups = {}
+        groups.update(group("cid_span", SPAN_RECIPE, [W1, W2], 8200, tp=2))
+        plan = npe.plan(W1, serving_dict=serving,
+                        status_reader=reader(status_payload(groups=groups)))
+        v = npe.pause_eligibility(W1, plan)
+        assert v["verdict"] == npe.ELIG_REFUSE
+        assert v["reason"] == npe.REASON_MULTI_NODE
+        assert len(plan["units"]) == 1, "one unit is not what makes it pausable"
+
+    def test_a_span_surviving_a_silent_sibling_is_still_refused(self):
+        """meta.hosts says TP pair, only one node answered: the unverified
+        sibling is still a node this stop would take down."""
+        groups = {}
+        groups.update(group("cid_span", SPAN_RECIPE, [W1, W2], 8200, tp=2,
+                            observed=[W1]))
+        plan = npe.plan(W1, serving_dict=SERVING,
+                        status_reader=reader(status_payload(groups=groups)))
+        v = npe.pause_eligibility(W1, plan)
+        assert v["verdict"] == npe.ELIG_REFUSE
+        assert v["peers"] == [W2] and W2 in "\n".join(v["lines"])
+
+    def test_a_multi_process_unit_on_one_reported_node_is_not_solo(self):
+        """tp>1 with a single-node placement: the declaration and the sweep
+        disagree, and a model split across processes is the thing this rule
+        exists to protect — the safer reading wins."""
+        serving = {"units": [{"id": "tp-only", "role": "worker",
+                              "nodes": [W4], "port": 8400,
+                              "recipe": WORKER_RECIPE,
+                              "model": "meta-llm/Work-7B", "tp": 4}]}
+        payload = status_payload(groups=dict(
+            group("cid_tp", WORKER_RECIPE, [W4], 8400,
+                  model="meta-llm/Work-7B", tp=4)))
+        v = npe.pause_eligibility(W4, npe.plan(W4, serving_dict=serving,
+                                               status_reader=reader(payload)))
+        assert v["verdict"] == npe.ELIG_REFUSE
+        assert v["multi_node"] == ["tp-only"]
+        assert "tp=4" in "\n".join(v["lines"])
+
+    def test_a_node_running_nothing_refuses_nothing_to_pause(self):
+        """Zero units is NOT a pause: there is nothing to stop. (The pre-11-22
+        verb recorded an empty node — the operator retired that.) FOREIGN is a
+        host serving.json declares nothing on, so the plan really is empty."""
+        plan = npe.plan(FOREIGN, serving_dict=SERVING,
+                        status_reader=reader(status_payload()))
+        assert plan["ok"] and plan["units"] == []
+        v = npe.pause_eligibility(FOREIGN, plan)
+        assert v["verdict"] == npe.ELIG_REFUSE
+        assert v["reason"] == npe.REASON_ZERO_UNITS
+        assert v["lines"] == [
+            f"REFUSED: {FOREIGN} runs nothing — nothing to pause.",
+            "Nothing stopped and nothing recorded."]
+
+    def test_an_unreadable_node_is_refused_not_read_as_empty(self):
+        """Fail-closed: 'could not enumerate' must not become 'runs nothing' —
+        that would turn a dead host into a verified-empty one."""
+        plan = npe.plan(W1, serving_dict=SERVING,
+                        status_reader=reader(None, "sparkrun status raised"))
+        v = npe.pause_eligibility(W1, plan)
+        assert v["verdict"] == npe.ELIG_REFUSE
+        assert v["reason"] == npe.REASON_PLAN_UNREADABLE
+        joined = "\n".join(v["lines"])
+        assert "could not be enumerated" in joined
+        assert "sparkrun status raised" in joined
+
+    def test_no_force_can_override_the_rule(self):
+        """`--force` is the orchestrator guard's, not this one's — a caller
+        cannot even hand it in."""
+        sig = inspect.signature(npe.pause_eligibility)
+        assert "force" not in sig.parameters
+        v = self._elig(W1)
+        assert v["verdict"] == npe.ELIG_REFUSE
+        assert "No flag overrides this" in "\n".join(v["lines"])
+
+    def test_a_handed_plan_means_the_fleet_is_swept_once(self):
+        def boom():
+            raise AssertionError("eligibility swept the fleet a second time")
+        plan = npe.plan(W3, serving_dict=SERVING,
+                        status_reader=reader(payload_for_host(W3)))
+        v = npe.pause_eligibility(W3, plan, status_reader=boom)
+        assert v["verdict"] == npe.ELIG_ALLOW
+
+    def test_a_uniform_pool_replica_is_eligible_by_itself(self):
+        """Eligibility is orthogonal to the orchestrator guard: a pool replica
+        is a single solo unit, so the ELIGIBILITY check allows it and the
+        guard is what answers the stays-served question (compose, not merge)."""
+        plan = pool_plan(P2)
+        assert npe.pause_eligibility(P2, plan)["verdict"] == npe.ELIG_ALLOW
+
+    def test_the_verdict_vocabulary_is_the_guards_own(self):
+        """Both checks answer with the same two words and one shared closing
+        line, so a caller can print either verdict without re-wording it."""
+        assert (npe.ELIG_ALLOW, npe.ELIG_REFUSE) == (npe.GUARD_ALLOW,
+                                                     npe.GUARD_REFUSE)
 
 
 # ── the two commands ───────────────────────────────────────────────────────

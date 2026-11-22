@@ -12,7 +12,7 @@ Pinned here, in the order the contract states them:
 
 1. a unit with even ONE parked node is absent from ``plan``/``issued`` and is
    reported under the additive ``paused`` key, with a line naming the unit, the
-   node, the reason and ``hscc node resume <host> --apply``;
+   node, the reason and ``hscc node resume <host>``;
 2. a skip is NOT a failure — ``success`` stays True. Load-bearing, not
    cosmetic: ``post_boot.py:745`` and ``recover.py:627`` read that one boolean,
    and a False there takes the ``launch-failed`` branch → restore baselines,
@@ -167,7 +167,10 @@ class TestParkedUnitIsSkipped:
         # The reason token exists ONLY inside the interpolated record, so this
         # pins that the reason actually reached the line (not the word "reason").
         assert REASON in out
-        assert "hscc node resume" in out and "--apply" in out
+        # The hint must name the verb that ends the pause — and must not send
+        # the operator to `--apply`, which the 11-22 rule retired: resume now
+        # prints its plan and asks.
+        assert "hscc node resume" in out and "--apply" not in out
 
     def test_a_parked_unit_does_not_make_the_launch_failing_verdict_lie(
             self, monkeypatch, overlay):
@@ -312,7 +315,7 @@ class TestNodesNarrowing:
         assert res["success"] is True, "post_boot must not take launch-failed"
         assert calls == []
         out = capsys.readouterr().out
-        assert "hscc node resume" in out and "--apply" in out
+        assert "hscc node resume" in out and "--apply" not in out
 
     def test_a_scoped_up_still_claims_the_whole_unparked_fleet(
             self, monkeypatch, overlay):

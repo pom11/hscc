@@ -462,15 +462,17 @@ class TestSpanGuard:
     def test_the_verb_refuses_to_resume_half_a_span(self, fleet, live_root):
         """The same rule, from the operator's side of the seam.
 
-        ``hscc node resume W1 --apply`` re-issues the whole declared workload, so
+        ``hscc node resume W1 --yes`` re-issues the whole declared workload, so
         before this rule it restarted units onto W2 while W2's own pause was still
         in force — the half-restart a tensor-parallel unit must never see. The
-        refusal lives in ``resume_host``, shared with the tick.
+        refusal lives in ``resume_host``, shared with the tick. `--yes` is what
+        gets the verb past its own confirmation gate, so this proves the span
+        guard is NOT the question — an answer cannot unlock it either.
         """
         seed(live_root, W1, until=at(-1), span_nodes=(W1, W2))
         seed(live_root, W2, until=at(3600), units=["wspan"],
              span_nodes=(W1, W2))
-        rc, out = cli("resume", W1, "--apply")
+        rc, out = cli("resume", W1, "--yes")
         assert rc == 1, out
         assert "REFUSED" in out and W2 in out, out
         assert fleet.calls == [], "a refused span must not run anything"

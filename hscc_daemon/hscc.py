@@ -438,11 +438,11 @@ def _get_help_text():
                 "The built-in orchestrator waker (daemon-resident)"),
         # node group (t_c28f4f14): dispatched at main() and listed in
         # COMMAND_HELP, so the primary banner names it too (F5 surface-honesty
-        # rule, t_88d896f3). `--apply` is called out because the default is a
-        # dry run, and an operator who does not know that reads "pause" as
-        # already done.
+        # rule, t_88d896f3). The ask is called out because a pause is NOT
+        # done until the operator answers y, and an operator who does not know
+        # that reads "pause" as already done.
         *_entry("node pause <host> [flags]",
-                "Park one node; dry-run by default until --apply"),
+                "Park one node; it asks before anything stops"),
     ])
 
     util = _section("Utility", [
@@ -622,12 +622,13 @@ COMMAND_HELP = {
     # node group (card t_c28f4f14): the operator surface for the node-pause
     # overlay. Every line authored <=76 for the same (B)-gate reason as
     # orch/main above (only the FIRST line gets _handle_help's 2-space
-    # prefix). Wording note: --apply OPTS IN here — the opposite polarity from
-    # `hscc cluster up|down [--dry-run]`, whose wording must not be copied.
+    # prefix). Wording note: pause/resume ASK before they mutate (operator
+    # rule 11-22) — the --dry-run preview flag means the same thing here as in
+    # `hscc cluster up|down [--dry-run]`, and --yes is what a script passes.
     "node": "Node pause commands (park one machine for maintenance).\n"
             "  Subcommands: pause <host>  resume <host>  paused\n"
-            "  pause/resume are DRY-RUN by default: they print the units\n"
-            "  they would stop or restart and change nothing until --apply.\n"
+            "  pause/resume print the plan, then ask: only y proceeds,\n"
+            "  a bare Enter stops nothing. --dry-run previews, --yes acts.\n"
             "  paused is read-only and never touches the fleet.\n"
             "  Usage: hscc node <subcommand> [args]",
     # main group (M4/M5): the main orchestrator's own tmux pane + the daemon's
@@ -1305,11 +1306,15 @@ def _handle_cluster():
 # keepalive paths, so this is how a machine gets parked for maintenance without
 # the daemon walking units back onto it.
 #
-# Dry-run default (the #478 rule, which the executor also implements): `pause`
-# and `resume` print the units they would stop or restart and change NOTHING
-# until `--apply`; `paused` is read-only always. NOTE the polarity: `--apply`
-# OPTS IN here, the opposite of `hscc cluster up|down [--dry-run]` above, so
-# that surface's wording deliberately does not transfer to these entries.
+# Mutation safety (operator rule 11-22, replaces `--apply`): `pause` and
+# `resume` print the plan — host, every model it will stop or restart, the
+# reason, the deadline — and then ASK: `Pause <host> and stop these N
+# model(s)? [y/N]`. Only a literal y/Y proceeds; a bare Enter, "yes", "n" or
+# anything else aborts with nothing stopped and nothing recorded. `--yes` is
+# what a script or cron passes to skip the ask, and with no terminal attached
+# the mutation is REFUSED unless `--yes` is there — a scheduled job must never
+# park a machine by answering for the operator. `--dry-run` previews: same
+# plan, no prompt, nothing recorded. `paused` is read-only always.
 #
 # Help is intercepted INSIDE _handle_node, on the RAW tail, before any import,
 # status read or state write — the B6/B10/B12 rule the cluster/orch/kanban
@@ -1322,14 +1327,16 @@ _NODE_VERBS = ("pause", "resume", "paused")
 
 _NODE_GROUP_ENTRIES = [
     ("hscc node pause <host> [flags]",
-     "Park one node: stop the sparkrun units on it and record a durable pause "
-     "the heal paths skip. DRY-RUN by default — prints every unit and every "
-     "node it would stop, stops nothing. Flags: [--reason <text>] "
-     "[--until <duration>] [--span] [--force] [--apply]."),
-    ("hscc node resume <host> [--apply]",
-     "Restart the units the pause recorded (sparkrun --ensure, the same "
+     "Park one node: stop the models on it and record a durable pause the heal "
+     "paths skip. Prints the plan and asks before anything stops; only y "
+     "proceeds. A node parks only when every model on it runs on it alone. "
+     "Flags: [--reason <text>] [--until <duration>] [--force] [--yes] "
+     "[--dry-run]."),
+    ("hscc node resume <host> [--yes] [--dry-run]",
+     "Restart the models the pause recorded (sparkrun --ensure, the same "
      "recipe and flags), then clear the pause and that node's heal strikes. "
-     "DRY-RUN by default — pass --apply to restart."),
+     "Prints what it will restart and asks before anything restarts; "
+     "--dry-run only previews."),
     ("hscc node paused [--json]",
      "Every paused node with its units, reason, since and until. Read-only: "
      "reads the overlay file, never the fleet."),
@@ -1338,27 +1345,34 @@ _NODE_GROUP_ENTRIES = [
 _NODE_SUBCOMMAND_HELP = {
     "pause": {
         "usage": "hscc node pause <host> [flags]",
-        "desc": ("Park <host>: enumerate its sparkrun units, stop them, then "
-                 "record the pause. DRY-RUN by default — prints what would "
-                 "stop and writes nothing; --apply is what stops and records. "
-                 "Flags: --reason <text> (recorded on the pause), --until "
-                 "<duration> (90m, 2h, 1d3h, 45 = seconds, or an ISO "
-                 "timestamp; open-ended without it), --span (accept stopping "
-                 "a multi-node unit across every node it spans), --force "
-                 "(override the orchestrator guard: the applied template's "
-                 "declared orchestrator node, or a pause that would leave no "
-                 "healthy unit serving the orchestrator model), --apply "
-                 "(do it)."),
+        "desc": ("Park <host>: enumerate its models, stop them, then record "
+                 "the pause. Prints the plan — the host, every model it will "
+                 "stop, the reason and the deadline — then asks 'Pause <host> "
+                 "and stop these N model(s)? [y/N]'. Only y proceeds; a bare "
+                 "Enter, n, 'yes' or anything else stops nothing and records "
+                 "nothing. A node parks only when EVERY model on it runs on "
+                 "that node alone — a model that spans other nodes is refused "
+                 "by name and no flag overrides that. Flags: --reason <text> "
+                 "(recorded on the pause), --until <duration> (90m, 2h, 1d3h, "
+                 "45 = seconds, or an ISO timestamp; open-ended without it), "
+                 "--force (override the orchestrator guard ONLY: the applied "
+                 "template's declared orchestrator node, or a pause that would "
+                 "leave no healthy unit serving the orchestrator model), --yes "
+                 "(act without asking — what a script or cron must pass to "
+                 "mean it; without a terminal the verb refuses instead), "
+                 "--dry-run (print the plan and change nothing)."),
     },
     "resume": {
-        "usage": "hscc node resume <host> [--apply]",
-        "desc": ("Restart the units recorded by the pause of <host>, through "
+        "usage": "hscc node resume <host> [--yes] [--dry-run]",
+        "desc": ("Restart the models recorded by the pause of <host>, through "
                  "sparkrun's --ensure path, so the same recipe and flags "
                  "re-issue the same workload instead of launching a "
-                 "duplicate. DRY-RUN by default — prints the commands and "
-                 "changes nothing; --apply restarts, then clears the pause and "
-                 "that node's heal strikes. A unit whose launch recipe cannot "
-                 "be rebuilt is refused and the pause is kept."),
+                 "duplicate. Prints what it will restart, then asks 'Resume "
+                 "<host> and restart these N model(s)? [y/N]'; only y "
+                 "proceeds. --yes restarts without asking, --dry-run prints "
+                 "the commands and changes nothing — including the pause. A "
+                 "model whose launch recipe cannot be rebuilt is refused and "
+                 "the pause is kept."),
     },
     "paused": {
         "usage": "hscc node paused [--json]",
@@ -1407,9 +1421,9 @@ def _print_node_group_help():
 #: _parse_node_args): these are mutating verbs on a live fleet, and a flag the
 #: parser did not understand must never be read as "the operator did not ask".
 _NODE_FLAGS = {
-    "pause": {"switches": ("--span", "--force", "--apply"),
+    "pause": {"switches": ("--force", "--yes", "--dry-run"),
               "values": ("--reason", "--until")},
-    "resume": {"switches": ("--apply",), "values": ()},
+    "resume": {"switches": ("--yes", "--dry-run"), "values": ()},
     "paused": {"switches": ("--json",), "values": ()},
 }
 
@@ -1451,6 +1465,83 @@ def _parse_node_args(verb, argv):
         positional.append(tok)
         i += 1
     return positional, opts, None
+
+
+# ── the mutation gate (replaces `--apply`, operator rule 11-22) ────────────
+#: The verdicts :func:`_confirm_mutation` reaches. Strings, not bools, because
+#: a caller must tell "the operator said no" from "there was nobody to ask":
+#: the first is an abort, the second a refusal that names `--yes` as the way
+#: out. Both leave the fleet and the overlay untouched.
+CONFIRM_PROCEED = "proceed"
+CONFIRM_DECLINED = "declined"
+CONFIRM_NO_TTY = "no-tty"
+
+
+def _stdin_is_tty():
+    """Is there a terminal to ask? Anything that is not — a pipe, cron,
+    launchd, ``ssh -T``, the agent tool — answers NO, and the verb refuses
+    instead of inventing an answer."""
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _ask_yes_no(prompt):
+    """One line from stdin. A closed stdin is an EMPTY answer (= no), never a
+    yes: an ``EOFError`` that got swallowed into a default would be the one bug
+    that turns "nobody answered" into a stopped node.
+
+    Two module-level seams (this and :func:`_stdin_is_tty`) so the y / n /
+    bare-Enter / no-terminal paths are all drivable without a pty.
+    """
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+
+
+def _answer_is_yes(answer):
+    """ONLY ``y`` or ``Y``. The question's default is N, so a bare Enter, "yes",
+    "Y?" or "y ah" are all NO — a mutation needs the one keystroke that means
+    it."""
+    return (answer if isinstance(answer, str) else "").strip() in ("y", "Y")
+
+
+def _confirm_mutation(prompt, yes):
+    """Ask the operator before a node verb touches the fleet. -> CONFIRM_*.
+
+    ``yes`` is the caller's ``--yes``: it skips the ask because a script cannot
+    answer, not because nobody objected. Without it and without a terminal the
+    mutation is REFUSED — that is the half that keeps a cron entry from parking
+    a node nobody meant to park.
+    """
+    if yes:
+        return CONFIRM_PROCEED
+    if not _stdin_is_tty():
+        return CONFIRM_NO_TTY
+    return (CONFIRM_PROCEED if _answer_is_yes(_ask_yes_no(prompt))
+            else CONFIRM_DECLINED)
+
+
+def _pause_prompt(host, count):
+    """The question, verbatim — docs/ops/node-pause.md quotes this line."""
+    return f"Pause {host} and stop these {count} model(s)? [y/N] "
+
+
+def _resume_prompt(host, count):
+    """The resume half, same shape, listing what comes back up."""
+    return f"Resume {host} and restart these {count} model(s)? [y/N] "
+
+
+def _node_flag_conflict(opts):
+    """``--yes`` and ``--dry-run`` contradict each other. Refuse the pair
+    instead of quietly preferring one — the same rule the parser applies to a
+    flag it did not understand, applied to a pair it did."""
+    if opts.get("--yes") and opts.get("--dry-run"):
+        return ("--yes and --dry-run contradict each other: --dry-run "
+                "previews, --yes acts")
+    return None
 
 
 def _node_paused(argv):
@@ -1495,7 +1586,7 @@ def _node_paused(argv):
             print("  until:   open-ended (only 'hscc node resume' ends it)")
         elif node_pauses.is_expired(entry):
             print(f"  until:   {until} — PAST DUE; resume it "
-                  f"(hscc node resume {host} --apply)")
+                  f"(hscc node resume {host})")
         else:
             print(f"  until:   {until}")
         if entry["span_nodes"]:
@@ -1526,7 +1617,12 @@ def _node_pause(argv):
         _print_node_verb_usage("pause")
         return 1
     host = positional[0].strip()
-    apply = opts["--apply"]
+    dry_run = opts["--dry-run"]
+    conflict = _node_flag_conflict(opts)
+    if conflict:
+        print(f"error: {conflict}")
+        _print_node_verb_usage("pause")
+        return 1
 
     until_iso = None
     if opts["--until"] is not None:
@@ -1541,77 +1637,80 @@ def _node_pause(argv):
             return 1
 
     p = node_pause_exec.plan(host)
-    if not p.get("ok"):
-        print(f"error: cannot enumerate the units on {host}: {p.get('error')}")
-        print("Nothing stopped and nothing recorded.")
-        return 1
     units = p["units"]
-    span_units = p["span_units"]
     affected = p["span_nodes"]
 
-    print(f"{host}: {len(units)} unit(s) on this node"
-          f"{' — dry run, nothing stopped' if not apply else ''}")
-    for u in units:
-        flags = f"port {u['port']}" if u.get("port") else "port ?"
-        if u.get("tp"):
-            flags += f" tp={u['tp']}"
-        print(f"  {u['unit_id']:<16} {u['kind']:<12} "
-              f"{', '.join(u['nodes'])}  ({flags})")
-        if not u["observed"]:
-            print(f"    not in the latest sweep — stopping it is a no-op if "
-                  f"it is already down")
-        if u.get("resume_blocked"):
-            print(f"    cannot be resumed later: {u['resume_blocked']}")
-    if len(affected) > 1:
-        print(f"  every node this affects: {', '.join(affected)}")
+    # ── the plan: printed before anything is decided, asked or stopped ─────
+    # The operator confirms against what they can READ — the host, every model
+    # this stops, the reason, the deadline. An unreadable node prints no table,
+    # and the shared eligibility check owns even that refusal, so this verb
+    # never has to word "cannot enumerate" in its own voice.
+    if p.get("ok"):
+        print(f"{host}: {len(units)} unit(s) on this node"
+              f"{' — dry run, nothing stopped' if dry_run else ''}")
+        for u in units:
+            flags = f"port {u['port']}" if u.get("port") else "port ?"
+            if u.get("tp"):
+                flags += f" tp={u['tp']}"
+            print(f"  {u['unit_id']:<16} {u['kind']:<12} "
+                  f"{', '.join(u['nodes'])}  ({flags})")
+            if not u["observed"]:
+                print(f"    not in the latest sweep — stopping it is a no-op if "
+                      f"it is already down")
+            if u.get("resume_blocked"):
+                print(f"    cannot be resumed later: {u['resume_blocked']}")
+        if len(affected) > 1:
+            print(f"  every node this affects: {', '.join(affected)}")
+        until_note = until_iso or "open-ended (only node resume ends it)"
+        print(f"  reason:  {opts['--reason'] or '(none given)'}")
+        print(f"  until:   {until_note}")
 
-    # ── refusals: each prints WHY, and none of them touches the fleet ──────
-    # The orchestrator refusal is ONE function's verdict, printed verbatim. This
-    # verb deliberately carries no orchestrator wording of its own: the agent
-    # tool path calls this verb, so printing the guard's own lines is what makes
-    # the two entry points agree by construction rather than by luck. It refuses
-    # a DRY RUN too, unlike the --span guard below — the plan is already printed
-    # above it so nothing is hidden, and a dry run is exactly when the operator
-    # wants to hear that this node is not safe to park.
+    # ── the two guards: eligibility first, then the orchestrator ───────────
+    # BOTH are one function's verdict printed verbatim, and neither is worded
+    # here. The agent tool calls this verb, so printing the checks' own lines is
+    # what makes the two entry points agree by construction rather than by luck.
+    # Order is eligibility -> orchestrator, and either refusal stops everything:
+    # an ineligible node never reaches the orchestrator question, and `--force`
+    # belongs to the orchestrator guard alone (it cannot unlock a shared model).
+    # Both refuse a preview too — the plan is printed above them, so nothing is
+    # hidden, and a preview is exactly when an operator wants to hear that this
+    # node is not safe to park.
+    elig = node_pause_exec.pause_eligibility(host, p)
+    for line in elig["lines"]:
+        print(line)
+    if elig["verdict"] == node_pause_exec.ELIG_REFUSE:
+        return 1
+
     verdict = node_pause_exec.orchestrator_pause_guard(
         host, plan=p, force=opts["--force"])
     for line in verdict["lines"]:
         print(line)
     if verdict["verdict"] == node_pause_exec.GUARD_REFUSE:
         return 1
-    if span_units and apply and not opts["--span"]:
-        # The opt-in guards the STOP, not the reading of the plan: a dry run
-        # mutates nothing, so refusing it would make the verb unusable for
-        # previewing exactly the blast radius --span exists to accept.
-        siblings = [n for n in affected if n != host]
-        others = (", ".join(siblings) if siblings
-                  else "(no sibling recorded)")
-        print(f"REFUSED: {host} hosts multi-node unit(s): "
-              f"{', '.join(span_units)}.")
-        print("  A span unit stops as a whole, so stopping it here also stops "
-              f"it on: {others}")
-        print("  Pass --span to accept that, together with --apply.")
-        print("Nothing stopped and nothing recorded.")
-        return 1
-    if opts["--span"] and not apply:
-        # --apply is what the span guard requires; --span alone mutates
-        # nothing, so it warns rather than refuses (the direction that could
-        # hurt the fleet is a stop nobody opted into).
-        print("note: --span without --apply still stops nothing "
-              "(dry-run is the default).")
 
-    if not units:
-        print("  nothing to stop on this node")
-        if not apply:
-            print("Dry run: nothing changed. Re-run with --apply to record "
-                  "the pause.")
-            return 0
-    elif not apply:
-        print("Dry run: nothing stopped and nothing recorded. Re-run with "
-              "--apply to stop these units and record the pause.")
+    if dry_run:
+        print("Dry run: nothing stopped and nothing recorded. Re-run without "
+              "--dry-run to be asked whether to stop them.")
         return 0
 
-    # ── apply: stop first, record second (see the module docstring) ────────
+    # ── the confirmation: nothing stops until the operator answers y ───────
+    # The question is the mutation safety (it replaces `--apply`): the plan is
+    # already printed above, the default is N, and only a literal y proceeds.
+    answer = _confirm_mutation(_pause_prompt(host, len(units)), opts["--yes"])
+    if answer != CONFIRM_PROCEED:
+        if answer == CONFIRM_NO_TTY:
+            print("REFUSED: no terminal to ask — this would stop live models "
+                  "with nobody confirming them.")
+            print(f"  Pass --yes to pause {host} non-interactively (a script "
+                  f"or cron must mean it), or --dry-run to look again.")
+        else:
+            print(f"Aborted: only y confirms a pause — {host} keeps running.")
+        print("Nothing stopped and nothing recorded.")
+        return 1
+    if opts["--yes"]:
+        print("note: --yes given — proceeding without asking.")
+
+    # ── confirmed: stop first, record second (see the module docstring) ────
     res = node_pause_exec.stop_units(units, apply=True)
     recorded = [u["unit_id"] for u in units]
     try:
@@ -1624,10 +1723,13 @@ def _node_pause(argv):
         print(f"error: the units were stopped but the pause did not reach "
               f"disk ({e}).")
         print(f"  {node_pauses.overlay_path()} is NOT updated — re-run "
-              f"'hscc node pause {host} --apply' before leaving this node.")
+              f"'hscc node pause {host}' before leaving this node.")
         return 1
-    print(f"paused {host}: {len(recorded)} unit(s), overlay at "
-          f"{node_pauses.overlay_path()}")
+    # The report names every model it stopped, so the operator (and the agent
+    # tool, which reports this text verbatim) never has to re-read the overlay
+    # to know what came down.
+    print(f"paused {host}: {len(recorded)} unit(s) stopped — "
+          f"{', '.join(recorded)}; overlay at {node_pauses.overlay_path()}")
     if not res["ok"]:
         print(f"WARNING: at least one unit did not stop cleanly — the pause "
               f"is recorded with stopped=False.")
@@ -1636,14 +1738,19 @@ def _node_pause(argv):
 
 
 def _node_resume(argv):
-    """`hscc node resume <host> [--apply]` — restart, then clear.
+    """`hscc node resume <host> [--yes] [--dry-run]` — restart, then clear.
 
     A thin surface over :func:`node_pause_exec.resume_host`, which holds the
     resume policy and is the SAME function the daemon's expiry tick runs — so
-    the dry-run gate, the rebuild-or-refuse rule and the clear pairing cannot
-    drift between an operator at a terminal and the daemon. This function owns
-    only the argument grammar, the "is this host paused at all" answer (which
-    needs the whole overlay to name the span owner) and the exit code.
+    the confirmation gate, the rebuild-or-refuse rule and the clear pairing
+    cannot drift between an operator at a terminal and the daemon. The gate is
+    handed IN to that function (the tick passes none, so it never asks): the
+    question has to come after the executor has listed what would restart, and
+    the verb cannot list it without sweeping the fleet a second time.
+
+    This function owns only the argument grammar, the "is this host paused at
+    all" answer (which needs the whole overlay to name the span owner) and the
+    exit code.
 
     The overlay stores unit IDS (node_pauses keeps the entry to six typed
     keys), so the launch commands are rebuilt by the executor's `plan()` from
@@ -1664,7 +1771,30 @@ def _node_resume(argv):
         _print_node_verb_usage("resume")
         return 1
     host = positional[0].strip()
-    apply = opts["--apply"]
+    conflict = _node_flag_conflict(opts)
+    if conflict:
+        print(f"error: {conflict}")
+        _print_node_verb_usage("resume")
+        return 1
+
+    def _confirm(_host, uids):
+        """The resume half of the mutation gate — same question, same y-only
+        rule, printed under the list of what comes back."""
+        answer = _confirm_mutation(_resume_prompt(_host, len(uids)),
+                                   opts["--yes"])
+        if answer == CONFIRM_PROCEED:
+            if opts["--yes"]:
+                print("note: --yes given — proceeding without asking.")
+            return True
+        if answer == CONFIRM_NO_TTY:
+            print("REFUSED: no terminal to ask — this would restart live "
+                  "models with nobody confirming them.")
+            print(f"  Pass --yes to resume {_host} non-interactively (a script "
+                  f"or cron must mean it), or --dry-run to look again.")
+        else:
+            print(f"Aborted: only y confirms a resume — {_host} stays parked.")
+        print("Nothing restarted and the pause stays recorded.")
+        return False
 
     # ONE snapshot for both questions. node_pauses.load() normalises into fresh
     # objects every call, so `paused()` + `covering()` would compare two
@@ -1683,8 +1813,13 @@ def _node_resume(argv):
             return 1
         print(f"{host} is not paused. Nothing to resume.")
         return 0
-    return 0 if node_pause_exec.resume_host(host, entry, apply=apply)["ok"] \
-        else 1
+    if opts["--dry-run"]:
+        # The preview keeps the executor's own dry-run posture: it prints the
+        # commands it would issue and cannot end the pause either.
+        return 0 if node_pause_exec.resume_host(host, entry)["ok"] else 1
+    res = node_pause_exec.resume_host(host, entry, apply=True,
+                                      confirm=_confirm)
+    return 0 if res["ok"] else 1
 
 
 def _handle_node(argv):

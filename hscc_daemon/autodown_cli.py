@@ -558,7 +558,7 @@ def _cmd_wake(rest, json_mode, theme_name=None):
                     + (", ".join(theme.esc(u) for u in parked)
                        if parked else "(none reported)"),
                     "  nodes holding them:  hscc node paused",
-                    "  put one back:    hscc node resume <host> --apply",
+                    "  put one back:    hscc node resume <host>",
                     "  then wake again: hscc autodown wake",
                     "  Nothing was started; state and the watchdog block are "
                     "unchanged."]

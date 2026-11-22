@@ -758,7 +758,7 @@ def run_post_boot_pass(boot_fn=None, probe_fn=None, up_fn=None,
                 # below must not claim a launch that never happened.
                 # Baselines stay ADVANCED: the under-lock advance above stands,
                 # because there is no retry to re-decide (the node is parked
-                # until `hscc node resume <host> --apply`) and restoring them
+                # until `hscc node resume <host>`) and restoring them
                 # would re-offer the same parked unit to every later pass.
                 # LOW priority: the operator is informed, never paged about
                 # their own pause.
@@ -767,7 +767,7 @@ def run_post_boot_pass(boot_fn=None, probe_fn=None, up_fn=None,
                 result.update(result="skipped-paused", message=(
                     f"host reboot detected on {issued_nodes} — nothing "
                     f"relaunched: {parked_ids} held by a node pause (hscc "
-                    f"node resume <host> --apply ends the pause)"))
+                    f"node resume <host> ends the pause)"))
                 _notify(notify_fn,
                         "HSCC post-boot relaunch skipped (node paused)",
                         f"Node(s) {issued_nodes} rebooted; nothing relaunched "
