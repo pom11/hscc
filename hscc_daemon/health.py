@@ -2113,8 +2113,8 @@ def _note_paused_router_stale(expected_absent, live_backends):
     the entire daemon log — so during the 2026-11-22 :4000 outage the daemon
     could not answer "does the live router still point at the node that was
     paused five minutes ago?", which is the one alternative explanation the
-    audit could not exclude
-    (``docs/audits/2026-11-22-proxy-connection-error.md`` §3.2/§4.3).
+    audit could not exclude (``docs/audits/2026-11-22-proxy-connection-error.md``
+    §3.2/§4.3, PR #634 — the record of that outage).
 
     VISIBILITY, NOT A FAULT. This must not change what the verdict does: it
     never touches the ``(healthy, reason)`` tuple, never takes a heal lease,
