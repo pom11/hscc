@@ -247,10 +247,11 @@ struct ClusterGraphEntry: TimelineEntry {
     // MARK: Captions
 
     /// What this chart is: scope · window · set. A node's identity goes through
-    /// `MonitorNode.shortTail` — the app's one rule for turning a host value into a
-    /// label — so a Home Screen tile never prints an address.
+    /// `MonitorNode.nodeLabel` — the same last-octet label every other surface
+    /// prints since apps 1.4.4 — so a Home Screen tile never prints an address.
     var scopeLine: String {
-        let scope = node.map { MonitorNode.shortTail($0) } ?? "all nodes"
+        let scope = node.map { MonitorNode.nodeLabel(host: $0, reportedHostname: nil) }
+            ?? "all nodes"
         return scope + " · " + window.label + " · " + (set?.graphLabel ?? "all metrics")
     }
 

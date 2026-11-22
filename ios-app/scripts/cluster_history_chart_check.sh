@@ -71,6 +71,29 @@ if ! grep -q "Sources/Shared/ClusterHistorySeries.swift" "$SELF"; then
   exit 1
 fi
 
+# The label rule (apps 1.4.4). A chart names a node exactly the way every other
+# surface names it — `MonitorNode.nodeLabel`, the last octet — and never through
+# `MonitorNode.shortTail`, which keeps its dot because it PAIRS rows (a serving
+# row with its host row) rather than naming them. No harness in this repo
+# compiles ClusterGraphReading.swift, so this is content-anchored rather than
+# executed: weaker than a byte, and named as such on purpose. The bytes the
+# legend produces are asserted where they can be — `scripts/model_decode_check/
+# node_label.swift` pins the labeler itself, including the port-free octet and
+# the dot the tail keeps.
+for label_src in Sources/Shared/ClusterGraphReading.swift \
+                 Sources/HSCCWidgets/GraphWidgetEntry.swift; do
+  if grep -q "MonitorNode.shortTail" "$label_src"; then
+    echo "error: $label_src names a node through the IDENTITY tail again — " >&2
+    echo "       every node label goes through MonitorNode.nodeLabel (1.4.4)" >&2
+    exit 1
+  fi
+  if ! grep -q "MonitorNode.nodeLabel" "$label_src"; then
+    echo "error: $label_src no longer routes node names through the shared labeler" >&2
+    exit 1
+  fi
+done
+echo "label-rule leg: the chart's node labels go through the shared labeler PASS"
+
 echo "compiling the REAL history layer + wire models + harness into a macOS CLI..."
 if ! xcrun --sdk "$SDK" swiftc -o "$TMP/cluster_history_chart_check" \
      "$subject" "${real_models[@]}" "$theme_stub" "$harness" 2>"$TMP/compile.err"; then

@@ -749,7 +749,8 @@ enum ClusterGraphReading {
                 }
             }
             panels.append(ClusterGraphPanel(host: host,
-                                            displayLabel: MonitorNode.shortTail(host),
+                                            displayLabel: MonitorNode.nodeLabel(
+                                                host: host, reportedHostname: nil),
                                             lines: lines))
         }
         if let limit, limit > 0, panels.count > limit {
@@ -808,25 +809,28 @@ enum ClusterGraphReading {
 
     /// The §7-safe label for one identity.
     ///
-    /// `MonitorNode.shortTail` is THE app rule for turning a host value into a
-    /// label (`.NNN` tail, or the value itself when it is not a dotted quad) and
-    /// this calls it rather than copying it, so a widget, a Live Activity, a live
-    /// probe and this chart cannot disagree about a node's name. The history
-    /// payload carries no hostname column, so the tail is all there is to show —
-    /// and an address is never what a Home Screen should show.
+    /// The node half is `MonitorNode.nodeLabel` — the last octet every other
+    /// surface prints since apps 1.4.4 — and this calls it rather than copying it,
+    /// so a widget, a Live Activity, a live probe, the menu bar and this chart
+    /// cannot disagree about a node's name. The history payload carries no
+    /// hostname column, so the octet is all there is to show — and an address is
+    /// never what a Home Screen should show. The `:port` an `.engine` series
+    /// appends is the port the route already sent: it says WHICH backend on that
+    /// node, which is a chart need, not a second spelling of the node.
     static func displayLabel(for kind: ClusterHistorySeriesKind, identity: String) -> String {
         switch kind {
         case .host:
-            return MonitorNode.shortTail(identity)
+            return MonitorNode.nodeLabel(host: identity, reportedHostname: nil)
         case .engine:
             guard let split = identity.firstIndex(of: ":") else {
-                return MonitorNode.shortTail(identity)
+                return MonitorNode.nodeLabel(host: identity, reportedHostname: nil)
             }
             let host = String(identity[..<split])
             let port = String(identity[identity.index(after: split)...])
-            if port.isEmpty { return MonitorNode.shortTail(host) }
-            let tail = MonitorNode.shortTail(host)
-            return tail + ":" + port
+            if port.isEmpty {
+                return MonitorNode.nodeLabel(host: host, reportedHostname: nil)
+            }
+            return MonitorNode.nodeLabel(host: host, reportedHostname: nil) + ":" + port
         }
     }
 
