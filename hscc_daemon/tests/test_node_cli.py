@@ -10,10 +10,11 @@ and ``heal_breaker.HEAL_BREAKER_FILE``, so every overlay/strike write lands in
 this test's tmp dir.
 
 What this file owns that the executor's tests do not: the CLI contract.
-Dry-run-by-default (#478) asserted as "no argv reached ``run_cmd``", the
-orchestrator refusal, the ``--span`` opt-in, overlay-written-AFTER-stop,
-``-h`` never reaching a mutating verb (B10), and the ``--until`` typo that
-``parse_until`` would otherwise swallow as open-ended.
+The confirmation question that replaced `--apply` (y / n / bare Enter /
+no-terminal / `--yes`), the preview `--dry-run` leaves behind, the two guards
+printed verbatim and in order (eligibility, then orchestrator),
+overlay-written-AFTER-stop, `-h` never reaching a mutating verb (B10), and the
+`--until` typo that ``parse_until`` would otherwise swallow as open-ended.
 """
 
 import ast
@@ -35,6 +36,11 @@ from hscc_daemon import node_pauses, serving, util
 ORCH = "192.0.2.11"
 W1 = "192.0.2.12"
 W2 = "192.0.2.13"
+#: Two single-node models on one machine — the 11-22 rule's ALLOWED shape:
+#: colocated is fine, both park together.
+W3 = "192.0.2.14"
+#: One single-node model — the plain allowed case.
+W4 = "192.0.2.15"
 #: Declared by no serving.json unit and running nothing — the empty node.
 QUIET = "192.0.2.30"
 
@@ -51,6 +57,12 @@ SERVING = {
          "recipe": WORKER_RECIPE, "model": "meta-llm/Work-8B", "tp": 1},
         {"id": "wspan", "role": "worker", "nodes": [W1, W2], "port": 8200,
          "recipe": SPAN_RECIPE, "model": "meta-llm/Work-8B", "tp": 2},
+        {"id": "w3a", "role": "worker", "nodes": [W3], "port": 8300,
+         "recipe": WORKER_RECIPE, "model": "meta-llm/Work-8B", "tp": 1},
+        {"id": "w3b", "role": "worker", "nodes": [W3], "port": 8310,
+         "recipe": WORKER_RECIPE, "model": "meta-llm/Work-9B", "tp": 1},
+        {"id": "w4", "role": "worker", "nodes": [W4], "port": 8400,
+         "recipe": WORKER_RECIPE, "model": "meta-llm/Work-7B", "tp": 1},
     ],
 }
 
@@ -78,7 +90,16 @@ def fleet_payload():
     groups.update(_group("cid_w1", WORKER_RECIPE, [W1], 8100,
                          served="meta-llm/Work-8B worker-model"))
     groups.update(_group("cid_span", SPAN_RECIPE, [W1, W2], 8200, tp=2,
-                         served="meta-llm/Work-8B worker-model"))
+                        served="meta-llm/Work-8B worker-model"))
+    groups.update(_group("cid_w3a", WORKER_RECIPE, [W3], 8300,
+                        model="meta-llm/Work-8B",
+                        served="meta-llm/Work-8B worker-model"))
+    groups.update(_group("cid_w3b", WORKER_RECIPE, [W3], 8310,
+                        model="meta-llm/Work-9B",
+                        served="meta-llm/Work-9B worker-model"))
+    groups.update(_group("cid_w4", WORKER_RECIPE, [W4], 8400,
+                        model="meta-llm/Work-7B",
+                        served="meta-llm/Work-7B worker-model"))
     return {"groups": groups, "solo_entries": [], "errors": {},
             "idle_hosts": [], "preparing_hosts": [], "pending_ops": [],
             "total_containers": 0, "host_count": 0}
@@ -143,6 +164,57 @@ def seed_pause(host=W1, **kw):
     return node_pauses.pause(host, **kw)
 
 
+def overlay_bytes():
+    """The overlay file's EXACT bytes (None when it does not exist yet).
+
+    Byte-identity is the refusal proof: ``paused(host) is None`` only says this
+    host is absent, while a refused pause must have changed nothing at all —
+    not another host's entry, not a timestamp, not the file's existence.
+    """
+    try:
+        with open(node_pauses.overlay_path(), "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+@pytest.fixture
+def tty(monkeypatch):
+    """Put a terminal on stdin and TYPE the answers, one per verb call.
+
+    Only ``_stdin_is_tty`` is patched. The answer goes in as typed characters,
+    so the prompt travels through the real ``_ask_yes_no`` — these tests prove
+    the exact question reaches the operator's terminal, which a fixture that
+    patched the ask away could never show. An exhausted queue is EOF, which is
+    an empty answer, which is NO.
+    """
+    def _attach(*answers):
+        monkeypatch.setattr(unified, "_stdin_is_tty", lambda: True)
+        buf = io.StringIO("".join(f"{a}\n" for a in answers))
+        monkeypatch.setattr(sys, "stdin", buf)
+        return buf
+    return _attach
+
+
+@pytest.fixture
+def no_tty(monkeypatch):
+    """No terminal: a pipe, cron, ssh -T, the agent tool. The refusal posture."""
+    monkeypatch.setattr(unified, "_stdin_is_tty", lambda: False)
+    monkeypatch.setattr(unified, "_ask_yes_no",
+                        lambda prompt: (_ for _ in ()).throw(
+                            AssertionError("asked with no terminal — "
+                                           "_stdin_is_tty is not the gate")))
+
+
+@pytest.fixture
+def never_asks(monkeypatch):
+    """A path that must not prompt: the question itself is the failure."""
+    def boom(prompt):
+        raise AssertionError(f"a preview/refusal must not ask (asked {prompt!r})")
+    monkeypatch.setattr(unified, "_stdin_is_tty", lambda: True)
+    monkeypatch.setattr(unified, "_ask_yes_no", boom)
+
+
 # ── help is inert: it loads nothing, reads nothing, stops nothing ──────────
 class TestHelpIsInert:
     """The B6/B10/B12 contract for this group: a help token can never reach a
@@ -162,10 +234,14 @@ class TestHelpIsInert:
         assert rc == 0, out
         assert "Node pause commands:" in out
         assert "hscc node pause <host> [flags]" in out
-        assert "hscc node resume <host> [--apply]" in out
+        assert "hscc node resume <host> [--yes] [--dry-run]" in out
         assert "hscc node paused [--json]" in out
-        # The dry-run default is advertised, not implied (#478).
-        assert "DRY-RUN by default" in out
+        # The mutation safety is advertised, not implied: the verb asks before
+        # it stops. And the two flags the 11-22 rule retired must be gone from
+        # the help text entirely — a flag nobody parses must not be advertised.
+        assert "asks" in out and "every model on it runs on it alone" in out
+        for gone in ("--apply", "--span"):
+            assert gone not in out, f"{gone} left the node verbs on 11-22"
 
     def test_a_leading_flag_is_not_a_subcommand(self):
         """Same refusal shape as `hscc cluster --whatever`: the token is not a
@@ -207,11 +283,16 @@ class TestHelpIsInert:
         assert rc == 0, out
         assert "hscc node paused [--json]" in out
 
-    def test_help_node_documents_the_dry_run_default(self, monkeypatch):
-        """`hscc help node` prints the same COMMAND_HELP blurb the audit reads."""
+    def test_help_node_documents_the_confirmation(self, monkeypatch):
+        """`hscc help node` prints the same COMMAND_HELP blurb the audit reads —
+        and that blurb must describe the ask, not the retired `--apply`."""
         rc, out = main_run(monkeypatch, ["help", "node"])
         assert rc == 0, out
         assert "Subcommands: pause <host>  resume <host>  paused" in out
+        assert "only y proceeds" in out
+        assert "--dry-run previews" in out and "--yes acts" in out
+        for gone in ("--apply", "--span"):
+            assert gone not in out, f"{gone} left the node verbs on 11-22"
 
     def test_primary_help_names_the_verb(self, monkeypatch):
         """F5 surface honesty: a dispatched TOP_LEVEL_COMMAND is listed."""
@@ -264,7 +345,11 @@ class TestPaused:
         rc, out = run(["paused"])
         assert rc == 0, out
         assert "PAST DUE" in out
-        assert f"hscc node resume {W1} --apply" in out
+        # The hint is a command the new grammar still accepts — `--apply` is
+        # gone, so a hint that printed it would tell the operator to type a
+        # flag the parser rejects.
+        assert f"hscc node resume {W1}" in out
+        assert "--apply" not in out
 
     def test_json_is_one_machine_readable_object(self):
         seed_pause(reason="disk swap", until="2h")
@@ -291,27 +376,53 @@ class TestPaused:
         assert "unknown flag: --verbose" in out
 
 
-# ── `node pause` — dry-run default, refusals, then stop + record ───────────
-class TestPauseDryRun:
-    def test_default_stops_nothing_and_records_nothing(self, fleet):
-        rc, out = run(["pause", W1])
-        assert rc == 0, out
-        assert fleet.calls == [], "dry run must not shell out"
-        assert node_pauses.paused(W1) is None
-        assert "nothing stopped" in out
+# ── `node pause` — the preview, the guards, the question, then stop + record ─
+class TestPausePreview:
+    """`--dry-run`: the same plan, no question, nothing recorded."""
 
-    def test_dry_run_prints_every_unit_and_every_affected_node(self, fleet):
-        rc, out = run(["pause", W1])
+    def test_dry_run_stops_nothing_and_records_nothing(self, fleet, never_asks):
+        before = overlay_bytes()
+        rc, out = run(["pause", W3, "--dry-run"])
         assert rc == 0, out
+        assert fleet.calls == [], "a preview must not reach run_cmd"
+        assert overlay_bytes() == before
+        assert "Dry run" in out
+
+    def test_dry_run_never_asks(self, fleet, never_asks):
+        """Previewing is not an answer, so it must not consume one — and it
+        must work with no terminal attached, which is where cron lives."""
+        rc, out = run(["pause", W4, "--dry-run"])
+        assert rc == 0, out
+        assert "Pause " not in out
+
+    def test_dry_run_prints_every_unit_even_for_a_refused_node(self, fleet,
+                                                               never_asks):
+        """The blast radius is on the page BEFORE the refusal, so the operator
+        reads what the refusal is about."""
+        rc, out = run(["pause", W1, "--dry-run"])
+        assert rc == 1, out
         assert "w1" in out and "wspan" in out
         assert "every node this affects:" in out
         assert W2 in out, "the span sibling must be printed, not hidden"
 
-    def test_no_units_is_reported_as_such(self, fleet):
-        rc, out = run(["pause", QUIET])
+    def test_dry_run_prints_the_reason_and_the_deadline(self, fleet, never_asks):
+        """Everything the operator is being asked to approve: host, every model
+        it will stop, the reason, the deadline."""
+        rc, out = run(["pause", W4, "--dry-run", "--reason", "disk swap",
+                       "--until", "2h"])
         assert rc == 0, out
-        assert "0 unit(s)" in out
-        assert "nothing to stop" in out
+        assert f"{W4}: 1 unit(s) on this node" in out
+        assert "w4" in out
+        assert "reason:  disk swap" in out
+        assert "until:   open-ended" not in out
+        assert out.splitlines()[-1].startswith("Dry run:")
+
+    def test_dry_run_without_until_says_what_ends_the_pause(self, fleet,
+                                                            never_asks):
+        rc, out = run(["pause", W4, "--dry-run"])
+        assert rc == 0, out
+        assert "reason:  (none given)" in out
+        assert "open-ended" in out
 
     def test_missing_host_is_a_usage_error(self, fleet):
         rc, out = run(["pause"])
@@ -319,67 +430,177 @@ class TestPauseDryRun:
         assert "needs exactly one host" in out
 
 
-class TestPauseRefusals:
-    def test_orchestrator_host_refuses_with_the_reason(self, fleet):
-        rc, out = run(["pause", ORCH])
+class TestPauseEligibilityRefusals:
+    """The rule at the CLI: exit 1, nothing stopped, nothing recorded."""
+
+    def test_a_multi_node_model_refuses_and_names_it_and_its_peer(self, fleet,
+                                                                  tty):
+        """The case #561/#567 let through with --span. Now a plain refusal —
+        and never a question: a `y` sitting in the queue must not be consumed,
+        because an answer cannot unlock this."""
+        answers = tty("y")
+        before = overlay_bytes()
+        rc, out = run(["pause", W1, "--yes"])
         assert rc == 1, out
         assert "REFUSED" in out
-        assert "orchestrator model" in out
-        # The WHY names the unit the plan actually read — not a model name.
-        assert "orch" in out
-        assert fleet.calls == []
-        assert node_pauses.paused(ORCH) is None
-
-    def test_orchestrator_host_needs_force_to_apply(self, fleet):
-        rc, out = run(["pause", ORCH, "--apply", "--force"])
-        assert rc == 0, out
-        assert fleet.calls, "--force --apply must stop"
-        entry = node_pauses.paused(ORCH)
-        assert entry is not None and entry["stopped"] is True
-
-    def test_span_needs_the_span_flag_opt_in(self, fleet):
-        rc, out = run(["pause", W1, "--apply"])
-        assert rc == 1, out
-        assert "REFUSED" in out
-        assert "wspan" in out
-        assert W2 in out, "the refusal names the node it would also hit"
+        assert "wspan" in out, "the refusal names the model that blocks it"
+        assert W2 in out, "and the other node that model lives on"
         assert fleet.calls == [], "a refused pause must not stop anything"
-        assert node_pauses.paused(W1) is None
+        assert overlay_bytes() == before
+        assert "Pause " not in out, "a refusal is not a question to answer"
+        assert answers.tell() == 0, \
+            "the refusal never reached the question — nothing was read from stdin"
 
-    def test_span_flag_without_apply_is_a_warning_not_a_stop(self, fleet):
-        rc, out = run(["pause", W1, "--span"])
+    def test_force_does_not_unlock_a_shared_model(self, fleet):
+        """--force is the orchestrator guard's override and nothing else."""
+        rc, out = run(["pause", W1, "--yes", "--force"])
+        assert rc == 1, out
+        assert "REFUSED" in out
+        assert fleet.calls == [] and node_pauses.paused(W1) is None
+
+    def test_two_colocated_single_node_models_are_not_a_refusal(self, fleet,
+                                                                never_asks):
+        """The 11-22 amendment at the CLI: a COUNT of units must not refuse.
+        Both models park together — that is what parking the machine means."""
+        rc, out = run(["pause", W3, "--dry-run"])
         assert rc == 0, out
-        assert "--span without --apply" in out
+        assert "REFUSED" not in out
+        assert "w3a" in out and "w3b" in out
+
+    def test_a_node_running_nothing_refuses_nothing_to_pause(self, fleet):
+        before = overlay_bytes()
+        rc, out = run(["pause", QUIET, "--yes"])
+        assert rc == 1, out
+        assert f"REFUSED: {QUIET} runs nothing — nothing to pause." in out
+        assert fleet.calls == []
+        assert overlay_bytes() == before
+        assert node_pauses.paused(QUIET) is None
+
+    def test_an_unreadable_node_is_refused_not_read_as_empty(self, fleet,
+                                                             monkeypatch):
+        """Fail-closed, and worded by the shared check rather than the verb:
+        'could not enumerate' must never collapse into 'runs nothing'."""
+        monkeypatch.setattr(npe, "fetch_cluster_status",
+                            lambda: (None, "sparkrun status query failed"))
+        rc, out = run(["pause", W1, "--yes"])
+        assert rc == 1, out
+        assert "could not be enumerated" in out
+        assert "sparkrun status query failed" in out
+        assert fleet.calls == [] and node_pauses.paused(W1) is None
+
+    def test_the_span_flag_is_gone_from_the_grammar(self, fleet):
+        """`--span` must not survive as an accepted no-op: muscle memory gets
+        told the flag is unknown, not silently ignored."""
+        rc, out = run(["pause", W1, "--span"])
+        assert rc == 1, out
+        assert "unknown flag: --span" in out
+        assert fleet.calls == []
+
+    def test_the_apply_flag_is_gone_from_the_grammar(self, fleet):
+        """Same for `--apply`: the question replaced it. A flag the parser
+        ignored would read as 'the operator never asked'."""
+        rc, out = run(["pause", W4, "--apply"])
+        assert rc == 1, out
+        assert "unknown flag: --apply" in out
+        assert fleet.calls == []
+
+    def test_yes_and_dry_run_contradict_and_are_refused_together(self, fleet):
+        rc, out = run(["pause", W4, "--yes", "--dry-run"])
+        assert rc == 1, out
+        assert "contradict" in out
         assert fleet.calls == []
 
     def test_unparseable_until_refuses_instead_of_parking_forever(self, fleet):
         """node_pauses.parse_until degrades garbage to open-ended; a CLI typo
         must not silently become a node that never comes back."""
-        rc, out = run(["pause", W1, "--apply", "--span", "--until", "2days"])
+        rc, out = run(["pause", W4, "--yes", "--until", "2days"])
         assert rc == 1, out
         assert "not a duration" in out
         assert fleet.calls == []
-        assert node_pauses.paused(W1) is None
+        assert node_pauses.paused(W4) is None
 
     def test_dangling_value_flag_is_refused(self, fleet):
-        rc, out = run(["pause", W1, "--until"])
+        rc, out = run(["pause", W4, "--until"])
         assert rc == 1, out
         assert "--until needs a value" in out
 
     def test_theme_is_refused_because_it_would_do_nothing(self, fleet):
-        rc, out = run(["pause", W1, "--theme", "dark"])
+        rc, out = run(["pause", W4, "--theme", "dark"])
         assert rc == 1, out
         assert "--theme" in out
 
-    def test_failed_status_read_is_not_read_as_an_empty_node(self, fleet,
-                                                             monkeypatch):
-        monkeypatch.setattr(npe, "fetch_cluster_status",
-                            lambda: (None, "sparkrun status query failed"))
-        rc, out = run(["pause", W1, "--apply", "--span"])
-        assert rc == 1, out
-        assert "cannot enumerate" in out
+
+class TestPauseConfirmation:
+    """The question IS the mutation safety (operator 11-22, replacing --apply).
+
+    `--yes` is the scripted answer, never the scripted *absence* of one: a
+    verb with no terminal and no `--yes` must refuse, or every cron entry on
+    the fleet becomes a pause waiting to fire.
+    """
+
+    def test_the_question_is_asked_verbatim(self, fleet, tty):
+        tty("y")
+        rc, out = run(["pause", W3])
+        assert rc == 0, out
+        assert f"Pause {W3} and stop these 2 model(s)? [y/N]" in out
+
+    def test_the_plan_is_printed_before_the_question(self, fleet, tty):
+        """An operator answers against what they can read, so the order is the
+        contract: plan first, then the ask."""
+        tty("y")
+        rc, out = run(["pause", W3])
+        assert rc == 0, out
+        assert out.index(f"{W3}: 2 unit(s) on this node") \
+            < out.index(f"Pause {W3} and stop these 2 model(s)?")
+
+    def test_y_proceeds_and_stops_both_models(self, fleet, tty):
+        tty("y")
+        rc, out = run(["pause", W3])
+        assert rc == 0, out
+        assert len(fleet.calls) == 2, fleet.calls
+        assert all("stop" in " ".join(c) for c in fleet.calls)
+
+    def test_capital_Y_proceeds_too(self, fleet, tty):
+        tty("Y")
+        rc, out = run(["pause", W4])
+        assert rc == 0, out
+        assert len(fleet.calls) == 1
+
+    @pytest.mark.parametrize("answer", ["", "n", "N", "yes", "yEs", "y y", " "])
+    def test_anything_but_y_aborts_and_records_nothing(self, fleet, tty, answer):
+        """The default of [y/N] is N — including a bare Enter, and including
+        strings that merely look like a yes."""
+        before = overlay_bytes()
+        tty(answer)
+        rc, out = run(["pause", W3])
+        assert rc == 1, (answer, out)
+        assert "Aborted" in out, out
         assert fleet.calls == []
-        assert node_pauses.paused(W1) is None
+        assert overlay_bytes() == before
+        assert node_pauses.paused(W3) is None
+
+    def test_no_terminal_refuses_without_yes(self, fleet, no_tty):
+        """cron, launchd, ssh -T, a pipe: nobody to ask, so no pause — and the
+        refusal says how a script means it."""
+        before = overlay_bytes()
+        rc, out = run(["pause", W3])
+        assert rc == 1, out
+        assert "REFUSED" in out and "--yes" in out
+        assert fleet.calls == [] and overlay_bytes() == before
+        assert node_pauses.paused(W3) is None
+
+    def test_yes_is_the_script_posture_and_says_so(self, fleet, no_tty):
+        rc, out = run(["pause", W3, "--yes"])
+        assert rc == 0, out
+        assert "--yes given" in out, "the report must record nobody was asked"
+        assert len(fleet.calls) == 2
+
+    def test_a_refusal_never_reaches_the_question(self, fleet, never_asks):
+        """Both guards are answered before the ask, so a refused node cannot
+        be talked past a prompt."""
+        rc, out = run(["pause", W1, "--yes"])
+        assert rc == 1, out
+        assert "Pause " not in out
 
 
 # ── the uniform pool: EVERY replica advertises the orchestrator alias ───────
@@ -480,18 +701,24 @@ def park(*hosts):
 
 
 class TestUniformPoolOrchestratorGuard:
-    """The four acceptance cases the operator's dry-run could not get past."""
+    """The four acceptance cases the operator's dry-run could not get past.
+
+    All four replicas here are single solo units, so the ELIGIBILITY check
+    allows every one of them and these tests are about the guard they compose
+    with (11-22: eligibility first, then the orchestrator guard, either refusal
+    stopping everything).
+    """
 
     def test_pausing_a_replica_is_allowed_and_says_who_still_serves_it(
-            self, pool):
-        rc, out = run(["pause", POOL_B])
+            self, pool, never_asks):
+        rc, out = run(["pause", POOL_B, "--dry-run"])
         assert rc == 0, out
         assert "REFUSED" not in out, out
         # 4 healthy replicas, this one goes down → 3 others keep the alias up.
         assert "orchestrator-model stays served by 3 other node(s)" in out, out
         for other in (POOL_A, POOL_C, POOL_D):
             assert other in out, f"{other} must be named as a remaining server"
-        assert pool.calls == [], "a dry run must not shell out"
+        assert pool.calls == [], "a preview must not shell out"
         assert node_pauses.paused(POOL_B) is None
 
     def test_declared_orchestrator_node_refuses_with_the_declared_reason(
@@ -535,11 +762,13 @@ class TestUniformPoolOrchestratorGuard:
         assert pool.calls == []
 
     def test_force_overrides_the_declared_node_refusal(self, pool):
-        rc, out = run(["pause", POOL_A, "--apply", "--force"])
+        """`--force` answers the ORCHESTRATOR guard, and only it — and it does
+        not skip the confirmation question, so this is `--yes --force`."""
+        rc, out = run(["pause", POOL_A, "--yes", "--force"])
         assert rc == 0, out
         assert "note: --force given" in out, out
         assert "declared orchestrator node" in out, out
-        assert pool.calls, "--force --apply must stop"
+        assert pool.calls, "--yes --force must stop"
         entry = node_pauses.paused(POOL_A)
         assert entry is not None and entry["stopped"] is True
 
@@ -548,24 +777,35 @@ class TestUniformPoolOrchestratorGuard:
         monkeypatch.setattr(
             npe, "fetch_cluster_status",
             lambda: (pool_payload(down={POOL_A, POOL_C, POOL_D}), None))
-        rc, out = run(["pause", POOL_B, "--apply", "--force"])
+        rc, out = run(["pause", POOL_B, "--yes", "--force"])
         assert rc == 0, out
         assert "note: --force given" in out, out
         assert "would leave no healthy unit" in out, out
-        assert pool.calls, "--force --apply must stop"
+        assert pool.calls, "--yes --force must stop"
 
-    def test_the_note_is_a_dry_run_verdict_too(self, pool, monkeypatch):
-        """The ALLOW note is part of the plan's answer, not of the stop: it must
-        print with no --apply (the operator's dry-run is what was broken)."""
-        rc, out = run(["pause", POOL_C])
+    def test_the_note_prints_for_a_preview_too(self, pool, never_asks):
+        """The ALLOW note is part of the plan's answer, not of the stop: it
+        must print with no confirmation at all (the operator's dry-run is what
+        was broken in #567, and --dry-run is where it lives now)."""
+        rc, out = run(["pause", POOL_C, "--dry-run"])
         assert rc == 0, out
         assert "Dry run: nothing stopped" in out
         assert "orchestrator-model stays served by" in out
 
-    def test_a_plain_pause_prints_no_orchestrator_note(self, fleet):
+    def test_a_non_orchestrator_replica_still_parks_when_confirmed(self, pool):
+        """The stays-served note is not a refusal in disguise: a plain replica
+        parks on `--yes`, and the note is still in the report."""
+        rc, out = run(["pause", POOL_B, "--yes"])
+        assert rc == 0, out
+        assert "orchestrator-model stays served by" in out
+        assert len(pool.calls) == 1, pool.calls
+        entry = node_pauses.paused(POOL_B)
+        assert entry is not None and entry["stopped"] is True
+
+    def test_a_plain_pause_prints_no_orchestrator_note(self, fleet, never_asks):
         """Non-uniform template, worker node: unchanged behaviour — no note, no
         refusal, and no claim about a model this node does not serve."""
-        rc, out = run(["pause", QUIET])
+        rc, out = run(["pause", W4, "--dry-run"])
         assert rc == 0, out
         assert "orchestrator" not in out.lower(), out
 
@@ -580,28 +820,38 @@ class TestUniformPoolOrchestratorGuard:
 
     def test_no_applied_record_is_reported_not_silently_ignored(self, pool,
                                                                 monkeypatch,
-                                                                tmp_path):
+                                                                tmp_path,
+                                                                never_asks):
         """A fleet with no applied-template record (hscc-bootstrap writes
         serving.json by hand) must not lose the healthy-count guard, and must
         say out loud that the declaration could not be consulted."""
         (tmp_path / "hscc" / "applied_template.json").unlink()
-        rc, out = run(["pause", POOL_B])
+        rc, out = run(["pause", POOL_B, "--dry-run"])
         assert rc == 0, out
         assert "orchestrator-model stays served by 3 other node(s)" in out, out
         assert "applied-template record could not be consulted" in out, out
 
 
-class TestPauseApply:
-    def test_apply_stops_every_unit_then_records_the_overlay(self, fleet):
-        rc, out = run(["pause", W1, "--apply", "--span", "--reason",
-                       "disk swap", "--until", "2h"])
+class TestPauseConfirmed:
+    """The confirmed path: stop everything the node owns, THEN record.
+
+    W3 carries two single-node models on purpose — a pause takes the whole
+    machine down in one call, which is what the old span-only framing got
+    wrong, and it is the only place in this file that proves `stop_units`
+    really loops.
+    """
+
+    def test_confirmation_stops_every_unit_then_records_the_overlay(self, fleet,
+                                                                    tty):
+        tty("y")
+        rc, out = run(["pause", W3, "--reason", "disk swap", "--until", "2h"])
         assert rc == 0, out
         assert len(fleet.calls) == 2, fleet.calls
         assert all("stop" in " ".join(c) for c in fleet.calls)
-        entry = node_pauses.paused(W1)
+        entry = node_pauses.paused(W3)
         assert entry is not None
-        assert entry["units"] == ["w1", "wspan"]
-        assert entry["span_nodes"] == [W1, W2]
+        assert entry["units"] == ["w3a", "w3b"]
+        assert entry["span_nodes"] == [W3]
         assert entry["reason"] == "disk swap"
         assert entry["stopped"] is True
         assert entry["since"] and entry["until"]
@@ -610,13 +860,31 @@ class TestPauseApply:
         lead = (until - datetime.now(timezone.utc)).total_seconds()
         assert 3400 < lead < 7400, entry["until"]
 
-    def test_reason_survives_spaces_as_one_token(self, fleet):
-        rc, _ = run(["pause", W1, "--apply", "--span", "--reason",
-                     "replace the disk"])
-        assert rc == 0, _
-        assert node_pauses.paused(W1)["reason"] == "replace the disk"
+    def test_the_report_names_every_model_it_stopped(self, fleet, tty):
+        """The agent tool reports this text verbatim, so the operator's own
+        report has to carry the list — not just a count."""
+        tty("y")
+        rc, out = run(["pause", W3])
+        assert rc == 0, out
+        line = [ln for ln in out.splitlines() if ln.startswith("paused ")][-1]
+        assert "w3a" in line and "w3b" in line, line
 
-    def test_stop_happens_before_the_overlay_is_written(self, fleet,
+    def test_a_single_solo_unit_parks_with_one_stop(self, fleet, tty):
+        tty("y")
+        rc, out = run(["pause", W4])
+        assert rc == 0, out
+        assert len(fleet.calls) == 1, fleet.calls
+        entry = node_pauses.paused(W4)
+        assert entry is not None and entry["units"] == ["w4"]
+        assert entry["span_nodes"] == [W4] and entry["stopped"] is True
+
+    def test_reason_survives_spaces_as_one_token(self, fleet, tty):
+        tty("y")
+        rc, _ = run(["pause", W3, "--reason", "replace the disk"])
+        assert rc == 0, _
+        assert node_pauses.paused(W3)["reason"] == "replace the disk"
+
+    def test_stop_happens_before_the_overlay_is_written(self, fleet, tty,
                                                         monkeypatch):
         """Ordering is the overlay's documented contract: a pause recorded
         before the stop would let a reader believe units are down that are not.
@@ -628,42 +896,39 @@ class TestPauseApply:
             seen["argv_at_record_time"] = list(fleet.calls)
             return real_pause(*a, **kw)
         monkeypatch.setattr(node_pauses, "pause", spy_pause)
-        rc, _ = run(["pause", W1, "--apply", "--span"])
+        tty("y")
+        rc, _ = run(["pause", W3])
         assert rc == 0
-        assert seen["argv_at_record_time"], "recorded before anything stopped"
+        assert len(seen["argv_at_record_time"]) == 2, \
+            "recorded before both models stopped"
 
-    def test_a_failing_stop_records_stopped_false_and_exits_nonzero(self,
-                                                                     fleet,
-                                                                     monkeypatch):
+    def test_a_failing_stop_records_stopped_false_and_exits_nonzero(self, fleet,
+                                                                    tty,
+                                                                    monkeypatch):
         monkeypatch.setattr(util, "run_cmd",
                             Recorder([{"ok": False, "output": "",
                                        "stderr": "sparkrun stop failed"}]))
-        rc, out = run(["pause", W1, "--apply", "--span"])
+        tty("y")
+        rc, out = run(["pause", W3])
         assert rc == 1, out
         assert "did not stop cleanly" in out
-        entry = node_pauses.paused(W1)
+        entry = node_pauses.paused(W3)
         # The pause IS in force (the heal paths must skip the node); only the
         # "units confirmed down" claim is withheld.
         assert entry is not None and entry["stopped"] is False
 
-    def test_overlay_write_failure_is_reported_as_failure(self, fleet,
+    def test_overlay_write_failure_is_reported_as_failure(self, fleet, tty,
                                                           monkeypatch):
         def boom(*a, **kw):
             raise OSError("disk full")
         monkeypatch.setattr(node_pauses, "save", boom)
-        rc, out = run(["pause", W1, "--apply", "--span"])
+        tty("y")
+        rc, out = run(["pause", W3])
         assert rc == 1, out
         assert "did not reach disk" in out
         assert len(fleet.calls) == 2, "the stop really did happen — say so"
-
-    def test_pausing_a_quiet_node_still_parks_it(self, fleet):
-        """No units is a legitimate pause: the point is that heal stops here."""
-        rc, out = run(["pause", QUIET, "--apply"])
-        assert rc == 0, out
-        assert fleet.calls == []
-        entry = node_pauses.paused(QUIET)
-        assert entry is not None and entry["units"] == []
-        assert entry["stopped"] is True
+        # The hint must be a command the new grammar still accepts.
+        assert "--apply" not in out and f"hscc node pause {W3}" in out
 
 
 # ── `node resume` — restart the recorded span, then clear ─────────────────
@@ -674,25 +939,89 @@ class TestResume:
         assert "not paused" in out
         assert fleet.calls == []
 
+    # ── the same question, the same default ────────────────────────────────
+    def test_the_resume_question_is_asked_verbatim(self, fleet, tty):
+        seed_pause(units=["w1", "wspan"])
+        tty("y")
+        rc, out = run(["resume", W1])
+        assert rc == 0, out
+        assert f"Resume {W1} and restart these 2 model(s)? [y/N]" in out
+
+    def test_the_resume_list_is_printed_before_the_question(self, fleet, tty):
+        seed_pause(units=["w1", "wspan"])
+        tty("y")
+        rc, out = run(["resume", W1])
+        assert rc == 0, out
+        assert out.index("pause recorded 2 unit(s)") \
+            < out.index(f"Resume {W1} and restart these 2 model(s)?")
+
+    def test_n_keeps_the_pause_and_restarts_nothing(self, fleet, tty):
+        seed_pause()
+        before = overlay_bytes()
+        tty("n")
+        rc, out = run(["resume", W1])
+        assert rc == 1, out
+        assert "Aborted" in out
+        assert fleet.calls == []
+        assert overlay_bytes() == before, "the record is the node's shield"
+
+    def test_bare_enter_keeps_the_pause_too(self, fleet, tty):
+        seed_pause()
+        tty("")
+        rc, out = run(["resume", W1])
+        assert rc == 1, out
+        assert fleet.calls == [] and node_pauses.paused(W1) is not None
+
+    def test_no_terminal_refuses_a_resume_without_yes(self, fleet, no_tty):
+        seed_pause()
+        rc, out = run(["resume", W1])
+        assert rc == 1, out
+        assert "REFUSED" in out and "--yes" in out
+        assert fleet.calls == [] and node_pauses.paused(W1) is not None
+
+    def test_a_declined_answer_rebuilds_nothing_at_all(self, fleet, tty,
+                                                      monkeypatch):
+        """Answering n must cost the fleet NOTHING — not even the status sweep
+        the command rebuild needs. That is why the gate sits ahead of plan()."""
+        seed_pause()
+        seen = []
+        monkeypatch.setattr(npe, "plan",
+                            lambda host, **kw: seen.append(host) or {
+                                "ok": False, "units": [], "span_nodes": [],
+                                "error": "must not be reached"})
+        tty("n")
+        rc, out = run(["resume", W1])
+        assert rc == 1, out
+        assert seen == [], "the fleet was swept for an answer nobody gave"
+
+    def test_yes_and_dry_run_contradict_for_resume_too(self, fleet):
+        seed_pause()
+        rc, out = run(["resume", W1, "--yes", "--dry-run"])
+        assert rc == 1, out
+        assert "contradict" in out
+        assert fleet.calls == []
+
     def test_span_sibling_points_at_the_owner_instead_of_acting(self, fleet):
         seed_pause()  # keyed W1, spans W2
-        rc, out = run(["resume", W2, "--apply"])
+        rc, out = run(["resume", W2, "--yes"])
         assert rc == 1, out
         assert "span of the pause on" in out and W1 in out
         assert fleet.calls == []
         assert node_pauses.paused(W1) is not None, "must not clear the owner"
+        assert "--apply" not in out, "the hint must use the new grammar"
 
     def test_dry_run_prints_the_ensure_command_and_changes_nothing(
-            self, fleet):
+            self, fleet, never_asks):
         seed_pause()
-        rc, out = run(["resume", W1])
+        rc, out = run(["resume", W1, "--dry-run"])
         assert rc == 0, out
-        assert fleet.calls == [], "dry run must not restart anything"
+        assert fleet.calls == [], "a preview must not restart anything"
         assert "WOULD RESUME" in out
         assert "--ensure" in out, "resume re-issues the declared workload"
+        assert "Resume " not in out, "a preview must not ask"
         assert node_pauses.paused(W1) is not None
 
-    def test_apply_restarts_then_clears_pause_and_strikes(self, fleet):
+    def test_yes_restarts_then_clears_pause_and_strikes(self, fleet):
         # Past the breaker's cap, so the node is genuinely SUSPENDED before the
         # resume — clearing three strikes would prove nothing (HEAL_BREAKER_MAX
         # is 6; suspended() is 0.0 below it). The slate is earned BEFORE the
@@ -708,7 +1037,7 @@ class TestResume:
         # The pause must be in force at the moment of the resume, so this is a
         # real "clear strikes THROUGH a pause" case, not a plain unparked resume.
         assert node_pauses.paused(W1) is not None
-        rc, out = run(["resume", W1, "--apply"])
+        rc, out = run(["resume", W1, "--yes"])
         assert rc == 0, out
         assert len(fleet.calls) == 2, fleet.calls
         assert all("--ensure" in " ".join(c) for c in fleet.calls)
@@ -735,7 +1064,7 @@ class TestResume:
         monkeypatch.setattr(util, "run_cmd",
                             Recorder([{"ok": False, "output": "",
                                        "stderr": "ensure failed"}]))
-        rc, out = run(["resume", W1, "--apply"])
+        rc, out = run(["resume", W1, "--yes"])
         assert rc == 1, out
         assert "failed to restart" in out
         assert node_pauses.paused(W1) is not None, (
@@ -746,20 +1075,20 @@ class TestResume:
     def test_a_unit_with_no_rebuildable_command_refuses_and_keeps_pause(
             self, fleet):
         seed_pause(units=["w1", "vanished"])
-        rc, out = run(["resume", W1, "--apply"])
+        rc, out = run(["resume", W1, "--yes"])
         assert rc == 1, out
         assert "REFUSED" in out
         assert "vanished" in out
         assert fleet.calls == [], "never guess a launch command"
         assert node_pauses.paused(W1) is not None
 
-    def test_a_pause_with_no_units_clears_on_apply(self, fleet):
+    def test_a_pause_with_no_units_clears_on_yes(self, fleet, never_asks):
         seed_pause(units=[], span_nodes=[])
-        rc, out = run(["resume", W1])
+        rc, out = run(["resume", W1, "--dry-run"])
         assert rc == 0, out
         assert "nothing to restart" in out
-        assert node_pauses.paused(W1) is not None, "dry run keeps it"
-        rc, out = run(["resume", W1, "--apply"])
+        assert node_pauses.paused(W1) is not None, "a preview keeps it"
+        rc, out = run(["resume", W1, "--yes"])
         assert rc == 0, out
         assert fleet.calls == []
         assert node_pauses.paused(W1) is None
@@ -768,7 +1097,7 @@ class TestResume:
         seed_pause()
         monkeypatch.setattr(npe, "fetch_cluster_status",
                             lambda: (None, "sparkrun status query failed"))
-        rc, out = run(["resume", W1, "--apply"])
+        rc, out = run(["resume", W1, "--yes"])
         assert rc == 1, out
         assert "cannot rebuild" in out
         assert node_pauses.paused(W1) is not None
@@ -789,7 +1118,7 @@ class TestResume:
         seed_pause()
         assert node_pauses.paused(W1) is not None, \
             "the pause must be in force for the resume, or this is no resume"
-        rc, _ = run(["resume", W1, "--apply"])
+        rc, _ = run(["resume", W1, "--yes"])
         assert rc == 0
         assert heal_breaker.strike_count(W1) == 0
         assert heal_breaker.suspended(W1) == 0.0
@@ -952,29 +1281,34 @@ class TestResumePolicyIsShared:
 
         monkeypatch.setattr(npe, "resume_host", fake_resume)
         seed_pause()
-        rc, out = run(["resume", W1, "--apply"])
+        rc, out = run(["resume", W1, "--yes"])
         assert rc == 0, out
         assert len(seen) == 1, seen
         host, entry, kw = seen[0]
         assert host == W1
         assert entry["units"] == ["w1", "wspan"], (
             "the verb hands over the overlay entry it selected, not a re-read")
-        assert kw == {"apply": True}, (
-            "--apply is how the verb says 'do it'; the tick passes apply too")
+        assert kw["apply"] is True, (
+            "--yes is how the verb says 'do it'; the tick passes apply too")
+        assert callable(kw["confirm"]), (
+            "the question is handed INTO the shared policy — a second copy of "
+            "it in the verb would drift from the tick's no-ask posture")
+        assert set(kw) == {"apply", "confirm"}, kw
         assert fleet.calls == [], (
             "the verb no longer restarts anything by itself — resume_host does")
 
     def test_a_dry_run_ask_is_passed_through_as_apply_false(self, fleet,
-                                                           monkeypatch):
+                                                           monkeypatch,
+                                                           never_asks):
         seen = []
         monkeypatch.setattr(
             npe, "resume_host",
             lambda host, entry, **kw: seen.append(kw) or {
                 "ok": True, "action": npe.RESUME_DRY_RUN})
         seed_pause()
-        rc, out = run(["resume", W1])
+        rc, out = run(["resume", W1, "--dry-run"])
         assert rc == 0, out
-        assert seen == [{"apply": False}], seen
+        assert seen == [{}], seen
 
     def test_a_kept_pause_exits_nonzero(self, fleet, monkeypatch):
         """The verb's whole remaining decision is ok → exit code, so pin both
@@ -985,7 +1319,7 @@ class TestResumePolicyIsShared:
             lambda host, entry, **kw: {"ok": False,
                                        "action": npe.RESUME_KEPT})
         seed_pause()
-        rc, out = run(["resume", W1, "--apply"])
+        rc, out = run(["resume", W1, "--yes"])
         assert rc == 1, out
 
     def test_the_policy_primitives_are_not_in_the_verb(self):

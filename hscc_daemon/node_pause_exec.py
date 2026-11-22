@@ -982,12 +982,13 @@ RESUME_DRY_RUN = "dry_run"
 
 
 def resume_host(host, entry, apply=False, directory=None, echo=print,
-                reason=None, run=None, pauses=None, now=None):
+                reason=None, run=None, pauses=None, now=None, confirm=None):
     """Restart the units ``entry`` recorded, then end the pause.
 
     This IS the resume policy — ``hscc node resume`` and the daemon's
-    expiry tick both run it, so the dry-run gate, the rebuild-or-refuse rule and
-    the clear pairing cannot drift apart between an operator and the daemon.
+    expiry tick both run it, so the confirmation gate, the rebuild-or-refuse
+    rule and the clear pairing cannot drift apart between an operator and the
+    daemon.
 
     ``entry`` comes from the CALLER's own :func:`node_pauses.list_pauses`
     snapshot and is never re-read here: ``node_pauses.load()`` normalises into
@@ -999,8 +1000,17 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
     own, so the guard is never optional — it cannot be skipped by forgetting an
     argument.
 
-    ``apply=False`` (the default, the #478 rule) prints every command and mutates
-    nothing — including the overlay, so a dry run cannot end a pause.
+    ``apply=False`` (the default) prints every command and mutates nothing —
+    including the overlay, so a preview cannot end a pause.
+
+    ``confirm`` is the CLI's mutation gate (operator rule 11-22, which replaced
+    ``--apply``): a callable ``(host, recorded_unit_ids) -> bool`` asked after
+    the listing below and before anything is rebuilt, restarted or cleared, so
+    a declined answer has cost the fleet nothing — not even a status sweep. The
+    daemon's expiry tick passes NOTHING, because a tick has no operator to ask:
+    it is the scheduled half of the same policy, not an unattended override.
+    Wording of the question and of the abort belongs to the caller; this
+    function only stops.
 
     The order is the contract:
 
@@ -1092,8 +1102,16 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
              "resuming here would start units on a node that has not been "
              "released.")
         echo(f"  Resume {' '.join(owners)} first "
-             f"(hscc node resume {' '.join(owners)} --apply); the pause on "
+             f"(hscc node resume {' '.join(owners)}); the pause on "
              f"{host} stays recorded.")
+        return res
+
+    # The operator's answer, when this caller asks for one (see the docstring:
+    # the tick does not). It sits after the listing above because an operator
+    # confirms against what they can READ, and before the plan() below because
+    # a declined answer should not have swept the fleet either.
+    if apply and confirm is not None and not confirm(host, recorded):
+        res["error"] = "confirmation not given — nothing was attempted"
         return res
 
     if recorded:
@@ -1124,7 +1142,8 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
         if not apply:
             res["action"] = RESUME_DRY_RUN
             res["ok"] = True
-            echo("Dry run: nothing restarted. Re-run with --apply.")
+            echo("Dry run: nothing restarted. Re-run without --dry-run to "
+                 "be asked whether to restart them.")
             return res
         if not out["ok"]:
             res["error"] = f"at least one unit failed to restart on {host}"
@@ -1136,7 +1155,8 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
         res["action"] = RESUME_DRY_RUN
         res["ok"] = True
         echo("  the pause recorded no units, so there is nothing to restart")
-        echo("Dry run: nothing changed. Re-run with --apply to clear it.")
+        echo("Dry run: nothing changed. Re-run without --dry-run to be "
+             "asked whether to clear it.")
         return res
 
     # Restarted (or nothing to restart): end the pause, THEN the strikes — the
@@ -1154,7 +1174,7 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
                         f"reach disk ({e})")
         echo(f"error: {res['error']}.")
         echo(f"  {node_pauses.overlay_path(directory)} still holds "
-             f"{host} — clear it with 'hscc node resume {host} --apply' "
+             f"{host} — clear it with 'hscc node resume {host}' "
              f"once the overlay is writable again.")
         return res
     res["pause_cleared"] = True
@@ -1263,7 +1283,7 @@ def auto_resume_expired(now=None, directory=None, apply=True, echo=None,
       2. drop a candidate whose span overlaps a pause the operator still holds
          (see below),
       3. resume the rest through :func:`resume_host` — the SAME function
-         ``hscc node resume --apply`` runs, so the dry-run gate, the
+         ``hscc node resume`` runs, so the confirmation gate, the
          rebuild-or-refuse rule and the clear pairing are shared, not restated.
 
     THE SPAN GUARD, which the CLI cannot need and a tick must.
@@ -1808,7 +1828,7 @@ def _doctor_check(now=None, root=None, stream_state=None, _daemon_running=None,
             f"of a {limit:.0f}s budget; {note})"
             + (f" — {message}" if message else ""),
             "end the pause by hand once the cause is fixed "
-            "(`hscc node resume <host> --apply`); the stream re-tries every "
+            "(`hscc node resume <host>`); the stream re-tries every "
             f"{stream_cadence()}s so this clears on its own")
 
     # (3) Fresh enough to trust, but the loop is not reaching this stream.
