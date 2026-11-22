@@ -205,4 +205,11 @@ def test_no_hardcoded_old_profile_or_board_literals_outside_resolver():
             offenders.append(f'{rel}: name == "orchestrator"')
     assert not offenders, (
         "hardcoded main-orchestrator identity outside the resolver:\n  "
-        + "\n  ".join(offenders))
+        + "\n  ".join(offenders)
+        + "\nFix by routing the read through hscc-roles/main_orch.py "
+        "(main_profile() / main_board() / legacy_general_profile(), whose "
+        "docstring gives the reason) and by naming the legacy identity "
+        "indirectly in prose. Do NOT add the offending file to RESOLVER_FILES: "
+        "that set is the resolver's own two files, and a consumer listed there "
+        "could hardcode the very identity it is supposed to resolve (ruled in "
+        "t_d1afc6e6, NOTES-t_d1afc6e6.md).")
