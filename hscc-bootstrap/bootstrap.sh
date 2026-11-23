@@ -276,7 +276,7 @@ else
   # swallowed. rc 3 is NOT a failure: the install succeeded and drifted operator
   # files were preserved + reported — it must surface as a loud warning.
   COPY_RC=0
-  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG) || COPY_RC=$?
+  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" HSCC_DIR="$HSCC_DIR" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG) || COPY_RC=$?
   if [ "$COPY_RC" -eq 0 ]; then
     ok "plugin files copied → $PLUGINS$($NO_BACKUP && echo ' (no backup)')"
   elif [ "$COPY_RC" -eq 3 ]; then
@@ -438,6 +438,35 @@ if $SKIP_ROLES; then warn "skipped"; else
   if $DRY_RUN; then plan "per-project orchestrators: $PLUGINS/hscc-roles/hscc.py orch-all (writes $HERMES_HOME/profiles)"
   else
     "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" orch-all >/dev/null 2>&1 && ok "per-project orchestrators provisioned" || warn "orchestrator provisioning reported issues"
+  fi
+fi
+
+# The payload stage above runs BEFORE profile provisioning (generate/orch-all
+# execute the installed hscc-roles), so on a fresh host the main profile does
+# not exist yet and cannot receive the payload — QA t_035b1b0b measured
+# `<main>` registering ZERO hscc plugins on a fresh install, saved only by
+# target_profiles.json=["*"] on the live fleet. install_payload.py now always
+# includes <main> in the resolved roster; this targeted second pass delivers it
+# once the profile exists (t_b312580e). No backup: the first pass already
+# backed up anything that differed, and this pass copies that same payload.
+hdr "Install: main orchestrator plugin payload"
+if $SKIP_ROLES; then warn "skipped"
+elif $DRY_RUN; then plan "main orchestrator payload: install_payload.py --main-only --no-backup → $HERMES_HOME/profiles/${MAIN_ORCH_NAME:-general}/plugins"
+elif [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
+  warn "repo is the runtime dir ($PLUGINS) — skipping plugin copy (in-place layout)"
+else
+  MAIN_COPY_FLAG="--main-only --no-backup"
+  $FORCE && MAIN_COPY_FLAG="$MAIN_COPY_FLAG --force"
+  MAIN_COPY_RC=0
+  MAIN_COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" HSCC_DIR="$HSCC_DIR" "$PYBIN" "$BOOT_DIR/install_payload.py" $MAIN_COPY_FLAG 2>&1) || MAIN_COPY_RC=$?
+  if [ "$MAIN_COPY_RC" -eq 0 ]; then
+    ok "main orchestrator plugin payload → $HERMES_HOME/profiles/${MAIN_ORCH_NAME:-general}/plugins"
+  elif [ "$MAIN_COPY_RC" -eq 3 ]; then
+    ok "main orchestrator plugin payload → $HERMES_HOME/profiles/${MAIN_ORCH_NAME:-general}/plugins"
+    warn "main orchestrator payload reported drift (same-pass copy; first-pass backup holds operator files)"
+  else
+    echo "$MAIN_COPY" >&2
+    die "main orchestrator plugin payload FAILED — <main> would have no hscc plugins"
   fi
 fi
 
