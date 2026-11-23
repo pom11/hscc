@@ -201,6 +201,17 @@ def test_root_block_states_main_only_and_carries_no_cluster_tool_catalog():
         assert verb in text
 
 
+def test_cluster_rule_matches_the_role_template_constant():
+    """R4 wording is one rule: drift between the two blocks fails here."""
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    src = open(os.path.join(repo, "hscc-roles", "generator.py"),
+               encoding="utf-8").read()
+    assert f'"{IS.CLUSTER_ACTIONS_RULE}"' in src, (
+        "install_soul.CLUSTER_ACTIONS_RULE and generator.CLUSTER_ACTIONS_RULE "
+        "have drifted")
+
+
 # ── NO-ANSI regression (RICH CLI hscc-bootstrap card) ──────────────────────
 # The themed __main__ summary must emit NO \x1b on a non-tty stdout — the same
 # output path the script prints in production, captured to a StringIO (Rich
