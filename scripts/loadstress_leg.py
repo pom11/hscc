@@ -22,10 +22,12 @@ WHAT THIS SCRIPT IS NOT
 It is not a burner harness and it must not grow one. CPU pressure comes from
 ``scripts/load_burners.sh``, which owns the burners' process groups, traps
 EXIT/INT/TERM/HUP and holds a hard timeout — the shape that exists because an
-ad-hoc loop on 2026-11-23 orphaned twelve ``while :; do :; done`` burners at
-ppid 1 for 3 h 40 m at load 24. Inlining a spinner here would re-create that
-incident inside the guard written against it (and
-``scripts/tests/test_load_burners.py`` fails the leg for it).
+ad-hoc spinner loop written inline in a test on 2026-11-23 orphaned twelve of
+them at ppid 1 for 3 h 40 m and held the box at load 24. Inlining a spinner here
+would re-create that incident inside the guard written against it (and
+``scripts/tests/test_loadstress_leg.py`` fails the leg for it, in both
+directions: the literal is never written out in this file, because quoting the
+incident's shape is how a static audit gets exempted into uselessness).
 
 CONTRACT
 --------
@@ -58,7 +60,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -73,6 +75,11 @@ FILES = (
     "hscc-api/tests/test_api_server_stop_signal.py",
     "hscc_daemon/tests/test_api_cli_stop_sidecar.py",
 )
+
+#: The name the leg is selected by (`HSCC_TEST_LEGS=loadstress`). The runner
+#: carries it as a shell literal because it is shell; this is the constant the
+#: guards tie that literal to.
+LEG_NAME = "loadstress"
 
 MARKER = os.environ.get("HSCC_LOADSTRESS_MARKER", "loadstress")
 DEFAULT_REPEATS = int(os.environ.get("HSCC_LOADSTRESS_REPEATS", "3"))
@@ -101,8 +108,8 @@ def _pytest_base(extra: list[str]) -> list[str]:
     non-zero items from the surviving file and the leg would stress half the
     class while reporting it whole.
     """
-    py = os.environ.get("HSCC_TEST_PY") or sys.executable
-    return [py, "-m", "pytest", "-p", "no:cacheprovider", "-m", MARKER, *extra]
+    return [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+            "--continue-on-collection-errors", "-m", MARKER, *extra]
 
 
 def _run(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -127,7 +134,11 @@ def collect(extra: list[str]) -> tuple[int, list[str], str]:
     text = proc.stdout + proc.stderr
     ids = sorted({ln.strip() for ln in proc.stdout.splitlines()
                   if "::" in ln and any(ln.startswith(f) for f in FILES)})
-    if proc.returncode != 0:
+    if proc.returncode not in (0, 5):
+        # 5 is pytest's "nothing was selected" status: a marker that matches no
+        # item is not a broken probe, it is an empty selection — and the empty
+        # selection is the case the caller below must get to, with its own
+        # message and its own exit code.
         raise SystemExit(
             f"loadstress: the selection probe exited {proc.returncode} — the "
             f"leg cannot certify a load run over a file it cannot even import."
@@ -266,6 +277,29 @@ def sweep(tag: str) -> int:
 # ── the two modes ───────────────────────────────────────────────────────────
 
 
+def _forwarded_stop(proc: subprocess.Popen) -> None:
+    """Make a signal to THIS leg reach the harness that owns the burners.
+
+    Python does not run ``finally`` for an unhandled SIGTERM, so without this
+    the leg could die and leave the harness — and every burner inside it — to
+    run on until the hard timeout. Forwarding is what makes "the burners die
+    with the leg" true at signal speed rather than at timeout speed; the hard
+    timeout stays as the backstop for a leg that is SIGKILLed, which nothing can
+    trap on macOS (no ``PR_SET_PDEATHSIG``), and which the leg answers by
+    sweeping its own tag on the way in.
+    """
+    def handler(signum, _frame):
+        try:
+            os.killpg(os.getpgid(proc.pid), signum)
+        except (ProcessLookupError, PermissionError):
+            pass                       # already gone; the exit below is the point
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)    # report the status a caller expects
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, handler)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="loadstress_leg.py", description=__doc__,
@@ -357,7 +391,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         proc = subprocess.Popen(cmd, env=env, cwd=REPO,
                                 stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True)
+                                stderr=subprocess.STDOUT, text=True,
+                                # The harness leads its own group, so a signal to
+                                # this leg can be forwarded to it without also
+                                # hitting this process, and the harness's own trap
+                                # is what reaches the burners' groups.
+                                start_new_session=True)
+        _forwarded_stop(proc)
         assert proc.stdout is not None
         for line in proc.stdout:
             sys.stdout.write(line)
