@@ -91,7 +91,8 @@ def test_registry_exists_and_covers_the_feature_rows():
     assert keys == ["orch_waker", "cron_watchers", "supervision",
                     "kanban_enforce", "main_board", "main_wakeups",
                     "budget_hook", "node_pauses",
-                    "node_pause_expiry"], "registry order is row order"
+                    "node_pause_expiry", "main_only_surface"], \
+        "registry order is row order"
 
 
 def test_every_registry_entry_is_well_formed():
@@ -129,7 +130,8 @@ def test_registry_seam_names_match_the_run_doctor_signature():
     assert registered - declared == {"_main_board_check",
                                      "_main_wakeups_check",
                                      "_node_pauses_check",
-                                     "_node_pause_expiry_check"}
+                                     "_node_pause_expiry_check",
+                                     "_main_only_surface_check"}
     assert "_main_board_check" not in declared, \
         "a new row must not add a keyword to run_doctor()'s signature"
 
@@ -450,3 +452,25 @@ def test_rows_receive_only_the_context_they_declare():
     doctor_rows.render_rows(_Hooks(), [spec], {}, hscc_dir="/sandbox/.hscc",
                             hermes_home="/sandbox/.hermes")
     assert calls == ["/sandbox/.hscc"]
+
+
+def test_main_only_row_declares_both_roots_and_says_why():
+    """The exception that proves the t_be690204 rule, pinned as a registry fact.
+
+    The daemon-state rows above must declare NO context because their writers
+    resolve from HOME alone, so a root lifted from ``HSCC_DIR`` is a directory
+    nothing writes to. This row's two roots each have a writer that honours them:
+    ``hermes_home`` is the tree the installers write when bootstrap is pointed at
+    a named ``--home``/``HERMES_HOME`` (the ``budget_hook`` precedent), and
+    ``hscc_dir`` is ``hscc-roles/main_orch``'s OWN documented relocation seam for
+    ``main-orchestrator.json`` — the document that decides which profile home is
+    ``<main>``. Dropping either keyword does not merely change a signature: drop
+    ``hermes_home`` and the row reads the operator's live ``~/.hermes`` from a
+    sandboxed Stage-1 run; drop ``hscc_dir`` and a sandboxed bootstrap asks about
+    the OPERATOR's identity instead of the one it is about to store.
+    """
+    by_key = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}
+    spec = by_key["main_only_surface"]
+    assert spec.row_kwargs == ("hermes_home", "hscc_dir")
+    assert spec.row_fn == "", "the generic builder; no run_doctor() edit"
+    assert spec.key not in ("orch_waker", "cron_watchers"), "sanity"
