@@ -1028,6 +1028,45 @@ def _write_profile_config(path, config, existing_text):
     return _write_if_changed(path, target)
 
 
+def set_kanban_auto_subscribe(pdir, enabled, *, dry_run=False):
+    """Set ``kanban.auto_subscribe_on_create`` in ONE profile config.
+
+    The writer half of ``orch_subscribe`` (t_31c8b258): a pane-backed
+    orchestrator's wake path is its pane + the hscc orch-waker, so Hermes must
+    not auto-create a gateway ``notify+wake`` sub for it. The existing
+    profile document is read whole and written through the same
+    preserve-every-key + Hermes-round-trip writers ``generate_profile`` uses,
+    so comments, key order and foreign keys survive.
+
+    Only an existing, parseable mapping is touched: a missing config or one
+    whose ``kanban`` value is not a mapping is reported and skipped, never
+    created or replaced. Returns ``{action, changed, config_path}`` where
+    ``action`` is ``written`` / ``unchanged`` / ``would-write`` /
+    ``missing-config`` / ``unparseable-config`` / ``unexpected-kanban-shape``.
+    """
+    pdir = os.path.expanduser(str(pdir))
+    path = os.path.join(pdir, "config.yaml")
+    existing, text = _read_config_file(pdir)
+    if existing is None:
+        action = "missing-config" if text is None else "unparseable-config"
+        return {"action": action, "changed": False, "config_path": path}
+    kanban = existing.get("kanban")
+    if kanban is None:
+        kanban = {}
+    elif not isinstance(kanban, dict):
+        return {"action": "unexpected-kanban-shape", "changed": False,
+                "config_path": path}
+    if kanban.get("auto_subscribe_on_create") is bool(enabled):
+        return {"action": "unchanged", "changed": False, "config_path": path}
+    if dry_run:
+        return {"action": "would-write", "changed": False, "config_path": path}
+    config = dict(existing)
+    config["kanban"] = {**kanban, "auto_subscribe_on_create": bool(enabled)}
+    changed = _write_profile_config(path, config, text)
+    return {"action": "written" if changed else "unchanged",
+            "changed": changed, "config_path": path}
+
+
 def _write_if_changed(path, content):
     """Write content only if it differs from what's on disk. Returns changed?"""
     if os.path.exists(path):
