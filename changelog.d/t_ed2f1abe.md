@@ -25,7 +25,7 @@ task: t_ed2f1abe
   and 1.0 s of SIGKILL grace while a stubborn serve goes down — the bound the
   new tests assert is 4.0 s. The watchdog's whole teardown budget stays below the
   API's wait, and the test file pins that inequality in both directions.
-* ``hscc-api/tests/test_gateway_serve_watchdog.py`` (15 items) SIGKILLs a real
+* ``hscc-api/tests/test_gateway_serve_watchdog.py`` (17 items) SIGKILLs a real
   API-side parent whose sidecar is a real subprocess and asserts the pid is gone
   and its loopback port released, not that a flag was set. Red on pristine
   ``origin/main`` at ``8a36d579``, where the sidecar is still alive 4.0 s after
