@@ -1,9 +1,9 @@
-"""`hscc clean`: archive the workspace of every finished card, then remove it.
+"""`hscc clean`: archive finished card workspaces, then clean rebuildable caches.
 
-Engine only (t_274530ae). The CLI verb is card 2 (t_fc9296a7) and the
-rebuildable-cache tiers are card 3 (t_a4d6b78d); there is no `--deep`, no
-report-only section and no output formatting here (D8), and this module must
-not be imported by ``hscc.py`` for those cards to wire it up.
+Engine only. The workspace tier is t_274530ae, the CLI verb is t_fc9296a7 and
+the rebuildable-cache tiers + the report-only section are t_701e22fc; output
+formatting stays out of here (D8) and this module must not be imported by
+``hscc.py`` at module scope for those cards to wire it up.
 
 Why this module exists
 ----------------------
@@ -58,16 +58,32 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
 from hscc_daemon import autodown
 from hscc_daemon import kanban_live
 
-__all__ = ["KIND", "SKIP_REASONS", "plan_clean", "execute"]
+__all__ = ["KIND", "KIND_COMMAND", "KIND_PATH", "KIND_REPORT", "TIER_SAFE",
+           "TIER_DEEP", "SKIP_REASONS", "CACHE_REASONS", "CACHE_STATUSES",
+           "plan_clean", "execute"]
 
-#: The one action kind this engine produces (card 2 renders / extends it).
+#: The workspace action kind (t_274530ae).
 KIND = "archive_workspace"
+#: A cache-tier action that runs one external command (``uv cache prune``).
+KIND_COMMAND = "cache_command"
+#: A cache-tier action that removes one directory the engine named itself.
+KIND_PATH = "cache_path"
+#: A path this verb measures and prints but never touches (script section 6).
+KIND_REPORT = "report_only"
+
+#: The two cache tiers. ``safe`` runs with ``--apply`` alone; ``deep`` runs only
+#: with ``--apply --deep --confirm`` (an explicit operator gesture) and is the
+#: tier whose removals cost the operator a rebuild.
+TIER_SAFE = "safe"
+TIER_DEEP = "deep"
+TIERS = (TIER_SAFE, TIER_DEEP)
 
 #: Closed vocabulary for ``skipped[].reason`` (D3 + D4). Anything outside this
 #: set is a bug, not a new category — a skip must always say *why* in a word.
@@ -96,15 +112,83 @@ TAR_EXCLUDES = (".git", "__pycache__", "node_modules", ".venv", "venv",
 _PROBE_TIMEOUT = 30       # a single `git status` on a healthy repo
 _TAR_TIMEOUT = 900        # a whole workspace, compressed
 
+# ── the cache tiers (t_701e22fc) ─────────────────────────────────────────── #
+
+#: Every external command the cache tiers name runs under this cap, killed when
+#: it expires and reported in ``errors``. The verb is callable from a cron, so
+#: a wedged ``brew cleanup`` must never be able to wedge the verb with it —
+#: this is the whole reason the cap is per command rather than per run.
+CACHE_TIMEOUT = 300
+
+#: A pytest temp dir is disposable once it has sat untouched this long (the
+#: reference script's ``-mtime +1``).
+PYTEST_TEMP_AGE_SECONDS = 86400
+
+#: ``${TMPDIR}/pytest-of-$USER`` — the tree the script sweeps.
+PYTEST_TEMP_PREFIX = "pytest-of-"
+
+#: ``$HOME/.cache/hscc-uitest*`` — the UI-test caches.
+UITEST_CACHE_PREFIX = "hscc-uitest"
+
+#: The names the engine puts on its own cache actions. They are part of the
+#: removal contract below (an action's ``name`` says which directory it may
+#: remove), so they are constants, not report strings.
+UV_NAME = "uv cache"
+NPM_NAME = "npm cache"
+CONDA_NAME = "conda pkgs"
+BREW_NAME = "homebrew"
+PIP_NAME = "pip cache"
+SIMCTL_NAME = "simulators"
+PYTEST_TEMP_NAME = "pytest temp dir"
+UITEST_NAME = "hscc UI-test cache"
+DERIVED_DATA_NAME = "Xcode DerivedData"
+SIMULATOR_CACHE_NAME = "simulator caches"
+TRASH_NAME = "Trash"
+
+#: How the Trash is emptied: the reference script's AppleScript, verbatim. This
+#: engine never removes ``~/.Trash`` itself — Finder is the only thing allowed
+#: to empty it, which is also why a missing ``osascript`` is a skip, not an
+#: ``rm -rf`` fallback.
+TRASH_APPLESCRIPT = 'tell application "Finder" to empty trash'
+
+#: ``<name>: (<allowed parent>, <leaf rule>)`` — the ONLY directories a
+#: ``cache_path`` action may remove, and the only names the executor accepts.
+#: A plan is untrusted input (it can arrive through ``--json``), so the executor
+#: re-DERIVES the parent from HOME/TMPDIR at removal time and requires the leaf
+#: rule under it: a name it does not know, a parent it does not derive for that
+#: name, or a leaf it did not name is refused. The same D2 posture the workspace
+#: tier applies to ``workspaces_root`` — a path in a dict is not permission.
+#: ``"*"`` means any child; ``prefix:<x>`` means any child whose name starts
+#: with ``<x>``.
+CACHE_PATH_RULES = {
+    DERIVED_DATA_NAME: ("xcode", "DerivedData"),
+    SIMULATOR_CACHE_NAME: ("coresimulator", "Caches"),
+    PYTEST_TEMP_NAME: ("pytest", "*"),
+    UITEST_NAME: ("cache", f"prefix:{UITEST_CACHE_PREFIX}"),
+}
+
+#: Closed vocabulary for a cache entry's ``status``.
+CACHE_STATUSES = ("planned", "skipped", "ran", "failed", "timed-out",
+                  "report-only")
+
+#: Closed vocabulary for a cache entry's ``reason``, deliberately SEPARATE from
+#: :data:`SKIP_REASONS`: that one is the workspace tier's vocabulary (a card is
+#: kept because it is dirty, unpushed, claimed…) and t_fc9296a7 pins every
+#: rendered workspace skip to it. A cache entry is skipped for machinery reasons
+#: instead, and merging the two vocabularies would let a card disappear behind
+#: an ``absent``.
+CACHE_REASONS = ("not-installed", "absent", "outside-root", "protected",
+                 "not-a-directory")
+
 
 # --------------------------------------------------------------------------- #
 # The public pair
 # --------------------------------------------------------------------------- #
 
 def plan_clean(*, days: int = DEFAULT_DAYS, boards=None, now=None,
-               kanban_db=None) -> dict:
+               kanban_db=None, deep: bool = False) -> dict:
     """Read-only plan: every finished-card workspace older than ``days`` that
-    is safe to archive.
+    is safe to archive, plus the rebuildable-cache tiers.
 
     ``boards`` narrows the pass to those slugs (``None`` = every board hermes
     enumerates). ``now`` (epoch seconds) and ``kanban_db`` (a
@@ -113,19 +197,42 @@ def plan_clean(*, days: int = DEFAULT_DAYS, boards=None, now=None,
     loader resolves it exactly like ``kanban_live.collect()`` does, and an
     unloadable lib is reported in ``errors`` rather than raised.
 
+    ``deep`` adds the deep tier — the whole uv cache instead of a prune, Xcode's
+    ``DerivedData``, the simulator caches and the Trash — to the plan. It changes
+    only WHAT MAY BE REMOVED, never what is measured: a ``deep`` plan is still
+    just a plan, and the executor refuses it unless the caller asked for it
+    (card t_fc9296a7 turns that refusal into the ``--confirm`` gate).
+
     Returns the JSON-safe dict card 2 dumps straight into ``hscc clean --json``::
 
-        {"days", "cutoff", "actions": [...], "skipped": [...], "errors": [...]}
+        {"days", "cutoff", "deep", "actions", "skipped", "errors",
+         "cache_actions", "report_only"}
+
+    The five t_274530ae keys keep their exact meaning: ``actions``/``skipped``
+    stay the WORKSPACE tier (a cache entry never joins them) and ``errors`` stays
+    the pass-level failure list. The three new keys are the cache tiers, and
+    every size in them is measured HERE — once, read-only — so ``execute`` never
+    re-walks a tree it has already cost the operator time on.
 
     A card too young, or one whose workspace does not exist, produces no entry
     at all — it is not a candidate, and silence about it keeps ``skipped``
-    meaning "we looked and decided to keep this".
+    meaning "we looked and decided to keep this". The cache tiers follow the
+    same rule: a cache directory that is not there produces no entry.
     """
     now_s = int(now if now is not None else time.time())
     days_i = max(0, int(days))
     cutoff = now_s - days_i * SECONDS_PER_DAY
-    plan = {"days": days_i, "cutoff": cutoff, "actions": [], "skipped": [],
-            "errors": []}
+    plan = {"days": days_i, "cutoff": cutoff, "deep": bool(deep),
+            "actions": [], "skipped": [], "errors": [],
+            "cache_actions": [], "report_only": []}
+
+    # The cache tiers first, and with no board authority in hand: a host whose
+    # kanban lib is unreachable still gets its cache report, and the workspace
+    # half still reports its own error below. Home and TMPDIR are resolved here
+    # and nowhere else in the plan, so one redirect moves the whole tier.
+    home, tmp_root = _host_roots()
+    cache, report = _plan_cache(home, tmp_root, now_s, bool(deep))
+    plan["cache_actions"], plan["report_only"] = cache, report
 
     if kanban_db is None:
         kanban_db = autodown._load_kanban_db_or_default()
@@ -187,25 +294,38 @@ def execute(plan, *, apply: bool, kanban_db=None) -> dict:
     Returns::
 
         {"apply", "archived": [{"path", "archive", "size_bytes"}],
-         "removed", "skipped", "errors", "freed_bytes"}
+         "removed", "skipped", "errors", "freed_bytes",
+         "cache": [...], "cache_freed_bytes", "report_only": [...]}
 
     ``size_bytes`` always means bytes of *workspace* data (what is freed), in
     the plan, in the skip entries and here; the archive's own size is one
     ``stat`` away and stays out of the payload.
+
+    The three cache keys are t_701e22fc. ``cache`` is one entry per cache
+    action with what happened to it (``status`` says ``ran``/``failed``/
+    ``timed-out``/``skipped``/``planned``), ``cache_freed_bytes`` is the sum of
+    the PLAN-TIME sizes of the actions that ran — an estimate, never a re-walk
+    (a ``prune`` that reclaims half a cache reports high, which is why the
+    workspace total and this one stay separate numbers) — and ``report_only``
+    is carried through unchanged so ``--json --apply`` is self-contained.
     """
     result = {"apply": bool(apply), "archived": [], "removed": 0,
-              "skipped": [], "errors": [], "freed_bytes": 0}
+              "skipped": [], "errors": [], "freed_bytes": 0,
+              "cache": [], "cache_freed_bytes": 0, "report_only": []}
+    home, tmp_root = _host_roots()
     actions = [a for a in (plan.get("actions") or [])
                if isinstance(a, dict) and a.get("kind") == KIND]
     if not actions:
-        return result
+        # Nothing to archive is not nothing to do: a host with no finished card
+        # still has caches to prune, and the cache tiers do not read the board.
+        return _finish_cache(result, plan, home=home, tmp_root=tmp_root)
 
     if kanban_db is None:
         kanban_db = autodown._load_kanban_db_or_default()
     if kanban_db is None:
         result["errors"].append(autodown._KANBAN_LOAD.get("reason")
                                 or "kanban lib unreachable")
-        return result
+        return _finish_cache(result, plan, home=home, tmp_root=tmp_root)
 
     for action in actions:
         entry = _action_entry(action)
@@ -278,7 +398,7 @@ def execute(plan, *, apply: bool, kanban_db=None) -> dict:
                                    "size_bytes": size})
         result["removed"] += 1
         result["freed_bytes"] += size
-    return result
+    return _finish_cache(result, plan, home=home, tmp_root=tmp_root)
 
 
 # --------------------------------------------------------------------------- #
@@ -431,7 +551,8 @@ def _git_entries(ws: Path) -> list:
 
 
 # --------------------------------------------------------------------------- #
-# Git + tar subprocess helpers (the only two executables this module names)
+# Git + tar subprocess helpers (the workspace tier's only two executables; the
+# cache tiers name their own, each one probed and each one bounded)
 # --------------------------------------------------------------------------- #
 
 def _run(argv: list, timeout: int) -> tuple:
@@ -556,6 +677,395 @@ def _archive_workspace(ws: Path, target: Path) -> tuple:
         with contextlib.suppress(OSError):
             if part.exists():
                 part.unlink()
+
+
+# --------------------------------------------------------------------------- #
+# The cache tiers: planning (read-only — probes and sizes, nothing else)
+# --------------------------------------------------------------------------- #
+
+#: Where conda lives on the reference host. Probed by REAL path first: the
+#: ``conda activate`` shim a shell installs has no executable behind it, while a
+#: conda in another prefix still owns a cache worth cleaning.
+CONDA_REAL_SUBPATH = ("miniconda3", "bin", "conda")
+
+#: ``(name, home-relative path, note)`` for the section the script prints under
+#: "report only — decide yourself". Measured and named, never touched: the whole
+#: point is that the operator decides, and cannot decide without the size.
+REPORT_ONLY_SPECS = (
+    ("Xcode device support",
+     ("Library", "Developer", "CoreDevice", "DeviceFS"),
+     "Xcode re-downloads it when a device connects"),
+    ("hermes profiles", (".hermes", "profiles"),
+     "hermes data — this verb never touches it"),
+    ("LM Studio models", (".lmstudio",),
+     "downloaded models; delete what you do not want yourself"),
+    ("Trash", (".Trash",),
+     "emptied only by the deep set, through Finder"),
+)
+
+
+def _host_roots() -> tuple:
+    """``(home, tmp_root)`` — the only two roots the cache tiers know about.
+
+    Both resolve at CALL time, never at import: pointing ``HOME``/``TMPDIR``
+    somewhere else moves the whole tier with it, and no absolute home path is
+    ever baked into this module (or into a plan a test can compare against).
+    """
+    tmp = os.environ.get("TMPDIR") or tempfile.gettempdir()
+    return Path(os.path.expanduser("~")), Path(tmp)
+
+
+def _user_name() -> str:
+    """``$USER`` — the name the pytest temp tree is keyed by, with a fallback."""
+    name = os.environ.get("USER") or ""
+    if name:
+        return name
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:  # pragma: no cover — needs a host with no passwd entry
+        return "unknown"
+
+
+def _probe(name: str) -> str:
+    """The absolute path of ``name``, or '' when it is not installed."""
+    return shutil.which(name) or ""
+
+
+def _conda_binary(home: Path) -> str:
+    """conda at its real path first, then whatever ``PATH`` offers (or '')."""
+    real = home.joinpath(*CONDA_REAL_SUBPATH)
+    if real.is_file() and os.access(real, os.X_OK):
+        return str(real)
+    return _probe("conda")
+
+
+def _size(path: Path) -> int:
+    """The plan-time size of one path, 0 when it is not there.
+
+    This is where a `hscc clean` pass spends its wall-clock time — an
+    ``lstat`` per file, read-only, and deliberately done ONCE, here, so an
+    ``--apply`` never re-walks a tree the operator already waited for.
+    """
+    return _dir_bytes(path) if path.is_dir() else 0
+
+
+def _children(root: Path, *, prefix: str = "", older_than: int | None = None) -> list:
+    """Immediate subdirectories of ``root`` matching the age/prefix filter.
+
+    Sorted, so a plan is byte-stable. A symlinked child is never a candidate:
+    the script's ``find -type d`` would follow it, and this engine would rather
+    leave one stale directory behind than remove a link into real work.
+    """
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if prefix and not name.startswith(prefix):
+            continue
+        child = root / name
+        try:
+            if child.is_symlink() or not child.is_dir():
+                continue
+            if (older_than is not None
+                    and os.lstat(child).st_mtime >= older_than):
+                continue
+        except OSError:
+            continue                    # vanished mid-listing: not a candidate
+        found.append(child)
+    return found
+
+
+def _command_entry(name, argv, *, tier, installed=True, size=0, note="") -> dict:
+    """One cache action that runs a command. ``argv[0]`` is the resolved path."""
+    return {"kind": KIND_COMMAND, "name": name, "tier": tier,
+            "argv": [str(a) for a in argv], "path": "", "root": "",
+            "size_bytes": int(size),
+            "status": "planned" if installed else "skipped",
+            "reason": "" if installed else "not-installed", "note": note}
+
+
+def _path_entry(name, path, root, *, tier, size=0, note="") -> dict:
+    """One cache action that removes a directory this engine named itself."""
+    return {"kind": KIND_PATH, "name": name, "tier": tier, "argv": [],
+            "path": str(path), "root": str(root), "size_bytes": int(size),
+            "status": "planned", "reason": "", "note": note}
+
+
+def _cache_roots_for(name: str, home: Path, tmp_root: Path) -> tuple:
+    """``(allowed parent, the one target under it or None)`` for a ``name``.
+
+    The single derivation both halves use — and it is read out of
+    :data:`CACHE_PATH_RULES`, so the planner and the executor cannot disagree
+    about what a name means. ``None`` as the target means "any child allowed by
+    the leaf rule" (``*`` or ``prefix:<x>``).
+    """
+    rule = CACHE_PATH_RULES.get(name)
+    if rule is None:
+        return None, None
+    kind, leaf = rule
+    parents = {"xcode": home / "Library" / "Developer" / "Xcode",
+               "coresimulator": home / "Library" / "Developer" / "CoreSimulator",
+               "pytest": tmp_root / f"{PYTEST_TEMP_PREFIX}{_user_name()}",
+               "cache": home / ".cache"}
+    parent = parents[kind]
+    if leaf == "*" or leaf.startswith("prefix:"):
+        return parent, None
+    return parent, parent / leaf
+
+
+def _plan_cache(home: Path, tmp_root: Path, now_s: int, deep: bool) -> tuple:
+    """``(cache_actions, report_only)`` — the two tiers, read-only.
+
+    ``shutil.which`` probes and size walks; no create, no move, no remove. A
+    binary that is not installed still gets an entry (``status="skipped"``,
+    ``reason="not-installed"``) so the report says the pass covered that cache
+    and why it did nothing — a Mac without Xcode must not be red.
+    """
+    actions = []
+
+    # uv is the one cache whose command changes with the tier: `prune` keeps
+    # what is still useful, `clean` drops the lot. So a non-deep plan never
+    # contains `uv cache clean` and a deep one never contains both.
+    uv = _probe("uv")
+    actions.append(_command_entry(
+        UV_NAME, [uv, "cache", "clean" if deep else "prune"],
+        tier=TIER_DEEP if deep else TIER_SAFE, installed=bool(uv),
+        size=_size(home / ".cache" / "uv"),
+        note="whole-cache clean (--deep) instead of prune" if deep else ""))
+
+    npm = _probe("npm")
+    actions.append(_command_entry(NPM_NAME, [npm, "cache", "clean", "--force"],
+                                  tier=TIER_SAFE, installed=bool(npm),
+                                  size=_size(home / ".npm")))
+
+    conda = _conda_binary(home)
+    actions.append(_command_entry(
+        CONDA_NAME, [conda, "clean", "--all", "-y"], tier=TIER_SAFE,
+        installed=bool(conda), size=_size(home / "miniconda3" / "pkgs"),
+        note="probed at its real path, not via PATH"))
+
+    brew = _probe("brew")
+    actions.append(_command_entry(
+        BREW_NAME, [brew, "cleanup", "--prune=30"], tier=TIER_SAFE,
+        installed=bool(brew),
+        size=_size(home / "Library" / "Caches" / "Homebrew")))
+
+    python3 = _probe("python3")
+    actions.append(_command_entry(
+        PIP_NAME, [python3, "-m", "pip", "cache", "purge"], tier=TIER_SAFE,
+        installed=bool(python3),
+        size=_size(home / "Library" / "Caches" / "pip")))
+
+    xcrun = _probe("xcrun")
+    actions.append(_command_entry(
+        SIMCTL_NAME, [xcrun, "simctl", "delete", "unavailable"],
+        tier=TIER_SAFE, installed=bool(xcrun)))
+
+    pytest_root, _ = _cache_roots_for(PYTEST_TEMP_NAME, home, tmp_root)
+    for child in _children(pytest_root,
+                           older_than=now_s - PYTEST_TEMP_AGE_SECONDS):
+        actions.append(_path_entry(PYTEST_TEMP_NAME, child, pytest_root,
+                                   tier=TIER_SAFE, size=_size(child),
+                                   note="older than 1 day"))
+
+    uitest_root, _ = _cache_roots_for(UITEST_NAME, home, tmp_root)
+    for child in _children(uitest_root, prefix=UITEST_CACHE_PREFIX):
+        actions.append(_path_entry(UITEST_NAME, child, uitest_root,
+                                   tier=TIER_SAFE, size=_size(child)))
+
+    if deep:
+        for name in (DERIVED_DATA_NAME, SIMULATOR_CACHE_NAME):
+            parent, target = _cache_roots_for(name, home, tmp_root)
+            if target is not None and target.is_dir():
+                actions.append(_path_entry(name, target, parent,
+                                           tier=TIER_DEEP, size=_size(target)))
+        # The Trash goes through Finder, exactly as the script does. There is
+        # no rm -rf path for it in this module at all: `osascript` missing is a
+        # skip, never a fallback.
+        osascript = _probe("osascript")
+        actions.append(_command_entry(
+            TRASH_NAME, [osascript, "-e", TRASH_APPLESCRIPT], tier=TIER_DEEP,
+            installed=bool(osascript), size=_size(home / ".Trash"),
+            note="emptied through Finder, never rm -rf"))
+
+    return actions, _plan_report_only(home)
+
+
+def _plan_report_only(home: Path) -> list:
+    """Script section 6 as plan entries: measured, printed, never touched."""
+    out = []
+    for name, rel, note in REPORT_ONLY_SPECS:
+        path = home.joinpath(*rel)
+        out.append({"kind": KIND_REPORT, "name": name, "path": str(path),
+                    "size_bytes": _size(path), "status": "report-only",
+                    "note": note})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# The cache tiers: execution (bounded, guarded, and the only place that mutates)
+# --------------------------------------------------------------------------- #
+
+def _finish_cache(result: dict, plan: dict, *, home: Path,
+                  tmp_root: Path) -> dict:
+    """Fold the cache tiers into an ``execute`` result and return it."""
+    entries, freed = _execute_cache(plan, apply=bool(result["apply"]),
+                                    home=home, tmp_root=tmp_root,
+                                    errors=result["errors"])
+    result["cache"] = entries
+    result["cache_freed_bytes"] = int(freed)
+    result["report_only"] = [dict(e) for e in (plan.get("report_only") or [])
+                             if isinstance(e, dict)
+                             and e.get("kind") == KIND_REPORT]
+    return result
+
+
+def _execute_cache(plan: dict, *, apply: bool, home: Path, tmp_root: Path,
+                   errors: list) -> tuple:
+    """``(one entry per cache action, freed estimate)``.
+
+    Nothing runs unless ``apply`` is true, and no command runs without a
+    timeout: an expired one is killed, lands in ``errors`` with its name, and
+    the pass continues to the next action. A refusal (``protected``,
+    ``outside-root``) is reported as a skip AND as an error, because a plan
+    naming a directory it was never allowed to name is worth an exit 1.
+    """
+    entries = []
+    freed = 0
+    for raw in (plan.get("cache_actions") or []):
+        if not isinstance(raw, dict):
+            continue
+        entry = _cache_entry(raw)
+        entries.append(entry)
+        if entry["status"] == "skipped":
+            continue                       # already explained by the planner
+        if not apply:
+            continue                       # a report is not a run
+        if entry["kind"] == KIND_COMMAND:
+            status, detail = _run_cache_command(entry["argv"])
+        else:
+            status, detail = _remove_cache_path(entry, home=home,
+                                                tmp_root=tmp_root)
+        if status == "skipped":
+            entry["status"], entry["reason"] = "skipped", detail
+            if detail in ("outside-root", "protected", "not-a-directory"):
+                errors.append(f"cache {entry['name']}: refused ({detail})")
+        elif status == "ran":
+            entry["status"], entry["reason"] = "ran", ""
+            freed += int(entry["size_bytes"] or 0)
+        else:
+            entry["status"], entry["reason"] = status, detail
+            errors.append(f"cache {entry['name']}: {status} ({detail})")
+    return entries, freed
+
+
+def _cache_entry(raw: dict) -> dict:
+    """Normalise one planned cache action into what the executor reports."""
+    status = str(raw.get("status") or "planned")
+    return {"kind": raw.get("kind"), "name": str(raw.get("name") or ""),
+            "tier": (raw.get("tier") if raw.get("tier") in TIERS
+                     else TIER_SAFE),
+            "argv": [str(a) for a in (raw.get("argv") or [])],
+            "path": str(raw.get("path") or ""),
+            "root": str(raw.get("root") or ""),
+            "size_bytes": _as_int(raw.get("size_bytes")),
+            "status": status if status in ("planned", "skipped") else "planned",
+            "reason": str(raw.get("reason") or ""),
+            "note": str(raw.get("note") or "")}
+
+
+def _run_cache_command(argv: list) -> tuple:
+    """``('ran'|'failed'|'timed-out', detail)`` for one cache command.
+
+    :data:`CACHE_TIMEOUT` is the point: ``brew cleanup`` can wedge on a tap
+    fetch, and this verb is meant to be runnable from a cron. ``_run`` reports
+    every ``SubprocessError`` as exit 124 with the exception name in stderr,
+    which is how a kill is told apart from a binary that refused.
+    """
+    if not argv or not argv[0]:
+        return "skipped", "not-installed"
+    rc, out, err = _run(argv, CACHE_TIMEOUT)
+    detail = (err or out or "").strip()[:200]
+    if rc == 124:
+        if "TimeoutExpired" in (err or ""):
+            return ("timed-out", f"killed after {CACHE_TIMEOUT}s with no "
+                                 f"result — the command was left mid-flight")
+        return "failed", detail or "could not run"
+    if rc != 0:
+        return "failed", detail or f"exit {rc}"
+    return "ran", ""
+
+
+def _remove_cache_path(entry: dict, *, home: Path, tmp_root: Path) -> tuple:
+    """Remove one cache directory this engine named. Never a shell command."""
+    blocker, resolved = _cache_path_blocker(entry, home=home, tmp_root=tmp_root)
+    if blocker:
+        return "skipped", blocker
+    try:
+        shutil.rmtree(str(resolved))
+    except OSError as e:
+        return "failed", f"could not remove {resolved}: {e}"
+    return "ran", ""
+
+
+def _cache_path_blocker(entry: dict, *, home: Path, tmp_root: Path) -> tuple:
+    """``('', resolved)`` when removal is allowed, else ``(reason, None)``.
+
+    Re-derived, never trusted — the D2 posture of the workspace tier, applied to
+    caches. The allowed parent comes from the CURRENT ``HOME``/``TMPDIR`` and the
+    action's own ``name`` (see :data:`CACHE_PATH_RULES`), the target must sit
+    strictly inside it, and it must clear :func:`_protected_roots`. So a plan
+    that arrived through ``--json`` cannot point this tier at anything the
+    engine did not itself name, and cannot name its way out of ``~/.hermes``,
+    ``~/.hscc`` or ``~/dev``.
+    """
+    name = str(entry.get("name") or "")
+    rule = CACHE_PATH_RULES.get(name)
+    if rule is None:
+        return "outside-root", None            # a name this engine never plans
+    _parent, leaf = rule
+    allowed, _fixed = _cache_roots_for(name, home, tmp_root)
+    target = str(entry.get("path") or "")
+    if allowed is None or not target:
+        return "absent" if allowed is not None else "outside-root", None
+    try:
+        resolved = Path(os.path.realpath(target))
+    except OSError:  # pragma: no cover — realpath only fails on a syscall error
+        return "absent", None
+    if not _strictly_inside(allowed, resolved):
+        return "outside-root", None
+    if leaf != "*" and not _leaf_ok(leaf, resolved.name):
+        return "outside-root", None
+    for protected in _protected_roots(home):
+        root = Path(os.path.realpath(str(protected)))
+        if resolved == root or root in resolved.parents:
+            return "protected", None
+    if not resolved.is_dir():
+        return "absent", None
+    return "", resolved
+
+
+def _leaf_ok(leaf: str, name: str) -> bool:
+    """Apply one :data:`CACHE_PATH_RULES` leaf rule to a directory name."""
+    if leaf.startswith("prefix:"):
+        return name.startswith(leaf[len("prefix:"):])
+    return name == leaf
+
+
+def _protected_roots(home: Path) -> tuple:
+    """The roots neither cache tier may ever remove anything from.
+
+    ``~/.hermes`` (config, sessions, memory, profiles — the archive path is
+    written there by the workspace tier and is the only ``~/.hermes`` path this
+    module touches, and never as a removal target), ``~/.hscc`` (daemon state)
+    and ``~/dev`` (the developer's own checkouts). This is a SECOND gate after
+    :func:`_cache_path_blocker`'s containment, not a replacement for it: the
+    first says "only what we named", this one says what we never name.
+    """
+    return (home / ".hermes", home / ".hscc", home / "dev")
 
 
 # --------------------------------------------------------------------------- #

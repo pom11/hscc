@@ -461,13 +461,16 @@ def _get_help_text():
                  "--skip-{skills,roles,daemon,patches,cli} (see `hscc help bootstrap`)"]),
         *_entry("update --check",
                 "Check GitHub releases for a newer version (read-only)"),
-        # clean (t_fc9296a7): dispatched, in COMMAND_HELP and in
-        # TOP_LEVEL_COMMANDS, so the primary surface names it too (the F5
-        # surface-honesty rule). The pair cannot fit one line, so it takes the
-        # two-line layout: usage alone + hanging-indent description.
-        *_entry("clean [--apply] [--days N] [--board <slug>] [--json]",
-                "Archive + remove finished cards' workspaces "
-                "(DRY RUN until --apply)"),
+        # clean (t_fc9296a7 + the cache tiers t_701e22fc): dispatched, in
+        # COMMAND_HELP and in TOP_LEVEL_COMMANDS, so the primary `hscc --help`
+        # surface names it too (the F5 surface-honesty rule). The usage is now
+        # too long for the two-column look, so it stands alone and the
+        # description wraps to _TOP_HELP_INDENT (see _entry).
+        *_entry("clean [--apply] [--deep] [--confirm] [--days N] "
+                "[--board <slug>] [--json]",
+                "Archive + remove finished cards' workspaces, then prune "
+                "rebuildable caches (DRY RUN until --apply; --deep needs "
+                "--confirm)"),
     ])
 
     examples = _section("Examples", [
@@ -629,23 +632,34 @@ COMMAND_HELP = {
                    "  pause|resume|enable|disable <project> [--json]\n"
                    "  Rebase -> gates -> force-with-lease push -> squash merge.\n"
                    "  Usage: hscc merge-queue <subcommand> [args]",
-    # clean (card t_fc9296a7): the disk-hygiene verb over the engine shipped by
-    # t_274530ae. Every authored line <= 76 (the (B) gate renders at 78 and
-    # _handle_help prints one 2-space prefix for the whole value).
-    "clean": "Archive then remove the workspace of every finished card.\n"
+    # clean (cards t_fc9296a7 + t_701e22fc): the disk-hygiene verb over the
+    # engine shipped by t_274530ae. Every authored line <= 76 (the (B) gate
+    # renders at 78 and _handle_help prints one 2-space prefix for the value).
+    "clean": "Archive then remove finished cards' workspaces, then caches.\n"
              "  DRY RUN by default: prints what would go, changes nothing.\n"
-             "  Usage: hscc clean [--apply] [--days N] [--board <slug>] [--json]\n"
-             "  --apply performs the safe set only: each workspace goes to\n"
-             "  <hermes-home>/kanban/workspace-archive/<board>/<id>.tar.gz\n"
-             "  first, and is only removed once that archive verifies. One\n"
-             "  with uncommitted changes, unpushed commits, a stash, an\n"
-             "  unreadable probe or a live claim is KEPT and named with its\n"
-             "  reason. --days N (default 7) is the age a finished card must\n"
-             "  pass; --board <slug> narrows the pass to that board.\n"
-             "  Unfinished cards, the board DBs, comments, attachments and\n"
-             "  anything under ~/dev are never touched. --json prints the\n"
-             "  engine's own dict, with no added text. There is no --deep\n"
-             "  flag yet. See: docs/ops/disk-hygiene.md",
+             "  Usage: hscc clean [--apply] [--deep] [--confirm] [--days N]\n"
+             "                   [--board <slug>] [--json]\n"
+             "  --apply runs the workspace safe set AND the safe cache set:\n"
+             "  uv prune, npm/conda/brew/pip caches, unavailable simulators,\n"
+             "  pytest temp dirs older than a day, the hscc UI-test caches.\n"
+             "  Each tool is probed first, so one that is not installed is a\n"
+             "  skip and not a failure, and each command is killed on its own\n"
+             "  timeout. Each workspace goes to <hermes-home>/kanban/\n"
+             "  workspace-archive/<board>/<id>.tar.gz first and is removed\n"
+             "  only once that archive verifies; one with uncommitted\n"
+             "  changes, unpushed commits, a stash, an unreadable probe or a\n"
+             "  live claim is KEPT and named. --days N (default 7) is the age\n"
+             "  a finished card must pass; --board <slug> narrows the pass.\n"
+             "  --deep alone REPORTS the deep set for free (whole uv cache,\n"
+             "  Xcode DerivedData, simulator caches, the Trash). To run it:\n"
+             "  --deep --apply --confirm — without --confirm this exits 2 and\n"
+             "  names the token. The Trash goes through Finder, never rm.\n"
+             "  Sizes are measured in the plan, so --apply never re-walks;\n"
+             "  that walk is what makes a first dry run take a minute.\n"
+             "  Unfinished cards, the board DBs, comments, attachments,\n"
+             "  ~/.hscc, ~/.hermes and anything under ~/dev are never\n"
+             "  touched. --json prints the engine's dict, no added text.\n"
+             "  See: docs/ops/disk-hygiene.md",
     "cards": "Live per-card worker view (read-only).\n"
              "  monitor [--live] [--interval <s>] [--board <slug>] [--tools]:\n"
              "    one panel per running card streaming its transcript; waiting\n"
@@ -2824,16 +2838,21 @@ def _handle_project():
 
 # ── `hscc clean` — the kanban workspace hygiene (card t_fc9296a7) ──────────
 #: Flags the verb accepts, spelled the way :data:`_NODE_FLAGS` spells them:
-#: switches are presence-only, values take exactly one token. ``--deep`` is
-#: deliberately ABSENT (card t_a4d6b78d owns the rebuildable-cache tiers), and
-#: an unknown flag is an error the caller renders with the usage line and exit
-#: 2 — never a silent drop, which is how an operator ends up believing a
-#: cleanup ran that never was.
-_CLEAN_FLAGS = {"switches": ("--apply", "--json"),
+#: switches are presence-only, values take exactly one token. ``--deep`` and
+#: ``--confirm`` are t_701e22fc: the deep set runs only when BOTH are present
+#: with ``--apply``, and the refusal to run it names the missing token.
+_CLEAN_FLAGS = {"switches": ("--apply", "--json", "--deep", "--confirm"),
                 "values": ("--days", "--board")}
 
-_CLEAN_USAGE = ("usage: hscc clean [--apply] [--days N] "
-                "[--board <slug>] [--json]")
+_CLEAN_USAGE = ("usage: hscc clean [--apply] [--deep] [--confirm] "
+                "[--days N] [--board <slug>] [--json]")
+
+#: The error for `--deep --apply` without the gesture. It must name the token
+#: the operator did not type — a deep pass that silently refused would be worse
+#: than one that refused loudly.
+_CLEAN_CONFIRM_NEEDED = ("--deep with --apply needs --confirm: the deep set "
+                         "drops the whole uv cache, Xcode DerivedData, the "
+                         "simulator caches and the Trash")
 
 
 def _parse_clean_args(argv):
@@ -2843,8 +2862,14 @@ def _parse_clean_args(argv):
     :func:`_parse_node_args`): a parser that prints its own usage and exits
     would own a surface the help intercepts above own. No positional is
     accepted — `hscc clean hscc` is a typo for `--board hscc`, not a board.
+
+    The gate lives HERE rather than in the handler, so the deep refusal is a
+    usage error (exit 2, usage line, named token) that cannot reach
+    :func:`plan_clean` at all: `hscc clean --deep --apply` without `--confirm`
+    mutates nothing because it never gets as far as planning.
     """
-    opts = {"--apply": False, "--json": False, "--days": None, "--board": None}
+    opts = {"--apply": False, "--json": False, "--deep": False,
+            "--confirm": False, "--days": None, "--board": None}
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -2875,7 +2900,119 @@ def _parse_clean_args(argv):
         if days < 0:
             return opts, f"--days cannot be negative, got {days}"
         opts["--days"] = days
+    if opts["--deep"] and opts["--apply"] and not opts["--confirm"]:
+        return opts, _CLEAN_CONFIRM_NEEDED
     return opts, None
+
+
+#: Section titles, by tier and by mode. A dry run has to say what would make
+#: the section real; an apply has to say what it already took.
+_CACHE_TITLES = {
+    ("safe", False): "rebuildable caches — safe set (runs with --apply)",
+    ("safe", True): "rebuildable caches — safe set (applied)",
+    ("deep", False): "rebuildable caches — deep set "
+                     "(needs --apply --deep --confirm)",
+    ("deep", True): "rebuildable caches — deep set (applied with "
+                    "--deep --confirm)",
+}
+
+
+def _cache_report_lines(plan, result=None):
+    """The cache tiers + the report-only section: ``(body lines, summary)``.
+
+    The same pure contract as :func:`_clean_report_lines` — it only reshapes
+    dicts the engine returned, so "a dry run prefixes every mutating line with
+    `would`" and "an apply never says `would`" are assertable without a
+    console. The engine keeps the two tiers apart; each section header says in
+    one line what it would take to make that tier happen, and the report-only
+    rows are listed under a header that says they are never touched.
+    """
+    from hscc_daemon.workspace_clean import (KIND_PATH, TIER_DEEP, TIER_SAFE,
+                                             _human_size)
+
+    applying = result is not None
+    source = (result.get("cache") or []) if applying \
+        else (plan.get("cache_actions") or [])
+    entries = [e for e in source if isinstance(e, dict)]
+    report = [e for e in (plan.get("report_only") or []) if isinstance(e, dict)]
+    by_tier = {TIER_SAFE: [], TIER_DEEP: []}
+    for e in entries:
+        by_tier.setdefault(e.get("tier") or TIER_SAFE, []).append(e)
+
+    def shown(entry):
+        """What one cache row is named by: its command, or the directory."""
+        argv = [str(a) for a in (entry.get("argv") or [])]
+        if argv:
+            # argv[0] is the RESOLVED binary path; the report shows its name
+            # (the path would cost a column and the plan already proved it).
+            text = " ".join([Path(argv[0]).name or "?"] + argv[1:])
+            return text if len(text) <= 64 else text[:61] + "..."
+        return str(entry.get("path") or "?")
+
+    def size_of(entry):
+        return _human_size(_clean_int(entry.get("size_bytes")))
+
+    def row(entry):
+        status = str(entry.get("status") or "planned")
+        reason = str(entry.get("reason") or "")
+        if status == "skipped":
+            verb, tail = "skipped", f"  ({reason or 'skipped'})"
+        elif not applying:
+            verb = "would remove" if entry.get("kind") == KIND_PATH \
+                else "would run"
+            tail = ""
+        elif status == "ran":
+            verb, tail = "ran", ""
+        elif status == "failed":
+            verb, tail = "FAILED", f"  ({reason or 'failed'})"
+        elif status == "timed-out":
+            verb, tail = "TIMED OUT", "  (killed on the command timeout)"
+        else:
+            verb, tail = status.upper(), ""
+        return f"   {verb:<12}  {shown(entry)}  {size_of(entry)}{tail}"
+
+    body = []
+    for tier in (TIER_SAFE, TIER_DEEP):
+        rows = by_tier.get(tier) or []
+        if not rows:
+            continue
+        if body:
+            body.append("")
+        body.append(_CACHE_TITLES[(tier, applying)])
+        body += [row(e) for e in rows]
+    if report:
+        if body:
+            body.append("")
+        body.append("report only — never touched by this verb")
+        body += [f"   {'noted':<12}  {str(e.get('path') or '?')}  "
+                 f"{size_of(e)}  ({e.get('note') or 'decide yourself'})"
+                 for e in report]
+
+    if not entries and not report:
+        return body, ""
+    planned = sum(1 for e in entries if e.get("status") == "planned")
+    skipped = sum(1 for e in entries if e.get("status") == "skipped")
+    ran = sum(1 for e in entries if e.get("status") == "ran")
+    bad = sum(1 for e in entries
+              if str(e.get("status")) in ("failed", "timed-out"))
+    if applying:
+        summary = (f"-> caches: {ran} ran, {skipped} skipped, {bad} failed; "
+                   f"~{_human_size(_clean_int((result or {}).get('cache_freed_bytes')))} "
+                   f"freed (plan-time du, an estimate)")
+    else:
+        total = sum(_clean_int(e.get("size_bytes")) for e in entries)
+        summary = (f"-> caches: {planned} would clean, {skipped} skipped; "
+                   f"~{_human_size(total)} in the plan"
+                   + (", deep set included" if plan.get("deep") else ""))
+    return body, summary
+
+
+def _clean_int(value) -> int:
+    """``int(value or 0)`` without the exception dance at every call site."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _clean_report_lines(plan, result=None):
@@ -2928,6 +3065,13 @@ def _clean_report_lines(plan, result=None):
     summary = f"-> {done} workspaces, {len(skips)} skipped"
     if applying:
         summary += f"; freed {_human_size(int(result.get('freed_bytes') or 0))}"
+    # The cache tiers ride underneath the workspace section, with their own
+    # summary on its own line: the workspace count line keeps its exact shape,
+    # because that is the number the workspace card's contract is pinned to.
+    cache_body, cache_summary = _cache_report_lines(plan, result)
+    body += cache_body
+    if cache_summary:
+        summary += "\n" + cache_summary
     return header, body, summary
 
 
@@ -2967,7 +3111,8 @@ def _handle_clean(argv, *, kanban_db=None):
         days=opts["--days"] if opts["--days"] is not None
         else workspace_clean.DEFAULT_DAYS,
         boards=None if opts["--board"] is None else [opts["--board"]],
-        kanban_db=kanban_db)
+        kanban_db=kanban_db,
+        deep=opts["--deep"])
     # `kanban_db` is forwarded so the executor's ROOT AUTHORITY is the same
     # board authority the plan was derived from. Production passes None and the
     # engine resolves hermes itself — that is the D2 gate for a plan that
