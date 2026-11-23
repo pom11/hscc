@@ -100,17 +100,23 @@ FOLD) recovers it. These stay raw-marker-anchored, `_says`-checked.
 
 ### The two non-layout classes
 
-* `test_fleet.py::test_daemon_mod_does_not_pollute_sys_path_*` — red at EVERY
-  length 53..212 because the parent's sweep ran pytest from
-  `…/workspaces/t_f2382c78/hscc` and the assert is
-  `assert <that dir> not in sys.path`. The sweep's own workspace is the value it
-  asserts absent. Attribute: harness, not layout. Verified below under the
-  canonical leg posture.
+* `test_fleet.py::test_daemon_mod_does_not_pollute_sys_path_{on_success,on_import_failure}` —
+  red at EVERY length 53..212, and its `E` line is not a render at all: it is
+  `AssertionError: _daemon_mod left plugins dir in sys.path: <the tree the sweep ran in>`.
+  Three things say this is not layout: (a) length-independence — no render rule can make an
+  assert red at all 160 probed lengths, (b) the value in the message is the sweep's own
+  checkout root, which pytest itself had put on `sys.path` for that invocation, and (c) at
+  `6d77e025` the canonical `hscc-cluster` leg runs them green
+  (`1196 passed, 3 skipped`). Attribute: the sweep's `sys.path` posture. The exact way the
+  sweep's invocation got that entry past the test's own `sys.path.remove(plugins_dir)`
+  preamble is not resolved here — it needs the sweep's invocation, and it is not this
+  card's defect either way.
 * `test_node_pause_stop_intent_t_8ad06a53.py` (6 cases, every length) — the
   parent's E lines are `SPARKRUN FENCE GUARD: a test/fixture tried to exec the
   operator's live sparkrun CLI`. That is the leg's autouse fence firing on the
-  sweep's posture, exactly the hazard the card's DECISIONS block warns about.
-  Attribute: sweep posture, not layout.
+  sweep's posture, exactly the hazard the card's DECISIONS block warns about. Also
+  length-independent, and green in the canonical `hscc_daemon` leg at `6d77e025`
+  (`4877 passed, 1 skipped`). Attribute: sweep posture, not layout.
 
 ## ASK 2 — the view fix
 
@@ -161,6 +167,20 @@ reads `ok`.
 
 ## GATE
 
-The affected legs (canonical + CI-shaped, one pytest process per leg dir) are
-posted with their SHA in the PR body and on the card — the pair is measured at
-the PR head commit itself, so no commit in this branch is unmeasured.
+`scripts/run_tests.sh` with `HSCC_TEST_LEGS=…`, one pytest process per leg dir, both
+postures (canonical = workstation env; CI-shaped = the CI job env including the thin
+sibling `HSCC_TEST_PY` interpreter). Measured at the PR head:
+
+```
+head 6d77e025  (branch wt/t_89804ce6, PR #643)
+canonical   hscc-project   1483 passed, 1 warning                     rc=0
+canonical   hscc_daemon    4877 passed, 1 skipped                     rc=0
+canonical   hscc-cluster   1196 passed, 3 skipped, 31 warnings        rc=0
+CI-shaped   hscc-project   1479 passed, 4 skipped, 5 warnings         rc=0
+CI-shaped   hscc_daemon    4854 passed, 24 skipped                    rc=0
+```
+
+Item totals match base (`origin/main` `6f404f9a`, `--collect-only`): `hscc-project`
+1483 = 1483; `hscc_daemon` 4878 = 4877+1 = 4854+24. `hscc-cluster` is here to show the
+two sys.path cases green in the leg posture; CI on `6d77e025` ran all eight legs
+independently and they passed there too.
