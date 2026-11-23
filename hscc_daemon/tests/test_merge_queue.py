@@ -5559,3 +5559,199 @@ def test_an_unreadable_board_does_not_cut_a_duplicate(tmp_path, monkeypatch):
 
     assert [c[4] for c in runner.calls] == ["show"], runner.calls
     assert handed[0][0] == "t_open"
+
+
+# ── removal while a gate is in flight (t_7cf67395) ──────────────────────────
+#
+# The incident: `merge-queue remove hscc 696` landed while #696's gate was
+# live. The removal nulled `in_flight`, the gate finished, wrote a `last` row
+# for a PR that was no longer in the queue — and the repo then declined to
+# claim its one eligible green PR for 30+ ticks without writing a single log
+# line. These tests pin the two halves: a removal that lands on a live claim
+# defers instead of lying, and a tick that declines to claim says why.
+
+def _log_sink():
+    """A collector for ``tick(log=…)``: returns (lines, log)."""
+    lines = []
+
+    def log(msg, level="INFO"):
+        lines.append((level, str(msg)))
+
+    return lines, log
+
+
+def test_removing_a_live_claim_defers_instead_of_reporting_an_idle_repo(
+        tmp_path, monkeypatch):
+    """A `remove` during a gate must not make the repo look idle."""
+    pair = _repo_pair(tmp_path)
+    head2 = _new_branch(pair["repo"], "wt/t_second")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]},
+                 8: {"headRefName": "wt/t_second", "headRefOid": head2}})
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, card="t_card", assignee="worker", path=state)
+    mq.add_to_queue("alpha", 8, card="t_second", assignee="worker", path=state)
+
+    mid = {}
+
+    def gate(command, worktree, timeout_s, **kw):
+        # The operator's CLI lands while this gate holds the repo.
+        mq.remove_from_queue("alpha", 7, path=state)
+        mid["ps"] = mq.load_state(state)["projects"]["alpha"]
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    first = mq.tick(state_path=state, root=str(tmp_path / "queue"),
+                    registry_path=registry, gh_runner=gh,
+                    git_runner=subprocess.run)
+
+    # The removal is honoured: PR #7 stops at the gate boundary and is merged
+    # by nobody, with its branch untouched.
+    assert first["processed"][0]["pr"] == 7, first
+    assert first["processed"][0]["result"] == "removed", first
+    assert gh.merged == []
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") == pair["head"]
+    # …but the ledger never claimed the repo was idle while the gate lived:
+    # the claim survives the removal, marked, until the gate settles it.
+    assert mid["ps"]["in_flight"] is not None, mid["ps"]
+    assert mid["ps"]["in_flight"]["cancel_requested"], mid["ps"]
+    assert mid["ps"]["queue"] == []
+    # Settled: nothing of PR #7 is left holding the repo.
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert [e["pr"] for e in ps["queue"]] == [8]
+
+    # The next tick still claims the remaining eligible PR.
+    second = mq.tick(state_path=state, root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run)
+    assert [p["pr"] for p in second["processed"]] == [8], second
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [8]
+
+
+def test_a_removal_tombstone_is_not_resurrected_as_work(tmp_path):
+    """A removal the daemon never got to settle must not come back."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    state = _state(tmp_path)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    # Exactly what `remove_from_queue` now leaves behind when the daemon dies
+    # mid-gate: a claim the operator removed, still claimed, still marked.
+    ps["in_flight"] = {
+        "pr": 7, "card": "t_card", "assignee": "worker",
+        "branch": pair["branch"], "enqueued_at": "2020-01-01T00:00:00+00:00",
+        "attempts": 0, "stage": "cancelling",
+        "cancel_requested": "2020-01-01T00:00:00+00:00",
+    }
+    mq.save_state(doc, state)
+
+    result = mq.tick(state_path=state, root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run)
+
+    assert result["processed"] == [], result
+    assert gh.merged == []
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert ps["queue"] == [] and ps["waiting"] == []
+
+
+def test_one_repo_raising_does_not_starve_the_others_silently(tmp_path,
+                                                              monkeypatch):
+    """A raise in one repo group is reported and the other repos still run."""
+    a = _repo_pair(tmp_path / "a")
+    b = _repo_pair(tmp_path / "b")
+    registry = _registry_multi(tmp_path, [("a", a["repo"]), ("b", b["repo"])])
+    gh = FakeGh({1: {"headRefName": a["branch"], "headRefOid": a["head"]},
+                 2: {"headRefName": b["branch"], "headRefOid": b["head"]}})
+    state = _state(tmp_path)
+    mq.add_to_queue("a", 1, path=state)
+    mq.add_to_queue("b", 2, path=state)
+
+    real_drain = mq._drain_waiting
+
+    def flaky(project, cfg, **kwargs):
+        if project == "a":
+            raise RuntimeError("simulated hiccup in one repo group")
+        return real_drain(project, cfg, **kwargs)
+
+    monkeypatch.setattr(mq, "_drain_waiting", flaky)
+    lines, log = _log_sink()
+    result = mq.tick(state_path=state, root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run, log=log)
+
+    # The raise is loud: named, traced, and recorded in the result.
+    assert any(level == "ERROR" and "simulated hiccup in one repo group" in msg
+               and "Traceback" in msg for level, msg in lines), lines
+    assert any("a" in err for err in result["errors"]), result["errors"]
+    # And it costs the other repo nothing: PR #2 merges on the same tick.
+    assert [p["project"] for p in result["processed"]] == ["b"], result
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [2]
+
+
+@pytest.mark.parametrize("action,needle", [
+    ("pause", "paus"),
+    ("disable", "disabl"),
+])
+def test_a_declined_claim_names_the_pr_and_the_condition(tmp_path, action,
+                                                         needle):
+    """No claim, no silence: the tick says which PR it passed over and why."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, path=state)
+    if action == "pause":
+        mq.set_paused("alpha", True, path=state)
+    else:
+        mq.set_enabled("alpha", False, path=state)
+
+    lines, log = _log_sink()
+    result = mq.tick(state_path=state, root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=_no_runner,
+                     git_runner=_no_runner, log=log)
+
+    assert result["processed"] == [], result
+    assert any("PR #7" in msg and needle in msg.lower()
+               for _level, msg in lines), lines
+
+
+def test_a_busy_repo_explains_the_entry_it_did_not_claim(tmp_path):
+    """The incident's shape: eligible PR, live claim, 30 ticks of silence."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    gh = FakeGh({21: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}},
+                views={21: [{"statusCheckRollup": pending}]})
+    state = _state(tmp_path)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    ps["in_flight"] = {
+        "pr": 21, "card": "t_ci", "assignee": "worker",
+        "branch": pair["branch"], "stage": "ci-pending",
+        "pushed_sha": pair["head"], "ci_base": "main",
+        "ci_since": "2020-01-01T00:00:00+00:00",
+        "enqueued_at": "2020-01-01T00:00:00+00:00",
+    }
+    mq.save_state(doc, state)
+    mq.add_to_queue("alpha", 7, path=state)
+
+    lines, log = _log_sink()
+    result = mq.tick(state_path=state, root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run, log=log)
+
+    # One PR per repo per tick: #21 keeps the claim, #7 waits.
+    assert [p["pr"] for p in result["processed"]] == [21], result
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [7]
+    assert any("PR #7" in msg and "#21" in msg for _level, msg in lines), lines
