@@ -39,6 +39,13 @@ CONTRACT_PHRASES = (
     "sole authority over the physical cluster",
     "never answer from memory alone",
     "hscc orch inject",
+    # t_1992ab13: the policed nudge TOOL, not just the CLI verb. t_9e3d868f
+    # made orch_message accept the configured main orchestrator at both ends,
+    # so a SOUL that names only `hscc orch inject` leaves the main shelling
+    # out to the CLI and losing the rate limit, the loop guard and the
+    # signature. Pinned here end-to-end (real SOUL.md on disk) and
+    # section-scoped in test_generator.py.
+    "orch_message",
     "hscc notify",
     "LIVE publish",
     "autodown",

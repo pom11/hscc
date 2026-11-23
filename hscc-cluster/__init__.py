@@ -9,6 +9,7 @@ from . import discovery
 from . import fleet
 from . import template_tools
 from . import orch_message
+from . import autodown_tools as adt
 from . import node_pause_tools as npt
 
 
@@ -41,6 +42,15 @@ _READ_TOOLS = [
     ("node_paused", npt.NODE_PAUSED_SCHEMA, npt.node_paused, "🅿️",
      "Which nodes are paused, with the units stopped, reason, since and "
      "until. Read-only: reads the pause overlay, never the fleet."),
+    # Idle autodown (t_c036808c): the READ half of `hscc autodown`. The write
+    # half stays CLI-only — arming or disarming fleet power is operator scope,
+    # so there is no autodown_enable/disable/wake/cancel tool to add here.
+    ("autodown_status", adt.AUTODOWN_STATUS_SCHEMA, adt.autodown_status, "💤",
+     "Idle autodown state: armed or not, the idle window, state (up/down/"
+     "waking) reconciled against the live serving layer, last activity, and "
+     "which interlock (kanban work, PR/CI, watchdog block) is holding a "
+     "teardown off. Read-only: same payload as `hscc autodown status --json`; "
+     "it never arms, disarms, wakes or cancels anything."),
 ]
 
 _OPS_TOOLS = [

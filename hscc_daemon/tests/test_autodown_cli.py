@@ -21,6 +21,7 @@ import pytest
 
 import hscc_daemon.autodown as ad
 from hscc_daemon import lifecycle
+from hscc_daemon.tests.rich_layout import _says
 from hscc_daemon.autodown_cli import (cmd_autodown, _parse_idle_minutes,
                                       DEFAULT_IDLE_MINUTES)
 
@@ -186,7 +187,15 @@ class TestStatus:
         assert rc == 0
         out = capsys.readouterr().out
         assert "UNEVALUABLE" in out
-        assert "missing" in out
+        # The row names the agent source it could not resolve — a machine path, and the
+        # daemon's plain Console is 80 wide on a non-tty, so the view FOLDS the path
+        # mid-token. Measured (t_89804ce6, verbatim tee of the render): the path splits
+        # inside the word `missing` (`…/miss` ⏎ `ing'`) at tmp roots 68..73 and
+        # 144..149 — which is exactly why this assert was red only in two windows: at
+        # every other length the break happens to fall outside that word. `_says`
+        # recovers the fold; the raw `UNEVALUABLE` above stays as the proof the row
+        # rendered, and it is the row's own marker so nothing can fold it.
+        assert _says(out, str(tmp_path / "missing"))
 
     def test_status_json_has_kanban_fields(self, capsys, autodown_file,
                                            block_file, monkeypatch):
