@@ -150,3 +150,79 @@ not a second interpretation of them).
    armed); pins for delegation-argv, no-self-stop, verdict parity, refusal.
 4. `hscc-commands/README.md`: the audit's S2 sentence, updated to the new fact.
 5. Changelog fragment `changelog.d/t_bf8577f9.md`.
+
+---
+
+## STEP 2 — what shipped, and the same probe re-run after it
+
+Implementation: commit `f9b83bfa` on `wt/t_bf8577f9`.
+
+* **Engine** `hscc-cluster/hscc.py`: `cmd_cluster_down(dry_run=False,
+  reason=STAY_DOWN_REASON)` (default keeps the CLI's stamped text byte-identical)
+  and an additive `stay_down_marker = {"cleared", "reason", "error"}` key —
+  `success` still means "sparkrun exited 0", pinned against `_PREVIOUS_KEYS`.
+* **Slash** `hscc-commands/__init__.py`: the per-node loop, `_ALREADY_DOWN_MARKERS`,
+  `_was_already_down`, `_claim_stay_down` and `_post_boot_module` are **gone**
+  (−122 lines of duplicate destructive-path code); the verb calls the engine
+  through `cmdlib._import_cluster_module("hscc")` and renders its verdict.
+  `dry-run` / `--dry-run` added; the preview prints the argv read *through* the
+  engine's builder. Engine unimportable → refusal naming `hscc cluster down`,
+  never a fallback stop.
+
+Re-running the identical probe against the fix (`step1_after.log`, same safety
+proof: fake sparkrun on `PATH[0]`, subprocess tripwire, marker stub — real
+`~/.hscc/expected-up.json` byte-identical before and after):
+
+```
+C. WHAT EACH PATH ACTUALLY ISSUES
+--- engine (`hscc cluster down`) ---
+  [sparkrun argv issued] ['stop --all --cluster hscc']
+  [marker written]       ['hscc cluster down']
+--- slash  (`/cluster-down confirm`) ---
+  [sparkrun argv issued] ['stop --all --cluster hscc']        ← was 4× `--hosts <node>`
+  [marker written]       ['/cluster-down']                     ← provenance kept
+
+D. IDENTICAL sparkrun OUTPUT → SAME verdict?
+### mode = mixed (JobNotFound AND `could not query …: ssh: Permission denied`, rc 1)
+[engine] success=False rc=1 benign_no_workloads=None            → ERROR
+[slash ] ❌ fleet down FAILED (sparkrun exit 1) — … could not query …   ← was `○ nothing running` ×4 + "All units stopped."
+### mode = already  → engine benign note   | slash ○ + the engine's own note (no "stopped" claim)
+### mode = clean    → engine success=True  | slash ✅ fleet down — sparkrun exited 0
+### mode = none     → engine success=True  | slash ✅ (same reading as the engine's own OK)
+```
+
+Two render bugs the new tests caught before they shipped, both now pinned:
+
+1. `if … or res.get("error")` mistook **sparkrun's stderr** for the engine's
+   pre-flight refusal — every honest failure would have rendered "the engine
+   could not issue the stop". The refusal is now detected as
+   `error` present **and** `returncode` absent.
+2. The first renderer passed through only what the engine *printed*. sparkrun's
+   per-host text is captured into `res["output"]`/`res["error"]` by
+   `_run_or_print`, so the operator would have seen an exit code and nothing
+   else — `test_sparkruns_stderr_reaches_the_operator` pins it.
+
+## Evidence ledger
+
+| What | Where |
+|---|---|
+| STEP 1 side-by-side (pre-fix, verbatim) | this file above; `step1.log` |
+| Same probe post-fix | `step1_after.log` |
+| Safety proof (fake CLI, tripwire, marker untouched) | printed in both logs |
+| Slash suite | `hscc-commands/tests/test_cluster_down_stay_down.py` — 87 cases green (was 84) |
+| Engine suite | `hscc-cluster/tests/test_cluster_down_output.py::TestStayDownMarkerReport` — 1202 passed / 3 pre-existing skips |
+| Daemon files touched by the marker contract | `test_cluster_down_benign_render.py`, `test_verify_stay_down.py`, `test_cluster_cli_help.py`, `test_cluster_group_help.py`, `test_cli_arg_safety.py` — 237 passed |
+| Changelog fragment | `changelog.d/t_bf8577f9.md` (`changelog_fragments.py check`: OK) |
+| Public-repo hygiene | `git diff origin/main` greps clean for `192.168.*`, `100.64.*`, `/Users/desac` |
+
+## LEFT (nothing blocking; for whoever picks this up)
+
+* `scripts/run_tests.sh` (all legs) is running at `f9b83bfa`; the leg summary is
+  posted as a PR comment when it lands — do not treat it as done until that
+  comment exists (the merge queue re-runs the gate regardless).
+* Audit S2 stays open for the *other* slash verbs — `/cluster-restart`,
+  `/cluster-reboot`, `/cluster-docker-prune`, `/cluster-apt-upgrade`,
+  `/orch-restart`, `/heal`, `/workers-up` still build their own `sparkrun` argv
+  and so bypass any guard `cmd_cluster_*` gains. That is now written down in
+  `hscc-commands/README.md`; whether to delegate them too is a separate card.
+
