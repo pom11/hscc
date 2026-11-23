@@ -76,6 +76,66 @@ SIDECAR_SHUTDOWN = "sidecar shutdown called"
 SIDECAR_STOPPED = "sidecar stopped"
 SERVE_RETURNED = "harness: _serve returned"
 
+#: What the `serve-lograce` child prints while it works, and what the parent
+#: waits on. Constants for both sides, so a rename on one side reddens the
+#: assertion that reads the other instead of turning a case into a timeout.
+#: `stage:` lines carry the child's phase; the last one seen is in every failure
+#: message, which is what makes a red here diagnosable without a re-run.
+STAGE_PREFIX = "stage:"
+#: Inside the log hook, holding `daemon_ops._handlers_lock`, BEFORE the signal is
+#: raised: the window was entered.
+RACE_ENTERED = "@@INSIDE-LOG-WRITE@@"
+#: ...and the handler came back out of it. This is the line the case asserts on.
+INTERRUPTED_INSIDE_LOG = "@@INTERRUPTED-INSIDE-LOG@@"
+#: The child's watchdog thread observed that the handler had still not returned
+#: `HANDLER_GRACE` seconds after the raise. An OBSERVATION, not a verdict: a
+#: throttled task can also simply not have been running (measured: under ~100x
+#: oversubscription this line appears while the handler is merely unscheduled),
+#: so nothing reddens on it. It is what lets a child that then goes silent be
+#: named — see :func:`_await_child`.
+HANDLER_LATE = "@@HANDLER-LATE@@"
+#: The handler WAS dispatched and reached its first write: the child's watchdog
+#: read `api_cli._last_signal` — the product's own record, written by the first
+#: line of `_sigterm_handler` — and saw it. Informational only: a healthy child
+#: can exit before the watchdog thread is scheduled to say anything, so nothing
+#: asserts on this line; it is there so a child that goes silent afterwards can
+#: be told apart from one whose stop was never dispatched at all.
+HANDLER_RAN = "@@HANDLER-RAN@@"
+
+# ━━━ load budgets, not behaviour budgets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# None of these can turn a wrong answer into a right one: they only decide how
+# long a LIVE child may take. Every one of them is measured, and the measurement
+# is why they are this size.
+#
+#   idle 14-core host: the child's first stdout line lands ~0.15 s after spawn
+#   and the whole lograce arm (both signals) runs in 1.76 s.
+#   contended GitHub runner, run 45081900690: the same child had not written ONE
+#   byte of stdout — and no `api.log` at all — in the 25 s the old
+#   `communicate(timeout=25)` allowed, i.e. it was still inside its imports.
+#   The child had not reached the window the case is about, yet the case blamed
+#   the signal handler.
+#
+# So the budgets are sized for a runner that is two orders of magnitude slower
+# than an idle one, and a stall is judged against the child's own progress rather
+# than against its whole life.
+#: Silence from a live child between two announced stages (or, once the parent
+#: has asked it to stop, between the signal and its exit) before it is called
+#: stuck. ~1000x the idle gap, ~7x the worst CI observation.
+CHILD_STAGE_STALL = 180.0
+#: One child's entire life, whatever it is doing — the backstop behind the stall.
+CHILD_LIFE_CAP = 420.0
+#: Spawn -> the child's own `HSCC API listening on ...` line. Same import phase
+#: as above, so the same order of budget.
+CHILD_READY_BUDGET = 180.0
+#: How long the child's watchdog waits, AFTER the signal has been raised, for the
+#: handler to come back out of the log-write window before it says the handler is
+#: still in there. The handler's body is an attribute write and a return, so this
+#: is generous about the work; it is only ever an observation, because a
+#: throttled task can also be unscheduled (see :data:`HANDLER_LATE`).
+HANDLER_GRACE = 8.0
+#: How long a marker the child writes BEFORE it exits may take to land on disk.
+CHILD_MARKER_BUDGET = 60.0
+
 # What the fake bridge / harness read out of the environment. Named once, here.
 ENV_SIDECAR_DIR = "HSCC_FAKE_SIDECAR_DIR"
 ENV_GATEWAY_DIR = "HSCC_FAKE_GATEWAY_DIR"
@@ -202,11 +262,19 @@ in sys.modules — that is what makes this process start a FAKE sidecar.
 import os
 import sys
 
+# The child's first words, BEFORE anything that a loaded runner can stretch.
+# The parent waits on this file's progress (:func:`_await_child`), so a stage
+# line has to exist before the imports that ran 25 s long on CI — otherwise the
+# parent has nothing to be patient about and guesses from a stopwatch.
+print("@@MARK_STAGE@@ harness-up", flush=True)
+
 sys.path.insert(0, os.environ["@@REPO_ROOT_ENV@@"])
 sys.path.insert(0, os.environ["@@GATEWAY_DIR_ENV@@"])
 import gateway_bridge  # noqa: F401  (the fake; claimed before hscc-api's dir)
+print("@@MARK_STAGE@@ fake-bridge-imported", flush=True)
 
 from hscc_daemon import api_cli
+print("@@MARK_STAGE@@ api_cli-imported", flush=True)
 
 verb, rest = sys.argv[1], sys.argv[2:]
 
@@ -223,6 +291,7 @@ if verb == "serve":
     _signal.signal(_signal.SIGTERM, api_cli._sigterm_handler)
     _signal.signal(_signal.SIGINT, api_cli._sigterm_handler)
 
+    print("@@MARK_STAGE@@ serve-enter", flush=True)
     _api = api_cli._load_api_server()
     api_cli._serve(_api, ["127.0.0.1"], False, int(rest[0]))
     print("@@SERVE_RETURNED@@", flush=True)
@@ -247,26 +316,74 @@ if verb == "serve-lograce":
     # teardown still has a real child to kill, and the stop flag the handler set
     # is what keeps the accept loops from ever starting.
     import signal as _signal
+    import threading as _threading
     import time as _time
     from hscc_daemon import daemon_ops
 
     _signum = getattr(_signal, rest[1])
     _real_log = daemon_ops.log
     _fired = []
+    _raised = _threading.Event()
+
+    def _watchdog():
+        # The trap this arm exists for is a handler that never comes back, and the
+        # only witness that can see it is a thread the blocked thread is not
+        # holding: `threading.Lock.acquire()` gives up the GIL while it waits, so
+        # this thread still runs while the main thread is stuck inside the
+        # handler.
+        #
+        # What it waits on is the product's OWN record — `api_cli._last_signal`,
+        # written by the first line of `_sigterm_handler` — and not a line the
+        # harness could print whether or not the handler ever ran. `raise_signal`
+        # returning is NOT proof the handler was dispatched: measured on the full
+        # leg run, a `serve-lograce` child printed `@@INTERRUPTED-INSIDE-LOG@@`,
+        # started its sidecar and then served forever on a stop it had already
+        # been given, and a harness-side "it came back" flag had no way to tell
+        # that apart from a handler that ran and was ignored.
+        #
+        # It measures from the RAISE, not from its own birth — measured the hard
+        # way under ~100x oversubscription, a grace clocked from here accused the
+        # handler of a deadlock while the child was still crossing
+        # `_load_api_server()` and had not raised anything yet.
+        #
+        # And it only OBSERVES. A task the kernel has simply not scheduled looks
+        # identical to a task deadlocked on a lock from the outside, so this line
+        # can be a slow runner as easily as a bug; what turns it into a verdict is
+        # the child then going silent for the whole stall budget, which is what
+        # :func:`_await_child` decides.
+        _raised.wait()
+        deadline = _time.monotonic() + @@HANDLER_GRACE@@
+        while _time.monotonic() < deadline:
+            if api_cli._last_signal is not None:
+                # Positive, informational: the handler was dispatched and got
+                # past its first write. Deliberately NOT asserted on — printing
+                # this is the watchdog's job and a healthy child can exit before
+                # the thread is scheduled to say anything.
+                print("@@MARK_RAN@@ signum=%s" % api_cli._last_signal, flush=True)
+                return
+            _time.sleep(0.05)
+        print("@@MARK_LATE@@ %s had still not returned %.0fs after the raise "
+              "(_last_signal=%r)"
+              % (rest[1], @@HANDLER_GRACE@@, api_cli._last_signal), flush=True)
+
+    _threading.Thread(target=_watchdog, daemon=True).start()
 
     def _log(msg, *a, **kw):
         if not _fired:
             _fired.append(str(msg))
             with daemon_ops._handlers_lock:   # exactly where the real write stands
+                print("@@MARK_RACE@@", flush=True)   # the window is entered
+                _raised.set()                # the grace clock starts HERE
                 _signal.raise_signal(_signum)  # the stop lands here, on this thread
                 _time.sleep(0.4)              # a handler that waits, waits here
-            print("@@INTERRUPTED-INSIDE-LOG@@", flush=True)
+            print("@@MARK_INTERRUPTED@@", flush=True)
         return _real_log(msg, *a, **kw)
 
     daemon_ops.log = _log
     _signal.signal(_signal.SIGTERM, api_cli._sigterm_handler)
     _signal.signal(_signal.SIGINT, api_cli._sigterm_handler)
 
+    print("@@MARK_STAGE@@ serve-enter", flush=True)
     _api = api_cli._load_api_server()
     api_cli._serve(_api, ["127.0.0.1"], False, int(rest[0]))
     daemon_ops.log = _real_log
@@ -292,7 +409,13 @@ raise SystemExit(api_cli.cmd_api([verb] + list(rest)))
 HARNESS = (HARNESS
            .replace("@@REPO_ROOT_ENV@@", ENV_REPO_ROOT)
            .replace("@@GATEWAY_DIR_ENV@@", ENV_GATEWAY_DIR)
-           .replace("@@SERVE_RETURNED@@", SERVE_RETURNED))
+           .replace("@@SERVE_RETURNED@@", SERVE_RETURNED)
+           .replace("@@MARK_STAGE@@", STAGE_PREFIX)
+           .replace("@@MARK_RACE@@", RACE_ENTERED)
+           .replace("@@MARK_INTERRUPTED@@", INTERRUPTED_INSIDE_LOG)
+           .replace("@@MARK_LATE@@", HANDLER_LATE)
+           .replace("@@MARK_RAN@@", HANDLER_RAN)
+           .replace("@@HANDLER_GRACE@@", repr(HANDLER_GRACE)))
 
 
 # --------------------------------------------------------------------------- #
@@ -401,8 +524,12 @@ def _marker_lines(sandbox):
         return []
 
 
-def _have(sandbox, needle, timeout=15.0):
-    """True once the fake bridge has recorded `needle`."""
+def _have(sandbox, needle, timeout=CHILD_MARKER_BUDGET):
+    """True once the fake bridge has recorded `needle`.
+
+    The bridge writes these from the API process, so the wait crosses a process
+    boundary and is a load wait like every other one in this file.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         if any(needle in line for line in _marker_lines(sandbox)):
@@ -497,7 +624,157 @@ def _popen(sandbox, verb, *args):
                             stderr=subprocess.STDOUT, text=True)
 
 
-def _wait_listening(sandbox, port, timeout=40.0):
+# --------------------------------------------------------------------------- #
+# waiting on a child: progress, not elapsed time
+# --------------------------------------------------------------------------- #
+
+class _ChildTrail:
+    """A live child's stdout, kept as it arrives, with a silence clock on it.
+
+    Why not `communicate(timeout=N)`: that judges the child's WHOLE LIFE against
+    one stopwatch, so a runner that is merely slow at `import` reddens a case
+    whose behaviour is fine. Measured, run 45081900690: the `serve-lograce` child
+    had written no stdout and no `api.log` in 25 s — it never reached the
+    log-write window the case is about — and the case reported the signal handler
+    wedged. Nothing was wedged; the child had not been asked yet.
+
+    Here the wait is keyed on progress. The harness announces bounded stages
+    (every gap between two of them is one import step), each line resets this
+    clock, and the budget therefore only runs out on a child that has stopped
+    doing anything — not on one that is doing a lot of it slowly.
+    """
+
+    def __init__(self, proc):
+        self._proc = proc
+        self._lines = []
+        self._lock = threading.Lock()
+        self._since = time.monotonic()
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self):
+        try:
+            for line in self._proc.stdout:
+                with self._lock:
+                    self._lines.append(line.rstrip("\n"))
+                    self._since = time.monotonic()
+        except (ValueError, OSError):
+            # the pipe went away under us (the caller closed it after the child
+            # died); whatever was collected is still the truth up to that point.
+            pass
+
+    def mark(self):
+        """Restart the silence clock: the parent is about to ask for something.
+
+        A serving child is SILENT by design, so a stall measured across the whole
+        run would execute a healthy server. The parent marks at the moment it
+        signals, and from there the clock measures exactly the property under
+        test — how long the stop takes to produce a word.
+        """
+        with self._lock:
+            self._since = time.monotonic()
+
+    def idle(self):
+        with self._lock:
+            return time.monotonic() - self._since
+
+    def text(self):
+        with self._lock:
+            return "\n".join(self._lines)
+
+    def saw(self, needle):
+        return needle in self.text()
+
+    def last(self):
+        with self._lock:
+            return self._lines[-1] if self._lines else "<nothing at all>"
+
+    def finish(self, timeout=10.0):
+        """Once the child is gone: drain what it buffered, then close the pipe."""
+        self._thread.join(timeout)
+        try:
+            self._proc.stdout.close()
+        except (ValueError, OSError):
+            pass
+
+
+#: What :func:`_await_child` settled for. `clean` is the only verdict the child
+#: earned by itself; `stalled` and `wedged` both mean the parent had to kill it,
+#: and `detail` says which clock ran out.
+ChildRun = collections.namedtuple(
+    "ChildRun", ("returncode", "output", "verdict", "detail"))
+
+
+def _kill_child(proc):
+    if proc.poll() is None:
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _stuck_verdict(trail):
+    """`wedged` when the child itself said the handler was still in the window.
+
+    The `@@HANDLER-LATE@@` line ALONE is not a verdict — a task the scheduler
+    simply passed over looks identical from here, and under ~100x oversubscription
+    this file's own rig measured it firing on a child that then finished fine.
+    But a child that said it and then produced NOTHING for the whole stall budget
+    is describing a lock it cannot leave, which is the defect this file exists for.
+    The line supplies the diagnosis; the silence supplies the verdict.
+    """
+    return "wedged" if trail.saw(HANDLER_LATE) else "stalled"
+
+
+def _await_child(proc, trail, *, stall=CHILD_STAGE_STALL, cap=CHILD_LIFE_CAP):
+    """Wait for a backgrounded child to exit, judging SILENCE not elapsed time.
+
+    Returns a :data:`ChildRun`:
+
+      ``clean``    the child exited on its own; `returncode` is its and the
+                   caller asserts on what it did.
+      ``stalled``  the parent had to kill it: a live child announced nothing for
+                   `stall` seconds, or outlived `cap` while still talking, with no
+                   such observation on record. `detail` says which clock ran out.
+      ``wedged``   the child went silent, and its own watchdog thread (see the
+                   `serve-lograce` harness) had said the handler was still inside
+                   the log-write window when the raise happened. The diagnosis is
+                   the child's; the silence is what makes it a verdict.
+
+    There is deliberately no separate ``capped`` verdict: a child that will not
+    finish and a child that will not speak are the same finding for a caller, and
+    which clock ran out belongs in `detail` rather than in a branch nobody reads.
+
+    In either of the other two the child has already been killed when this
+    returns. The price of the design is that a genuine wedge now costs the stall
+    budget to
+    report instead of a few seconds; a case that accuses a healthy child on a
+    busy runner costs the fleet a re-run triage every time it fires, and this one
+    has already done exactly that on CI.
+    """
+    deadline = time.monotonic() + cap
+    while True:
+        returncode = proc.poll()
+        if returncode is not None:
+            trail.finish()
+            return ChildRun(returncode, trail.text(), "clean", "")
+        idle = trail.idle()
+        if idle > stall:
+            _kill_child(proc)
+            trail.finish()
+            return ChildRun(None, trail.text(), _stuck_verdict(trail),
+                            f"went silent for {idle:.0f}s after {trail.last()!r}")
+        if time.monotonic() > deadline:
+            _kill_child(proc)
+            trail.finish()
+            return ChildRun(None, trail.text(), _stuck_verdict(trail),
+                            f"still alive after {cap:.0f}s, last line "
+                            f"{trail.last()!r}")
+        time.sleep(0.05)
+
+
+def _wait_listening(sandbox, port, timeout=CHILD_READY_BUDGET):
     """Block until the child's OWN log says it is listening on `port`.
 
     The log line — not a port probe — is the readiness here: `_serve` writes it
@@ -519,7 +796,7 @@ def _wait_listening(sandbox, port, timeout=40.0):
         f"{_describe(sandbox)}")
 
 
-def _wait_serving_child(sandbox, port, not_pid, timeout=40.0):
+def _wait_serving_child(sandbox, port, not_pid, timeout=CHILD_READY_BUDGET):
     """:func:`_wait_listening` plus the promise `start` makes on top of it.
 
     `hscc api start` is a double fork, so the pid the caller must signal is not
@@ -633,6 +910,7 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
     """
     port = _free_port()
     proc = _popen(sandbox, "serve", str(port))
+    trail = _ChildTrail(proc)
     try:
         # No pid file here: this arm runs `_serve` in the foreground exactly as
         # `python -m api_server serve` does, and that entry path deliberately
@@ -643,14 +921,18 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
             f"the sidecar never started, so nothing below proves a teardown: "
             f"{_describe(sandbox)}")
         sidecar_pid = _read_int(sandbox["sidecar_pid"])
+        # From here the silence IS the measurement. A serving child has nothing
+        # to say, so the stall clock is restarted at the moment we ask it to stop
+        # (see :meth:`_ChildTrail.mark`) instead of running from its spawn — the
+        # one window that must not be patient is the one we just opened.
+        trail.mark()
         os.kill(proc.pid, sig)
-        try:
-            out = proc.communicate(timeout=25)[0]
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out = proc.communicate()[0]
-            pytest.fail(f"{sig.name} did not stop the serving loop: {out}\n"
-                        f"{_describe(sandbox)}")
+        run = _await_child(proc, trail)
+        out = run.output
+        if run.verdict != "clean":
+            pytest.fail(f"{sig.name} did not stop the serving loop: the child "
+                        f"{run.verdict} ({run.detail}).\n"
+                        f"child output: {out}\n{_describe(sandbox)}")
         assert proc.returncode == 0, (
             f"{sig.name} ended the process with rc={proc.returncode} instead "
             f"of a clean cooperative stop.\n{out}\n{_describe(sandbox)}")
@@ -693,22 +975,44 @@ def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
     What stays production-shaped afterwards: the binds happen, the fake sidecar
     really starts, the stop flag the handler set is what keeps the accept loops
     from starting, and the `finally:` still has a real child to kill.
+
+    How it waits, and why not on a clock: the signal is raised by the CHILD, so
+    there is no parent-side moment to aim at — all the parent can observe is what
+    the child says. The child therefore announces the window it is standing in
+    (`@@INSIDE-LOG-WRITE@@`, lock held and all) and the parent waits on SILENCE
+    rather than on elapsed life (:func:`_await_child`). A runner slow enough to
+    spend this case's whole old 25 s budget inside `import` reddened it on CI
+    (run 45081900690, both arms, empty stdout and no `api.log`) with the child not
+    yet entered into the handler at all — and the child had no way to say so.
     """
     port = _free_port()
     proc = _popen(sandbox, "serve-lograce", str(port), sig.name)
+    trail = _ChildTrail(proc)
     try:
-        try:
-            out = proc.communicate(timeout=25)[0]
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out = proc.communicate()[0]
+        run = _await_child(proc, trail)
+        out = run.output
+        if run.verdict == "wedged":
+            # The child's own watchdog thread — the only witness that can still
+            # run while the main thread is blocked in `Lock.acquire()` — had said
+            # the handler was still inside the window, and the child then said
+            # nothing at all for the whole stall budget. Defect named by the
+            # process that has it, and confirmed by the silence after it.
             pytest.fail(
                 f"{sig.name} arriving inside a log write never stopped the "
                 f"process — the handler is blocked on a lock its own thread holds "
                 f"(`daemon_ops._handlers_lock`), so the stop flag was never set "
-                f"and the sidecar teardown was never reached."
+                f"and the sidecar teardown was never reached ({run.detail})."
                 f"\nchild output: {out}\n{_describe(sandbox)}")
-        assert "@@INTERRUPTED-INSIDE-LOG@@" in out, (
+        if run.verdict != "clean":
+            # No verdict from the child, so no claim about its mechanism. The old
+            # case asserted the deadlock here on nothing but a stopwatch and it
+            # was wrong: on CI the child had not reached the window at all.
+            pytest.fail(
+                f"{sig.name} was raised inside a log write and the child never "
+                f"came back — it {run.verdict} ({run.detail}). Nothing above it "
+                f"was reached, so this says nothing about the handler."
+                f"\nchild output: {out}\n{_describe(sandbox)}")
+        assert INTERRUPTED_INSIDE_LOG in out, (
             "the signal never landed inside a log write, so this case says "
             f"nothing about that window.\nchild output: {out}\n"
             f"{_describe(sandbox)}")
