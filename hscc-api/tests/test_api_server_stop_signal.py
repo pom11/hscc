@@ -1038,8 +1038,16 @@ def test_the_sandbox_fixture_reaps_a_child_a_case_never_reaped(tmp_path):
     finally:
         with pytest.raises(StopIteration):
             next(box)                    # what pytest does to finalize the fixture
+        # Sample the facts BEFORE this arm's own belt-and-braces sweep. A
+        # mutation probe (t_eed6b74d) proved why: when `_reap` was weakened to
+        # kill only the direct child, the sweep below had already cleared the
+        # tagged descendant by the time the asserts ran, and the arm went green
+        # on its own cleanup instead of the fixture's. The cleanup stays — a red
+        # must not orphan — but it may not be the thing the assertion reads.
+        survived = _survivors(tag)
+        kid_alive = kid is not None and _alive(kid)
         trail.finish()
-        for pid in _survivors(tag):
+        for pid in survived:
             try:
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
@@ -1047,10 +1055,11 @@ def test_the_sandbox_fixture_reaps_a_child_a_case_never_reaped(tmp_path):
     assert proc.poll() is not None, (
         f"the fixture teardown reaped neither pid {proc.pid} nor its group")
     assert not _alive(proc.pid), f"child {proc.pid} outlived the teardown"
-    assert kid is None or not _alive(kid), (
+    assert not kid_alive, (
         f"descendant {kid} outlived the teardown — the fixture's killpg is not "
         "reaching the group")
-    assert not _survivors(tag), f"tagged survivors of the teardown: {_survivors(tag)}"
+    assert not survived, (
+        f"tagged survivors of the teardown: {survived} — the group kill missed them")
 
 
 def test_the_two_budgets_agree_about_who_waits_for_whom():
