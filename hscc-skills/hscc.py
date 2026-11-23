@@ -3,7 +3,13 @@
 Hermes Spark Cluster Control (HSCC) — Skills & Templates Installer
 
 Install / update bundled Hermes skills and templates to ~/.hermes/ directories.
-Idempotent: skips files that are already installed (hash-matched).
+
+Idempotent: a file that already matches the repo is left alone. An hscc-OWNED
+skill (a name in ``BUNDLED_SKILLS``) whose installed copy DIFFERS from the
+repo is backed up first and then overwritten — an existing copy is never a
+reason to skip, which is how a stale July copy used to survive every
+bootstrap (t_45fa38e2, audit t_4c12ff7f §8). Foreign and operator skills are
+never written, moved or removed by this installer.
 
 Usage: hscc-skills <command> [args]
 
@@ -24,6 +30,7 @@ import os
 import hashlib
 import shutil
 import json
+import time
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -88,6 +95,28 @@ BUNDLED_TEMPLATES = [
     "USER.md",
 ]
 
+#: The skills hscc OWNS — exactly the names this installer may back up and
+#: overwrite. Nothing else in a skills tree is hscc's to touch (t_45fa38e2),
+#: and that boundary is what makes "always update, never skip" safe.
+OWNED_SKILLS = tuple(BUNDLED_SKILLS)
+
+#: Where a replaced owned-skill copy is kept: a SIBLING of the scanned
+#: ``skills/`` dir, never inside it. hermes collects skill candidates by
+#: directory name AND frontmatter ``name:`` at ANY depth under the scan root
+#: (see hscc-bootstrap/skill_guard.py), so a ``.bak-*`` copy left in place is
+#: discovered as a skill and CREATES the name collision the guard exists to
+#: prevent. ``install_review_skill._backups_dir`` set this precedent.
+SKILLS_BACKUPS_DIRNAME = "skills-backups"
+
+
+class BackupUnavailable(RuntimeError):
+    """A replacing write whose backup could not be taken.
+
+    Raised instead of writing. A replacing write without a backup is a
+    deletion (the contract install_review_skill.py already states for its own
+    seam), so the caller reports this and writes nothing.
+    """
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -151,6 +180,209 @@ def copy_skill_dir(src_dir, dest_dir, skill_name):
     return results
 
 
+def _backup_stamp():
+    """Write-time stamp for a backup name (``20261123-050102``).
+
+    The shape is not free: ``backup_util._STAMP_RE`` (``.bak-\\d{8}-\\d{6}``)
+    is what orders a family when the retention window prunes it, and
+    ``backup_util._backup_epoch`` reads the name instead of the mtime because
+    ``copy2`` stamps a backup with the SOURCE's clock. A name that drifts from
+    the shape is a backup the pruner can rank, which is worse than one it can
+    see and keep.
+    """
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def _load_backup_util():
+    """Import ``hscc-bootstrap/backup_util.py`` lazily, or None when absent.
+
+    Same lazy ``sys.path`` window ``_write_decision`` opens for
+    ``skill_guard``: the two modules sit beside this one in the repo checkout
+    (``hscc-skills/../hscc-bootstrap``) and in the deployed plugins tree.
+    ``None`` here must make a caller REFUSE a write, never perform one
+    unprotected — see :class:`BackupUnavailable`.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))
+                        + os.sep + ".." + os.sep + "hscc-bootstrap")
+        import backup_util
+        return backup_util
+    except ImportError:
+        return None
+
+
+def skill_backups_dir(skills_dest):
+    """``<home>/skills-backups`` for a skills dir — OUTSIDE the scan root."""
+    return os.path.join(os.path.dirname(os.path.abspath(skills_dest)),
+                        SKILLS_BACKUPS_DIRNAME)
+
+
+def owned_skill_drift(src_dir, dest_dir, skill_name):
+    """Files this template ships that the installed copy lacks or differs on.
+
+    Empty list means the installed copy matches the repo for every shipped
+    file. Deliberately one-directional: a file the template does NOT ship is
+    operator content, never drift, and never a reason to write or to delete.
+    """
+    live = os.path.join(dest_dir, skill_name)
+    drift = []
+    for root, _dirs, files in os.walk(src_dir):
+        rel_root = os.path.relpath(root, src_dir)
+        for fn in sorted(files):
+            rel = fn if rel_root == "." else os.path.join(rel_root, fn)
+            dst_path = os.path.join(live, rel)
+            if not os.path.isfile(dst_path) or \
+                    file_hash(os.path.join(root, fn)) != file_hash(dst_path):
+                drift.append(rel)
+    return drift
+
+
+def _snapshot_owned_skill(skill_name, dest_dir, backup_mod, stamp=None):
+    """Copy the live owned-skill tree aside and prune the family. Returns the name.
+
+    Written under ``skills-backups/`` (see ``SKILLS_BACKUPS_DIRNAME``) with the
+    ``<name>.bak-<stamp>`` shape every HSCC writer uses, then pruned by
+    ``backup_util.prune_backup_dir`` to ``HSCC_BACKUP_KEEP`` (default 3) so the
+    pile is self-limiting — the 27k-file / 1.5 GB lesson of t_9462260b applies
+    to skills exactly as it did to hooks. Two runs inside one second collide
+    on the stamp, so a counter suffix keeps the second snapshot instead of
+    raising or silently reusing the first.
+    """
+    live = os.path.join(dest_dir, skill_name)
+    backups = skill_backups_dir(dest_dir)
+    ensure_dir(backups)
+    base = f"{skill_name}{backup_mod.BACKUP_INFIX}{stamp or _backup_stamp()}"
+    bak = os.path.join(backups, base)
+    n = 1
+    while os.path.exists(bak):
+        n += 1
+        bak = os.path.join(backups, f"{base}-{n}")
+    try:
+        shutil.copytree(live, bak, symlinks=False)
+    except OSError as exc:
+        shutil.rmtree(bak, ignore_errors=True)
+        raise BackupUnavailable(
+            f"could not snapshot {live} to {bak}: {exc}") from exc
+    backup_mod.prune_backup_dir(backups)
+    return os.path.basename(bak)
+
+
+def install_owned_skill(src_dir, dest_dir, skill_name, stamp=None):
+    """Backup-then-overwrite ONE hscc-owned skill. -> (per-file results, backup|None)
+
+    The order is the whole point: the snapshot is taken BEFORE the first write
+    and :class:`BackupUnavailable` aborts the call if it cannot be taken, so no
+    path replaces operator bytes without a recoverable copy. A copy that
+    already matches the repo needs no snapshot — nothing is being given up —
+    which is what keeps a clean bootstrap from minting one backup per owned
+    skill per run.
+
+    Removals are not part of this seam: files the template does not ship stay
+    where they are (the operator's, not hscc's), so the update converges the
+    shipped text without ever deleting.
+    """
+    backup_name = None
+    if os.path.isdir(os.path.join(dest_dir, skill_name)) and \
+            owned_skill_drift(src_dir, dest_dir, skill_name):
+        backup_mod = _load_backup_util()
+        if backup_mod is None:
+            raise BackupUnavailable(
+                "hscc-bootstrap/backup_util.py is not importable — refusing to "
+                f"overwrite the installed copy of {skill_name} without a backup")
+        backup_name = _snapshot_owned_skill(skill_name, dest_dir, backup_mod,
+                                            stamp=stamp)
+    return copy_skill_dir(src_dir, dest_dir, skill_name), backup_name
+
+
+def _write_decision(skill_name, dest_dir, hermes_home):
+    """Collision-guard verdict for one owned skill about to be written.
+
+    -> ``(skip_reason, note)``. ``skip_reason`` non-None means do not write;
+    ``note`` is guard context that must still reach the report even when the
+    write goes ahead.
+
+    This module is the writer that CREATED the June collisions: BUNDLED_SKILLS
+    were copied FLAT into the live skills tree while hermes' own builtin sync
+    maintained category copies (``devops/sdlc-review``,
+    ``software-development/{systematic-debugging,test-driven-development}``)
+    with different content, and hermes refuses to resolve an ambiguous bare
+    name — every spawn asking for one died with 'Unknown skill(s)'. Writes
+    therefore go through the same guard install_review_skill.py uses, with one
+    narrowing (t_45fa38e2):
+
+      * the name resolves NOWHERE                      -> write (first install);
+      * the name resolves AT the path this writer writes -> WRITE. Refreshing a
+        copy that is already here cannot create a collision the tree does not
+        already have, and the old blanket refusal is precisely what froze the
+        stale copies the audit found (t_4c12ff7f §8: 'GUARDED collision' was
+        why July content survived every bootstrap);
+      * the name resolves only from ANOTHER path, and there is no copy here
+        -> STILL REFUSED. Writing there is what created June's collision, so
+        that door stays shut and the refusal is reported verbatim.
+
+    The import is lazy and fail-open ONLY when skill_guard.py is absent (a
+    half-deployed tree) — never on a guard *decision*.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))
+                        + os.sep + ".." + os.sep + "hscc-bootstrap")
+        import skill_guard
+    except ImportError:
+        return None, ""
+    roots = [os.path.abspath(dest_dir)]
+    ext = skill_guard.external_dirs_for_home(hermes_home)
+    roots.extend(str(r) for r in ext)
+    res = skill_guard.resolution(roots, skill_name)
+    if res["state"] == "missing":
+        return None, ""
+    target = os.path.realpath(os.path.join(dest_dir, skill_name))
+    try:
+        at_target = any(os.path.realpath(p) == target for p in res["paths"])
+    except OSError:
+        at_target = False
+    if at_target:
+        if res["state"] == "collision":
+            return None, ("refreshed a colliding copy (hermes still refuses the "
+                          "bare name; adjudicate with `doctor.py --skills`): "
+                          + ", ".join(res["paths"]))
+        if res["state"] == "disabled":
+            return None, "refreshed, but this home lists the name under skills.disabled"
+        return None, ""
+    if res["state"] == "collision":
+        return ("collision: " + ", ".join(res["paths"]), "")
+    if res["state"] == "disabled":
+        return ("disabled in this home: " + ", ".join(res["paths"]), "")
+    return ("already resolves elsewhere: " + ", ".join(res["paths"]), "")
+
+
+def _owned_skill_write(src, skill, dest_dir, hermes_home):
+    """Apply the guard then backup+overwrite.
+
+    -> ``(status, detail, copied, unchanged)`` so both callers keep their own
+    totals. Shared by ``install`` and ``install-skills`` so the two entry
+    points cannot drift into two different update policies.
+    """
+    skip, note = _write_decision(skill, dest_dir, hermes_home)
+    if skip:
+        return "GUARDED", skip[:120], 0, 0
+    try:
+        results, backup_name = install_owned_skill(src, dest_dir, skill)
+    except BackupUnavailable as exc:
+        return "BACKUP-FAILED", str(exc)[:120], 0, 0
+    if not results:
+        # An owned dir with nothing in it is a broken template, not a success:
+        # say so rather than reporting the skill as up to date.
+        return "EMPTY", "source ships no files", 0, 0
+    copies = sum(1 for s in results.values() if s == "copied")
+    skips = sum(1 for s in results.values() if s == "skipped")
+    detail = f"+{copies} copied" + (f", {skips} unchanged" if skips else "")
+    if backup_name:
+        detail += f" (backup {backup_name})"
+    if note:
+        detail += f" — {note}"
+    return ("UPDATED" if copies else "UP-TO-DATE"), detail, copies, skips
+
+
 def format_status_table(items):
     """Format a list of (name, status, detail) tuples as a readable table."""
     if not items:
@@ -209,24 +441,14 @@ def cmd_install():
             skills_results[skill] = ("MISSING", f"not found in source")
             continue
 
-        skip = _guard_skips(skill, SKILLS_DEST, HERMES_HOME)
-        if skip:
+        status, detail, copies, unchanged = _owned_skill_write(
+            src, skill, SKILLS_DEST, HERMES_HOME)
+        if status in ("GUARDED", "BACKUP-FAILED", "EMPTY"):
             skills_skipped += 1
-            skills_results[skill] = ("GUARDED", skip[:120])
-            continue
-
-        results = copy_skill_dir(src, SKILLS_DEST, skill)
-        if not results:
-            skills_skipped += 1
-            skills_results[skill] = ("SKIPPED", "no new files")
-            continue
-
-        copies = sum(1 for s in results.values() if s in ("copied",))
-        skips = sum(1 for s in results.values() if s == "skipped")
-        skills_copied += copies
-        skills_skipped += skips
-        status_str = f"+{copies} copied" + (f", {skips} unchanged" if skips else "")
-        skills_results[skill] = ("UPDATED" if copies else "UP-TO-DATE", status_str)
+        else:
+            skills_copied += copies
+            skills_skipped += unchanged
+        skills_results[skill] = (status, detail)
 
     print(format_status_table(
         [(s, r[0], r[1]) for s, r in skills_results.items()]
@@ -283,42 +505,8 @@ def cmd_install():
         print("  Everything is already up to date. Nothing to do.")
 
 
-def _guard_skips(skill_name, dest_dir, hermes_home):
-    """Collision-guard verdict for one bundled skill about to be written into
-    ``dest_dir`` (card t_bc611809).
-
-    This module is the writer that CREATED the June collisions: BUNDLED_SKILLS
-    were copied FLAT into the live skills tree while hermes' own builtin sync
-    maintained category copies (``devops/sdlc-review``,
-    ``software-development/{systematic-debugging,test-driven-development}``)
-    with different content, and hermes refuses to resolve an ambiguous bare
-    name — every spawn asking for one died with 'Unknown skill(s)'. Writes now
-    go through the same guard install_review_skill.py uses: a name is only
-    copied when it resolves from NO other path in this home's scan set. The
-    import is lazy and fail-open ONLY when skill_guard.py is absent (a
-    half-deployed tree) — never on a guard *decision*.
-    """
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))
-                        + os.sep + ".." + os.sep + "hscc-bootstrap")
-        import skill_guard
-    except ImportError:
-        return None
-    roots = [os.path.abspath(dest_dir)]
-    ext = skill_guard.external_dirs_for_home(hermes_home)
-    roots.extend(str(r) for r in ext)
-    res = skill_guard.resolution(roots, skill_name)
-    if res["state"] == "collision":
-        return ("collision: " + ", ".join(res["paths"]))
-    if res["state"] == "ok" and not all(
-            os.path.realpath(p) == os.path.realpath(os.path.join(dest_dir, skill_name))
-            for p in res["paths"]):
-        return ("already resolves elsewhere: " + ", ".join(res["paths"]))
-    return None
-
-
 def cmd_install_skills():
-    """Install / update Hermes skills only (collision-guarded)."""
+    """Install / update Hermes skills only (collision-guarded, backup-first)."""
     print("─── Installing Hermes Skills ───")
     print(f"  Source: {SKILLS_SOURCE}")
     print(f"  Dest:   {SKILLS_DEST}")
@@ -331,29 +519,38 @@ def cmd_install_skills():
     results = []
     copied = 0
     guarded = 0
+    failed = 0
+    backups = []
     for skill in BUNDLED_SKILLS:
         src = os.path.join(SKILLS_SOURCE, skill)
         if not os.path.isdir(src):
             results.append((skill, "MISSING", "not found"))
             continue
-        skip = _guard_skips(skill, SKILLS_DEST, HERMES_HOME)
-        if skip:
+        status, detail, copies, _unchanged = _owned_skill_write(
+            src, skill, SKILLS_DEST, HERMES_HOME)
+        if status == "GUARDED":
             guarded += 1
-            results.append((skill, "GUARDED", skip[:120]))
-            continue
-        file_results = copy_skill_dir(src, SKILLS_DEST, skill)
-        copies = sum(1 for s in file_results.values() if s == "copied")
-        if copies > 0:
-            copied += copies
-            results.append((skill, "UPDATED", f"+{copies} file(s)"))
+        elif status == "BACKUP-FAILED":
+            failed += 1
         else:
-            results.append((skill, "UP-TO-DATE", "already installed"))
+            copied += copies
+            if "backup " in detail:
+                backups.append(detail.split("backup ")[-1].rstrip(")"))
+        results.append((skill, status, detail))
 
     print(format_status_table(results))
     print()
     if guarded:
-        print(f"{guarded} skill(s) GUARDED (name already resolves elsewhere — "
-              "hscc will not create a collision; the category copy wins).")
+        print(f"{guarded} skill(s) GUARDED (name already resolves elsewhere and "
+              "nothing is installed at the target — writing there would CREATE a "
+              "collision; the existing copy wins).")
+    if failed:
+        print(f"{failed} skill(s) BACKUP-FAILED: nothing was written. hscc refuses "
+              "a replacing write it cannot back up — restore "
+              "hscc-bootstrap/backup_util.py and re-run.")
+    if backups:
+        print(f"Replaced copies were snapshotted under {skill_backups_dir(SKILLS_DEST)}"
+              f" ({', '.join(backups)}).")
     print(f"Done. {copied} file(s) installed, rest unchanged.")
 
 
