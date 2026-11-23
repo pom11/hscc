@@ -32,6 +32,8 @@ that writes a marker instead of supervising a real ``hermes serve``.
 import ast
 import inspect
 import os
+import queue
+import socket
 import subprocess
 import sys
 import textwrap
@@ -56,6 +58,15 @@ STOPPED_LINE = "hscc-api: stopped"
 WARN_MARK = "did not stop"
 
 
+def _free_port():
+    """An ephemeral loopback port, released before the child binds it."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
 def _shut_down_within():
     """The shipped bound, read from production (never a copy that can drift)."""
     value = getattr(api_server, "_SHUTDOWN_WAIT_SECONDS", None)
@@ -66,18 +77,40 @@ def _shut_down_within():
     return float(value)
 
 
-def _wedged(server, gate):
-    """Make one listener's loop unable to return.
+def _wedged(server, entered, gate):
+    """Make one listener's loop unable to return, and say when it happened.
 
     ``service_actions`` is the seam ``BaseServer.serve_forever`` calls on every pass
     *before* it re-reads ``__shutdown_request``, so blocking here is exactly the
-    wedged-loop state — no sleep, no race, no timing luck. The gate belongs to the
-    CALLER and is fresh per test: a gate shared across arms leaks a release from the
-    healthy arm into the wedged one and the wedged case passes for free.
+    wedged-loop state — no sleep, no race, no timing luck.
+
+    Two events, and both matter:
+
+      * ``entered`` — set from inside the wedged call. Without it the caller cannot
+        know the loop reached the seam: a stop that arrives while the listener
+        thread has not entered its ``while not __shutdown_request`` check yet makes
+        the loop exit before ``service_actions`` is ever called, and the case then
+        "passes" on a build that still hangs. This was measured: aiming at the
+        freshly-started loop, ``shutdown()`` came back in 0.15 s for exactly that
+        reason.
+      * ``gate`` — belongs to the CALLER and is fresh per test. A gate shared across
+        arms leaks a release from the healthy arm into the wedged one, and the
+        wedged case then passes for free.
     """
-    def _wedged_action(self, _gate=gate):
+    def _wedged_action(_entered=entered, _gate=gate):
+        # No `self`: this is an INSTANCE attribute, and Python does not bind a
+        # function stored on an instance — `self.service_actions()` calls it with
+        # no arguments at all.
+        _entered.set()
         _gate.wait()
     server.service_actions = _wedged_action
+
+
+def _await_wedge(entered, server):
+    """Block until the listener is demonstrably stuck inside ``service_actions``."""
+    assert entered.wait(5.0), (
+        f"the listener never reached service_actions, so this case proves nothing "
+        f"about a wedged loop (hosts={server.hosts!r})")
 
 
 def _serve_on_a_thread(server, stopping, poll_interval=0.1):
@@ -115,13 +148,13 @@ def test_a_wedged_listener_cannot_hold_the_stop_hostage(hscc_dir):
     method that cannot return cannot reach ``serve_main``'s ``finally:``.
     """
     server = api_server.create_server(hscc_dir=hscc_dir, addr=("127.0.0.1", 0))
-    gate = threading.Event()
-    _wedged(server.servers[0], gate)
+    entered, gate = threading.Event(), threading.Event()
+    _wedged(server.servers[0], entered, gate)
     stopping = threading.Event()
     thread, box = _serve_on_a_thread(server, stopping)
-    started = time.monotonic()
     try:
-        assert thread.is_alive(), "serve_forever returned before anything served"
+        _await_wedge(entered, server)
+        started = time.monotonic()
         stopping.set()
         thread.join(SUPERVISOR_SIGKILL_SECONDS)
         elapsed = time.monotonic() - started
@@ -190,12 +223,13 @@ def test_the_bound_is_named_and_is_the_wait_that_is_kept(hscc_dir, monkeypatch):
 
     monkeypatch.setattr(api_server, "_SHUTDOWN_WAIT_SECONDS", 1.0)
     server = api_server.create_server(hscc_dir=hscc_dir, addr=("127.0.0.1", 0))
-    gate = threading.Event()
-    _wedged(server.servers[0], gate)
+    entered, gate = threading.Event(), threading.Event()
+    _wedged(server.servers[0], entered, gate)
     stopping = threading.Event()
     thread, box = _serve_on_a_thread(server, stopping)
-    started = time.monotonic()
     try:
+        _await_wedge(entered, server)
+        started = time.monotonic()
         stopping.set()
         thread.join(SUPERVISOR_SIGKILL_SECONDS)
         elapsed = time.monotonic() - started
@@ -267,11 +301,12 @@ def test_only_the_wedged_listener_is_named(hscc_dir, monkeypatch):
     server = api_server.create_server(
         hscc_dir=hscc_dir, bind_overrides=["127.0.0.1", "::1"], port_override=0)
     assert server.hosts == ["127.0.0.1", "::1"]
-    gate = threading.Event()
-    _wedged(server.servers[1], gate)            # the ::1 listener is the wedged one
+    entered, gate = threading.Event(), threading.Event()
+    _wedged(server.servers[1], entered, gate)   # the ::1 listener is the wedged one
     stopping = threading.Event()
     thread, box = _serve_on_a_thread(server, stopping)
     try:
+        _await_wedge(entered, server)
         stopping.set()
         thread.join(10.0)
         assert not thread.is_alive(), "serve_forever never returned from the stop"
@@ -304,6 +339,8 @@ _FAKE_BRIDGE = textwrap.dedent('''
 ''')
 
 _CHILD_DRIVER = textwrap.dedent('''
+    import os
+    import pathlib
     import sys
     import threading
 
@@ -313,10 +350,12 @@ _CHILD_DRIVER = textwrap.dedent('''
     import api_server
 
     if {wedge}:
-        GATE = threading.Event()           # set by nobody: the loop cannot return
+        NEVER = threading.Event()          # set by nobody: the loop cannot return
+        ENTERED = pathlib.Path(os.environ["HSCC_TEST_WEDGE_MARKER"])
 
         def _wedged(self):
-            GATE.wait()
+            ENTERED.write_text("inside-service-actions")
+            NEVER.wait()
 
         api_server._ApiServer.service_actions = _wedged
 
@@ -324,39 +363,52 @@ _CHILD_DRIVER = textwrap.dedent('''
 ''')
 
 
-def _spawn_wedged_child(tmp_path, sandbox, port, wedge):
-    """Run `serve_main` in a child with (or without) a wedged listener loop."""
-    fake = tmp_path / "fake_bridge"
-    fake.mkdir()
-    (fake / "gateway_bridge.py").write_text(_FAKE_BRIDGE)
-    marker = tmp_path / "bridge.marker"
-    env = dict(sandbox["env"])
-    env["HSCC_TEST_BRIDGE_MARKER"] = str(marker)
-    driver = tmp_path / "driver.py"
-    driver.write_text(_CHILD_DRIVER.format(
-        fake_dir=str(fake), api_dir=str(API_DIR), port=port, wedge=wedge))
-    proc = subprocess.Popen(
-        [sys.executable, "-u", str(driver)], cwd=str(tmp_path), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    # The child prints the ready line only after the handlers are installed and
-    # every listener is bound, so a stop sent here is a stop the child promised to
-    # be able to answer. Read the pipe here so a full pipe cannot block the child.
-    lines = []
-    deadline = time.time() + 25.0
-    while time.time() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            break
-        lines.append(line)
-        if READY_LINE in line:
-            break
-    proc.test_lines = lines
-    proc.test_marker = marker
-    if READY_LINE not in "".join(lines):
-        _kill(proc)
-        raise AssertionError(
-            f"child never became ready: {''.join(lines)!r}")
+def _attach_reader(proc):
+    """Drain the child's stdout on a daemon thread and keep every line.
+
+    Copied in shape from test_api_server_entrypoint.py for the same two reasons:
+    a pipe nobody reads fills and blocks the CHILD, and the lines read while
+    waiting for readiness are exactly the ones a failure message needs — the pipe
+    can only be read once, so a later ``communicate()`` would report "".
+    """
+    proc.lines = []
+    proc.lines_q = queue.Queue()
+
+    def _drain():
+        try:
+            for line in proc.stdout:
+                proc.lines.append(line)
+                proc.lines_q.put(line)
+        finally:
+            proc.lines_q.put(None)
+
+    proc.reader = threading.Thread(target=_drain, daemon=True,
+                                   name="stop-bound-stdout-drain")
+    proc.reader.start()
     return proc
+
+
+def _output(proc, join_timeout=10.0):
+    """Everything the child wrote, once the drain thread has seen EOF."""
+    reader = getattr(proc, "reader", None)
+    if reader is not None:
+        reader.join(join_timeout)
+    return "".join(getattr(proc, "lines", []))
+
+
+def _wait_for_line(proc, needle, timeout):
+    """Block until a drained line contains ``needle`` (EOF or slow => fail)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            line = proc.lines_q.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        if line is None:
+            return False                    # the child exited before saying it
+        if needle in line:
+            return True
+    return False
 
 
 def _kill(proc):
@@ -367,6 +419,50 @@ def _kill(proc):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+
+
+def _spawn_child(tmp_path, sandbox, port, wedge):
+    """Run ``serve_main`` in a child, with (or without) a wedged listener loop.
+
+    Readiness is the child's own ready line — the last line before
+    ``serve_forever()`` — so the stop sent afterwards is one the child promised it
+    could answer. When wedging, the stop waits for a second signal: the child's
+    own file saying it is INSIDE ``service_actions``. Signalling on readiness alone
+    races the listener threads into their loops, and a stop that arrives first
+    makes each loop exit before the seam is ever reached — the case would then pass
+    on a build that still hangs.
+    """
+    fake = tmp_path / "fake_bridge"
+    fake.mkdir()
+    (fake / "gateway_bridge.py").write_text(_FAKE_BRIDGE)
+    marker = tmp_path / "bridge.marker"
+    wedge_marker = tmp_path / "wedge.marker"
+    env = dict(sandbox["env"])
+    env["HSCC_TEST_BRIDGE_MARKER"] = str(marker)
+    env["HSCC_TEST_WEDGE_MARKER"] = str(wedge_marker)
+    driver = tmp_path / "driver.py"
+    driver.write_text(_CHILD_DRIVER.format(
+        fake_dir=str(fake), api_dir=str(API_DIR), port=port, wedge=wedge))
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(driver)], cwd=str(tmp_path), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    _attach_reader(proc)
+    proc.test_marker = marker
+    if not _wait_for_line(proc, READY_LINE, 25.0):
+        out = _output(proc)
+        _kill(proc)
+        raise AssertionError(f"child never became ready: {out!r}")
+    if wedge:
+        deadline = time.time() + 5.0
+        while not wedge_marker.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        if not wedge_marker.exists():
+            out = _output(proc)
+            _kill(proc)
+            raise AssertionError(
+                f"the child never entered service_actions, so the loop is not "
+                f"wedged and the case would prove nothing: {out!r}")
+    return proc
 
 
 @pytest.fixture()
@@ -395,24 +491,19 @@ def test_serve_main_reaches_the_teardown_when_a_listener_is_wedged(tmp_path,
     ``os._exit`` orphan t_56552ecc closed). At head the child gives up on the
     wedged loop, tears the sidecar down, names the listener, and exits non-zero.
     """
-    import socket
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
-    proc = _spawn_wedged_child(tmp_path, sandbox, port, wedge=True)
+    port = _free_port()
+    proc = _spawn_child(tmp_path, sandbox, port, wedge=True)
     proc.terminate()
     try:
         proc.wait(timeout=SUPERVISOR_SIGKILL_SECONDS + 5)
     except subprocess.TimeoutExpired:
-        out = "".join(proc.test_lines)
+        out = _output(proc)
         _kill(proc)
         pytest.fail(
             "a wedged listener loop held serve_main's finally: — the gateway "
             "sidecar keeps this process's token and the supervisor escalates to "
             f"SIGKILL. Child output:\n{out}")
-    out = "".join(proc.test_lines)
+    out = _output(proc)
     assert proc.returncode == 1, (
         f"a stop that abandoned a listener exited {proc.returncode}; the "
         f"supervisor must be able to tell it from a clean stop.\n{out}")
@@ -434,21 +525,16 @@ def test_serve_main_exits_zero_without_a_warning_when_the_listener_is_healthy(
     warning. Without this arm the wedged case would pass just as well on a build
     that warns and exits 1 on every stop.
     """
-    import socket
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
-    proc = _spawn_wedged_child(tmp_path, sandbox, port, wedge=False)
+    port = _free_port()
+    proc = _spawn_child(tmp_path, sandbox, port, wedge=False)
     proc.terminate()
     try:
         proc.wait(timeout=SUPERVISOR_SIGKILL_SECONDS + 5)
     except subprocess.TimeoutExpired:
-        out = "".join(proc.test_lines)
+        out = _output(proc)
         _kill(proc)
         pytest.fail(f"a healthy SIGTERM did not stop the server.\n{out}")
-    out = "".join(proc.test_lines)
+    out = _output(proc)
     assert proc.returncode == 0, (
         f"a clean stop exited {proc.returncode}.\n{out}")
     assert WARN_MARK not in out, f"a healthy stop warned anyway.\n{out}"
