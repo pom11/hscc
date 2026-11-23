@@ -6,7 +6,7 @@ task: t_e98c6ad4
   answer. It resolves the main profile name through its own store, so no plugin,
   test or doc names a profile and no second resolver exists (ruling D-A).
 * Two surfaces, two answers, one resolver. The **tool catalog** — `hscc-cluster`'s
-  28 tools and `sparkrun-hermes`' `sparkrun_exec` — registers only where the home
+  31 tools and `sparkrun-hermes`' `sparkrun_exec` — registers only where the home
   resolves to `<main>` (`cluster_tools_allowed`). The **operator slash verbs** in
   `hscc-commands` register at `<main>` *and* the operator/gateway root home
   (`operator_commands_allowed`), because they are the wedge path and a human types

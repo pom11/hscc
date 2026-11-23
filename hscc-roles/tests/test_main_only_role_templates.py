@@ -1,4 +1,4 @@
-"""Main-only cluster rule in the non-main SOUL templates (t_c3a29c37).
+"""Main-only cluster rule in the non-main SOUL templates (t_c3a29c37, t_a3557207).
 
 The 2026-11-23 audit (``docs/audits/2026-11-23-main-only-surface.md``, operator
 rulings in ``~/fleet-check/verdict-main-only.txt``) made cluster control a
@@ -10,6 +10,11 @@ main-orchestrator-only surface. This file pins the ROLE-TEXT half of that rule:
 * the main section keeps stating the exclusivity out loud;
 * reintroducing a cluster-tool claim into either non-main block reddens the
   SAME predicate (the mutation probe is a committed test, not a one-off run).
+
+QA finding F4 (t_035b1b0b) showed the project-orch rule 11 still promised the
+``orch_message`` tool, which the main-only tier no longer registers in those
+homes. The rule now points at the main orchestrator instead, and the rendered
+SOUL — not only the template block — is what the tests read.
 
 Everything is a pure text/read assertion: no profile tree, no fleet, no home.
 """
@@ -47,11 +52,10 @@ def _registered_cluster_tools():
     return found
 
 
-#: Tools registered by ``hscc-cluster`` that are coordination, not cluster
-#: control: a project orchestrator may call ``orch_message`` (the tool itself
-#: refuses workers, and rule 11 is pinned to the ``*-orch`` block). The main-only
-#: rule is about the fleet surface, not about which agent may nudge a peer.
-COORDINATION_TOOLS = {"orch_message"}
+# No exemption list. ``orch_message`` used to be carved out as "coordination,
+# not cluster control", but the tool registers only in the main orchestrator's
+# home (QA F4, t_035b1b0b): promising it to a ``*-orch`` profile is the defect.
+# Every name the registry declares is a cluster reference in a non-main SOUL.
 
 
 def _cluster_capability_mentions(text):
@@ -59,11 +63,10 @@ def _cluster_capability_mentions(text):
 
     Word-boundary matching, so a tool named without backticks is caught too.
     Deliberately not a capability-aware sentence parser: naming the surface at
-    all in a non-main block is the defect this card removes. ``orch_message``
-    is excluded — it is the coordination channel, not cluster control.
+    all in a non-main block is the defect this card removes.
     """
     names = (set(CLUSTER_TOOLSETS) | set(CLUSTER_PASSTHROUGH)
-             | _registered_cluster_tools()) - COORDINATION_TOOLS
+             | _registered_cluster_tools())
     return sorted(n for n in names
                   if re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", text))
 
@@ -101,10 +104,11 @@ def test_project_orch_section_names_no_cluster_tool_as_callable():
     assert _cluster_capability_mentions(_project_orch_block()) == []
 
 
-def test_orch_message_rule_stays_out_of_the_worker_block():
-    """Rule 11 is a project-orch rule; the tool already refuses workers."""
+def test_orch_message_rule_stays_out_of_every_non_main_block():
+    """The nudge tool is main-only now, so no non-main block may name it."""
     assert "orch_message" not in _worker_block()
-    assert "`orch_message`" in _project_orch_block()
+    assert "orch_message" not in _project_orch_block()
+    assert "Nudges go through the main orchestrator." in _project_orch_block()
 
 
 def test_the_main_section_still_states_the_exclusivity():
@@ -135,3 +139,28 @@ def test_the_non_main_blocks_never_spell_the_main_name():
     """R2/D-A: the rule is keyed on the resolver, never a literal profile name."""
     for block in (_worker_block(), _project_orch_block()):
         assert "general" not in block.lower()
+
+
+# ── the rendered SOUL, not only the template block (QA F4, t_a3557207) ──────
+
+def _render(name):
+    """compose_soul() with a neutral base: the ops layer is what this pins."""
+    spec = {"name": name, "identity": "ROLE-IDENTITY-MARKER"}
+    return generator.compose_soul(spec, base_identity="BASE-IDENTITY-MARKER")
+
+
+def test_rendered_non_main_souls_name_no_cluster_tool():
+    """The QA finding was a *generated* SOUL line, so the rendered text is read."""
+    for name in ("coder", "demo-orch"):
+        soul = _render(name)
+        assert "ROLE-IDENTITY-MARKER" in soul
+        assert _cluster_capability_mentions(soul) == [], (
+            f"{name}'s generated SOUL advertises a cluster tool its home no "
+            "longer registers")
+
+
+def test_rendered_main_soul_keeps_the_nudge_tool():
+    """The tier is main-only, not removed: the main's SOUL still names it."""
+    soul = _render("general")
+    assert "`orch_message`" in soul
+    assert "Talking to orchestrators" in soul
