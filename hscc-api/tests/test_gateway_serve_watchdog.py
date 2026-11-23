@@ -66,6 +66,10 @@ REPO = Path(__file__).resolve().parents[2]
 API_DIR = REPO / "hscc-api"
 WATCHDOG = API_DIR / "gateway_serve_watchdog.py"
 
+#: Linux exposes per-process truth here; macOS does not have this directory, and
+#: the branch in _state_and_command is the whole difference between the two.
+_PROC_DIR = Path("/proc")
+
 #: The env name the watchdog reads. Read through ``getattr`` with the literal
 #: default on purpose: the harness must still run (and still fail for the
 #: behavioural reason) on a tree where the seam does not exist yet, so that the
@@ -267,28 +271,82 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+#: Sentinels for :func:`_state_and_command`. ``UNKNOWN`` is deliberately NOT
+#: the same answer as ``DEAD``: "gone" is the answer that can hide a surviving
+#: orphan, so a platform that could not answer must never be read as one.
+DEAD = "dead"
+UNKNOWN = "unknown"
+
+
+def _state_and_command(pid):
+    """``(state, command)`` for ``pid`` — ``DEAD``/``UNKNOWN`` + ``None`` else.
+
+    Linux first, and for a reason that cost a CI run to find: ``/proc/<pid>/stat``
+    and ``/proc/<pid>/cmdline`` answer without a subprocess and the command line
+    there cannot be truncated, whereas procps ``ps`` clips ``command=`` to the
+    display width (80 columns when nothing wider is configured) and these sandbox
+    paths are longer than that. Every identity answer in this file quietly came
+    back "not ours" on the first Linux runner that tried them, which turned
+    "SIGKILL the parent" into a 30-second wait on a process that was never
+    signalled.
+
+    macOS has no ``/proc``, so it gets the one ``ps`` call the zombie answer
+    already needed (BSD ``ps`` does not clip, and ``-ww`` keeps it honest if a
+    narrow terminal ever is).
+    """
+    target = _PROC_DIR / str(int(pid))
+    if _PROC_DIR.is_dir():
+        try:
+            stat = (target / "stat").read_text()
+        except FileNotFoundError:
+            return DEAD, None
+        except OSError:
+            return UNKNOWN, None
+        # comm is parenthesised and may contain spaces or ')': the state field is
+        # the first token after the LAST ')'.
+        tail = stat.rpartition(")")[2].split()
+        if not tail:
+            return UNKNOWN, None
+        try:
+            raw = (target / "cmdline").read_bytes()
+        except FileNotFoundError:
+            return DEAD, None
+        except OSError:
+            return tail[0], None
+        return tail[0], raw.decode("utf-8", "replace")
+    try:
+        out = subprocess.run(
+            ["ps", "-ww", "-o", "state=,command=", "-p", str(int(pid))],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:  # noqa: BLE001 — a ps that will not answer is not a death
+        return UNKNOWN, None
+    if not out:
+        return UNKNOWN, None
+    state, _, command = out.partition(" ")
+    return state, command
+
+
 def _alive(pid, marker=None) -> bool:
     """Is this pid still a RUNNING process — and, given ``marker``, still OURS?
 
     ``kill(pid, 0)`` alone is not enough and this is the trap that bites every
     supervisor test: a process that has exited but has not been reaped yet is a
     zombie, still answers signal 0, and is a child of SOMEONE ELSE (the sandbox
-    parent, which is dead or busy), so nothing here can reap it. On macOS the
-    only way to tell "exited" from "running" from the outside is the process
-    state, so one ``ps`` per liveness answer — the loops below exit on the first
-    "no", so it is a couple of calls per case, not hundreds.
+    parent, which is dead or busy), so nothing here can reap it. Telling "exited"
+    from "running" from the outside needs the process state, which
+    :func:`_state_and_command` reads per platform.
 
-    ``marker`` closes the second half of the same trap. macOS has no ``/proc``
-    and recycles pids, and under a full leg (1300 items, heavy process churn) an
+    ``marker`` closes the second half of the same trap. macOS and Linux both
+    recycle pids, and under a full leg (1300 items, heavy process churn) an
     unrelated process can be handed a dead serve's number within microseconds of
     it dying — it happened on the third of three leg runs, arm=poison, where the
     wait had already seen the pid go and the very next ``_alive`` answered
     "running". Existence is not identity, and asserting on existence alone makes
     a passing teardown look like a failure. The marker is a path that appears in
-    the argv of the process this test started and in no one else's, so the one
-    ``ps`` call answers existence, zombie-ness and identity at once. Without a
-    marker the answer stays deliberately conservative: no output from ``ps`` is
-    not proof of death.
+    the argv of the process this test started and in no one else's.
+
+    When the platform cannot answer at all, the answer is "alive": the safe
+    direction, because a wrong "gone" is what lets an orphan through the door.
     """
     if not pid:
         return False
@@ -298,18 +356,11 @@ def _alive(pid, marker=None) -> bool:
         return False
     except (PermissionError, TypeError, ValueError):
         return True
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "state=,command=", "-p", str(int(pid))],
-            capture_output=True, text=True, timeout=5).stdout.strip()
-    except Exception:  # noqa: BLE001 — no answer from ps is not "dead"
+    state, command = _state_and_command(pid)
+    if state == DEAD:
+        return False
+    if state == UNKNOWN or command is None:
         return True
-    if not out:
-        # ps found no such pid. Without a marker that is treated as "alive"
-        # (never let a flaky ps turn a survivor into a pass); with a marker the
-        # absence of our argv IS the answer.
-        return marker is None
-    state, _, command = out.partition(" ")
     if state.startswith("Z"):
         return False
     if marker is not None:
@@ -360,6 +411,53 @@ def _signal(pid, sig, marker=None) -> bool:
 def _kill_soft(pid, marker=None) -> None:
     """SIGKILL ``pid``, but never a process this test did not start."""
     _signal(pid, signal.SIGKILL, marker)
+
+
+def test_state_and_command_parses_a_proc_style_layout(tmp_path, monkeypatch):
+    """The Linux branch, driven through a fake ``/proc`` on any platform.
+
+    The CI leg is the only Linux this file gets, so the parsing rules liveness
+    now rests on are tested against a directory laid out like ``/proc`` rather
+    than discovered on a runner: the state token is the first field after the
+    LAST ``)`` (``comm`` may hold spaces and parens), a missing ``stat`` is
+    ``DEAD``, and an unreadable one is ``UNKNOWN`` — never ``DEAD``, because
+    "gone" is the answer that lets an orphan through.
+    """
+    fake = tmp_path / "proc"
+    entry = fake / "4242"
+    entry.mkdir(parents=True)
+    (entry / "stat").write_text(
+        "4242 (weird (proc) name) S 4241 4242 4242 0 -1 4194304 "
+        "1 0 0 0 0 0 0 0 20 0 1 0 1234 1 1 0 0\n")
+    marker = str(tmp_path / "fake_api.py")
+    (entry / "cmdline").write_bytes(b"/usr/bin/python\x00"
+                                    + marker.encode() + b"\x00")
+    monkeypatch.setattr(sys.modules[__name__], "_PROC_DIR", fake)
+
+    state, command = _state_and_command(4242)
+    assert state == "S"
+    assert command is not None and marker in command
+    assert _state_and_command(4243) == (DEAD, None)
+    # (No _alive() call here on purpose: _alive starts with a real
+    # kill(4242, 0), and whether that pid exists on this machine has nothing to
+    # do with the parsing being tested.)
+
+
+def test_state_and_command_of_this_process_agrees_with_kill(tmp_path, monkeypatch):
+    """Whatever branch this platform takes, it must agree with ``kill(pid, 0)``.
+
+    One real assertion per platform, so a broken branch (a clipped ``ps`` column,
+    a ``/proc`` read that needs privileges) reddens here instead of showing up
+    forty assertions later as "the parent was not ours to signal".
+    """
+    here = os.getpid()
+    monkeypatch.setattr(sys.modules[__name__], "_PROC_DIR", _PROC_DIR)
+    state, command = _state_and_command(here)
+    assert state not in (DEAD, UNKNOWN), f"cannot read our own pid: {state!r}"
+    assert not state.startswith("Z")
+    assert command is not None and sys.executable in command
+    assert _alive(here, str(tmp_path / "not_our_path")) is False
+    assert _alive(here, sys.executable) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -520,6 +618,15 @@ def sidecar(request, tmp_path):
         if mode != "stop":
             assert _port_free(handle.port) is False, (
                 f"sidecar must really be listening; {diag()}")
+        # Harness self-check, and it earned its place the hard way: if the
+        # identity answer does not work on THIS platform, every pid assertion
+        # below silently answers "gone", "not ours to signal" turns into a 30 s
+        # wait, and the failure lands far from its cause. That is exactly what
+        # happened on the first Linux runner (procps clips ps's command= column).
+        assert _alive(proc.pid, handle.parent_marker), (
+            f"harness identity check broken on {sys.platform}: our own live "
+            f"parent pid {proc.pid} did not match its own argv marker; "
+            f"_state_and_command answered {tuple(_state_and_command(proc.pid))!r}")
         yield handle
     finally:
         # Cleanup: never leak a process into the rest of the leg, whatever
