@@ -263,6 +263,31 @@ def _identity(value) -> str:
     return text or UNKNOWN_ID
 
 
+def _append_ledger(path, entry) -> bool:
+    """Append one JSON row to a lifecycle ledger, creating its directory first.
+
+    The ledgers live under ``~/.hscc``, which bootstrap normally owns. A worker
+    home without that directory used to lose every wedge row silently: the
+    append sat inside a swallow-everything ``try`` and ``open()`` failed with
+    ``FileNotFoundError`` before anything was written (QA t_035b1b0b F2,
+    t_02947a95). Create the parent here, and if the append still fails say so
+    once on stderr — a ledger that stopped recording must not look healthy.
+    """
+    import json
+
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
+    except Exception as exc:
+        print(f"hscc: WARNING: could not append {path}: {exc}",
+              file=sys.stderr, flush=True)
+        return False
+
+
 # ── kanban_task_blocked handler ──────────────────────────────────────────────
 
 _BLOCKED_LOG = os.path.join(os.path.expanduser("~/.hscc"), "blocked_tasks.jsonl")
@@ -314,7 +339,6 @@ def on_kanban_task_blocked(task_id=None, profile_name=None, reason=None,
         # useless to the fleet check.
         try:
             import datetime
-            import json
             entry = {
                 "task_id": _identity(task_id),
                 "profile_name": _identity(profile_name),
@@ -322,8 +346,7 @@ def on_kanban_task_blocked(task_id=None, profile_name=None, reason=None,
                 "board": _identity(board),
                 "blocked_at": datetime.datetime.utcnow().isoformat(),
             }
-            with open(_BLOCKED_LOG, "a") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            _append_ledger(_BLOCKED_LOG, entry)
         except Exception:
             pass
 
@@ -452,11 +475,7 @@ def on_kanban_task_completed(task_id=None, profile_name=None, summary=None,
             "board": _identity(board),
             "completed_at": datetime.datetime.utcnow().isoformat(),
         }
-        try:
-            with open(_COMPLETION_LOG, "a") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        _append_ledger(_COMPLETION_LOG, entry)
 
         # 2. Best-effort auto-unblock of dependents.
         # Read the blocked log to find tasks that reference this completed task.

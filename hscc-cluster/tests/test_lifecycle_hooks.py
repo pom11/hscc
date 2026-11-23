@@ -85,6 +85,31 @@ class TestBlockedHandler:
         assert entry["board"] == "default"
         assert "blocked_at" in entry
 
+    def test_blocked_handler_creates_missing_ledger_dir(self, tmp_path):
+        """The wedge row survives a `~/.hscc` that does not exist yet (F2)."""
+        log_path = tmp_path / "missing-hscc" / "blocked_tasks.jsonl"
+        assert not log_path.parent.exists()
+        with patch.object(workflow, "_BLOCKED_LOG", str(log_path)):
+            result = workflow.on_kanban_task_blocked(
+                task_id="test-789", profile_name="coder",
+                reason="needs_input", board="default")
+        assert result is not None
+        entry = json.loads(log_path.read_text().strip())
+        assert entry["task_id"] == "test-789"
+        assert entry["reason"] == "needs_input"
+
+    def test_blocked_handler_reports_remaining_failure(self, tmp_path, capsys):
+        """An append that still fails is logged once, never swallowed."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("")
+        log_path = blocker / "blocked_tasks.jsonl"
+        with patch.object(workflow, "_BLOCKED_LOG", str(log_path)):
+            result = workflow.on_kanban_task_blocked(task_id="test-790")
+        assert result is not None
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert str(log_path) in err
+
     def test_blocked_handler_noop_without_context(self, tmp_path):
         """on_kanban_task_blocked doesn't crash with all-None args.
 
@@ -129,6 +154,33 @@ class TestCompletedHandler:
         assert entry["profile_name"] == "reviewer"
         assert entry["summary"] == "All checklist items done"
         assert "completed_at" in entry
+
+    def test_completed_handler_creates_missing_ledger_dir(self, tmp_path):
+        """The completion row survives a `~/.hscc` that does not exist yet (F2)."""
+        log_path = tmp_path / "missing-hscc" / "task_completions.jsonl"
+        assert not log_path.parent.exists()
+        with patch.object(workflow, "_COMPLETION_LOG", str(log_path)):
+            result = workflow.on_kanban_task_completed(
+                task_id="test-791", profile_name="reviewer",
+                summary="done", board="default")
+        assert result is not None
+        entry = json.loads(log_path.read_text().strip())
+        assert entry["task_id"] == "test-791"
+        assert entry["summary"] == "done"
+
+    def test_completed_handler_reports_remaining_failure(self, tmp_path, capsys):
+        """An append that still fails is logged once, never swallowed."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("")
+        log_path = blocker / "task_completions.jsonl"
+        with patch.object(workflow, "_COMPLETION_LOG", str(log_path)), \
+             patch.object(workflow, "_BLOCKED_LOG",
+                          str(tmp_path / "blocked_tasks.jsonl")):
+            result = workflow.on_kanban_task_completed(task_id="test-792")
+        assert result is not None
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert str(log_path) in err
 
     def test_completed_handler_noop_without_context(self, tmp_path):
         """on_kanban_task_completed doesn't crash with all-None args.
