@@ -1,21 +1,26 @@
 import heal
 
-def test_reap_orphans_spares_serving_units(monkeypatch):
+# Reaper topology comes from conftest's _pin_topology: HEAD 192.0.2.10, workers
+# 192.0.2.11/.12/.13 — TEST-NET-1 only, no fleet is contacted by this file.
+# serving.json is planted as a real fake FILE (the `fake_serving` fixture) rather
+# than by stubbing a reader, because for this tool "orphan" IS that file's content
+# and the F13 guard branches on the file's STATE (absent/corrupt/unit-less).
+
+
+def test_reap_orphans_spares_serving_units(monkeypatch, fake_serving):
+    fake_serving([{"name": "orch", "nodes": ["192.0.2.12"]}])
     monkeypatch.setattr(heal, "_running_containers", lambda: [
         {"node": "192.0.2.12", "recipe": "orch"},
         {"node": "192.0.2.13", "recipe": "stray"},
-    ])
-    monkeypatch.setattr(heal.cl, "read_serving_units", lambda: [
-        {"name": "orch", "nodes": ["192.0.2.12"]},
     ])
     monkeypatch.setattr(heal.cl, "run_cmd", lambda args, timeout=30:
                         {"ok": True, "stdout": "", "stderr": "", "code": 0})
     out = heal.reap_orphans({"confirm": True})
     assert out["reaped"] == [{"node": "192.0.2.13", "recipe": "stray"}]
 
-def test_reap_orphans_requires_confirm(monkeypatch):
+def test_reap_orphans_requires_confirm(monkeypatch, fake_serving):
+    fake_serving([{"name": "orch", "nodes": ["192.0.2.12"]}])
     monkeypatch.setattr(heal, "_running_containers", lambda: [])
-    monkeypatch.setattr(heal.cl, "read_serving_units", lambda: [])
     out = heal.reap_orphans({})
     assert out["preview"] is True
 
@@ -27,12 +32,17 @@ def test_restart_model_requires_confirm():
     out = heal.restart_model({"recipe": "r", "node": "192.0.2.12"})
     assert out["preview"] is True
 
-def test_reap_never_touches_head(monkeypatch):
+def test_reap_never_touches_head(monkeypatch, fake_serving):
+    """HEAD stays off the orphan list even though serving.json says nothing about
+    it — the exemption is unconditional, not a property of the file. The
+    absent/corrupt-file half of that shape is now the guard's refusal, pinned in
+    test_heal_reap_serving_guard_t_b21a939e.py; here serving.json is healthy so
+    this test says only what its name says."""
+    fake_serving([{"name": "worker-a", "nodes": ["192.0.2.11"]}])
     monkeypatch.setattr(heal, "_running_containers", lambda: [
         {"node": heal.cl.HEAD, "recipe": "orch-27b"},
         {"node": "192.0.2.13", "recipe": "stray"},
     ])
-    monkeypatch.setattr(heal.cl, "read_serving_units", lambda: [])  # empty/corrupt serving.json
     monkeypatch.setattr(heal.cl, "run_cmd", lambda args, timeout=30:
                         {"ok": True, "stdout": "", "stderr": "", "code": 0})
     out = heal.reap_orphans({"confirm": True})
@@ -44,13 +54,13 @@ def test_restart_refuses_head_without_force():
     assert out.get("refused") is True and out["executed"] is False
 
 
-def test_reap_orphans_tracks_failed_stops(monkeypatch):
+def test_reap_orphans_tracks_failed_stops(monkeypatch, fake_serving):
     """reap_orphans should check run_cmd result and only reap on success."""
+    fake_serving([{"name": "worker-a", "nodes": ["192.0.2.11"]}])
     monkeypatch.setattr(heal, "_running_containers", lambda: [
         {"node": "192.0.2.13", "recipe": "good-orphan"},
         {"node": "192.0.2.14", "recipe": "bad-orphan"},
     ])
-    monkeypatch.setattr(heal.cl, "read_serving_units", lambda: [])
 
     def fake_run_cmd(args, timeout=30):
         recipe = args[2]  # [SPARKRUN, "stop", recipe, "--hosts", node]
@@ -70,12 +80,12 @@ def test_reap_orphans_tracks_failed_stops(monkeypatch):
     assert "host unreachable" in out["failed"][0]["error"]
 
 
-def test_reap_orphans_ok_when_all_succeed(monkeypatch):
+def test_reap_orphans_ok_when_all_succeed(monkeypatch, fake_serving):
     """When all stops succeed, ok=True and failed is None."""
+    fake_serving([{"name": "worker-a", "nodes": ["192.0.2.11"]}])
     monkeypatch.setattr(heal, "_running_containers", lambda: [
         {"node": "192.0.2.13", "recipe": "orphan1"},
     ])
-    monkeypatch.setattr(heal.cl, "read_serving_units", lambda: [])
     monkeypatch.setattr(heal.cl, "run_cmd", lambda args, timeout=30:
                         {"ok": True, "stdout": "", "stderr": "", "code": 0})
 
@@ -86,12 +96,12 @@ def test_reap_orphans_ok_when_all_succeed(monkeypatch):
     assert out["failed"] is None
 
 
-def test_reap_orphans_all_fail(monkeypatch):
+def test_reap_orphans_all_fail(monkeypatch, fake_serving):
     """When all stops fail, reaped is empty and ok=False."""
+    fake_serving([{"name": "worker-a", "nodes": ["192.0.2.11"]}])
     monkeypatch.setattr(heal, "_running_containers", lambda: [
         {"node": "192.0.2.13", "recipe": "orphan1"},
     ])
-    monkeypatch.setattr(heal.cl, "read_serving_units", lambda: [])
     monkeypatch.setattr(heal.cl, "run_cmd", lambda args, timeout=30:
                         {"ok": False, "stdout": "", "stderr": "ssh refused", "code": 255})
 

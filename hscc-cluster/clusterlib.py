@@ -5,7 +5,7 @@ Topology (HEAD/NODES/NAS_HOST) is resolved lazily via the single discovery
 module (WS2). There is NO fake-IP fallback: if the cluster can't be resolved,
 accessing these names raises DiscoveryError rather than silently SSHing
 documentation addresses."""
-import json, os, subprocess
+import json, os, subprocess, time
 
 try:
     from . import discovery as _discovery  # package context (runtime)
@@ -76,6 +76,71 @@ def read_serving_units():
         return data.get("units", []) if isinstance(data, dict) else []
     except (FileNotFoundError, json.JSONDecodeError):
         return []
+
+
+#: ``state`` values for :func:`serving_snapshot`.
+SERVING_OK = "ok"
+SERVING_ABSENT = "absent"
+SERVING_UNPARSEABLE = "unparseable"
+SERVING_UNREADABLE = "unreadable"
+
+
+def serving_snapshot(path=None):
+    """Read serving.json ONCE and report its content AND its file state.
+
+    :func:`read_serving_units` is the tolerant read: missing or corrupt answers
+    ``[]``. That is the right answer for a read-only tool and a dangerous one for
+    a reaper — "the file said nothing" and "the fleet serves nothing" collapse to
+    the same value, and the second one stops containers (F13,
+    docs/audits/2026-11-23-agent-surface.md §4/§9). Anything that mutates on the
+    strength of serving.json needs to tell those apart, so it gets this.
+
+    Returns ``{"path", "state", "units", "age_s"}``:
+
+      * ``state`` — ``"ok"`` (parsed a JSON object), ``"absent"`` (no file),
+        ``"unreadable"`` (OSError: permissions, unreadable home, dangling
+        symlink) or ``"unparseable"`` (not JSON, or JSON that is not an object).
+      * ``units`` — the declared unit list; ``[]`` whenever ``state`` is not
+        ``"ok"``, so a caller can never pair a non-``"ok"`` state with units it
+        would then trust.
+      * ``age_s`` — seconds since the file's mtime, or ``None`` when it could not
+        be stat'ed. Age is REPORTED and never enforced here: serving.json is
+        written by bootstrap's ``serving_gen``, ``template apply`` and
+        ``onboard.py`` — operator-triggered events, not a heartbeat — so there is
+        no age at which it is legitimately stale. Age is context for the verdict,
+        not a threshold.
+
+    ONE ``open()`` for the whole read, so a verdict and the node set it judges
+    cannot come from two different versions of a file that has >=3 writers.
+    ``path`` defaults to the module-level :data:`SERVING_JSON` read at CALL time
+    (not a default-arg bound at definition), so tests that monkeypatch the
+    constant take effect. Never raises.
+    """
+    if path is None:
+        path = SERVING_JSON
+    snap = {"path": str(path), "state": SERVING_OK, "units": [], "age_s": None}
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        snap["state"] = SERVING_ABSENT
+        return snap
+    except json.JSONDecodeError:
+        snap["state"] = SERVING_UNPARSEABLE
+        return snap
+    except OSError:
+        snap["state"] = SERVING_UNREADABLE
+        return snap
+    if not isinstance(data, dict):
+        snap["state"] = SERVING_UNPARSEABLE
+        return snap
+    units = data.get("units", [])
+    snap["units"] = units if isinstance(units, list) else []
+    try:
+        snap["age_s"] = max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        snap["age_s"] = None
+    return snap
 
 
 def confirm_gate(confirm, action):
