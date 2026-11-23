@@ -91,7 +91,8 @@ def test_registry_exists_and_covers_the_feature_rows():
     assert keys == ["orch_waker", "cron_watchers", "supervision",
                     "kanban_enforce", "main_board", "main_wakeups",
                     "budget_hook", "node_pauses",
-                    "node_pause_expiry", "main_only_surface"], \
+                    "node_pause_expiry", "main_only_surface",
+                    "orch_wake_subs"], \
         "registry order is row order"
 
 
@@ -131,7 +132,8 @@ def test_registry_seam_names_match_the_run_doctor_signature():
                                      "_main_wakeups_check",
                                      "_node_pauses_check",
                                      "_node_pause_expiry_check",
-                                     "_main_only_surface_check"}
+                                     "_main_only_surface_check",
+                                     "_orch_wake_subs_check"}
     assert "_main_board_check" not in declared, \
         "a new row must not add a keyword to run_doctor()'s signature"
 
