@@ -787,6 +787,14 @@ def test_spawn_hands_down_the_read_end_and_keeps_the_write_end(monkeypatch,
     parent keeps the write end in module state, and the read end is closed here
     — a parent that kept its own read end open could hold the pipe shut for a
     watchdog that should already be gone.
+
+    ``pass_fds`` is also the ONLY thing that makes the fd inheritable (``os.pipe``
+    fds are non-inheritable since PEP 446 and ``Popen`` closes every other fd in
+    the child), which is what keeps the API's *other* children from holding the
+    write end open and delaying detection forever — ``api_cli._spawn_dashboard``
+    is exactly that shape. Measured with a sibling in its own session left alive
+    past the parent's SIGKILL: the serve still died 0.054 - 0.172 s later, which
+    is pipe speed, not the 0.25 s poll speed the fallback would cost.
     """
     monkeypatch.setattr(bridge, "_watchdog_script", lambda: str(WATCHDOG))
     monkeypatch.setattr(bridge, "_serve_env", lambda env: dict(env))
