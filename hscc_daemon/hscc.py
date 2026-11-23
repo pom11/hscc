@@ -555,9 +555,11 @@ COMMAND_HELP = {
     # line gets the 2-space prefix — every line is authored to stay <=76 so
     # the rendered block fits the (B) gate's 78 budget (t_90082309: the old
     # single "Subcommands: status hosts … up [--dry-run]" line overflowed at
-    # width 80). Verb list unchanged, split into two aligned lines.
+    # width 80). Verb list split into two aligned lines there; `history` was
+    # added by the LEFT-4 coverage gate (t_c13de3cc) after the dispatcher had
+    # carried it unadvertised.
     "cluster": "Cluster management commands.\n"
-               "  Subcommands: status  hosts  monitor  jobs  info\n"
+               "  Subcommands: status  hosts  monitor  jobs  info  history\n"
                "               stop <id>  down [--dry-run]  up [--dry-run]\n"
                "  Usage: hscc cluster <subcommand> [args]",
     "template": "Cluster template commands.\n  Subcommands: list status preview validate apply\n  preview/validate take <name>; validate also takes\n  [--structural-only] [--json]; apply also takes\n  [--confirm] [--force-recreate]. Try 'hscc template --help'.\n  Usage: hscc template <subcommand> [args]",
@@ -576,7 +578,10 @@ COMMAND_HELP = {
                "  Delegates to the relocated portfolio CLI under hscc-project/.\n"
                "  Try 'hscc project --help' for the full subcommand surface.\n"
                "  Usage: hscc project <subcommand> [args]",
-    "api": "HSCC HTTP API server lifecycle.\n  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>] stop status\n  Usage: hscc api <subcommand> [args]",
+    "api": "HSCC HTTP API server lifecycle.\n"
+           "  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>]\n"
+           "               stop  status  install-service  uninstall-service\n"
+           "  Usage: hscc api <subcommand> [args]",
     "autodown": "Idle autodown/autoup for the GPU serving layer.\n  Subcommands: status enable [--idle-minutes <n>] [--force] disable wake cancel\n  Usage: hscc autodown <subcommand> [args]",
     # Multi-line value, same 76-col authored budget as project/cluster above
     # (F5 card t_fc307a51: the base blocked/stale sentences measured 121 and
