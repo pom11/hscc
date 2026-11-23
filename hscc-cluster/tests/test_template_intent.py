@@ -115,14 +115,50 @@ class TestResolve:
         assert ports == [8000, 8001]
         assert len({u.node for u in plan.families[0].units}) == 1   # same node
 
-    def test_proxy_ports_increment_per_family(self):
+    def test_every_proxy_family_resolves_to_the_one_gateway_port(self):
+        """sparkrun keeps ONE gateway per cache dir, so a proxy family must not
+        get a port of its own.
+
+        A second port was only ever a refusal waiting: sparkrun's gateway state
+        dir has no port in it and its liveness check is port-agnostic, so the
+        second family's ``proxy start`` fails and its consumers end up with a
+        URL on a port nothing bound. Every proxy family therefore resolves to
+        ``base_proxy_port`` — the live gateway's address.
+        """
         t = ti.ClusterTemplate.from_dict({
             "name": "x", "orchestrator": "o.yaml",
             "families": [
                 {"name": "coding", "models": ["a.yaml"], "workers": 1},
                 {"name": "vision", "models": ["b.yaml"], "workers": "remaining"}]})
         plan = ti.resolve(t, _topo(3), _coster=_coster())
-        assert [f.proxy_port for f in plan.families] == [4000, 4001]
+        assert [f.proxy_port for f in plan.families] == [4000, 4000]
+
+    def test_explicit_nodes_proxy_families_share_it_too(self):
+        """The explicit-``nodes:`` branch mints proxy_port on its own code path
+        — it must resolve to the same single gateway port, not drift back to a
+        per-family counter."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "version": 3,
+            "orchestrator": {"recipe": "o.yaml", "nodes": ["192.0.2.1"]},
+            "families": [
+                {"name": "coding", "models": ["a.yaml"], "nodes": ["192.0.2.2"]},
+                {"name": "vision", "models": [{"recipe": "b.yaml", "tp": 2}],
+                 "nodes": ["192.0.2.3", "192.0.2.4"]}]})
+        plan = ti.resolve(t, _topo(3), _coster=_coster())
+        assert [f.proxy_port for f in plan.families] == [4000, 4000]
+
+    def test_proxy_false_family_still_resolves_to_no_gateway(self):
+        """Collapsing the ports must not erase the OTHER half of the field:
+        ``None`` still means "this family has no gateway" (its consumers fall
+        back to a concrete endpoint)."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": "o.yaml",
+            "families": [
+                {"name": "coding", "models": ["a.yaml"], "workers": 1,
+                 "proxy": False},
+                {"name": "vision", "models": ["b.yaml"], "workers": "remaining"}]})
+        plan = ti.resolve(t, _topo(3), _coster=_coster())
+        assert [f.proxy_port for f in plan.families] == [None, 4000]
 
     def test_remaining_excludes_claimed(self):
         t = ti.ClusterTemplate.from_dict({
