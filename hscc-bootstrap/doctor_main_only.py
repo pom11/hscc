@@ -273,7 +273,10 @@ def discover_profiles(hermes_home: str) -> List[Tuple[str, str]]:
     """``[(name, profile_home)]`` for every non-dot dir under ``profiles/``.
 
     Delegates to ``skill_guard.discover_profiles`` — the sweep the skill findings
-    already use — so the dot-dir rule and the sort order stay in one place.
+    already use — so the dot-dir rule and the sort order stay in one place. The
+    dot-dir rule is load-bearing, not tidiness: ``profiles/.deleted`` is a recycle
+    dir (Oct 26, two ``probe-*`` markers) that a plain directory glob counts, and
+    a home list carrying it means a finding that can never be fixed.
     """
     try:
         import skill_guard  # noqa: PLC0415 - flat sibling of hscc-bootstrap
