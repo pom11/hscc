@@ -158,6 +158,13 @@ def _no_tmux_discovery(monkeypatch):
                         lambda port, token: False, raising=False)
     monkeypatch.setattr(gateway_bridge, "_listener_cmdline",
                         lambda port: None, raising=False)
+    # Same contract for the sidecar's parent-liveness watchdog (t_ed2f1abe):
+    # default "no watchdog available", which is the pre-t_ed2f1abe spawn shape
+    # (serve spawned directly into the test's fake Popen). Nothing in this leg
+    # may spawn a real watchdog + a real child; the one case that does pins the
+    # seam to the real script itself.
+    monkeypatch.setattr(gateway_bridge, "_watchdog_script",
+                        lambda: None, raising=False)
 
 
 @pytest.fixture(autouse=True)

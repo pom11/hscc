@@ -15,6 +15,12 @@ This module owns the two pieces that were missing:
      whole thing, ``hscc api stop`` tears it down — no launchd plist, no
      separate management.
 
+     The spawn goes through :mod:`gateway_serve_watchdog` (same dir), which is
+     the piece that makes the sidecar die with an API that never got to run
+     :func:`shutdown` — the SIGKILL escalation in ``hscc api stop``, a crash, or
+     a blocked teardown. ``shutdown()`` alone was the only protection, and it is
+     the door a killed parent cannot open (t_ed2f1abe).
+
   2. Driver mounts — a lazily-mounted :class:`GatewayDriver` per project when
      the project's session is viewed/opened (WS connect from routes_ws, or a
      history read from routes_session). Mounting backfills the store from the
@@ -42,6 +48,7 @@ import logging
 import os
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -66,6 +73,26 @@ _MOUNT_FAIL_HW: dict = {}
 # Seconds between TCP accept probes while health-checking the serve boot.
 _SERVE_PROBE_INTERVAL_S = 0.5
 
+# --- sidecar supervision (t_ed2f1abe) -------------------------------------- #
+# ``hermes serve`` is spawned under gateway_serve_watchdog.py, which is what
+# makes the sidecar die when this process dies by anything OTHER than a clean
+# return through ``shutdown()`` — the SIGKILL escalation in ``hscc api stop``, a
+# crash, or a teardown that blocks. macOS has no PR_SET_PDEATHSIG, so the
+# watchdog's primary signal is a pipe: this process holds the write end, the
+# watchdog holds the read end, and the kernel returns EOF to it the instant this
+# process's fd table is destroyed (measured 0.8-1.0 ms; the reparenting-poll
+# fallback it degrades to costs the poll interval instead — see the watchdog's
+# module docstring for the measurement table).
+_WATCHDOG_NAME = "gateway_serve_watchdog.py"
+#: Env contract with the watchdog (read by it, popped before the serve spawns).
+ENV_LIVENESS_FD = "HSCC_GATEWAY_LIVENESS_FD"
+#: Seconds the API waits for the watchdog to finish tearing the serve down, on
+#: both the clean stop and the failed-readiness path. MUST stay above the
+#: watchdog's own TERM + KILL budget (2.0 s + 1.0 s): an API that stops waiting
+#: too early kills the watchdog mid-teardown and rebuilds the orphan out of the
+#: fix, which is the failure mode this whole module exists to close.
+_SHUTDOWN_WAIT_S = 5.0
+
 # The serve binary (authoritative prior: the isolated probes ran
 # ~/.hermes/hermes-agent/venv/bin/hermes serve ...). Overridable via config.
 DEFAULT_SERVE_BIN = os.path.join(
@@ -83,6 +110,12 @@ _serve_proc: Optional[subprocess.Popen] = None
 _serve_port: int = DEFAULT_SERVE_PORT
 _serve_bin: str = DEFAULT_SERVE_BIN
 _drivers: dict[str, GatewayDriver] = {}   # project -> mounted driver
+#: Write end of the parent-liveness pipe, held for the life of the process (and
+#: across the serve's). Only this process may hold it — ``os.pipe()`` marks both
+#: ends close-on-exec, so no descendant inherits it and an EOF at the watchdog
+#: therefore means "this API process is gone", not "nobody in the tree wants
+#: it". None when no supervised serve was ever spawned (or after a release).
+_serve_liveness_write_fd: Optional[int] = None
 
 
 def _reset_for_tests() -> None:
@@ -97,6 +130,25 @@ def _reset_for_tests() -> None:
         _serve_bin = DEFAULT_SERVE_BIN
         _drivers = {}
         _MOUNT_FAIL_HW.clear()
+    _release_liveness_write_fd()
+
+
+def _release_liveness_write_fd() -> None:
+    """Close the held write end, if any. Idempotent, never raises.
+
+    Closing it is NOT a teardown mechanism (the watchdog would take that as
+    "the parent is gone") — it is bookkeeping, so a reset or a re-spawn cannot
+    leave a stale fd behind and let a dead serve's watchdog keep reading a pipe
+    nobody owns. Callers must have already stopped the supervised process.
+    """
+    global _serve_liveness_write_fd
+    with _LOCK:
+        fd, _serve_liveness_write_fd = _serve_liveness_write_fd, None
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -226,6 +278,97 @@ def _serve_env(env) -> dict:
     return e
 
 
+def _watchdog_script() -> Optional[str]:
+    """Path of the parent-liveness watchdog, or None when it is not available.
+
+    Seam, defaulting to the honest answer. When it returns None the serve is
+    spawned DIRECTLY — the pre-t_ed2f1abe shape, with no parent-liveness
+    protection — so a test that patches this to None pins the fallback, and the
+    suite-wide conftest default keeps every other unit test off the real spawn.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        _WATCHDOG_NAME)
+    return path if os.path.exists(path) else None
+
+
+def _spawn_serve(cmd: list) -> subprocess.Popen:
+    """Spawn ``cmd`` (the ``hermes serve`` argv) under the liveness watchdog.
+
+    Returns the Popen of the process the API supervises — the WATCHDOG, not the
+    serve, which is one level down with its own process group. Raises OSError if
+    neither spawn works, which is how ``start_serve``'s existing failure path
+    reports it.
+
+    The liveness pipe: ``os.pipe()`` marks both ends close-on-exec, so the write
+    end stays exclusively in this process (a ``Popen`` never hands it sideways)
+    and the watchdog's read returns EOF exactly when this process's fd table is
+    destroyed — SIGKILL, a crash, or an interpreter death all land there. The
+    read end is what goes down via ``pass_fds``, which is also why its number
+    survives the exec and can be named in the env.
+    """
+    watchdog = _watchdog_script()
+    env = _serve_env(os.environ)
+    if watchdog is None:
+        log.warning("gateway-bridge: %s not available; spawning the serve "
+                    "directly — it will NOT survive a kill that skips "
+                    "shutdown()", _WATCHDOG_NAME)
+        return subprocess.Popen(
+            cmd, env=env, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+
+    # Release any previous hold BEFORE the new pipe, so two write ends can never
+    # be live at once (a stale one would keep a retired watchdog waiting).
+    _release_liveness_write_fd()
+    read_fd, write_fd = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable or "python3", watchdog] + list(cmd),
+            env=dict(env, **{ENV_LIVENESS_FD: str(read_fd)}),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, pass_fds=(read_fd,))
+    except OSError as exc:
+        os.close(read_fd)
+        os.close(write_fd)
+        # A watchdog that cannot start must not cost the operator the sidecar
+        # (the WS relay's REST fallback is the whole reason this is optional):
+        # degrade to the direct spawn, loudly.
+        log.warning("gateway-bridge: watchdog spawn failed (%r); spawning the "
+                    "serve directly — it will NOT survive a kill that skips "
+                    "shutdown()", exc)
+        return subprocess.Popen(
+            cmd, env=env, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+    os.close(read_fd)                    # the parent keeps ONLY the write end
+    global _serve_liveness_write_fd
+    with _LOCK:
+        _serve_liveness_write_fd = write_fd
+    return proc
+
+
+def _stop_supervised(proc: subprocess.Popen) -> None:
+    """Stop the supervised process and wait for its teardown to finish.
+
+    The wait is the point, and it must outlast the watchdog's own TERM+KILL
+    budget (see ``_SHUTDOWN_WAIT_S``): SIGKILLing the watchdog while it is still
+    waiting on the serve is how the orphan comes back through the fix.
+    """
+    try:
+        proc.terminate()
+    except OSError as exc:
+        log.warning("gateway-bridge: could not signal the supervised serve: %r",
+                    exc)
+        return
+    try:
+        proc.wait(timeout=_SHUTDOWN_WAIT_S)
+    except subprocess.TimeoutExpired:
+        log.warning("gateway-bridge: supervised serve still up after %ss; "
+                    "killing it", _SHUTDOWN_WAIT_S)
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def start_serve(port: Optional[int] = None, bin_path: Optional[str] = None,
                 serve_bin: Optional[str] = None) -> bool:
     """Spawn + health-check the supervised ``hermes serve`` sidecar.
@@ -299,11 +442,7 @@ def start_serve(port: Optional[int] = None, bin_path: Optional[str] = None,
 
     cmd = [binary, "serve", "--port", str(port), "--skip-build"]
     try:
-        proc = subprocess.Popen(
-            cmd, env=_serve_env(os.environ),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        proc = _spawn_serve(cmd)
     except OSError as exc:
         log.warning("gateway-bridge: failed to start hermes serve: %r", exc)
         return False
@@ -315,16 +454,17 @@ def start_serve(port: Optional[int] = None, bin_path: Optional[str] = None,
         if proc.poll() is not None:
             log.warning("gateway-bridge: hermes serve exited early (rc=%s)",
                         proc.returncode)
+            _release_liveness_write_fd()
             return False
         if _probe_tcp(host, port):
             break
         time.sleep(_SERVE_PROBE_INTERVAL_S)
     else:
-        # Timed out waiting — terminate the orphan so we don't leak a process.
-        try:
-            proc.terminate()
-        except OSError:
-            pass
+        # Timed out waiting — stop what we started so we don't leak a process,
+        # and only then release the liveness fd (releasing it first would hand
+        # the watchdog an EOF and start a second teardown racing this one).
+        _stop_supervised(proc)
+        _release_liveness_write_fd()
         log.warning("gateway-bridge: hermes serve did not accept on "
                     "127.0.0.1:%s within %ss", port, _SERVE_READY_TIMEOUT_S)
         return False
@@ -511,7 +651,12 @@ def shutdown() -> None:
     Called on API teardown (``api_cli._serve`` finally after serve_forever) so
     no driver thread or serve subprocess outlives the API. Idempotent; never
     raises. Drivers are stopped first (each releases the serve's turn lease on
-    its pinned session), then the serve process is terminated.
+    its pinned session), then the supervised process is stopped and waited for.
+
+    This is the COOPERATIVE door. It is not the guarantee: a teardown that never
+    runs (the SIGKILL escalation in ``hscc api stop``, a crash, a blocked
+    ``finally:``) is covered by gateway_serve_watchdog.py instead, which notices
+    this process is gone and takes the serve with it.
     """
     global _drivers
     with _LOCK:
@@ -524,14 +669,8 @@ def shutdown() -> None:
         except Exception as exc:  # noqa: BLE001
             log.warning("gateway-bridge: stop driver during shutdown: %r", exc)
     if proc is not None:
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        except OSError as exc:
-            log.warning("gateway-bridge: kill serve during shutdown: %r", exc)
+        _stop_supervised(proc)
+    _release_liveness_write_fd()
     with _LOCK:
         global _serve_up
         _serve_up = False
