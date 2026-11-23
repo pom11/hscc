@@ -268,7 +268,10 @@ class TestApplyBlocksMoreThanOneProxyFamily:
         _, rig = self._setup(tmp_path, monkeypatch, "two-proxy", TWO_PROXY_YAML)
         res = ct.apply_template("two-proxy", confirm=True)
 
-        assert res["status"] == "blocked", res
+        # (``res.get`` so a pre-guard run FAILS HERE with the whole apply report
+        # in the message — that report is the evidence: two proxy start argv,
+        # the second family loaded=False, and a proxies/ step saying "ok".)
+        assert res.get("status") == "blocked", res
         assert res["success"] is False
         # a NAMED error, not a silent per-family loaded=False
         err = " || ".join(res["errors"])
