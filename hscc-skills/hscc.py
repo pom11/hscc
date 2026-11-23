@@ -336,6 +336,30 @@ def _non_main_homes(hermes_home):
     return out
 
 
+def _main_only_copies(skills_root):
+    """Every hscc main-only skill dir under *skills_root*, at any depth.
+
+    hermes discovers a SKILL.md package at any depth, so a category copy
+    (``skills/control/hscc``) is just as live as a top-level one. A directory
+    only counts when it actually carries ``SKILL.md`` and its name is one of
+    the main-only names; an unrelated reference subdir that happens to share
+    a name is not a skill and is left alone. A selected parent is not
+    descended into, so a tree cannot be listed twice.
+    """
+    found = []
+    for root, dirs, _files in os.walk(skills_root):
+        keep = []
+        for name in sorted(dirs):
+            path = os.path.join(root, name)
+            if name in MAIN_ONLY_SKILLS and \
+                    os.path.isfile(os.path.join(path, "SKILL.md")):
+                found.append((path, name))
+                continue  # moving the parent already carries this subtree
+            keep.append(name)
+        dirs[:] = keep
+    return found
+
+
 def move_non_main_skill_copies(hermes_home=None, stamp=None):
     """Move main-only skills out of every non-main home into dated backups.
 
@@ -353,10 +377,7 @@ def move_non_main_skill_copies(hermes_home=None, stamp=None):
         skills = os.path.join(home, "skills")
         if not os.path.isdir(skills):
             continue
-        for skill in CLUSTER_SKILLS:
-            src = os.path.join(skills, skill)
-            if not os.path.isdir(src):
-                continue
+        for src, skill in _main_only_copies(skills):
             backups = os.path.join(home, SKILLS_BACKUPS_DIRNAME,
                                    f"removed-{stamp}")
             ensure_dir(backups)

@@ -9,6 +9,13 @@ installed copy differs is snapshotted to `<home>/skills-backups/<name>.bak-<stam
 and then overwritten, so an existing copy is never a reason to skip (t_45fa38e2).
 Names outside `BUNDLED_SKILLS` are never written, moved or removed.
 
+The cluster-control skills (`hscc`, `hscc-cluster`, `hscc-model-onboard`) are
+**main-profile only** (R4, t_b52e70ba). They install to
+`<root>/profiles/<main_orch.main_name()>/skills/`; copies already sitting in the
+root home or any other profile are MOVED (never deleted) to that home's
+`skills-backups/removed-<stamp>/`. The generic/work skills keep installing at
+`HERMES_HOME/skills/`.
+
 The vendored tree and that list are the **same set**: `install/hscc-skills/` holds
 13 skill dirs and `BUNDLED_SKILLS` names all 13, so every vendored skill is installed
 and updated. The full vendored inventory is in

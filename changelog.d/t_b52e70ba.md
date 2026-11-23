@@ -26,11 +26,12 @@ task: t_b52e70ba
 kind: Verified
 task: t_b52e70ba
 
-* New `hscc-bootstrap/tests/test_skill_install_main_only.py` (6 cases) drives
+* New `hscc-bootstrap/tests/test_skill_install_main_only.py` (7 cases) drives
   the real CLI as a subprocess with throwaway `HERMES_HOME` / `HSCC_DIR`: the
   three skills land under the resolved (non-default) main name, the root home
   and two fake profiles keep zero copies, every moved tree is byte-recoverable
-  under `skills-backups/removed-<stamp>/`, a profile-authored skill survives,
+  under `skills-backups/removed-<stamp>/`, a profile-authored skill and a
+  same-named non-skill reference dir survive, a category-depth copy is moved,
   the sweep is idempotent, a non-main `HERMES_HOME` is cleaned, `status` reads
   the main profile, a tampered name fails closed, and the full `install` verb
   follows the same route.

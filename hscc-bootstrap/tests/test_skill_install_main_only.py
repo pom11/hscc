@@ -118,6 +118,26 @@ def test_main_only_skills_land_on_the_resolved_main_and_nowhere_else(tmp_path):
     assert "MOVED" in r.stdout and "removed-" in r.stdout
 
 
+def test_category_copies_are_moved_but_a_mere_reference_dir_is_not(tmp_path):
+    """hermes scans SKILL.md at any depth, so a category copy is still live."""
+    root, hscc, _main_home = make_sandbox(tmp_path)
+    nested = root / "profiles" / "backend" / "skills" / "legacy" / "hscc"
+    nested.mkdir(parents=True)
+    (nested / "SKILL.md").write_text("# nested stale copy\n", encoding="utf-8")
+    reference = root / "profiles" / "backend" / "skills" / "mine" / "references" / "hscc"
+    reference.mkdir(parents=True)
+    (reference / "note.md").write_text("not a skill\n", encoding="utf-8")
+
+    r = run_installer(root, hscc)
+    assert r.returncode == 0, r.stderr
+    assert not nested.exists()
+    kept = backup_dirs(root / "profiles" / "backend")
+    assert len(kept) == 1
+    assert (kept[0] / "hscc" / "SKILL.md").read_text(
+        encoding="utf-8") == "# nested stale copy\n"
+    assert (reference / "note.md").read_text(encoding="utf-8") == "not a skill\n"
+
+
 def test_the_sweep_is_idempotent_and_mints_no_second_backup(tmp_path):
     root, hscc, _main_home = make_sandbox(tmp_path)
     seed_skill(root / "profiles" / "backend", "hscc-cluster", "# stale\n")
