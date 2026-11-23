@@ -2303,9 +2303,18 @@ def _reap_orphan_proxy_listener(tracked_pid):
       1. no listener -> nothing to do (returns True, port is free).
       2. the listener IS the tracked PID **or a descendant of it** -> not an
          orphan, do NOT touch it (that is sparkrun's own process, or the
-         litellm child of sparkrun's launcher — the t_640be7a2 shape: killing
-         it takes a WORKING :4000 down, which is worse than the bookkeeping
-         mismatch the verifier used to complain about).
+         litellm CHILD of sparkrun's launcher — the t_640be7a2 shape, and the
+         one that actually holds the socket: killing it takes a WORKING
+         :4000 down, which is worse than the bookkeeping mismatch the verifier
+         used to complain about. THE PIDs ARE USUALLY DIFFERENT, so identity
+         may never be ``pid == tracked_pid``.
+         UNKNOWN IS NOT "NOT MINE" (t_af7d5486): this guard uses the tri-state
+         :func:`_pid_is_tracked_or_descendant`, and a walk that could not be
+         COMPLETED refuses as well — a SIGKILL cannot be unsent, so an
+         unreadable process table must not be read as a foreign tree.
+         When ``tracked_pid`` is None there is no "mine" to compare against
+         (hollow or absent state file), so this guard stands aside and the
+         cmdline vetting decides — the shape t_90958eb8's repair relies on.
       3. the cmdline must mention litellm -> we kill only the thing we mean.
          A foreign listener (a second hscc-api, a dev server) is reported and
          left alone, exactly like the 2.8.0 orphaned-serve heal's contract.
@@ -2315,14 +2324,22 @@ def _reap_orphan_proxy_listener(tracked_pid):
     pid, cmdline = _proxy_listener()
     if pid is None:
         return True
-    matched, depth = _proxy_owner_is_tracked_proxy(pid, tracked_pid)
-    if matched:
-        log(f"proxy listener on :{PROXY_PORT} is "
-            + (f"the tracked PID {pid}" if depth == 0 else
-               f"PID {pid}, a depth-{depth} descendant of tracked PID "
-               f"{tracked_pid}")
-            + " — not an orphan, leaving it to sparkrun")
-        return False
+    if tracked_pid is not None:
+        ours = _pid_is_tracked_or_descendant(pid, tracked_pid)
+        if ours is None:
+            log(f"proxy listener on :{PROXY_PORT} is PID {pid} and sparkrun "
+                f"tracks {tracked_pid}, but its parent chain could not be read "
+                f"to the end — that does NOT prove it is foreign, and a "
+                f"SIGKILL cannot be unsent: refusing to reap, leaving it to "
+                "sparkrun", "WARN")
+            return False
+        if ours:
+            who = ("the tracked PID itself" if pid == tracked_pid else
+                   f"a descendant of tracked PID {tracked_pid}")
+            log(f"proxy listener on :{PROXY_PORT} is PID {pid} — {who} "
+                "(sparkrun records the launcher, the child holds the socket) — "
+                "not an orphan, leaving it to sparkrun")
+            return False
     if not cmdline or "litellm" not in cmdline.lower():
         log(f"proxy listener on :{PROXY_PORT} is PID {pid} but its cmdline is "
             f"not litellm ({cmdline!r}) — refusing to kill an unrecognised "
@@ -2562,6 +2579,71 @@ def _proc_ppid(pid):
         return int(out) if out.isdigit() else None
     except Exception:
         return None
+
+
+#: How many parent-hops a caller may walk upward from a port owner before it
+#: stops trying to prove the owner is ours (t_af7d5486). The live shape is ONE
+#: hop (`uv tool uvx` wrapper -> litellm child that binds :4000); the bound
+#: exists so a malformed process table costs a few `ps` calls, never a scan.
+PROXY_ANCESTRY_MAX_HOPS = 5
+
+
+def _pid_is_tracked_or_descendant(pid, tracked_pid,
+                                  max_hops=PROXY_ANCESTRY_MAX_HOPS,
+                                  ppid_fn=None):
+    """Tri-state: is `pid` sparkrun's tracked proxy, or a process IT started?
+
+    True   — PROVEN OURS: ``pid == tracked_pid``, or the bounded ``ppid`` walk
+             from ``pid`` reaches ``tracked_pid``. The live shape is one hop:
+             sparkrun's state file records the ``uv tool uvx`` WRAPPER while
+             :4000 is held by its litellm CHILD (measured on a healthy proxy:
+             tracked 85087, port owner 85090, ``PPID(85090) == 85087``).
+    False  — PROVEN NOT OURS: the walk COMPLETED at a root and never touched
+             ``tracked_pid``. A genuinely foreign listener must stay
+             distinguishable from a shrug, or the reaper can never act.
+    None   — NOT EVALUABLE: the walk could not be completed, because a parent
+             on the chain was unreadable or the hop budget ran out before a
+             root was reached. Unknown is not the same statement as "not mine".
+
+    WHY THREE VALUES AND NOT A BOOLEAN (t_af7d5486). Both consumers need
+    ``None`` kept apart from ``False``, and they read it differently ON PURPOSE:
+      - the kill path (:func:`_reap_orphan_proxy_listener`) reads ``None`` as
+        REFUSE TO KILL — a signal cannot be unsent, so an unfinished walk fails
+        closed;
+      - the repair verifier must read ``None`` as UNVERIFIED — not-evaluable is
+        not green, and it is not evidence that someone else owns the port
+        either. It does NOT call this helper yet: on main it still answers with
+        :func:`_proxy_owner_is_tracked_proxy`, and adopting the tri-state is
+        what t_0df7fc35 exists to do.
+    Collapsing ``None`` into ``False`` is what turns a ``ps`` hiccup into a
+    fleet outage: the caller concludes "not our proxy" and SIGKILLs the gateway.
+
+    `ppid_fn` is the seam tests inject; it defaults to :func:`_proc_ppid`, the
+    same ``ps`` lookup the rest of this module already trusts.
+    """
+    if not pid or not tracked_pid:
+        return None
+    pid, tracked_pid = int(pid), int(tracked_pid)
+    if pid == tracked_pid:
+        return True
+    step = ppid_fn or _proc_ppid
+    seen = {pid}
+    current = pid
+    for _ in range(max(0, int(max_hops))):
+        try:
+            parent = step(current)
+        except Exception:
+            return None
+        if parent is None:
+            return None                        # chain unreadable: not evaluable
+        parent = int(parent)
+        if parent == tracked_pid:
+            return True
+        if parent in seen or parent <= 1:
+            return False                       # hit a root (or a cycle): done
+        seen.add(parent)
+        current = parent
+    return None                                # budget spent, root never seen
 
 
 def _proc_alive(pid):

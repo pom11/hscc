@@ -1992,11 +1992,21 @@ class TestCheckProxy:
         assert killed == []
 
     def test_reap_kills_untracked_litellm_orphan(self, tmp_hfcc_dir, monkeypatch):
+        """A litellm on the port whose ancestry COMPLETES at the root without
+        the tracked PID is an orphan and is reaped (t_af7d5486).
+
+        The parent chain is now part of what "untracked" means, so this test
+        states it instead of inheriting whatever the host's PID table happened
+        to say about PID 999 — which is how a reap test passes or fails on
+        unrelated processes on the machine running it.
+        """
         from hscc_daemon import health
         killed = []
         state = {"listener": (999, "python -m litellm --config /tmp/x.yaml")}
         monkeypatch.setattr(health, "_proxy_listener", lambda: state["listener"])
         monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 111)
+        monkeypatch.setattr(health, "_proc_ppid",
+                            lambda pid: 1 if pid == 999 else None)
         def fake_kill(pid, sig):
             killed.append((pid, sig))
             state["listener"] = (None, None)      # dies on first signal

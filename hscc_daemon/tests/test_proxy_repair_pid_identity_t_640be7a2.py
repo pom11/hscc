@@ -125,11 +125,36 @@ class FakeProcessTable:
     def __init__(self, monkeypatch, table=None):
         self.table = dict(table or {})
         self.calls = []
+        # The SAME table answers both directions: the verifier asks for CHILDREN
+        # (`_proc_children`, downward BFS) while the reap asks for PARENTS
+        # (`_proc_ppid`, upward walk, t_af7d5486). Faking only one of them
+        # leaves the other reading the host's real process table — which is
+        # exactly the fail-open shape these tests must never depend on.
         monkeypatch.setattr(health, "_proc_children", self.children)
+        monkeypatch.setattr(health, "_proc_ppid", self.ppid)
 
     def children(self, pid):
         self.calls.append(int(pid))
         return list(self.table.get(int(pid), []))
+
+    def ppid(self, pid):
+        """Parent of `pid` — the inverse of `self.table`, derived on demand.
+
+        Derived rather than prebuilt because :meth:`chain` extends the table
+        after construction. A PID the table never lists as anyone's child is a
+        TOP-LEVEL process whose real parent is the root, so a foreign tree's
+        upward walk COMPLETES at the root (the honest ``False``, "proven not
+        ours") instead of stalling on an unreadable parent (``None``). That
+        distinction is the whole point of the tri-state: the reap must still
+        reap a genuinely foreign orphan, and must refuse only when the chain
+        cannot be read at all.
+        """
+        pid = int(pid)
+        self.calls.append(pid)
+        for parent, kids in self.table.items():
+            if pid in [int(k) for k in kids]:
+                return int(parent)
+        return 1
 
     def chain(self, root, length):
         """root -> c1 -> … for ``length`` links; returns the deepest PID."""
