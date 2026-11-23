@@ -4353,7 +4353,7 @@ def test_removing_a_live_claim_defers_instead_of_reporting_an_idle_repo(
     # the claim survives the removal, marked, until the gate settles it.
     assert mid["ps"]["in_flight"] is not None, mid["ps"]
     assert mid["ps"]["in_flight"]["cancel_requested"], mid["ps"]
-    assert mid["ps"]["queue"] == []
+    assert [e["pr"] for e in mid["ps"]["queue"]] == [8], mid["ps"]
     # Settled: nothing of PR #7 is left holding the repo.
     ps = mq.load_state(state)["projects"]["alpha"]
     assert ps["in_flight"] is None
