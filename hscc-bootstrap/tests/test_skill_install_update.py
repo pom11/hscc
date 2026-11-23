@@ -235,6 +235,26 @@ def test_unowned_extra_file_inside_an_owned_skill_survives(home):
     assert md5(extra) == before, "hscc deleted operator content it never shipped"
 
 
+def test_status_reports_nested_drift_the_writer_can_see(home):
+    """`status` must not call a skill OK while a shipped file differs.
+
+    The old compare walked only the top level of each skill AND only files
+    present on both sides, so a stale — or outright missing — nested
+    ``references/*.md`` printed ✓ OK. The report and the writer now share
+    ``owned_skill_drift``, which is the only definition worth having.
+    """
+    run_installer(home)  # converge everything first
+    nested = sorted(os.listdir(os.path.join(_TEMPLATE, "hscc", "references")))
+    assert nested, "the template ships no nested files — the pin would be vacuous"
+    target = os.path.join(home, "skills", "hscc", "references", nested[0])
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write("# drifted by hand\n")
+    out = run_installer(home, cmd="status")
+    row = [ln for ln in out.splitlines() if ln.strip().startswith("hscc ")]
+    assert row, f"the status table lost the hscc row:\n{out}"
+    assert "OUT-OF-DATE" in row[0], f"status lied about a nested drift:\n{row[0]}"
+
+
 # ── fail-closed on a missing backup ─────────────────────────────────────────
 
 def _load_installer_module(monkeypatch, home):

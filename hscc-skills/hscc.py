@@ -601,22 +601,20 @@ def cmd_status():
             continue
 
         installed_files = os.listdir(dst_skill) if os.path.isdir(dst_skill) else []
-        source_files = os.listdir(src_skill)
 
         if not installed_files:
-            skill_status.append((skill, "⚠ NOT INSTALLED", f"{len(source_files)} file(s) in source"))
+            n_src = sum(len(fs) for _r, _d, fs in os.walk(src_skill))
+            skill_status.append((skill, "⚠ NOT INSTALLED", f"{n_src} file(s) in source"))
             continue
 
-        out_of_date = []
-        for src_file in source_files:
-            src_path = os.path.join(src_skill, src_file)
-            dst_path = os.path.join(dst_skill, src_file)
-            if os.path.isfile(src_path) and os.path.isfile(dst_path):
-                if file_hash(src_path) != file_hash(dst_path):
-                    out_of_date.append(src_file)
-
+        # Use the WRITER's own definition of drift, so `status` and `install`
+        # can never disagree about the same tree. The old compare walked only
+        # the top level AND only files present on both sides, so it reported
+        # ✓ OK for a skill whose nested references/*.md was stale — or missing.
+        out_of_date = owned_skill_drift(src_skill, SKILLS_DEST, skill)
         if out_of_date:
-            skill_status.append((skill, "⚠ OUT-OF-DATE", f"{len(out_of_date)} file(s) need update"))
+            skill_status.append((skill, "⚠ OUT-OF-DATE",
+                                 f"{len(out_of_date)} file(s) need update"))
         else:
             skill_status.append((skill, "✓ OK", f"{len(installed_files)} file(s)"))
 
