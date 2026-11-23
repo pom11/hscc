@@ -361,8 +361,13 @@ def test_no_non_test_script_inlines_a_burner_loop():
     and timeout. Any second file matching is not exempt, including the ones that
     would rather quote the incident than describe it.
     """
+    # Both controls are SPLIT, because an audit that forbids quoting the
+    # incident's shape must not be reddened by a file quoting it to prove it
+    # bites — that is how such an audit gets exempted into uselessness. The
+    # sibling audit in `test_load_burners.py` caught exactly this in this file
+    # on its first run, which is the audit working, not misfiring.
     assert _BURNER_LOOP.search("while " + ":; do :; done")
-    assert _BURNER_LOOP.search("while true; do :; done")
+    assert _BURNER_LOOP.search("while true" + "; do :; done")
     sanctioned = {"load_burners.sh"}
     offenders = []
     for path in sorted((REPO / "scripts").glob("*.py")) + sorted(
