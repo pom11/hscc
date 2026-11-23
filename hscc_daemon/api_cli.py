@@ -605,6 +605,15 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
         # grepping ~/.hscc/api.log for a stop that worked has one string to
         # look for on both entry paths, and `hscc api stop`'s own report is a
         # message about the pid it signalled, not about the server finishing.
+        # The abandoned-listener report, AFTER the teardown it bought and BEFORE
+        # the closing line — the same order `serve_main` prints it in, so an
+        # operator who reads either entry path's output finds the two lines in the
+        # same sequence. This is the half of t_60932269's work this entry path was
+        # silently dropping: without it a stop that gave up on a wedged loop is
+        # indistinguishable, in the log, from one that got every loop back.
+        if not stop_clean:
+            daemon_ops.log(_abandoned_listener_report(server, api), "WARN",
+                           log_file=API_LOG_FILE, pid_file=API_PID_FILE)
         daemon_ops.log("HSCC API stopped",
                        log_file=API_LOG_FILE, pid_file=API_PID_FILE)
     # 0 for a stop that got every loop back, 1 for one that had to abandon a
