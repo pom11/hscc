@@ -19,10 +19,14 @@ kind: Verified
 task: t_28cc4de5
 
 * `hscc-api/tests/test_kanban_monitor_route_pointer.py`: 9 tests green, and they
-  bite — deleting the help pointer reddens the two CLI-end tests, deleting the
-  handler's verb name reddens the route-end test, and a `POST` registered on
-  `/v1/kanban/running` reddens the GET-only test (each proven by mutation on a
-  throwaway copy of the tree, not by argument).
+  bite — measured by mutation on a throwaway `--detach` worktree at the commit,
+  tree restored clean afterwards: removing the pointer from the verb help reddens
+  2 CLI-end tests, rewriting the handler's summary line to drop the verb name
+  reddens 1 route-end test, and registering a `POST` on `/v1/kanban/running`
+  reddens the GET-only test; the unmutated control is 9 green. (The verb name is
+  pinned on the docstring's SUMMARY line precisely because the old body prose
+  already mentioned `hscc kanban monitor --board` and F8 still happened — a
+  pairing buried in prose nobody opens is not a pointer.)
 * The naming is not allowed to be decorative: the shared-backing test drives
   both doors — `kanban_cli._cmd_monitor --json` and the route handler — against
   one spied `kanban_live.collect` and requires the identical call set
