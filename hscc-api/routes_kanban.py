@@ -250,12 +250,21 @@ def handle_kanban_stale(server, ctx, query, body):
 
 
 def handle_kanban_running(server, ctx, query, body):
-    """GET /v1/kanban/running — the running cards `hscc cards monitor` draws.
+    """GET /v1/kanban/running — ``hscc kanban monitor`` over HTTP (audit F8).
+
+    This route IS the monitor verb's route parity; the two names answer one
+    question, and the pointer is stated on BOTH ends so neither can be dropped
+    silently again (the CLI side names this path in
+    ``kanban_cli.SUBCOMMAND_HELP["monitor"]``; both ends are pinned by
+    ``tests/test_kanban_monitor_route_pointer.py``).
 
     Same ``kanban_live.collect()`` pass, same registered-project board scope,
     same row projection — so a widget and the CLI cannot disagree. ``?board=``
     is honored because ``hscc cards monitor --board`` and
     ``hscc kanban monitor --board`` both have it.
+
+    GET only, and read-only like the verb: the kill panel is a SEPARATE route
+    (``POST /v1/kanban/task/{id}/kill``) and this handler never reaches it.
     """
     board = query.get("board")
     try:
