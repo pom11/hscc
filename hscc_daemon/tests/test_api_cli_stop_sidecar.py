@@ -94,6 +94,13 @@ INTERRUPTED_INSIDE_LOG = "@@INTERRUPTED-INSIDE-LOG@@"
 #: so nothing reddens on it. It is what lets a child that then goes silent be
 #: named — see :func:`_await_child`.
 HANDLER_LATE = "@@HANDLER-LATE@@"
+#: The handler WAS dispatched and reached its first write: the child's watchdog
+#: read `api_cli._last_signal` — the product's own record, written by the first
+#: line of `_sigterm_handler` — and saw it. Informational only: a healthy child
+#: can exit before the watchdog thread is scheduled to say anything, so nothing
+#: asserts on this line; it is there so a child that goes silent afterwards can
+#: be told apart from one whose stop was never dispatched at all.
+HANDLER_RAN = "@@HANDLER-RAN@@"
 
 # ━━━ load budgets, not behaviour budgets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # None of these can turn a wrong answer into a right one: they only decide how
@@ -317,16 +324,26 @@ if verb == "serve-lograce":
     _real_log = daemon_ops.log
     _fired = []
     _raised = _threading.Event()
-    _came_back = _threading.Event()
 
     def _watchdog():
         # The trap this arm exists for is a handler that never comes back, and the
         # only witness that can see it is a thread the blocked thread is not
         # holding: `threading.Lock.acquire()` gives up the GIL while it waits, so
         # this thread still runs while the main thread is stuck inside the
-        # handler. It measures from the RAISE, not from its own birth — measured
-        # the hard way under ~100x oversubscription, a grace clocked from here
-        # accused the handler of a deadlock while the child was still crossing
+        # handler.
+        #
+        # What it waits on is the product's OWN record — `api_cli._last_signal`,
+        # written by the first line of `_sigterm_handler` — and not a line the
+        # harness could print whether or not the handler ever ran. `raise_signal`
+        # returning is NOT proof the handler was dispatched: measured on the full
+        # leg run, a `serve-lograce` child printed `@@INTERRUPTED-INSIDE-LOG@@`,
+        # started its sidecar and then served forever on a stop it had already
+        # been given, and a harness-side "it came back" flag had no way to tell
+        # that apart from a handler that ran and was ignored.
+        #
+        # It measures from the RAISE, not from its own birth — measured the hard
+        # way under ~100x oversubscription, a grace clocked from here accused the
+        # handler of a deadlock while the child was still crossing
         # `_load_api_server()` and had not raised anything yet.
         #
         # And it only OBSERVES. A task the kernel has simply not scheduled looks
@@ -335,9 +352,19 @@ if verb == "serve-lograce":
         # the child then going silent for the whole stall budget, which is what
         # :func:`_await_child` decides.
         _raised.wait()
-        if not _came_back.wait(@@HANDLER_GRACE@@):
-            print("@@MARK_LATE@@ %s had still not returned %.0fs after the raise"
-                  % (rest[1], @@HANDLER_GRACE@@), flush=True)
+        deadline = _time.monotonic() + @@HANDLER_GRACE@@
+        while _time.monotonic() < deadline:
+            if api_cli._last_signal is not None:
+                # Positive, informational: the handler was dispatched and got
+                # past its first write. Deliberately NOT asserted on — printing
+                # this is the watchdog's job and a healthy child can exit before
+                # the thread is scheduled to say anything.
+                print("@@MARK_RAN@@ signum=%s" % api_cli._last_signal, flush=True)
+                return
+            _time.sleep(0.05)
+        print("@@MARK_LATE@@ %s had still not returned %.0fs after the raise "
+              "(_last_signal=%r)"
+              % (rest[1], @@HANDLER_GRACE@@, api_cli._last_signal), flush=True)
 
     _threading.Thread(target=_watchdog, daemon=True).start()
 
@@ -348,7 +375,6 @@ if verb == "serve-lograce":
                 print("@@MARK_RACE@@", flush=True)   # the window is entered
                 _raised.set()                # the grace clock starts HERE
                 _signal.raise_signal(_signum)  # the stop lands here, on this thread
-                _came_back.set()              # the handler came back; stand down
                 _time.sleep(0.4)              # a handler that waits, waits here
             print("@@MARK_INTERRUPTED@@", flush=True)
         return _real_log(msg, *a, **kw)
@@ -388,6 +414,7 @@ HARNESS = (HARNESS
            .replace("@@MARK_RACE@@", RACE_ENTERED)
            .replace("@@MARK_INTERRUPTED@@", INTERRUPTED_INSIDE_LOG)
            .replace("@@MARK_LATE@@", HANDLER_LATE)
+           .replace("@@MARK_RAN@@", HANDLER_RAN)
            .replace("@@HANDLER_GRACE@@", repr(HANDLER_GRACE)))
 
 
