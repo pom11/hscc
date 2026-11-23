@@ -64,6 +64,13 @@ def test_project_orch_ops_formats_cleanly():
     assert "hscc.py create" in text
 
 
+def test_project_orch_ops_requires_pr_preflight():
+    text = generator._PROJECT_ORCH_OPS.format(name="x-orch")
+    assert "Verify a PR before you card against it" in text
+    assert "headRefOid" in text and "git ls-remote" in text
+    assert "do not create the card" in text
+
+
 def test_sync_updates_soul_with_backup_and_is_idempotent(tmp_path):
     pdir = _profile(tmp_path, "demo-orch", f"OLD BASE\n\n{ROLE}\n{OLD_OPS}")
     src = _source(tmp_path)
