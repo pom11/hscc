@@ -572,6 +572,57 @@ def ensure_plugins_tier_for_home(home):
     return {"tier": tier, "added": added, "pruned": pruned}
 
 
+def ensure_plugins_tier_for_new_home(home):
+    """Seed the tier for a home that a provisioning step has JUST created.
+
+    Same single-home, single-resolver contract as
+    :func:`ensure_plugins_tier_for_home` — and one deliberate difference, which
+    is the whole reason this function exists instead of that one.
+
+    ``hermes profile create`` writes ``.env``, ``SOUL.md`` and ``skills/`` and
+    NO ``config.yaml`` (measured: ``profiles_initialization.finish_profile_layout``
+    reaches ``_migrate_profile_config_if_outdated``, which returns immediately
+    when there is no config to migrate). So the new-profile caller meets a home
+    with no config at all, and :func:`ensure_plugins_tier_for_home` correctly
+    declines — which leaves R5 unsatisfied exactly where R5 says it must not be:
+    the config HERMES later creates for that home is stamped with the current
+    ``_config_version``, so ``_migrate_to_21`` never runs for it again and a
+    missing ``plugins`` key is never filled by anything. For a per-project
+    orchestrator home that is a home whose hooks never load, and — on a legacy
+    or cloned home whose version *is* old — a home ``_migrate_to_21`` fills with
+    EVERY manifest-bearing dir under its own ``plugins/`` (measured: 10, in a
+    live ``<name>-orch`` home).
+
+    So here a missing config is created, holding only ``plugins.enabled``. That
+    is not the installer's policy — :func:`enable` deliberately reports
+    ``config_missing`` rather than inventing a ROOT config, because at install
+    time a missing root config means Hermes has never run and its own first-run
+    seed is the authority. It is safe here for two reasons that do not hold for
+    the installer: the home is a profile this very step provisioned (so the
+    write cannot reach a config an operator is editing), and the key we write is
+    self-defusing under the migration path — ``_migrate_to_21`` returns as soon
+    as it sees ``plugins.enabled`` (``config_migrations.py``), so hermes'
+    first-run migration of the file we just made cannot re-widen it.
+
+    Returns the same ``{"tier", "added", "pruned"}`` record (``added`` is then
+    the whole tier), or None when the config already carries the tier.
+    """
+    home = os.path.abspath(os.path.expanduser(str(home)))
+    path = os.path.join(home, "config.yaml")
+    if not os.path.isdir(home):
+        return None                      # the profile was never provisioned
+    import yaml                                    # file-local convention (see enable())
+    if os.path.isfile(path):
+        return ensure_plugins_tier_for_home(home)
+    cfg = {}                                       # the whole doc: only the tier
+    added, pruned, tier = _write_plugins_tier(cfg, home)
+    if not added and not pruned:                   # pragma: no cover - tier empty
+        return None
+    with open(path, "w") as fh:
+        yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
+    return {"tier": tier, "added": added, "pruned": pruned}
+
+
 def _ensure_kanban_routing(cfg):
     """Route catch-all kanban work to a worker + size concurrency. Returns the
     keys changed.
@@ -1520,7 +1571,36 @@ def main(argv=None):
                         help="explicit Hermes home to wire, used as given "
                              "(default: $HERMES_HOME resolved to the Hermes "
                              "ROOT, else ~/.hermes)")
+    parser.add_argument("--plugins-tier-only", dest="plugins_tier_only",
+                        action="store_true",
+                        help="seed ONLY plugins.enabled for --home and exit — "
+                             "the new-profile tier write (R5), for a "
+                             "provisioning step that has just created one home "
+                             "and must not touch anything else. Requires "
+                             "--home; never runs the toolset/kanban/delegation/"
+                             "hooks wiring.")
     args = parser.parse_args(argv)
+    if args.plugins_tier_only:
+        # Deliberately a different code path, not a flag on enable(): the full
+        # wire would silently provision a per-project orchestrator with the
+        # toolsets, kanban routing, delegation and hooks of the main install,
+        # which is far beyond "this home must not be key-less".
+        if args.home is None:
+            parser.error("--plugins-tier-only needs --home <dir>: it seeds "
+                         "exactly ONE home and must never sweep the tree")
+        rec = ensure_plugins_tier_for_new_home(args.home)
+        if rec is None:
+            body = f"plugins.enabled already tiered (no change): {args.home}"
+        else:
+            body = (f"plugins.enabled tiered for {args.home}: "
+                    f"tier={rec['tier']} added={', '.join(rec['added']) or '-'}"
+                    f" pruned={', '.join(rec['pruned']) or '-'}")
+        if sys.stdout.isatty():
+            _theme.make_console().print(
+                _theme.panel("bootstrap", _theme.escape(body)))
+        else:
+            print(body)
+        return 0
     home = args.home if args.home is not None else _root_home()
     path = os.path.join(os.path.expanduser(home), "config.yaml")
     res = enable(path)
