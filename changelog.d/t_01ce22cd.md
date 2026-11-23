@@ -64,3 +64,13 @@ task: t_01ce22cd
   11 passed in 184.88s` — the 180 s stall signature, on an id other than the two
   that reddened the leg). The lane is stall-flaky on a loaded host; nothing in it
   reads the escalate surface.
+* post-merge (head `1b49951c`, host idle, one pytest process per leg dir):
+  `hscc_daemon/tests` **`4954 passed, 1 skipped`, exit 0** — both pre-merge reds
+  came back green. `hscc-api/tests` `1 failed, 1360 passed, 1 skipped`; the single
+  red is
+  `test_gateway_serve_watchdog.py::test_watchdog_buries_its_child_when_the_parent_is_sigkilled`,
+  the SIGKILL-liveness test that landed with `t_ed2f1abe`, and it reddens without
+  this diff too: the same selection six times over two trees — pristine
+  `origin/main` `3 passed / 3 passed / 1 failed [poison]`, this tree
+  `1 failed [poison] / 3 passed / 3 passed` — with the whole-leg red a third
+  parametrization again.
