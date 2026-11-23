@@ -353,7 +353,7 @@ def _tmux_pane_for(project: str):
         pane = repl_inject.resolve_pane(profile)
         return pane, None
     except repl_inject.InjectError as exc:
-        if exc.kind == "ambiguous":
+        if exc.kind in ("ambiguous", "ambiguous_server"):
             return None, exc.message
         return None, None
     except Exception:  # noqa: BLE001 — routing decision, never fatal to the socket

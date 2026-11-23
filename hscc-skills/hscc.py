@@ -11,6 +11,13 @@ reason to skip, which is how a stale July copy used to survive every
 bootstrap (t_45fa38e2, audit t_4c12ff7f §8). Foreign and operator skills are
 never written, moved or removed by this installer.
 
+MAIN-ONLY (t_b52e70ba, operator ruling R4): the cluster-control skills
+``hscc``, ``hscc-cluster`` and ``hscc-model-onboard`` install to the main
+orchestrator's profile only — ``<root>/profiles/<main_orch.main_name()>``,
+never a hard-coded name. Every copy found in the root home or any other
+profile is MOVED (never deleted) to that home's
+``skills-backups/removed-<stamp>/`` so it stays recoverable.
+
 Usage: hscc-skills <command> [args]
 
 Commands:
@@ -28,6 +35,7 @@ Environment Variables:
 import sys
 import os
 import hashlib
+import importlib.util
 import shutil
 import json
 import time
@@ -101,17 +109,34 @@ BUNDLED_TEMPLATES = [
 #: and that boundary is what makes "always update, never skip" safe.
 OWNED_SKILLS = tuple(BUNDLED_SKILLS)
 
-#: The owned skills that document the cluster CONTROL surface, and therefore
-#: belong on the main orchestrator's home ONLY (driver ruling 4 on the
-#: main-only audit, docs/audits/2026-11-23-main-only-surface.md §5.3 row 6 /
-#: §8 t_b52e70ba): "documentation of a toolset a profile cannot call is a lie in
-#: the prompt". This is a SUBSET of BUNDLED_SKILLS on purpose — the rest
-#: (brainstorming, caveman, sdlc-review, the devops group, …) is generic Hermes
-#: material that stays on every profile, so a check keyed on the whole list
-#: would report the fleet's healthy skill trees as drift. Read (never
+#: Cluster-CONTROL skills — the owned skills that document the cluster
+#: surface, and therefore belong on the main orchestrator's home ONLY (driver
+#: ruling 4 on the main-only audit,
+#: docs/audits/2026-11-23-main-only-surface.md §5.3 row 6 / §8 t_b52e70ba;
+#: R4 in verdict-main-only.txt, 2026-11-23): "documentation of a toolset a
+#: profile cannot call is a lie in the prompt". This is a SUBSET of
+#: BUNDLED_SKILLS on purpose — the rest (brainstorming, caveman, sdlc-review,
+#: the devops group, …) is generic Hermes material that stays on every
+#: profile, so a check keyed on the whole list would report the fleet's
+#: healthy skill trees as drift. These three install to the main profile only,
+#: and every copy in any OTHER home is MOVED to that home's
+#: ``skills-backups/removed-<stamp>/`` (never deleted). Read (never
 #: re-spelled) by hscc-bootstrap/doctor_main_only.py, which is what keeps
 #: doctor's verdict and this installer's ownership boundary from disagreeing.
 CLUSTER_SKILLS = ("hscc", "hscc-cluster", "hscc-model-onboard")
+
+#: Skills hscc no longer ships (or that reached a home outside this
+#: installer). A copy is MOVED out of the scanned ``skills/`` tree into
+#: ``<home>/skills-backups/removed-<stamp>/`` — never deleted, so operator
+#: edits in an orphan survive as a backup (t_60d2ef4e).
+#:
+#: ``hscc-master-knowledge`` is a July-era installed-only orphan: it is not
+#: vendored under ``install/hscc-skills/``, so no bootstrap ever updated it.
+#: Repo content wins; the audit's default is retire, not merge
+#: (t_4c12ff7f F12).
+RETIRED_SKILLS = [
+    "hscc-master-knowledge",
+]
 
 #: Where a replaced owned-skill copy is kept: a SIBLING of the scanned
 #: ``skills/`` dir, never inside it. hermes collects skill candidates by
@@ -128,6 +153,16 @@ class BackupUnavailable(RuntimeError):
     Raised instead of writing. A replacing write without a backup is a
     deletion (the contract install_review_skill.py already states for its own
     seam), so the caller reports this and writes nothing.
+    """
+
+
+class MainProfileUnresolved(RuntimeError):
+    """The main orchestrator's profile could not be resolved.
+
+    Carries no fallback name on purpose: D-A/R2 forbid a hard-coded
+    ``general``, so an unreadable or missing ``hscc-roles/main_orch.py`` must
+    fail closed instead of silently installing cluster-control text into a
+    guessed profile.
     """
 
 
@@ -224,10 +259,219 @@ def _load_backup_util():
         return None
 
 
+def _load_main_orch():
+    """Load ``hscc-roles/main_orch.py`` (the single identity resolver), or None.
+
+    Both the repo checkout (``hscc-skills/../hscc-roles``) and the deployed
+    plugins tree (``plugins/hscc-skills/../hscc-roles``) place the module as a
+    sibling, so walk up the same way ``_find_skills_source`` does. Loading it
+    by path keeps this installer from putting a generic ``main_orch`` module
+    name on ``sys.path`` where another payload could shadow it.
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(5):
+        path = os.path.join(d, "hscc-roles", "main_orch.py")
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location(
+                "_hscc_skills_main_orch", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        d = os.path.dirname(d)
+    return None
+
+
+def hermes_root_for_home(hermes_home):
+    """The root for a home that may be profile-scoped.
+
+    ``<root>/profiles/<name>`` -> ``<root>``; every other path is itself.
+    Pure string transform, matching ``hermes_python.hermes_root`` and
+    ``doctor.hermes_root_from_home``'s core rule, so a first bootstrap (where
+    the profile does not exist yet) still resolves.
+    """
+    home = os.path.abspath(os.path.expanduser(str(hermes_home)))
+    parent = os.path.dirname(home)
+    if os.path.basename(parent) == "profiles":
+        return os.path.dirname(parent)
+    return home
+
+
+def main_profile_home(hermes_home=None):
+    """``<root>/profiles/<main_name()>`` — resolved, never hard-coded (D-A/R2)."""
+    home = hermes_home if hermes_home is not None else HERMES_HOME
+    root = hermes_root_for_home(home)
+    resolver = _load_main_orch()
+    if resolver is None:
+        raise MainProfileUnresolved(
+            "hscc-roles/main_orch.py is not importable — cannot resolve the "
+            "main orchestrator profile (no hard-coded fallback)")
+    name = str(resolver.main_name())
+    if not name or name in (".", "..") or os.path.basename(name) != name:
+        raise MainProfileUnresolved(
+            f"main orchestrator name {name!r} is not a single path component")
+    return os.path.join(root, "profiles", name)
+
+
+def skill_destination(skill, hermes_home=None):
+    """``(skills_dir, home)`` for one bundled skill.
+
+    Cluster-control skills target the main profile only; shared/work skills
+    keep the caller's home, which is the tree the installer has always
+    written. The home is returned too because the collision guard reads that
+    home's config.
+    """
+    home = hermes_home if hermes_home is not None else HERMES_HOME
+    if skill in CLUSTER_SKILLS:
+        main_home = main_profile_home(home)
+        return os.path.join(main_home, "skills"), main_home
+    return os.path.join(home, "skills"), home
+
+
+def _non_main_homes(hermes_home):
+    """Every home that must not carry a main-only skill, main excluded."""
+    home = os.path.abspath(os.path.expanduser(str(hermes_home)))
+    root = hermes_root_for_home(home)
+    main_home = os.path.realpath(main_profile_home(home))
+    homes = [root]
+    profiles = os.path.join(root, "profiles")
+    if os.path.isdir(profiles):
+        for entry in sorted(os.listdir(profiles)):
+            path = os.path.join(profiles, entry)
+            if os.path.isdir(path):
+                homes.append(path)
+    out, seen = [], set()
+    for candidate in homes:
+        real = os.path.realpath(candidate)
+        if real == main_home or real in seen:
+            continue
+        seen.add(real)
+        out.append(candidate)
+    return out
+
+
+def _main_only_copies(skills_root):
+    """Every hscc main-only skill dir under *skills_root*, at any depth.
+
+    hermes discovers a SKILL.md package at any depth, so a category copy
+    (``skills/control/hscc``) is just as live as a top-level one. A directory
+    only counts when it actually carries ``SKILL.md`` and its name is one of
+    the main-only names; an unrelated reference subdir that happens to share
+    a name is not a skill and is left alone. A selected parent is not
+    descended into, so a tree cannot be listed twice.
+    """
+    found = []
+    for root, dirs, _files in os.walk(skills_root):
+        keep = []
+        for name in sorted(dirs):
+            path = os.path.join(root, name)
+            if name in CLUSTER_SKILLS and \
+                    os.path.isfile(os.path.join(path, "SKILL.md")):
+                found.append((path, name))
+                continue  # moving the parent already carries this subtree
+            keep.append(name)
+        dirs[:] = keep
+    return found
+
+
+def move_non_main_skill_copies(hermes_home=None, stamp=None):
+    """Move main-only skills out of every non-main home into dated backups.
+
+    R4: non-main homes get NO hscc cluster-control skills. The move is
+    ``os.rename`` into ``<home>/skills-backups/removed-<stamp>/`` — a sibling
+    of the scanned ``skills/`` tree — so the bytes remain recoverable and no
+    ``rm``/``shutil.rmtree`` touches operator data. A same-home rename also
+    cannot lose a tree halfway across a copy. Returns
+    ``[(home, skill, backup_path), ...]``.
+    """
+    stamp = stamp or _backup_stamp()
+    moved = []
+    for home in _non_main_homes(hermes_home if hermes_home is not None
+                                else HERMES_HOME):
+        skills = os.path.join(home, "skills")
+        if not os.path.isdir(skills):
+            continue
+        for src, skill in _main_only_copies(skills):
+            backups = os.path.join(home, SKILLS_BACKUPS_DIRNAME,
+                                   f"removed-{stamp}")
+            ensure_dir(backups)
+            dst = os.path.join(backups, skill)
+            n = 1
+            while os.path.lexists(dst):
+                n += 1
+                dst = os.path.join(backups, f"{skill}-{n}")
+            os.rename(src, dst)
+            moved.append((home, skill, dst))
+    return moved
+
+
+def _sweep_non_main(hermes_home):
+    """Move non-main copies; -> ``(moved, error)`` with a fail-closed error."""
+    try:
+        return move_non_main_skill_copies(hermes_home), None
+    except MainProfileUnresolved as exc:
+        return [], str(exc)
+
+
+def _moved_rows(moved, hermes_home):
+    """Report rows that name every moved tree and where it went."""
+    root = hermes_root_for_home(hermes_home)
+    rows = []
+    for home, skill, dst in moved:
+        rel_home = os.path.relpath(home, root)
+        label = "(root)" if rel_home == "." else rel_home
+        rows.append((f"{skill} [{label}]", "MOVED",
+                     os.path.relpath(dst, home)))
+    return rows
+
+
 def skill_backups_dir(skills_dest):
     """``<home>/skills-backups`` for a skills dir — OUTSIDE the scan root."""
     return os.path.join(os.path.dirname(os.path.abspath(skills_dest)),
                         SKILLS_BACKUPS_DIRNAME)
+
+
+def retire_skill_copies(hermes_home=None, stamp=None):
+    """Move ``RETIRED_SKILLS`` copies into dated backups. -> ``[(skill, dst)]``
+
+    The move is ``os.rename`` into ``<home>/skills-backups/removed-<stamp>/``,
+    a sibling of the scanned ``skills/`` tree, so (a) the orphan stops being
+    discovered without any ``rm``/``shutil.rmtree`` touching operator data,
+    and (b) its bytes stay recoverable even when the copy diverged from the
+    July original. One stamp per run, so every skill retired by this run lands
+    in one dated directory; a same-second re-run appends ``-2`` rather than
+    overwriting or raising.
+
+    Only names in ``RETIRED_SKILLS`` are candidates. A clean home — or a home
+    already swept — creates no directory and returns ``[]``.
+    """
+    home = os.path.abspath(os.path.expanduser(
+        hermes_home if hermes_home is not None else HERMES_HOME))
+    skills = os.path.join(home, "skills")
+    if not os.path.isdir(skills):
+        return []
+    stamp = stamp or _backup_stamp()
+    moved = []
+    for skill in RETIRED_SKILLS:
+        src = os.path.join(skills, skill)
+        if not os.path.isdir(src):
+            continue
+        backups = os.path.join(home, SKILLS_BACKUPS_DIRNAME,
+                               f"removed-{stamp}")
+        ensure_dir(backups)
+        dst = os.path.join(backups, skill)
+        n = 1
+        while os.path.lexists(dst):
+            n += 1
+            dst = os.path.join(backups, f"{skill}-{n}")
+        os.rename(src, dst)
+        moved.append((skill, dst))
+    return moved
+
+
+def _retire_rows(moved, hermes_home):
+    """Report rows naming every moved tree and where it went."""
+    return [(skill, "MOVED", os.path.relpath(dst, hermes_home))
+            for skill, dst in moved]
 
 
 def owned_skill_drift(src_dir, dest_dir, skill_name):
@@ -440,6 +684,14 @@ def cmd_install():
         print(f"       Setting HSCC_SKILLS_DIR env var or placing templates at ~/hermes-cc/Resources/templates/")
         print()
 
+    # Retire orphans before installing: a retired name is no longer ours to
+    # update, and leaving it in the scan root keeps it discoverable forever.
+    retired = retire_skill_copies(HERMES_HOME)
+    if retired:
+        print("─── Retired skills ───")
+        print(format_status_table(_retire_rows(retired, HERMES_HOME)))
+        print()
+
     # Install skills
     print("─── Skills ───")
     skills_results = {}
@@ -454,8 +706,14 @@ def cmd_install():
             skills_results[skill] = ("MISSING", f"not found in source")
             continue
 
+        try:
+            dest, guard_home = skill_destination(skill, HERMES_HOME)
+        except MainProfileUnresolved as exc:
+            skills_missing += 1
+            skills_results[skill] = ("MAIN-UNRESOLVED", str(exc)[:120])
+            continue
         status, detail, copies, unchanged = _owned_skill_write(
-            src, skill, SKILLS_DEST, HERMES_HOME)
+            src, skill, dest, guard_home)
         if status in ("GUARDED", "BACKUP-FAILED", "EMPTY"):
             skills_skipped += 1
         else:
@@ -463,9 +721,17 @@ def cmd_install():
             skills_skipped += unchanged
         skills_results[skill] = (status, detail)
 
+    moved, move_error = _sweep_non_main(HERMES_HOME)
     print(format_status_table(
         [(s, r[0], r[1]) for s, r in skills_results.items()]
+        + _moved_rows(moved, HERMES_HOME)
     ))
+    print()
+    if move_error:
+        print(f"[ERROR] non-main skill cleanup skipped: {move_error}")
+    elif moved:
+        print(f"Moved {len(moved)} main-only skill tree(s) out of non-main "
+              "homes into dated skills-backups/removed-<stamp>/ dirs.")
     print()
 
     # Install templates
@@ -523,11 +789,26 @@ def cmd_install_skills():
     print("─── Installing Hermes Skills ───")
     print(f"  Source: {SKILLS_SOURCE}")
     print(f"  Dest:   {SKILLS_DEST}")
+    try:
+        main_skills = os.path.join(main_profile_home(HERMES_HOME), "skills")
+    except MainProfileUnresolved as exc:
+        print(f"[ERROR] {exc}")
+        print("        Refusing to install without a resolved main profile.")
+        sys.exit(1)
+    print(f"  Main:   {main_skills} ({', '.join(CLUSTER_SKILLS)} only)")
     print()
 
     if not os.path.isdir(SKILLS_SOURCE):
         print(f"[ERROR] Skills source not found: {SKILLS_SOURCE}")
         sys.exit(1)
+
+    # Bootstrap's step. Moving the orphan first means the rest of the run
+    # cannot rediscover it as a skill candidate, and its bytes survive under
+    # skills-backups/removed-<stamp>/ (t_60d2ef4e).
+    retired = retire_skill_copies(HERMES_HOME)
+    if retired:
+        print(format_status_table(_retire_rows(retired, HERMES_HOME)))
+        print()
 
     results = []
     copied = 0
@@ -539,8 +820,9 @@ def cmd_install_skills():
         if not os.path.isdir(src):
             results.append((skill, "MISSING", "not found"))
             continue
+        dest, guard_home = skill_destination(skill, HERMES_HOME)
         status, detail, copies, _unchanged = _owned_skill_write(
-            src, skill, SKILLS_DEST, HERMES_HOME)
+            src, skill, dest, guard_home)
         if status == "GUARDED":
             guarded += 1
         elif status == "BACKUP-FAILED":
@@ -548,8 +830,13 @@ def cmd_install_skills():
         else:
             copied += copies
             if "backup " in detail:
-                backups.append(detail.split("backup ")[-1].rstrip(")"))
+                backups.append((skill, os.path.join(
+                    skill_backups_dir(dest),
+                    detail.split("backup ")[-1].rstrip(")"))))
         results.append((skill, status, detail))
+
+    moved, move_error = _sweep_non_main(HERMES_HOME)
+    results.extend(_moved_rows(moved, HERMES_HOME))
 
     print(format_status_table(results))
     print()
@@ -562,8 +849,19 @@ def cmd_install_skills():
               "a replacing write it cannot back up — restore "
               "hscc-bootstrap/backup_util.py and re-run.")
     if backups:
-        print(f"Replaced copies were snapshotted under {skill_backups_dir(SKILLS_DEST)}"
-              f" ({', '.join(backups)}).")
+        print("Replaced copies were snapshotted first:")
+        for skill, backup_path in backups:
+            print(f"  {skill}: {backup_path}")
+    if move_error:
+        print(f"[ERROR] non-main skill cleanup skipped: {move_error}")
+    elif moved:
+        print(f"Moved {len(moved)} main-only skill tree(s) out of non-main "
+              "homes into dated skills-backups/removed-<stamp>/ dirs "
+              "(move, not delete).")
+    if retired:
+        print(f"Retired {len(retired)} orphan skill(s) to "
+              f"{os.path.join(skill_backups_dir(SKILLS_DEST), 'removed-*')} "
+              "(moved, never deleted).")
     print(f"Done. {copied} file(s) installed, rest unchanged.")
 
 
@@ -607,7 +905,12 @@ def cmd_status():
     skill_status = []
     for skill in BUNDLED_SKILLS:
         src_skill = os.path.join(SKILLS_SOURCE, skill)
-        dst_skill = os.path.join(SKILLS_DEST, skill)
+        try:
+            dst_dir, _guard_home = skill_destination(skill, HERMES_HOME)
+        except MainProfileUnresolved as exc:
+            skill_status.append((skill, "⚠ MAIN-UNRESOLVED", str(exc)[:120]))
+            continue
+        dst_skill = os.path.join(dst_dir, skill)
 
         if not os.path.isdir(src_skill):
             skill_status.append((skill, "⚠ MISSING", "source not found"))
@@ -624,7 +927,7 @@ def cmd_status():
         # can never disagree about the same tree. The old compare walked only
         # the top level AND only files present on both sides, so it reported
         # ✓ OK for a skill whose nested references/*.md was stale — or missing.
-        out_of_date = owned_skill_drift(src_skill, SKILLS_DEST, skill)
+        out_of_date = owned_skill_drift(src_skill, dst_dir, skill)
         if out_of_date:
             skill_status.append((skill, "⚠ OUT-OF-DATE",
                                  f"{len(out_of_date)} file(s) need update"))
@@ -661,12 +964,16 @@ def cmd_status():
     print("─── Locations ───")
     print(f"  Hermes Skills:  {SKILLS_SOURCE}")
     print(f"  Hermes Skills:  {SKILLS_DEST}")
+    try:
+        print(f"  Main profile:   {main_profile_home(HERMES_HOME)}")
+    except MainProfileUnresolved as exc:
+        print(f"  Main profile:   UNRESOLVED — {exc}")
     print(f"  Hermes Templates: {TEMPLATES_SOURCE}")
     print(f"  Hermes Templates: {TEMPLATES_DEST}")
 
 
 def cmd_uninstall():
-    """Remove all installed skills and templates."""
+    """Remove all installed skills and templates (the reverse of install)."""
     print("─── Uninstalling HSCC Skills & Templates ───")
     print(f"  Removing from: {HERMES_HOME}")
     print()
@@ -674,17 +981,23 @@ def cmd_uninstall():
     removed = 0
     removed_dir = 0
 
-    # Remove skills
-    if os.path.isdir(SKILLS_DEST):
-        for skill in BUNDLED_SKILLS:
-            skill_path = os.path.join(SKILLS_DEST, skill)
-            if os.path.isdir(skill_path):
-                shutil.rmtree(skill_path)
-                removed += 1
-                print(f"  Removed skill: {skill}")
-            else:
-                print(f"  (skipped, not installed): {skill}")
-        print()
+    # Remove skills from the SAME destinations install uses, or the main-only
+    # trio would survive a reverse install whenever the caller ran it from the
+    # root home (t_b52e70ba).
+    for skill in BUNDLED_SKILLS:
+        try:
+            dest, _guard_home = skill_destination(skill, HERMES_HOME)
+        except MainProfileUnresolved as exc:
+            print(f"  (skipped, main unresolved): {skill} — {exc}")
+            continue
+        skill_path = os.path.join(dest, skill)
+        if os.path.isdir(skill_path):
+            shutil.rmtree(skill_path)
+            removed += 1
+            print(f"  Removed skill: {skill}")
+        else:
+            print(f"  (skipped, not installed): {skill}")
+    print()
 
     # Remove templates
     if os.path.isdir(TEMPLATES_DEST):

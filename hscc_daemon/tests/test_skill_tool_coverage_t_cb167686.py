@@ -17,11 +17,14 @@ gate that keeps it fixed. It bites on the two ways the audit says the drift happ
   ``kanban_paused``, ``main_status`` and ``doctor`` as tools this wave "adds", and
   §10 decided all three against (D6, D9, D11). §12.2 (the operator verdict) then
   ruled that D11 was about the *route* and that the read-only ``doctor`` **tool**
-  stands, so two of the three are still refused and ``doctor`` is now registered —
-  which is exactly the kind of move this gate is built to notice rather than let
-  drift: the count, the table and the decided-against list have to be edited in the
-  same deliberate commit. A document that names a phantom tool is worse than one
-  that omits a real one, because an agent wastes a turn calling it.
+  stands, so ``doctor`` is now registered. t_c920b0ca then shipped
+  ``main_status``: D9 asked for read **routes** for the dashboards (still
+  deferred), while the card that owns the agent-tool read is this wave's
+  ``main_status`` card. ``kanban_paused`` remains refused here. That is exactly
+  the kind of move this gate is built to notice rather than let drift: the count,
+  the table and the decided-against list have to be edited in the same deliberate
+  commit. A document that names a phantom tool is worse than one that omits a real
+  one, because an agent wastes a turn calling it.
 
 So the tool tables and the registry must be the SAME SET, in both directions — the
 same both-directions rule ``test_plugin_manifest_drift.py`` applies to ``plugin.yaml``,
@@ -52,7 +55,20 @@ if not (REPO / "scripts" / "run_tests.sh").is_file():
 
 SKILL_DIR = REPO / "install" / "hscc-skills" / "hscc-cluster"
 SKILL_MD = SKILL_DIR / "SKILL.md"
+HSCC_SKILL_MD = REPO / "install" / "hscc-skills" / "hscc" / "SKILL.md"
 BUNDLED_LIST = REPO / "hscc-skills" / "hscc.py"
+
+#: Every agent-facing prose claim about the size of the catalog, as
+#: ``(path, pattern)``. The count is DERIVED from the payload below, never
+#: re-typed: QA F5 (t_035b1b0b) measured the audit and a release note still
+#: saying "28 tools" while the registry declared 31. A test pins the count the
+#: agents actually read, so the next registry move cannot leave a stale number.
+TOOL_COUNT_CLAIMS = [
+    (SKILL_MD, r"the (\d+) registered agent tools"),
+    (SKILL_MD, r"\*\*Agent tools\*\* — (\d+) tools registered"),
+    (SKILL_MD, r"## The registered agent tools \((\d+)\)"),
+    (HSCC_SKILL_MD, r"## The `hscc-cluster` agent tools \((\d+)\)"),
+]
 
 #: Everything above this heading is the tool tables. Everything below it is the
 #: section that records which verbs were decided AGAINST a tool. The split is the
@@ -75,7 +91,12 @@ DECIDED_AGAINST = [
     ("heal-clear", "D4"),                    # the read landed as heal_status; clear stays operator-only
     ("template validate", "D5"),             # route + slash hint recommended, no tool
     ("hscc notify", "D7"),                   # an agent that can page the operator trains them to ignore pages
-    ("hscc main status", "D9"),              # dashboards get a read ROUTE, not an agent tool
+    # ("hscc main status", "D9") was here. It came out deliberately on
+    # t_c920b0ca: that card ships the read-only agent tool `main_status` (the
+    # audit's new-tool wave names it). D9's separate ask — read *routes* for the
+    # dashboards — is still deferred, and `main start` / `main wakeups` remain
+    # CLI-only. The tool is registered and documented, so this list — which means
+    # "no tool, and the skill says so" — no longer describes it.
     # ("hscc doctor", "D11") was here. It came out deliberately on t_7f570861:
     # the operator verdict (§12.2) ruled that D11 refused the HTTP *route*
     # ("it reads this host's trees") and that "the read-only agent *tool* is a
@@ -143,6 +164,27 @@ def test_skill_tool_tables_are_exactly_the_registered_tools():
         "that does not exist"
     )
     assert len(documented) == len(registered)
+
+
+def test_stated_tool_counts_are_the_payload_count():
+    """Every prose count equals ``len(_registered_tools())``, not a typed number.
+
+    ``hscc-cluster``'s 31 plus ``sparkrun-hermes``' ``sparkrun_exec`` is the
+    32-tool agent catalog; the skill headings state the ``hscc-cluster`` half,
+    so that is the half this pins.
+    """
+    registered = len(_registered())
+    assert registered, "the registry parsed empty — the count pin would be vacuous"
+
+    for path, pattern in TOOL_COUNT_CLAIMS:
+        hits = re.findall(pattern, path.read_text(encoding="utf-8"))
+        assert len(hits) == 1, (
+            f"{path.relative_to(REPO)} no longer states its tool count exactly "
+            f"once for /{pattern}/ — if the wording changed, this gate must "
+            "change with it rather than pass vacuously")
+        assert int(hits[0]) == registered, (
+            f"{path.relative_to(REPO)} says {hits[0]} tools; "
+            f"hscc-cluster/__init__.py registers {registered}")
 
 
 def test_decided_against_tools_are_declared_absent_and_not_documented():

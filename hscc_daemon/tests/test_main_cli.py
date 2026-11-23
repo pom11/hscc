@@ -11,6 +11,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 from contextlib import redirect_stdout
@@ -372,6 +373,17 @@ def test_cli_failure_exits_nonzero_with_the_fix(monkeypatch):
     assert "error: 2 tmux panes" in out
 
 
+def test_cli_ambiguous_server_names_the_tmux_tmpdir_fix(monkeypatch):
+    monkeypatch.setattr(mc, "start", lambda: {
+        "ok": False, "action": "ambiguous-server", "name": "general",
+        "profile": "general", "board": "general", "pane": None,
+        "target": None, "session": None, "command": None,
+        "detail": "2 live tmux servers and TMUX_TMPDIR is unset"})
+    rc, out = _cli(["start"])
+    assert rc == 1
+    assert "fix: set TMUX_TMPDIR" in out
+
+
 def test_unified_cli_dispatches_main(monkeypatch):
     calls = []
     monkeypatch.setattr(mc, "cmd_main", lambda argv: calls.append(argv) or 0)
@@ -418,3 +430,185 @@ def test_start_reusing_a_pane_also_disables_the_gate(_pin_state):
     assert res["ok"] is True and res["action"] == "reused"
     assert res["subscription"]["allowed"] is False
     assert _auto_subscribe(path) is False
+
+
+# --------------------------------------------------------------------------- #
+# The tmux SERVER seam (t_4b3e3806): `main start` must join the running server
+#
+# The bug: with TMUX_TMPDIR unset (a fresh shell), unqualified `tmux
+# list-sessions` looks only in /tmp, finds nothing, and `start` CREATES a
+# detached session on a SECOND server the operator's own tmux cannot see.
+# These tests run the REAL `main_cli.run_tmux` against a fake tmux binary and
+# fake unix sockets: nothing here can reach the operator's tmux.
+# --------------------------------------------------------------------------- #
+
+FAKE_TMUX_SRC = r'''#!{python}
+import json
+import os
+import sys
+
+argv = sys.argv[1:]
+log = os.environ["FAKE_TMUX_LOG"]
+live = [p for p in os.environ.get("FAKE_TMUX_LIVE", "").split(os.pathsep) if p]
+
+# Only a LEADING -S is tmux's global socket option (same parser rule as the
+# fake in hscc-api/tests/test_repl_inject_socket.py).
+target = None
+i = 0
+while i < len(argv) and argv[i].startswith("-"):
+    if argv[i] == "-S" and i + 1 < len(argv):
+        target = argv[i + 1]
+        i += 2
+        continue
+    break
+explicit = target is not None
+if target is None:
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    target = os.path.join(base, "tmux-%d" % os.getuid(), "default")
+
+with open(log, "a") as fh:
+    fh.write(json.dumps({{"argv": argv, "socket": target,
+                         "explicit": explicit}}) + "\n")
+
+if target not in live:
+    sys.stderr.write("no server running on %s\n" % target)
+    sys.exit(1)
+
+verb = next((a for a in argv[i:]
+             if not a.startswith("-") and not a.startswith("#{{")), "")
+if verb == "list-sessions":
+    sys.stdout.write("work\t1\t5\n")
+elif verb == "display-message":
+    sys.stdout.write("work\n")
+elif verb in ("new-window", "new-session"):
+    sys.stdout.write("%9\n")
+sys.exit(0)
+'''
+
+
+@pytest.fixture
+def tmux_server(request, tmp_path, monkeypatch):
+    """Two fake server sockets; only the ones a test marks live answer."""
+    import tempfile
+
+    repl_inject = mc.load_repl_inject()
+    assert repl_inject is not None
+
+    # A unix socket path must fit macOS' 104-byte sockaddr_un, so the socket
+    # dir (not the binary) lives under the shortest temp root.
+    base = tempfile.mkdtemp(prefix="hmc", dir="/tmp")
+    default_dir = os.path.join(base, "a")
+    private_dir = os.path.join(base, "b")
+    for d in (default_dir, private_dir):
+        os.makedirs(os.path.join(d, f"tmux-{os.getuid()}"), exist_ok=True)
+
+    listeners = []
+    paths = {}
+    for where, root in (("default", default_dir), ("private", private_dir)):
+        path = os.path.join(root, f"tmux-{os.getuid()}", "default")
+        assert len(path) < 104, path
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(path)
+        sock.listen(8)
+        listeners.append(sock)
+        paths[where] = path
+
+    log = tmp_path / "tmux-calls.jsonl"
+    fake = tmp_path / "tmux"
+    fake.write_text(FAKE_TMUX_SRC.format(python=sys.executable))
+    fake.chmod(0o755)
+
+    monkeypatch.setenv("FAKE_TMUX_LOG", str(log))
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", os.path.join(base, "empty"))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+    monkeypatch.setattr(repl_inject, "TMUX_DEFAULT_TMPDIR", default_dir)
+    monkeypatch.setattr(repl_inject, "TMUX_PRIVATE_TMPDIRS", (private_dir,))
+    monkeypatch.setattr(repl_inject, "TMUX_BIN", str(fake))
+    # Discovery itself is repl_inject's business (pinned by its own suite);
+    # this test is about where the SESSION calls land.
+    monkeypatch.setattr(repl_inject, "hermes_panes", lambda: [])
+    repl_inject.reset_tmux_socket_cache()
+
+    def live(*where):
+        monkeypatch.setenv(
+            "FAKE_TMUX_LIVE", os.pathsep.join(paths[w] for w in where))
+
+    def calls():
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text().splitlines()
+                if line.strip()]
+
+    live("private")
+    request.addfinalizer(lambda: [s.close() for s in listeners])
+    request.addfinalizer(repl_inject.reset_tmux_socket_cache)
+    request.addfinalizer(lambda: shutil.rmtree(base, ignore_errors=True))
+    return {"paths": paths, "live": live, "calls": calls,
+            "default_dir": default_dir, "ri": repl_inject}
+
+
+def _verb(argv):
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):
+        if argv[i] == "-S":
+            i += 2
+            continue
+        break
+    return next((a for a in argv[i:]
+                 if not a.startswith("-") and not a.startswith("#{")), "")
+
+
+def test_start_joins_the_server_discovered_without_tmux_tmpdir(tmux_server):
+    """MANDATORY shape from t_4c5855a6: TMUX_TMPDIR removed, private server.
+
+    At base this test fails the only way the bug can fail: the session call
+    carries no -S, the fake (like tmux) answers only on the live private
+    socket, so `start` falls into its "no server at all" branch.
+    """
+    repl_inject = tmux_server["ri"]
+    assert "TMUX_TMPDIR" not in os.environ
+
+    res = mc.start(repl=repl_inject, runner=None)
+    assert res["ok"] is True and res["action"] == "created-window", res
+    create = [c for c in tmux_server["calls"]()
+              if _verb(c["argv"]) == "new-window"]
+    assert len(create) == 1, tmux_server["calls"]()
+    assert create[0]["explicit"] is True
+    assert create[0]["socket"] == tmux_server["paths"]["private"]
+    assert all(c["explicit"] for c in tmux_server["calls"]())
+
+
+def test_start_adds_no_socket_argument_when_tmux_tmpdir_is_set(tmux_server,
+                                                               monkeypatch):
+    """NO-REGRESSION: a declared TMUX_TMPDIR means the argv is unchanged.
+
+    tmux reads TMUX_TMPDIR itself; an injected -S would second-guess an
+    explicit setting. The fake honours tmux's own default rule, so this test
+    would fail if the prefix were merely absent but the server elsewhere.
+    """
+    repl_inject = tmux_server["ri"]
+    tmux_server["live"]("default")
+    monkeypatch.setenv("TMUX_TMPDIR", tmux_server["default_dir"])
+
+    res = mc.start(repl=repl_inject, runner=None)
+    assert res["ok"] is True and res["action"] == "created-window", res
+    creates = [c for c in tmux_server["calls"]()
+               if _verb(c["argv"]) == "new-window"]
+    assert len(creates) == 1
+    assert creates[0]["explicit"] is False, creates[0]
+    assert all(not c["explicit"] for c in tmux_server["calls"]())
+
+
+def test_start_refuses_two_live_servers_instead_of_creating_a_third(tmux_server):
+    """Two servers + no TMUX_TMPDIR: name the refusal, create nothing."""
+    repl_inject = tmux_server["ri"]
+    tmux_server["live"]("default", "private")
+
+    res = mc.start(repl=repl_inject, runner=None)
+    assert res["ok"] is False and res["action"] == "ambiguous-server", res
+    assert "TMUX_TMPDIR" in res["detail"]
+    assert not [c for c in tmux_server["calls"]()
+                if _verb(c["argv"]) in ("new-window", "new-session")]

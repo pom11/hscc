@@ -36,6 +36,11 @@ contradicted the canonical prefer-profiled-sibling rule), which is exactly
 why the rule is imported, never re-derived. If hscc-api is not deployed
 beside hscc-project the matcher cannot answer, and that surfaces as a NAMED
 branch-C refusal / UNVERIFIED row — never as a private fallback predicate.
+
+The tmux SERVER is resolved the same way: :func:`run_tmux` prefixes every
+call with ``repl_inject.tmux_socket_args()`` (t_4c5855a6), so a launch from a
+fresh shell joins the server the operator's panes are on instead of creating
+a parallel one (t_4b3e3806).
 """
 from __future__ import annotations
 
@@ -158,10 +163,31 @@ def _guard(name: str) -> None:
 
 
 def run_tmux(*args: str) -> subprocess.CompletedProcess:
-    """Run tmux with argv; return the CompletedProcess (never raises on rc)."""
-    if run_tmux is _ORIG_RUN_TMUX:
+    """Run tmux with argv; return the CompletedProcess (never raises on rc).
+
+    Every call is aimed at the server :func:`repl_inject.tmux_socket_args`
+    resolved (t_4c5855a6, the same resolver ``hscc orch inject`` uses). A
+    launch from a fresh shell has no ``TMUX_TMPDIR``; without the ``-S``
+    prefix tmux creates the named session on a SECOND server the operator's
+    own tmux cannot see (t_4b3e3806). The resolver is imported from the
+    canonical matcher — never copied. Its two-live-server refusal comes back
+    as a failed result so branch C names it instead of raising past the
+    launch door; an older matcher without the resolver adds no argument.
+    """
+    matcher = _pane_matcher()
+    binary = getattr(matcher, "TMUX_BIN", "tmux") or "tmux"
+    default_binary = getattr(matcher, "_DEFAULT_TMUX_BIN", binary)
+    if run_tmux is _ORIG_RUN_TMUX and _under_pytest() and binary == default_binary:
         _guard("run_tmux")
-    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+    argv = [str(a) for a in args]
+    try:
+        resolver = getattr(matcher, "tmux_socket_args", None)
+        prefix = list(resolver()) if callable(resolver) else []
+    except Exception as exc:  # noqa: BLE001 — a refusal is a branch-C reason
+        return subprocess.CompletedProcess([binary, *argv], 1, "",
+                                           f"tmux: {exc}")
+    return subprocess.run([binary, *prefix, *argv], capture_output=True,
+                          text=True)
 
 
 def run_ps(tty: str) -> str:

@@ -26,8 +26,7 @@ Health & monitoring
       Aggregate vLLM throughput + queue depth across the fleet
   autoscale
       Show autoscale decision from current queue depth (read-only)
-  escalate
-      Show pending failure escalations (dry-run, no mutations)
+  escalate             Preview escalations — POST /v1/escalate mutates
   heal-clear <node>
       Clear one node's heal-breaker strikes (mutates; not /heal)
   heal-status

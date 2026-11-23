@@ -270,6 +270,16 @@ def test_installer_completes_and_is_self_contained(sandbox):
     for rel in ("serving.json", "triggers.json", "autodown.json", "autonomy"):
         assert (sandbox["hscc"] / rel).exists(), f"missing {rel} in HSCC_DIR"
 
+    # t_b312580e: a FRESH install (no target_profiles.json) must reach the main
+    # orchestrator's profile home, which is created after the first payload
+    # pass. QA F1 measured <main> with zero hscc plugins before this fix.
+    main = json.loads(
+        (sandbox["hscc"] / "main-orchestrator.json").read_text())["name"]
+    main_plugins = sandbox["hermes"] / "profiles" / main / "plugins"
+    for plugin in ("hscc-cluster", "hscc-commands", "sparkrun-hermes"):
+        assert (main_plugins / plugin / "__init__.py").is_file(), \
+            f"fresh install left <main> without {plugin}"
+
     # And nothing reached the operator's live state.
     assert (_md5(live_cfg), _md5(live_trig)) == before, \
         "the isolated install modified LIVE state"

@@ -21,6 +21,16 @@ Everything the queue needs to survive a daemon restart is persisted in
 ``~/.hscc/merge-queue-state.json`` (atomic replace + fsync); a run that dies
 mid-flight is recovered to the head of its project's queue on the next tick.
 
+A PR that is not green yet sits in ``waiting``; EVERY tick re-checks that list
+(one cheap ``gh pr view`` per entry) and returns the green ones to the FIFO,
+whether or not the active queue is empty. After a push the new head's CI is
+usually pending, so the entry keeps its in-flight claim at ``ci-pending`` and
+is re-read each tick until green (merge that exact SHA), red (hand back) or the
+CI budget expires (release to the rechecked wait list) — never re-gated on the
+same pushed head. GitHub answers ``mergeable: UNKNOWN`` for a few seconds after
+the base moves; that is re-polled, and a still-undecided entry keeps the head
+slot instead of being parked in ``waiting``.
+
 The queue is **on by default** for a project that has all three of: a git
 checkout at its registry ``repo``, a ``github.com`` ``origin`` remote, and
 declared gates (``merge_queue.gates``) or hscc's built-in gates::
@@ -75,6 +85,41 @@ DEFAULT_GATE_TIMEOUT_S = 3600
 DEFAULT_PROCESS_TIMEOUT_S = 120
 MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
+
+#: How many verbatim failure lines a red handback carries ahead of the tail.
+#:
+#: The tail alone cannot name a failing test: `scripts/run_tests.sh` runs 12
+#: legs, so a leg that goes red in the middle has ~60 lines of later legs and
+#: trailing stderr printed after its own `FAILED path::test` line, and the
+#: 40-line window is already full of them (measured on PR #673, 2026-11-23).
+#: Reading the FULL output is therefore the fix, and this cap is what keeps
+#: that safe: a branch whose fixture blew up can print hundreds of `FAILED`
+#: rows, and a card comment is a triage surface, not a log file.
+MAX_FAILURE_LINES = 25
+
+#: Per-line cap. A pytest short-summary line ends with the failure reason, and
+#: the reason is unbounded (`assert` can carry a whole dict). The part triage
+#: reads — `FAILED path::test` — is at the front, so a long line is shortened
+#: rather than dropped.
+MAX_FAILURE_LINE_CHARS = 300
+
+#: GitHub answers ``mergeable: "UNKNOWN"`` for every open PR for a few seconds
+#: after the base branch moves (measured: all 13 open PRs, then MERGEABLE /
+#: CONFLICTING on a second ``gh pr view``).  That is "not decided yet", not
+#: "not ready": re-poll a bounded number of times before believing it.
+#: Read at CALL time so a test can retune/zero the delay.
+MERGEABLE_POLL_ATTEMPTS = 3
+MERGEABLE_POLL_DELAY_S = 5.0
+
+#: The in-flight stage of a PR whose head the queue pushed and whose CI has not
+#: answered yet.  The claim is HELD here (no re-rebase, no re-gate) and
+#: re-read on every tick until the checks are green or red.
+CI_PENDING_STAGE = "ci-pending"
+
+#: How long a pushed head may keep the claim while CI stays silent.  Past this
+#: the entry goes back to the wait list (which every tick rechecks), never
+#: terminal: a CI that never reported is not a verdict about the code.
+CI_PENDING_TIMEOUT_S = 1800
 
 #: Task-policy class the gate asks for on macOS, and where that tool lives.
 #:
@@ -573,14 +618,15 @@ def project_config(project, registry_path=None):
 # ── read-only rows (CLI monitor + GET /v1/merge-queue) ─────────────────────
 
 #: States a row can carry. ``queued``/``merged``/``resolve``/``failed`` are
-#: ledger outcomes; ``rebasing``/``gating``/``merging``/``timeout`` are the live
-#: stages the daemon stamps on its in-flight claim as it moves through the
-#: queue. ``timeout`` is a stage, never an outcome state: a gate that ran out of
-#: budget re-enters the wait list, so its row renders ``waiting`` (see
-#: ``_OUTCOME_STATES``), and nothing that timed out may render ``resolve``.
+#: ledger outcomes; ``rebasing``/``gating``/``merging``/``ci-pending``/
+#: ``timeout`` are the live stages the daemon stamps on its in-flight claim as
+#: it moves through the queue. ``timeout`` is a stage, never an outcome state: a
+#: gate that ran out of budget re-enters the wait list, so its row renders
+#: ``waiting`` (see ``_OUTCOME_STATES``), and nothing that timed out may render
+#: ``resolve``.
 MERGE_QUEUE_STATES = (
-    "queued", "waiting", "rebasing", "gating", "merging", "resolve", "merged",
-    "failed", "timeout",
+    "queued", "waiting", "rebasing", "gating", "merging", "ci-pending",
+    "resolve", "merged", "failed", "timeout",
 )
 
 _OUTCOME_STATES = {
@@ -588,12 +634,18 @@ _OUTCOME_STATES = {
     "already-merged": "merged",
     "conflict": "resolve",
     "red-gate": "resolve",
+    # CI failed on the head the queue itself pushed: the local gates passed,
+    # so this is a real verdict about the code and needs the worker.
+    "red-ci": "resolve",
     "refused": "failed",
     "error": "failed",
     # Budget exhaustion is not a verdict about the code, so it must not render
     # as a failure the author is sent to fix: the entry is back in the wait
     # list, and the read model says so.
     "gate-timeout": "waiting",
+    # Same for a pushed head whose CI never answered: release to waiting (the
+    # wait list is rechecked every tick), not a resolve the worker must chase.
+    "ci-timeout": "waiting",
 }
 
 
@@ -938,6 +990,96 @@ def _tail(text, lines=MAX_GATE_TAIL_LINES):
     return "\n".join(rows[-lines:])
 
 
+#: A gate's own words for "this went red", matched at the START of a line so a
+#: progress line, a dot line or prose that merely mentions a failure cannot join
+#: the digest.  Two buckets, because they answer two different questions:
+#:
+#: * `_TEST_FAILURE_RE` — `FAILED <path>::<test> - <reason>` / `ERROR ...`:
+#:   pytest's short test summary, printed by `-q` (`run_tests.sh` adds `-rs` for
+#:   the skips). This is the name of the thing that broke.
+#: * `_LEG_FAILURE_RES` — `  ✗ <leg> (pytest exit N)` and `N failed, M passed in
+#:   Xs`: `scripts/run_tests.sh`'s own summary row and pytest's per-leg count
+#:   line. Together they say WHICH leg went red and HOW MANY it lost.
+_TEST_FAILURE_RE = re.compile(r"^(?:FAILED|ERROR)\s")
+_LEG_FAILURE_RES = (
+    re.compile(r"^✗\s"),
+    re.compile(r"^\d+ failed\b"),
+)
+
+
+def _failure_lines(text, *, cap=MAX_FAILURE_LINES):
+    """The failure lines of a gate's output, VERBATIM, capped.
+
+    Read from the FULL text, never from the tail.  That is the whole point:
+    `_tail` keeps the last 40 lines of one 12-leg run, and a leg failing in the
+    middle has the legs after it — plus the stderr the API appends — sitting on
+    top of its `FAILED` line.  PR #673's handback measured as a run whose only
+    red evidence was `✗ hscc-api (pytest exit 1)`: enough to know the suite was
+    red, not enough to say whether the test or the branch broke.
+
+    Verbatim is also the point.  A paraphrase ("hscc-api failed") is what the
+    summary row already said and cannot be trusted for a flake call; the exact
+    `path::test - reason` line is what a re-queue-vs-fix decision is made from,
+    and it is what the author can grep their own tree for.
+
+    Ordering is by kind, not by position, and that is deliberate: the leg rows
+    lead, then the failing tests in the order pytest printed them.  A branch
+    with 40 failures is capped, and the rows printed last (the summary block)
+    would otherwise be the cap's first casualty — losing exactly the line that
+    names the leg.  Leading indentation is dropped: this is a list of failure
+    lines, not a transcript.
+
+    De-duplicated, capped at ``cap`` distinct lines, each line capped at
+    :data:`MAX_FAILURE_LINE_CHARS`; when anything is hidden the last entry says
+    how many, so a short digest never looks like a complete one.
+    """
+    legs, tests, seen = [], [], set()
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _TEST_FAILURE_RE.match(line):
+            bucket = tests
+        elif any(p.match(line) for p in _LEG_FAILURE_RES):
+            bucket = legs
+        else:
+            continue
+        if len(line) > MAX_FAILURE_LINE_CHARS:
+            line = line[:MAX_FAILURE_LINE_CHARS - 1].rstrip() + "…"
+        if line in seen:
+            continue
+        seen.add(line)
+        bucket.append(line)
+    legs = legs[:cap]
+    room = cap - len(legs)
+    kept = legs + tests[:room]
+    if len(tests) > room:
+        kept.append(f"… {len(tests) - room} more failure line(s) not shown …")
+    return kept
+
+
+def _gate_report(text, *, note=None):
+    """What a gate that did not pass hands back: the failure lines, then the tail.
+
+    The digest LEADS because the reader of a card comment reads from the top,
+    and in a 12-leg run the tail is the least informative part of the output: it
+    is mostly the legs that passed after the failure.  The tail itself is still
+    the plain :func:`_tail` of the full text — the digest is added to it, never
+    substituted for it — so nothing that used to be visible went away.
+
+    ``note`` is appended after the tail, which is where the timeout path's
+    `timeout after {N}s` line has always been read.
+    """
+    tail = _tail(text)
+    if note:
+        tail = f"{tail}\n{note}" if tail else note
+    lines = _failure_lines(text)
+    if not lines:
+        return tail
+    header = "━━━ Failed lines from the full gate output (verbatim) ━━━"
+    return "\n".join([header, *lines, "", tail])
+
+
 def _truthy_check(entry):
     """True/False/None for one statusCheckRollup entry (None = still pending)."""
     if not isinstance(entry, dict):
@@ -975,6 +1117,34 @@ def _checks_green(rollup, *, required_checks=False):
     return True
 
 
+def _checks_verdict(info, *, required_checks=False):
+    """``"green"``, ``"pending"`` or ``"red"`` for a PR's reported checks.
+
+    The tri-state the queue needs AFTER it pushed: "not green yet" conflates a
+    check still running (hold the claim, look again) with a check that failed
+    (hand back to the worker). An empty rollup is only green when GitHub
+    positively said the base requires no checks, mirroring :func:`_checks_green`.
+    """
+    rollup = (info or {}).get("statusCheckRollup")
+    if not rollup:
+        return "green" if required_checks is False else "pending"
+    if not isinstance(rollup, list):
+        return "pending"
+    pending = False
+    for entry in rollup:
+        verdict = _truthy_check(entry)
+        if verdict is False:
+            return "red"
+        if verdict is not True:
+            pending = True
+    return "pending" if pending else "green"
+
+
+def _mergeable_unknown(info):
+    """True when GitHub has not decided ``mergeable`` yet (absent or UNKNOWN)."""
+    return str((info or {}).get("mergeable") or "").upper() in ("", "UNKNOWN")
+
+
 def _pr_ready(info, *, required_checks=False):
     """Open, non-draft, mergeable, not changes-requested, checks green."""
     if not isinstance(info, dict):
@@ -1004,6 +1174,27 @@ def pr_view(repo, pr, runner=None):
         return json.loads(proc.stdout)
     except (TypeError, ValueError):
         return None
+
+
+def pr_view_settled(repo, pr, runner=None):
+    """``gh pr view`` that gives GitHub a bounded moment to compute mergeability.
+
+    Right after the base moves, GitHub reports ``mergeable: UNKNOWN`` for every
+    open PR until it recomputes. Treating that as "not ready" parked the PR in
+    the wait list, which only drained when the queue was empty — a livelock.
+    Re-poll a few times with a short backoff; a still-UNKNOWN answer is returned
+    as-is and the caller leaves the entry at the head of the queue.
+    """
+    attempts = max(1, int(MERGEABLE_POLL_ATTEMPTS))
+    info = pr_view(repo, pr, runner=runner)
+    for attempt in range(1, attempts):
+        if info is None or not _mergeable_unknown(info):
+            break
+        delay = max(0.0, float(MERGEABLE_POLL_DELAY_S))
+        if delay:
+            time.sleep(delay)
+        info = pr_view(repo, pr, runner=runner)
+    return info
 
 
 # ── git worktree / rebase ───────────────────────────────────────────────────
@@ -1316,6 +1507,12 @@ def _run_gate(command, worktree, timeout_s):
     3. carry the **real last lines** into the handback, so a timeout is
        distinguishable from a test failure by reading the PR comment.
 
+    And a fourth, learned from the other side of the same comment: the last
+    lines are not enough to name a failure.  A 12-leg run buries its
+    `FAILED path::test` line under everything printed after it, so a non-passing
+    leg goes through :func:`_gate_report`, which puts the verbatim failure lines
+    ahead of the tail.
+
     Internal contract only (``process_entry`` is the sole caller plus injected
     test runners); nothing outside this module parses this tuple.
     """
@@ -1341,9 +1538,15 @@ def _run_gate(command, worktree, timeout_s):
             # the kill raced the pipes, and the whole bug was picking one.
             out = _stream_text(stdout) or _stream_text(exc.stdout)
             err = _stream_text(stderr) or _stream_text(exc.stderr)
-            return "timeout", _tail(f"{out}\n{err}\ntimeout after {timeout_s}s")
-        return ("pass" if proc.returncode == 0 else "fail"), \
-            _tail(_stream_text(stdout) + _stream_text(stderr))
+            return "timeout", _gate_report(f"{out}\n{err}",
+                                           note=f"timeout after {timeout_s}s")
+        verdict = "pass" if proc.returncode == 0 else "fail"
+        full = _stream_text(stdout) + _stream_text(stderr)
+        # A passing leg keeps the plain tail it always kept — the digest is
+        # triage evidence for a red run, and scanning 12 green legs for markers
+        # would only risk reformatting output nobody reads.
+        return verdict, (_tail(full) if verdict == "pass"
+                         else _gate_report(full))
     except OSError as exc:
         # The gate could not be started at all.  That is a real failure with a
         # readable reason, and it must NOT be reported as a timeout: a timeout
@@ -1708,16 +1911,6 @@ def _stop_cancelled(state_path, project, entry, reason):
     return {"pr": entry.get("pr"), "result": reason}
 
 
-def _post_push_ready(cfg, base, after, head_sha, git_runner, gh_runner):
-    """True only when the pushed head itself is green and still the PR head."""
-    if not isinstance(after, dict):
-        return False
-    if str(after.get("headRefOid") or "") != head_sha:
-        return False
-    required = _required_for_info(cfg, base, after, git_runner, gh_runner)
-    return _pr_ready(after, required_checks=required)
-
-
 def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                   root=None, git_runner=None, gh_runner=None,
                   handback=None, log=None):
@@ -1730,7 +1923,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     log = log or (lambda *a, **k: None)
 
     base = expected_base(cfg, git_runner) or "main"
-    info = pr_view(cfg["repo"], entry["pr"], runner=gh_runner)
+    info = pr_view_settled(cfg["repo"], entry["pr"], runner=gh_runner)
     if info is None:
         return _retry_or_drop(doc, state_path, project, entry, "gh pr view failed")
     if info.get("headRefName"):
@@ -1750,8 +1943,18 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                              gh_runner)
     required = _required_for_info(cfg, base, info, git_runner, gh_runner)
     if not _pr_ready(info, required_checks=required):
+        if _mergeable_unknown(info):
+            # Not decided yet is NOT not-ready: keep the head slot so the next
+            # tick looks again instead of parking it in a wait list.
+            _release_to_head(state_path, project, entry)
+            log(f"merge-queue {project}: PR #{entry['pr']} mergeable UNKNOWN "
+                f"after {MERGEABLE_POLL_ATTEMPTS} polls; left at the head of "
+                "the queue", "WARN")
+            return {"pr": entry["pr"], "result": "mergeable-unknown"}
         # Not green yet: leave it at the head of the queue, no handback.
         _requeue_waiting(state_path, project, entry)
+        log(f"merge-queue {project}: PR #{entry['pr']} checks not green; "
+            "moved to the wait list", "INFO")
         return {"pr": entry["pr"], "result": "waiting"}
 
     cancel = _cancel_reason(state_path, project, entry, cfg)
@@ -1837,11 +2040,18 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             return {"pr": entry["pr"], "result": "gate-timeout",
                     "gate": command, "timeout_s": timeout_s}
         if verdict != "pass":
+            # `attempts` counts retries ALREADY SPENT (0 on a first pass), so the
+            # handback reports the 1-based attempt the reader expects to see.
+            attempt = int(entry.get("attempts") or 0) + 1
+            # Evidence first, boilerplate last: `output` leads with the verbatim
+            # failure lines, so the comment names the broken test above the
+            # resolve script instead of below six lines of it.
             body = (f"Merge queue: gate failed after rebasing onto "
                     f"origin/{base}.\n\n"
-                    f"Gate: {command}\n\n"
-                    f"{resolve_instructions(info.get('headRefName'), base)}\n"
-                    f"{output}")
+                    f"Gate: {command}\n"
+                    f"Attempt: {attempt}\n\n"
+                    f"{output}\n\n"
+                    f"{resolve_instructions(info.get('headRefName'), base)}\n")
             _finish(doc, project, state_path, ps, "red-gate", entry,
                     gate=command, head_sha=info.get("headRefOid"))
             _handback(entry, cfg, body, handback, gh_runner)
@@ -1870,38 +2080,14 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
 
     # The force-push moved the head, so the pre-push readiness answer is stale:
     # re-read the PR itself and merge only this exact SHA while it is green.
-    after = pr_view(cfg["repo"], entry["pr"], runner=gh_runner)
+    after = pr_view_settled(cfg["repo"], entry["pr"], runner=gh_runner)
     cancel = _cancel_reason(state_path, project, entry, cfg)
     if cancel:
         return _stop_cancelled(state_path, project, entry, cancel)
-    if not _post_push_ready(cfg, base, after, head_sha, git_runner, gh_runner):
-        _requeue_waiting(state_path, project, entry)
-        log(f"merge-queue {project}: PR #{entry['pr']} not green on the "
-            "pushed head; will re-check next tick", "WARN")
-        return {"pr": entry["pr"], "result": "waiting"}
-
-    # Last check under the lock: never merge a PR the operator removed while
-    # the post-push probe was in flight.
-    cancel = _cancel_reason(state_path, project, entry, cfg)
-    if cancel:
-        return _stop_cancelled(state_path, project, entry, cancel)
-
-    merge = _gh(["pr", "merge", str(entry["pr"]), "--squash",
-                 "--delete-branch", "--match-head-commit", head_sha],
-                worktree, gh_runner)
-    if merge is None or merge.returncode != 0:
-        return _retry_or_drop(
-            doc, state_path, project, entry,
-            f"gh pr merge failed: {_tail(merge.stderr if merge else '', 10)}")
-
-    merged_sha = head_sha
-    merged = pr_view(cfg["repo"], entry["pr"], runner=gh_runner)
-    if isinstance(merged, dict) and isinstance(merged.get("mergeCommit"), dict):
-        merged_sha = merged["mergeCommit"].get("oid") or merged_sha
-    _finish(doc, project, state_path, ps, "merged", entry, sha=merged_sha,
-            pushed_sha=head_sha)
-    log(f"merge-queue {project}: merged PR #{entry['pr']} as {merged_sha}")
-    return {"pr": entry["pr"], "result": "merged", "sha": merged_sha}
+    return _settle_pushed_head(
+        project, cfg, entry, after, head_sha, base=base,
+        state_path=state_path, cwd=worktree, git_runner=git_runner,
+        gh_runner=gh_runner, handback=handback, log=log)
 
 
 def _requeue_waiting(state_path, project, entry):
@@ -1920,6 +2106,83 @@ def _requeue_waiting(state_path, project, entry):
                     and _find_entry(ps["waiting"], entry.get("pr")) is None):
                 ps["waiting"].append(entry)
         save_state(doc, state_path)
+
+
+def _release_to_head(state_path, project, entry):
+    """Give a claim back at the HEAD of the FIFO, not in the wait list.
+
+    Used when the PR's readiness is simply not decided yet (GitHub answered
+    ``mergeable: UNKNOWN`` even after the bounded re-poll): parking it in
+    ``waiting`` is what used to strand it, so it must keep its head slot.
+    """
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        if flight and int(flight.get("pr", 0)) == int(entry.get("pr", 0)):
+            ps["in_flight"] = None
+            if (_find_entry(ps["queue"], entry.get("pr")) is None
+                    and _find_entry(ps["waiting"], entry.get("pr")) is None):
+                ps["queue"].insert(0, entry)
+        save_state(doc, state_path)
+
+
+def _drain_waiting(project, cfg, *, state_path, git_runner=None,
+                   gh_runner=None, log=None):
+    """Return every wait-listed PR whose checks are green to the FIFO.
+
+    Runs on EVERY tick, with a cheap ``gh pr view`` per waiting entry, and does
+    not require the active queue to be empty.  Before this the wait list was
+    only revisited by auto-enqueue (which runs only when every FIFO is empty),
+    so one non-empty queue kept green PRs waiting forever.  Entries move in
+    their original wait-list order; ``enqueued_at`` still ranks them against
+    the queue's existing entries.
+    """
+    log = log or (lambda *a, **k: None)
+    with _file_lock():
+        ps = _project_state(load_state(state_path), project)
+        waiting = [dict(entry) for entry in (ps.get("waiting") or [])
+                   if isinstance(entry, dict)]
+    if not waiting:
+        return []
+    base = expected_base(cfg, git_runner) or "main"
+    ready = []
+    for entry in waiting:
+        info = pr_view(cfg["repo"], entry.get("pr"), runner=gh_runner)
+        if not isinstance(info, dict):
+            continue
+        required = _required_for_info(cfg, base, info, git_runner, gh_runner)
+        if _pr_ready(info, required_checks=required):
+            ready.append(entry)
+    if not ready:
+        return []
+    ready_prs = {int(entry["pr"]) for entry in ready
+                 if entry.get("pr") is not None}
+    moved = []
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        remaining = []
+        for entry in ps.get("waiting") or []:
+            try:
+                pr = int(entry.get("pr"))
+            except (TypeError, ValueError):
+                remaining.append(entry)
+                continue
+            if pr not in ready_prs:
+                remaining.append(entry)
+                continue
+            # A CLI `add` may already have returned it to the queue; either way
+            # it is no longer waiting, and must not be duplicated.
+            if _find_entry(ps["queue"], pr) is None:
+                ps["queue"].append(entry)
+            moved.append(pr)
+        ps["waiting"] = remaining
+        save_state(doc, state_path)
+    if moved:
+        log(f"merge-queue {project}: returned green waiting PR(s) "
+            f"{', '.join('#' + str(pr) for pr in moved)} to the FIFO", "INFO")
+    return moved
 
 
 def _retry_or_drop(doc, state_path, project, entry, error):
@@ -1952,6 +2215,162 @@ def _retry_or_drop(doc, state_path, project, entry, error):
             result = "removed"
         save_state(fresh, state_path)
     return {"pr": entry.get("pr"), "result": result, "error": error}
+
+
+def _ci_pending_expired(since_iso):
+    """True when a held pushed head has outlived the CI-pending budget."""
+    since = _epoch(since_iso)
+    return (since is not None
+            and time.time() - since >= max(1, int(CI_PENDING_TIMEOUT_S)))
+
+
+def _hold_ci_pending(state_path, project, entry, *, head_sha, base, since,
+                     log):
+    """Keep the claim at ``ci-pending`` and record what it is waiting on."""
+    _update_flight(state_path, project, entry["pr"],
+                   stage=CI_PENDING_STAGE,
+                   pushed_sha=head_sha, ci_base=base, ci_since=since)
+    log(f"merge-queue {project}: PR #{entry['pr']} pushed "
+        f"{(head_sha or '?')[:12]}; CI pending, holding the claim", "INFO")
+
+
+def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
+                        state_path, cwd, git_runner, gh_runner, handback,
+                        log, ci_since=None):
+    """Decide one look at a head the queue pushed.
+
+    Green (and still the PR head) -> merge that exact SHA.  Pending -> hold the
+    claim at ``ci-pending`` and look again next tick.  Red -> comment and hand
+    the card back, because the local gates passed and CI is a real verdict.
+    Called both right after the force-push and on every later tick while the
+    claim is parked, so a pushed PR is never re-gated from scratch for CI.
+    """
+    pr = entry["pr"]
+    since = ci_since or _now_iso()
+    if not isinstance(info, dict):
+        if _ci_pending_expired(since):
+            _requeue_waiting(state_path, project, entry)
+            log(f"merge-queue {project}: PR #{pr} CI still unknown after "
+                f"{CI_PENDING_TIMEOUT_S}s and gh pr view failed; released to "
+                "the wait list", "WARN")
+            return {"pr": pr, "result": "ci-timeout",
+                    "error": "gh pr view failed"}
+        _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
+                         base=base, since=since, log=log)
+        return {"pr": pr, "result": CI_PENDING_STAGE,
+                "error": "gh pr view failed"}
+
+    state = str(info.get("state", "")).upper()
+    if state in ("MERGED", "CLOSED"):
+        _finish(None, project, state_path, None, "already-" + state.lower(),
+                entry, sha=info.get("headRefOid"))
+        log(f"merge-queue {project}: PR #{pr} is already {state.lower()}",
+            "INFO")
+        return {"pr": pr, "result": "already-merged"}
+
+    if str(info.get("headRefOid") or "") != head_sha:
+        # A worker (or anyone) pushed over the queue's head while it waited:
+        # the queue can no longer merge the SHA it validated.
+        _requeue_waiting(state_path, project, entry)
+        log(f"merge-queue {project}: PR #{pr} head moved from the pushed "
+            f"{(head_sha or '?')[:12]}; released to the wait list", "WARN")
+        return {"pr": pr, "result": "waiting"}
+
+    required = _required_for_info(cfg, base, info, git_runner, gh_runner)
+    verdict = _checks_verdict(info, required_checks=required)
+    if verdict == "red":
+        body = (
+            f"Merge queue: CI is red on the pushed head {head_sha[:12]}.\n\n"
+            "The project gates passed locally and the queue pushed this head, "
+            "but the repository's own checks failed on the result.\n\n"
+            f"{resolve_instructions(entry.get('branch'), base)}\n")
+        _finish(None, project, state_path, None, "red-ci", entry,
+                head_sha=head_sha)
+        _handback(entry, cfg, body, handback, gh_runner)
+        log(f"merge-queue {project}: PR #{pr} CI red on pushed head "
+            f"{head_sha[:12]}", "WARN")
+        return {"pr": pr, "result": "red-ci", "head_sha": head_sha}
+
+    if verdict == "pending" or not _pr_ready(info, required_checks=required):
+        if verdict == "pending":
+            if _ci_pending_expired(since):
+                _requeue_waiting(state_path, project, entry)
+                log(f"merge-queue {project}: PR #{pr} CI pending for "
+                    f"{CI_PENDING_TIMEOUT_S}s; released to the wait list",
+                    "WARN")
+                return {"pr": pr, "result": "ci-timeout",
+                        "timeout_s": CI_PENDING_TIMEOUT_S}
+            _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
+                             base=base, since=since, log=log)
+            return {"pr": pr, "result": CI_PENDING_STAGE}
+        if _mergeable_unknown(info):
+            # Checks are green but GitHub has not recomputed mergeability yet:
+            # "not decided" is still not "not ready", so keep the claim rather
+            # than parking a validated, pushed head in the wait list.
+            if _ci_pending_expired(since):
+                _requeue_waiting(state_path, project, entry)
+                log(f"merge-queue {project}: PR #{pr} mergeable still UNKNOWN "
+                    f"after {CI_PENDING_TIMEOUT_S}s; released to the wait list",
+                    "WARN")
+                return {"pr": pr, "result": "ci-timeout",
+                        "timeout_s": CI_PENDING_TIMEOUT_S}
+            _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
+                             base=base, since=since, log=log)
+            return {"pr": pr, "result": CI_PENDING_STAGE}
+        # Checks are green but the PR itself is not mergeable now (draft,
+        # review requested changes, ...): not a CI verdict, park it.
+        _requeue_waiting(state_path, project, entry)
+        log(f"merge-queue {project}: PR #{pr} not mergeable after push; "
+            "released to the wait list", "WARN")
+        return {"pr": pr, "result": "waiting"}
+
+    # Last check under the lock: never merge a PR the operator removed while
+    # the post-push probe (or a later tick's re-check) was in flight.
+    cancel = _cancel_reason(state_path, project, entry, cfg)
+    if cancel:
+        return _stop_cancelled(state_path, project, entry, cancel)
+
+    merge = _gh(["pr", "merge", str(pr), "--squash",
+                 "--delete-branch", "--match-head-commit", head_sha],
+                cwd, gh_runner)
+    if merge is None or merge.returncode != 0:
+        return _retry_or_drop(
+            None, state_path, project, entry,
+            f"gh pr merge failed: {_tail(merge.stderr if merge else '', 10)}")
+
+    merged_sha = head_sha
+    merged = pr_view(cfg["repo"], pr, runner=gh_runner)
+    if isinstance(merged, dict) and isinstance(merged.get("mergeCommit"), dict):
+        merged_sha = merged["mergeCommit"].get("oid") or merged_sha
+    _finish(None, project, state_path, None, "merged", entry, sha=merged_sha,
+            pushed_sha=head_sha)
+    log(f"merge-queue {project}: merged PR #{pr} as {merged_sha}", "INFO")
+    return {"pr": pr, "result": "merged", "sha": merged_sha}
+
+
+def _resume_ci_pending(project, cfg, entry, *, state_path, git_runner=None,
+                       gh_runner=None, handback=None, log=None):
+    """One tick's look at a claim parked on a pending pushed-head CI."""
+    log = log or (lambda *a, **k: None)
+    handback = handback or default_handback
+    cancel = _cancel_reason(state_path, project, entry, cfg)
+    if cancel:
+        return _stop_cancelled(state_path, project, entry, cancel)
+    head_sha = str(entry.get("pushed_sha") or "")
+    if not head_sha:
+        # A claim from a version that did not record the pushed SHA cannot be
+        # trusted to merge anything: release it instead of guessing.
+        _requeue_waiting(state_path, project, entry)
+        log(f"merge-queue {project}: PR #{entry['pr']} ci-pending claim has no "
+            "pushed SHA; released to the wait list", "WARN")
+        return {"pr": entry["pr"], "result": "waiting"}
+    base = entry.get("ci_base") or expected_base(cfg, git_runner) or "main"
+    info = pr_view_settled(cfg["repo"], entry["pr"], runner=gh_runner)
+    return _settle_pushed_head(
+        project, cfg, entry, info, head_sha, base=base,
+        state_path=state_path, cwd=cfg["repo"], git_runner=git_runner,
+        gh_runner=gh_runner, handback=handback, log=log,
+        ci_since=entry.get("ci_since"))
 
 
 # ── tick ────────────────────────────────────────────────────────────────────
@@ -2005,6 +2424,12 @@ def tick(*, state_path=None, root=None, registry_path=None,
         for name in names:
             ps = _project_state(doc, name)
             flight = ps.get("in_flight")
+            if (isinstance(flight, dict)
+                    and str(flight.get("stage") or "") == CI_PENDING_STAGE):
+                # A pushed head waiting on CI is NOT a dead run: its claim is
+                # live and this tick re-checks it in place. Recovering it would
+                # re-rebase and re-gate work that is already pushed.
+                continue
             if flight:
                 ps["in_flight"] = None
                 if not any(int(e.get("pr", 0)) == int(flight.get("pr", 0))
@@ -2033,6 +2458,16 @@ def tick(*, state_path=None, root=None, registry_path=None,
                       and not _project_state(doc, n).get("paused")]
             if not active:
                 continue
+
+            # Every tick, whether or not the FIFO is empty: a PR whose checks
+            # went green while it sat in `waiting` must be able to re-enter the
+            # queue. Auto-enqueue alone only runs on an EMPTY FIFO, which is
+            # exactly the livelock this drain removes.
+            for name in active:
+                _drain_waiting(name, cfgs[name], state_path=state_path,
+                               git_runner=git_runner, gh_runner=gh_runner,
+                               log=log)
+            doc = load_state(state_path)
 
             # Auto-enqueue only when this repo's whole FIFO is empty, so a
             # shared repo never stacks new work in front of queued entries.
@@ -2089,6 +2524,53 @@ def tick(*, state_path=None, root=None, registry_path=None,
                                     "attempts": 0,
                                 })
                         save_state(doc, state_path)
+
+            # A pushed head whose CI is still pending KEEPS its in-flight claim
+            # (stage `ci-pending`) and is re-checked here, in place, on every
+            # tick. It is not released to `waiting` and re-gated later, and it
+            # is not "recovered" as a dead run.
+            ci_claim = None
+            with _file_lock():
+                doc = load_state(state_path)
+                for idx, name in enumerate(members):
+                    cfg = cfgs.get(name)
+                    ps = _project_state(doc, name)
+                    if (cfg is None or not effective_enabled(cfg, ps)
+                            or ps.get("paused")):
+                        continue
+                    flight = ps.get("in_flight")
+                    if (isinstance(flight, dict)
+                            and str(flight.get("stage") or "")
+                            == CI_PENDING_STAGE):
+                        ci_claim = (idx, name, dict(flight))
+                        break
+            if ci_claim is not None:
+                _, claim_name, entry = ci_claim
+                cfg = cfgs[claim_name]
+                _stream_stamp(project=claim_name, pr=entry["pr"],
+                              stage=CI_PENDING_STAGE)
+                lock_root = os.path.dirname(os.path.abspath(state_path))
+                with _repo_lock(cfg["repo"], root=lock_root):
+                    try:
+                        outcome = _resume_ci_pending(
+                            claim_name, cfg, entry, state_path=state_path,
+                            git_runner=git_runner, gh_runner=gh_runner,
+                            handback=handback, log=log)
+                    except Exception as exc:
+                        outcome = _retry_or_drop(
+                            None, state_path, claim_name, entry, str(exc))
+                result["processed"].append({"project": claim_name, **outcome})
+                log(f"merge-queue {claim_name}: PR #{entry['pr']} -> "
+                    f"{outcome.get('result')}")
+                doc = load_state(state_path)
+                for name in members:
+                    ps = _project_state(doc, name)
+                    member_cfg = cfgs.get(name)
+                    result["projects"][name] = _project_view(
+                        ps, member_cfg,
+                        effective_enabled(member_cfg, ps)
+                        if member_cfg else False)
+                continue
 
             # Claim the oldest entry across every project on this repo, under
             # the lock and on a FRESH read, so an operator's `add` between our
@@ -2153,6 +2635,8 @@ def tick(*, state_path=None, root=None, registry_path=None,
                     outcome = _retry_or_drop(
                         doc, state_path, claim_name, entry, str(exc))
             result["processed"].append({"project": claim_name, **outcome})
+            log(f"merge-queue {claim_name}: PR #{entry['pr']} -> "
+                f"{outcome.get('result')}")
             doc = load_state(state_path)
             for name in members:
                 ps = _project_state(doc, name)
@@ -2188,6 +2672,26 @@ def _project_view(ps, cfg, enabled=None):
     }
 
 
+def _daemon_log(msg, level="INFO"):
+    """Write one merge-queue line to the daemon log. Never raises.
+
+    ``tick()`` defaults ``log`` to a no-op so an injected runner/test tick never
+    writes the operator's log; the daemon's own entry point
+    (:func:`check_merge_queue`) passes this instead, which is why the log used
+    to have zero merge-queue lines. The path follows ``HSCC_HOME`` at call time,
+    so a temp instance logs to its own root.
+    """
+    try:
+        from . import daemon_ops
+        root = _hscc_root()
+        os.makedirs(root, exist_ok=True)
+        daemon_ops.log(msg, level,
+                       log_file=os.path.join(root, "daemon.log"),
+                       pid_file=os.path.join(root, "daemon.pid"))
+    except Exception:
+        pass
+
+
 def check_merge_queue():
     """Daemon stream entry: run one tick and stamp ``state/merge_queue.json``.
 
@@ -2202,7 +2706,7 @@ def check_merge_queue():
     """
     from .state import write_state
     try:
-        result = tick()
+        result = tick(log=_daemon_log)
     except Exception as exc:
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     try:

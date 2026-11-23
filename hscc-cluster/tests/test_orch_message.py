@@ -556,6 +556,20 @@ def test_ambiguous_pane_refused(repl):
     assert repl.calls and out["sent"] is False
 
 
+def test_ambiguous_server_gets_its_own_reason(repl):
+    """Two live tmux servers is a SERVER choice, not an ambiguous pane.
+
+    The refusal's fix is "name the server in TMUX_TMPDIR", so reusing
+    ``ambiguous_pane`` sent the operator looking for a duplicate pane that
+    does not exist (t_4b3e3806)."""
+    repl.raise_exc = FakeInjectError(
+        "ambiguous_server", "2 live tmux servers and TMUX_TMPDIR is unset")
+    out = send()
+    assert out["reason"] == om.REASON_AMBIGUOUS_SERVER == "ambiguous_server"
+    assert out["sent"] is False
+    assert "TMUX_TMPDIR" in out["detail"]
+
+
 def test_transport_error_maps_to_transport_reason(repl):
     repl.raise_exc = FakeInjectError("tmux", "tmux paste-buffer failed")
     out = send()

@@ -208,18 +208,45 @@ def _under_pytest() -> bool:
     return bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
 
-def run_tmux(argv):
+def _socket_args(repl):
+    """The ``-S <socket>`` prefix from repl_inject, or ``()`` when unavailable.
+
+    THE resolver is ``repl_inject.tmux_socket_args()`` (t_4c5855a6) — the same
+    one ``hscc orch inject`` uses. It is never re-derived here: a second copy
+    of the discovery rules is exactly the drift this seam exists to prevent.
+    A fake repl injected by a test need not carry the resolver; a real
+    hscc-api module always does. Its two-server refusal (kind
+    ``ambiguous_server``) propagates so :func:`start` can name it.
+    """
+    resolver = getattr(repl, "tmux_socket_args", None)
+    return tuple(resolver()) if callable(resolver) else ()
+
+
+def run_tmux(argv, *, socket_args=None, repl=None):
     """Run one tmux command; return ``(returncode, stdout, stderr)``.
+
+    Every argv is aimed at the server repl_inject resolved: a fresh shell has
+    no ``TMUX_TMPDIR``, and without the ``-S`` prefix tmux would create a
+    SECOND detached session on a parallel server while the operator watches
+    their own server (t_4b3e3806). ``socket_args`` lets :func:`start` pass the
+    one resolution it made; a direct caller gets the same resolver here.
 
     Hermeticity guard: under pytest the ORIGINAL seam raises instead of
     executing, so a test that forgets to inject a runner cannot touch the
-    operator's real tmux server.
+    operator's real tmux server. Pointing ``repl_inject.TMUX_BIN`` at a fake
+    (as the socket tests do) is ownership, so that path may exec.
     """
-    if _under_pytest() and run_tmux is _ORIG_RUN_TMUX:
+    repl = repl if repl is not None else load_repl_inject()
+    binary = "tmux"
+    if repl is not None:
+        binary = getattr(repl, "TMUX_BIN", None) or binary
+    if socket_args is None:
+        socket_args = _socket_args(repl)
+    if _under_pytest() and run_tmux is _ORIG_RUN_TMUX and binary == "tmux":
         raise MainPaneError(
             "real tmux execution is disabled under pytest "
             "(hermeticity guard) — inject a runner")
-    cp = subprocess.run(["tmux", *[str(a) for a in argv]],
+    cp = subprocess.run([binary, *socket_args, *[str(a) for a in argv]],
                         capture_output=True, text=True)
     return cp.returncode, cp.stdout or "", cp.stderr or ""
 
@@ -318,6 +345,15 @@ def start(*, profile=None, hscc_dir=None, runner=None, repl=None,
                 "action": "kanban-root-refused", "pane": None, "target": None,
                 "session": None, "command": None, "detail": refusal}
     repl = repl if repl is not None else load_repl_inject()
+    try:
+        socket_args = _socket_args(repl)
+    except Exception as exc:  # noqa: BLE001 — report the refusal, never crash
+        kind = getattr(exc, "kind", None)
+        return {**_receipt(name, profile, board), "ok": False,
+                "action": ("ambiguous-server"
+                           if kind == "ambiguous_server" else "tmux-error"),
+                "pane": None, "target": None, "session": None,
+                "command": None, "detail": str(exc)}
 
     try:
         panes = _profile_panes(repl, profile)
@@ -351,7 +387,8 @@ def start(*, profile=None, hscc_dir=None, runner=None, repl=None,
     # `chat` is what repl_inject recognises as a REPL; a bare `hermes -p X`
     # would run, but `hscc orch inject` could never resolve it.
     command = [binary, "-p", profile, "chat"]
-    run = runner or run_tmux
+    run = runner or (lambda argv: run_tmux(argv, socket_args=socket_args,
+                                            repl=repl))
     try:
         sessions = _sessions(run)
         if sessions:
@@ -462,6 +499,9 @@ def _start_lines(result):
     elif result.get("action") == "kanban-root-refused":
         lines.append("  fix: unset HERMES_KANBAN_HOME, or point HERMES_HOME "
                      "at that root")
+    elif result.get("action") == "ambiguous-server":
+        lines.append("  fix: set TMUX_TMPDIR to the tmux server that holds "
+                     "your panes, then retry")
     elif result.get("action") in ("missing-repl", "discovery-failed"):
         lines.append("  fix: deploy the hscc-api plugin beside hscc_daemon")
     elif result.get("action") in ("create-failed", "tmux-error"):

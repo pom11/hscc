@@ -31,24 +31,33 @@ def test_compose_soul_orchestrator_skips_worker_ops():
     assert "gateway node" in soul.lower()
 
 
-def test_project_orch_work_rules_carry_the_orch_message_nudge_rule():
-    """t_1d284d82: `orch_message` is a NUDGE channel, not a work order.
+def test_project_orch_work_rules_route_nudges_through_the_main_orchestrator():
+    """t_1d284d82 + t_a3557207: a nudge is not a work order — and not this
+    profile's channel either.
 
     The rule has to live INSIDE the generated "## How you manage work" list (an
     orch reads that list as its work-management contract), so it is asserted on
-    the text that follows the heading — not merely somewhere in the SOUL.
+    the text that follows the heading — not merely somewhere in the SOUL. QA F4
+    measured the old wording promising the `orch_message` tool to homes the
+    main-only tier leaves with 0 cluster tools, so the rule now points at the
+    main orchestrator and names no tool.
     """
     spec = {"name": "demo-orch", "identity": "You orchestrate demo.\n",
             "preload_skills": []}
     soul = generator.compose_soul(spec, base_identity="BASE")
     assert "## How you manage work" in soul
     section = soul.split("## How you manage work", 1)[1]
-    assert "`orch_message`" in section
-    assert "11. **`orch_message` is a nudge, not a work order.**" in section
-    assert "never by commenting on DONE cards" in section
+    assert "11. **Nudges go through the main orchestrator.**" in section
+    assert "orch_message" not in section
+    assert "ask it to pass the nudge on" in section
+    assert "Never comment on DONE cards" in section
     assert "on a CARD on the right board (`--board` explicit)" in section
-    # Workers cannot send orch_message at all (the tool refuses a non-orch
-    # sender), so the rule belongs to the orchestrator block only.
+    # The main keeps the tool; a worker never names it.
+    main_soul = generator.compose_soul(
+        {"name": main_orch.DEFAULT_NAME, "identity": "You orchestrate.\n",
+         "preload_skills": []},
+        base_identity="BASE")
+    assert "`orch_message`" in main_soul
     worker = generator.compose_soul(
         {"name": "coder", "identity": "You build.\n", "preload_skills": []},
         base_identity="BASE")
