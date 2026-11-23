@@ -405,12 +405,12 @@ def _speak_describe_set(payload: dict) -> str:
 # --------------------------------------------------------------------------- #
 
 def handle_list(server, ctx, query, body):
-    """GET /v1/profiles/list — the profile ROSTER, not the counts (audit F2).
+    """GET /v1/profiles/list — the profile ROSTER; ``hscc profiles`` lives here:
+    ``GET /v1/profiles`` (audit F2).
 
-    Every profile the API can see + the config whitelist (no secrets). This is
-    NOT the answer to ``hscc profiles`` — running task counts per profile are
-    answered by exactly one route, :data:`PROFILES_STATUS_POINTER`
-    (``routes_ops.handle_profiles``), which is also what the CLI verb renders.
+    ``hscc profiles`` is ``GET /v1/profiles`` (``routes_ops.handle_profiles``,
+    named by :data:`PROFILES_STATUS_POINTER`) and only there. This route counts
+    nothing: every profile the API can see + the config whitelist, no secrets.
 
     The payload deliberately carries no ``counts`` / ``total_running`` key, and
     this module never calls ``cmd_profile_status``: that is what keeps this

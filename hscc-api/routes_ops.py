@@ -562,7 +562,8 @@ def handle_escalate_run(server, ctx, query, body):
 
 
 def handle_profiles(server, ctx, query, body):
-    """GET /v1/profiles — the canonical answer to ``hscc profiles`` (audit F2).
+    """GET /v1/profiles — the canonical ``hscc profiles`` answer; the profile
+    ROSTER is ``GET /v1/profiles/list`` (audit F2).
 
     Running kanban task counts per profile. The payload has ONE implementation:
     ``profile_status.get_profile_status`` reached through

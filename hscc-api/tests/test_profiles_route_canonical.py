@@ -144,6 +144,18 @@ def _matching(path, method=None):
             if p.match(path) and (method is None or m == method)]
 
 
+def _names_route(text, route):
+    """Does ``text`` name ``route``'s path as ITSELF, not as a prefix of a longer one?
+
+    ``/v1/profiles`` is a literal prefix of ``/v1/profiles/list``, so a plain
+    ``in`` test on the roster's own docstring would pass on a docstring that
+    never mentions the canonical route — the same name-collision that let F2
+    read two routes as one answer. The lookahead is the whole point.
+    """
+    path = route.split(" ", 1)[1]
+    return re.search(re.escape(path) + r"(?!/)", text) is not None
+
+
 def _first_match(path, method="GET"):
     """The handler the real dispatcher would run: first (method, regex) match."""
     hits = _matching(path, method)
@@ -352,17 +364,44 @@ class TestOneImplementationOfThePayload:
             f"_backing_profiles seam; found call sites in {sorted(owners)}")
 
     def test_the_canonical_route_adds_nothing_but_speak(self, running, token,
-                                                        calls):
+                                                        monkeypatch):
         """The handler is a pass-through, so it cannot be a second answer.
 
         ``handle_profiles`` may add ``speak`` and nothing else: the moment it
-        recomputes or re-derives a count, the payload has two producers.
+        recomputes or re-derives a number, the payload has two producers. The
+        backing below is deliberately NOT self-consistent — ``total_running``
+        disagrees with ``sum(counts.values())`` and ``profiles`` names a profile
+        with no count row. The real
+        ``profile_status.get_profile_status`` always agrees with itself, and a
+        self-consistent fixture cannot tell a pass-through from a handler that
+        recomputes the total (measured: with a consistent fixture that mutation
+        passed this test unnoticed). The handler's contract is to pass the
+        payload through untouched, so the fake must make any recomputation
+        observable.
         """
+        answer = {"counts": {"researcher-a": 2, "architect": 1},
+                  "total_running": 5,
+                  "profiles": ["architect", "researcher-a", "worker"]}
+        monkeypatch.setattr(routes_ops, "_backing_profiles", lambda: dict(answer))
         status, payload = _get(running, token, COUNTS_PATH)
         assert status == 200
-        assert {k: v for k, v in payload.items() if k != "speak"} == COUNTS_ANSWER
-        assert payload["speak"] == "2 profiles running 3 tasks."
-        assert calls["counts"] == 1, "the backing must be reached exactly once"
+        assert {k: v for k, v in payload.items() if k != "speak"} == answer
+        assert payload["speak"] == "2 profiles running 5 tasks."
+        assert payload["total_running"] != sum(payload["counts"].values()), (
+            "the fixture lost its bite: total now equals the counts sum, so a "
+            "recomputing handler would pass this test again")
+
+    def test_the_canonical_backing_is_reached_once(self, running, token, calls):
+        """One request, one pass through the seam.
+
+        The F8 rule for the same reason: a handler that reads the counts twice
+        (or reads them somewhere else as well) has two answers to reconcile
+        even while both look right on a quiet fixture.
+        """
+        status, payload = _get(running, token, COUNTS_PATH)
+        assert status == 200 and payload["speak"]
+        assert calls["counts"] == 1
+        assert calls["roster"] == 0, "the counts door must not reach the roster"
 
 
 # --------------------------------------------------------------------------- #
@@ -426,26 +465,36 @@ class TestPointerNamedOnBothEnds:
                 f"{route!r} and pattern {pattern!r} name different paths")
             assert method == "GET"
 
-    def test_both_handlers_name_the_other_end(self):
+    def test_both_handlers_name_the_other_end_on_their_summary_lines(self):
         """A one-directional pointer is how F2 happened in the first place.
 
         Standing at either route you must be able to learn the other exists and
-        which one answers ``hscc profiles`` — the rule F8
-        (``test_kanban_monitor_route_pointer.py``) already enforces for the
-        monitor verb.
+        which one answers ``hscc profiles``. The pin is on the SUMMARY BLOCK
+        (everything before the first blank line — what ``help()``, an IDE hover
+        and a `git grep -A1` show) rather than the body, for the reason F8
+        measured: body prose that already mentions the pairing did not stop
+        F8, and the same rule applies here
+        (``test_kanban_monitor_route_pointer.py``).
+
+        The route names are matched by :func:`_names_route`, so the roster
+        cannot satisfy "names the canonical" by containing its OWN longer path.
         """
-        canonical = routes_ops.handle_profiles.__doc__ or ""
-        roster = routes_profiles.handle_list.__doc__ or ""
-        assert "hscc profiles" in canonical
-        assert routes_profiles.PROFILES_ROSTER_ROUTE in canonical, (
-            "the canonical must name the roster it is NOT")
-        assert "hscc profiles" in roster
-        assert routes_ops.PROFILES_STATUS_ROUTE.split(" ", 1)[1] in roster, (
-            "the roster must name the canonical route back")
+        for doc, other in ((routes_ops.handle_profiles.__doc__,
+                            routes_profiles.PROFILES_ROSTER_ROUTE),
+                           (routes_profiles.handle_list.__doc__,
+                            routes_ops.PROFILES_STATUS_ROUTE)):
+            assert doc, "a handler lost its docstring — nothing to point at"
+            summary = doc.split("\n\n", 1)[0]
+            assert "hscc profiles" in summary, (
+                f"{AUDIT_ROW}: the summary must name the CLI verb the pair is "
+                f"about, not just the path: {summary!r}")
+            assert _names_route(summary, other), (
+                f"{AUDIT_ROW}: the summary must name {other!r} as itself; "
+                f"found {summary!r}")
 
     def test_the_pair_is_documented_at_module_level_too(self):
         """The docstring an agent reads before writing a caller, not just the
         handler docstring it reads after."""
-        assert routes_ops.PROFILES_ROSTER_POINTER in (routes_ops.__doc__ or "")
-        assert routes_ops.PROFILES_STATUS_ROUTE.split(" ", 1)[1] in (
-            routes_profiles.__doc__ or "")
+        assert _names_route(routes_ops.__doc__ or "", routes_ops.PROFILES_ROSTER_POINTER)
+        assert _names_route(routes_profiles.__doc__ or "",
+                            routes_ops.PROFILES_STATUS_ROUTE)
