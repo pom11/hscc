@@ -490,6 +490,14 @@ class TestStatus:
 # ---------------------------------------------------------------------------
 
 class TestEnable:
+    # This case plants `last_activity_iso = 2020-01-01` and asserts `enable` moved it
+    # OFF that value. Under t_3b38aca4's absolute freeze at 2020-01-01 the product's
+    # "now" IS that instant, so the inequality `cfg["last_activity_iso"] !=
+    # "2020-01-01T00:00:00+00:00"` is unsatisfiable and the case reads red at that arm
+    # alone (frozen 2200 and every relative arm are green — t_0389093a). That is the
+    # freeze colliding with a "the value must have moved" assertion, not a date risk:
+    # nothing here goes red on a future date, because the pin is in the PAST and the
+    # product only ever moves the stamp forward from it.
     def test_enable_arms_and_resets_idle_timer(self, capsys, autodown_file,
                                                block_file):
         # Simulate prior activity far in the past (would be idle-eligible if an

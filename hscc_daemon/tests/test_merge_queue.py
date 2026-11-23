@@ -1819,6 +1819,27 @@ def test_non_green_head_moves_to_the_wait_list_so_the_fifo_proceeds(tmp_path):
 
 # ── generated_at is the ledger write time, not the read time (F14) ─────────
 
+# ── the four "the stamp moved" cases, and what an absolute freeze does to them ──
+#
+# test_view_generated_at_is_the_last_state_write_not_the_read,
+# test_tick_stamps_the_ledger_even_when_it_does_no_work,
+# test_gate_heartbeat_advances_the_stream_while_the_gate_runs and
+# test_check_merge_queue_stamps_the_stream_when_the_tick_does_no_work all assert that
+# TWO SUCCESSIVE WRITES stamp differently. `save_state` stamps `generated_at` from
+# `merge_queue._now_iso()`, so under an ABSOLUTE freeze (t_3b38aca4's t3b3_freeze,
+# `--frozen <iso> --freeze-time`) every write in the process answers the same instant
+# and the assertion is unsatisfiable by construction: measured red at frozen
+# 2020-01-01 AND frozen 2200-01-01 with `assert '<instant>' != '<instant>'`.
+#
+# That both-directions shape is the signature of a clock that cannot ADVANCE, not of a
+# two-clock window — a window defect flips in ONE direction only, when the fixture
+# literal crosses it. The cross-check agrees: all four are green at the real clock and
+# under the shipped relative harness at ±400 days and at the equivalent travel
+# (HSCC_WALL_SHIFT_DAYS=±2518/+63225), where the clock keeps moving (t_0389093a).
+# Nothing here goes red on a future date; do not "fix" it by pinning the stamps, which
+# would delete the freshness promise these four cases exist to hold.
+
+
 def test_view_generated_at_is_the_last_state_write_not_the_read(tmp_path):
     """F14: two reads with no tick/write between them share one timestamp."""
     state = _state(tmp_path)
