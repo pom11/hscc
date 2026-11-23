@@ -20,6 +20,7 @@ provides_tools:
   - node_paused
   - autodown_status
   - merge_queue_status
+  - doctor
   # _OPS_TOOLS
   - provision_model
   - stop_model
