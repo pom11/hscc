@@ -408,13 +408,16 @@ if verb == "serve-crashed":
     # The raise is injected AT THE `serve_forever` SEAM rather than deep inside it,
     # deliberately and for the reason t_60932269 gave for injecting its wedge at
     # `service_actions`: nothing in the product raises out of
-    # `_MultiServer.serve_forever` today — the listener loops run on their own
-    # threads (so an exception there dies in the thread, it does not reach
-    # `_serve`) and the bounded stop RETURNS rather than raising. The arm therefore
-    # stands in for the class of failure `serve_main`'s own `except Exception`
-    # catches, and everything it makes observable is real: a real `except Exception`
-    # in the product's `_serve`, a real teardown of a real child process, a real
-    # exit status.
+    # `_MultiServer.serve_forever` ON PURPOSE. It runs each listener's loop on its
+    # own daemon thread — an exception there dies in that thread and never reaches
+    # `_serve` — and its flag branch is written to RETURN the hosts it abandoned
+    # rather than raise. What it can still do is fail along the way: building a
+    # waiter thread in `_shutdown_bounded` raises `RuntimeError: can't start new
+    # thread` under thread exhaustion, and that unplanned class is exactly what this
+    # arm — and `serve_main`'s own `except Exception` — exists for. So the seam
+    # stands in for it, and everything it makes observable is real: a real
+    # `except Exception` in the product's `_serve`, a real teardown of a real child
+    # process, a real exit status.
     #
     # argv: <port> <binds-csv> <crash|->   — '-' injects nothing, which is the
     # control arm: byte-identical below the seam, stopped by SIGTERM like any
