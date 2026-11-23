@@ -22,6 +22,8 @@ Backing (the ``hermes_cli.profiles`` library, NEVER CLI text-parsing —
 a fake via ``sys.modules``):
 
   * ``GET  /v1/profiles/list``               -> ``hermes_cli.profiles.list_profiles()``
+        (the ROSTER. The counts question — ``hscc profiles`` — is answered by
+        ``GET /v1/profiles`` in ``routes_ops.py``, and only there; audit F2)
   * ``GET  /v1/profiles/{name}``             -> ``show``: profile summary + config whitelist
   * ``GET  /v1/profiles/{name}/describe``    -> ``read_profile_meta().description``
   * ``POST /v1/profiles/create``             -> ``create_profile(...)``
@@ -44,6 +46,40 @@ from api_server import ApiError, ROUTES
 # The profile-root gate (t_c443c001): one implementation, and the write choke
 # point for every mutating backing below.
 import profile_root
+
+
+# --------------------------------------------------------------------------- #
+# This module answers "what profiles exist", NOT "who is running cards" (F2)
+# --------------------------------------------------------------------------- #
+#
+# ``docs/audits/2026-11-23-agent-surface.md:186`` (F2) listed
+# ``GET /v1/profiles/list`` as a SECOND route answering ``hscc profiles``.
+# Measured against the payloads it is not: ``hscc profiles`` prints running
+# kanban task counts per profile, and that question has exactly one route —
+# ``GET /v1/profiles`` in ``routes_ops.py``. What this module serves is the
+# profile ROSTER (every profile + the config whitelist), which no counts route
+# can answer and which iOS's create-card assignee picker
+# (``ProfileListResponse``) reads.
+#
+# So the F2 disposition is a pointer, not a deletion: aliasing either route
+# onto the other would break one of the two shipped decoders, and deleting the
+# roster would close the only door to the config whitelist. What IS pinned is
+# the boundary — this route must never grow a ``counts`` / ``total_running``
+# payload and must never call the count implementation, because a roster that
+# starts answering the counts question is precisely the invisible second
+# source of truth F2 warns about. See
+# ``hscc-api/tests/test_profiles_route_canonical.py``.
+
+#: The canonical answer to ``hscc profiles`` lives elsewhere; a reader who
+#: arrives here wanting running task counts is sent there. Literal rather than
+#: an import of ``routes_ops`` so this module stays loadable without the ops
+#: route table; the test asserts the two constants agree.
+PROFILES_STATUS_POINTER = "GET /v1/profiles"
+#: This route's own name. The ``ROUTES.append`` below compiles
+#: :data:`PROFILES_ROSTER_PATTERN`, so prose and dispatch table share one name.
+PROFILES_ROSTER_ROUTE = "GET /v1/profiles/list"
+PROFILES_ROSTER_PATTERN = r"^/v1/profiles/list$"
+
 
 # --------------------------------------------------------------------------- #
 # Backing-call seam (monkeypatch these in tests). ``hermes_cli`` is only
@@ -369,7 +405,21 @@ def _speak_describe_set(payload: dict) -> str:
 # --------------------------------------------------------------------------- #
 
 def handle_list(server, ctx, query, body):
-    """GET /v1/profiles/list — every profile + config summary (no secrets)."""
+    """GET /v1/profiles/list — the profile ROSTER, not the counts (audit F2).
+
+    Every profile the API can see + the config whitelist (no secrets). This is
+    NOT the answer to ``hscc profiles`` — running task counts per profile are
+    answered by exactly one route, :data:`PROFILES_STATUS_POINTER`
+    (``routes_ops.handle_profiles``), which is also what the CLI verb renders.
+
+    The payload deliberately carries no ``counts`` / ``total_running`` key, and
+    this module never calls ``cmd_profile_status``: that is what keeps this
+    roster from becoming a second source of truth for the other question. Its
+    ``profiles`` value is a list of per-profile OBJECTS where the counts
+    payload's ``profiles`` is a list of NAMES — same key name, different
+    meaning, which is why the two read as one question. Pinned by
+    ``tests/test_profiles_route_canonical.py``; do not "unify" the two.
+    """
     try:
         profiles = _backing_list_profiles()
     except Exception:
@@ -544,7 +594,7 @@ def handle_describe_set(server, ctx, query, body):
 # the exact match wins; the ``{name}`` routes are anchored with ``$`` so they
 # never swallow the ``/describe`` subpaths.
 
-ROUTES.append(("GET", re.compile(r"^/v1/profiles/list$"), handle_list))
+ROUTES.append(("GET", re.compile(PROFILES_ROSTER_PATTERN), handle_list))
 ROUTES.append(("GET", re.compile(r"^/v1/profiles/(?P<name>[^/]+)$"),
                handle_show))
 ROUTES.append(

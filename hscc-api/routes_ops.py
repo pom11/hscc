@@ -21,7 +21,10 @@ Backing (libraries, never CLI text-parsing):
   * ``GET  /v1/daemon/host``  -> local platform/psutil host metrics (daemon host's OWN machine)
   * ``GET  /v1/triggers``     -> ``trigger.load_triggers()`` + ``state.read_state('triggers')`` + recent events
   * ``GET  /v1/escalate``     -> ``escalate_watcher.scan_and_escalate`` (read-only: no-op reassign/notify)
-  * ``GET  /v1/profiles``     -> ``cluster_engine.cmd_profile_status()``
+  * ``GET  /v1/profiles``     -> ``cluster_engine.cmd_profile_status()`` —
+    the canonical ``hscc profiles`` answer (running counts). The profile
+    ROSTER is a different question: ``GET /v1/profiles/list`` in
+    ``routes_profiles.py``. See ``PROFILES_STATUS_ROUTE`` — audit F2.
   * ``POST /v1/cluster/up``   -> ``cluster_engine.cmd_cluster_up(dry_run=False)``
   * ``POST /v1/cluster/down`` -> ``cluster_engine.cmd_cluster_down(dry_run=False)``
 
@@ -37,6 +40,44 @@ import re
 import health_cache
 from api_server import ApiError, ROUTES
 from routes_cluster import _load_cluster_engine, _is_error_dict
+
+
+# --------------------------------------------------------------------------- #
+# The `hscc profiles` question has ONE canonical route (audit F2)
+# --------------------------------------------------------------------------- #
+#
+# ``docs/audits/2026-11-23-agent-surface.md:186`` (F2) measured that `hscc
+# profiles` "is answered by TWO routes" — this one and `GET /v1/profiles/list`.
+# Measured against the payloads they answer two DIFFERENT questions:
+#
+#   * this route: "which profiles are running kanban cards, how many each"
+#     -> ``counts`` / ``total_running`` / ``profiles`` = a list of NAMES;
+#   * ``routes_profiles.handle_list``: "what profiles exist" (the roster)
+#     -> ``count`` / ``profiles`` = a list of per-profile OBJECTS, and it is
+#        the only door to the config whitelist.
+#
+# Neither is an alias of the other, and both have shipped clients (iOS
+# ``ProfilesResponse`` reads the counts, ``ProfileListResponse`` — used by the
+# create-card assignee picker — reads the roster). So the F2 fix is not a
+# deletion: it is to name the canonical, point the roster at it, and pin the
+# boundary so a later payload edit cannot quietly make the roster a second
+# answer to this question. Pinned by
+# ``hscc-api/tests/test_profiles_route_canonical.py``.
+
+#: The ONE route that answers ``hscc profiles`` (running task counts). The CLI
+#: verb renders the same single implementation this handler calls, so the two
+#: doors cannot disagree — see :func:`handle_profiles`.
+PROFILES_STATUS_ROUTE = "GET /v1/profiles"
+#: The registration pattern for :data:`PROFILES_STATUS_ROUTE`. The
+#: ``ROUTES.append`` at the bottom of this file compiles THIS constant, so the
+#: name in prose and the name in the dispatch table cannot drift apart.
+PROFILES_STATUS_PATTERN = r"^/v1/profiles$"
+#: Where to send a reader who wanted the roster rather than the counts. A
+#: literal on purpose (importing ``routes_profiles`` here would make this
+#: module depend on the roster's module to describe its own naming); the test
+#: asserts both modules' pointers agree and that this one resolves to a real
+#: registered route.
+PROFILES_ROSTER_POINTER = "GET /v1/profiles/list"
 
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +291,14 @@ def _backing_escalate_run():
 
 
 def _backing_profiles():
+    """The ONE door from this API to the profile-count implementation.
+
+    ``cmd_profile_status`` is called nowhere else in ``hscc-api``, and that
+    single call site is what makes ``GET /v1/profiles`` one implementation of
+    the ``hscc profiles`` payload rather than one of two (audit F2). Tests
+    monkeypatch THIS function; a second door would have to be added here and
+    ``tests/test_profiles_route_canonical.py`` reddens on it.
+    """
     eng = _load_cluster_engine()
     if eng is None:
         return None
@@ -513,7 +562,23 @@ def handle_escalate_run(server, ctx, query, body):
 
 
 def handle_profiles(server, ctx, query, body):
-    """GET /v1/profiles — running kanban task counts per profile."""
+    """GET /v1/profiles — the canonical answer to ``hscc profiles`` (audit F2).
+
+    Running kanban task counts per profile. The payload has ONE implementation:
+    ``profile_status.get_profile_status`` reached through
+    ``cluster_engine.cmd_profile_status`` — the same single call the CLI verb
+    makes (``hscc_daemon/hscc.py::_handle_profiles`` renders
+    ``eng.cmd_profile_status()``), so the CLI and this route cannot drift. This
+    handler contributes nothing to the payload but ``speak``.
+
+    NOT the profile roster: a caller wanting every profile plus its config
+    whitelist wants ``GET /v1/profiles/list`` (``routes_profiles.handle_list``,
+    pointed at by :data:`PROFILES_ROSTER_POINTER`). The two payloads share the
+    key name ``profiles`` with DIFFERENT meanings — a list of profile NAMES
+    here, a list of profile OBJECTS there — which is exactly how F2 read them
+    as one question. That boundary is pinned by
+    ``tests/test_profiles_route_canonical.py``; do not "unify" the two.
+    """
     try:
         data = _backing_profiles()
     except Exception:
@@ -580,6 +645,6 @@ ROUTES.append(("GET", re.compile(r"^/v1/triggers$"), handle_triggers))
 ROUTES.append(("POST", re.compile(r"^/v1/triggers/run$"), handle_triggers_run))
 ROUTES.append(("GET", re.compile(r"^/v1/escalate$"), handle_escalate))
 ROUTES.append(("POST", re.compile(r"^/v1/escalate$"), handle_escalate_run))
-ROUTES.append(("GET", re.compile(r"^/v1/profiles$"), handle_profiles))
+ROUTES.append(("GET", re.compile(PROFILES_STATUS_PATTERN), handle_profiles))
 ROUTES.append(("POST", re.compile(r"^/v1/cluster/up$"), handle_cluster_up))
 ROUTES.append(("POST", re.compile(r"^/v1/cluster/down$"), handle_cluster_down))
