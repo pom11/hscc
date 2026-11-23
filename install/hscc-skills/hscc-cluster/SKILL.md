@@ -86,6 +86,13 @@ the decisions quoted below.
 A stale `serving.json` is the one way this tool can delete live work, which is why
 the guard reads the file and refuses rather than repairing it.
 
+Naming (audit F7): these four are the `heal` **tools** — individual repairs, each
+yours to call one at a time. They are not `/heal` (the operator's chat-surface
+sweep that decides which workers are unhealthy) and not `hscc heal-status` /
+`heal-clear` (the daemon's breaker strike ledger, CLI-only until D4 lands a read
+tool). The whole `heal*` family is tabulated once in `install/hscc-skills/hscc/SKILL.md`
+under "Naming traps" — that table is the single source; do not restate it here.
+
 ### Fleet (4) — reads and advice, no scaling
 
 | tool | answers | state source |
@@ -113,10 +120,13 @@ Both ends must be `*-orch` (the one non-`*-orch` name it accepts is the configur
 main orchestrator, from that resolver). It refuses worker profiles and `default`, and
 it **never interrupts a running turn** — it queues.
 
-Not to be confused with three neighbours that share the `orch` prefix and do different
-things: `hscc orch inject` (types into a live tmux pane — CLI-only), `/orch-restart`
-(restarts the orchestrator **vLLM**), `POST /v1/orchestrator/chat` (one chat turn, by
-job id).
+Not to be confused with the other capabilities that share the `orch` prefix and do
+different things: `hscc orch inject` (types into a live tmux pane — CLI-only),
+`hscc orch waker status|enable|disable` (the daemon-resident waker's on/off
+switch — it sends nothing), `/orch-restart` (restarts the orchestrator **vLLM**),
+`POST /v1/orchestrator/chat` (one chat turn, by job id). All of them are tabulated
+once in `install/hscc-skills/hscc/SKILL.md` under "Naming traps"; that table is
+the single source.
 
 ## Tools that deliberately do NOT exist
 
@@ -226,6 +236,7 @@ python3 ~/.hermes/plugins/hscc-cluster/hscc.py <command> [args] [--json]
   cluster-template    list | preview | apply
   profile-status      running kanban task counts per profile
   orch inject <p> "<msg>" [--mode auto|plain|queue|steer] [--dry-run] [--json]
+  orch waker status|enable|disable [--json]
 ```
 
 `--json` is the machine path and is byte-identical to the pre-themed output (daemons,
