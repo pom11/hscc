@@ -66,8 +66,11 @@ the subscribe-side gate; the fix text says so.
 Inside a pytest process the row's real inputs are the operator's live boards and
 live session registries, so an uninjected call returns a refusal ERROR naming the
 seams instead (the ``doctor_node_pauses`` / ``doctor_main_only`` fence shape).
-Tests inject fake subscription rows and a fake session registry and therefore
-never touch a gateway, a board or a live registry.
+The fence counts a process a test SPAWNED as part of the suite too — see
+:func:`_under_pytest`, because the door this row feeds runs in one (``doctor_tools``
+execs ``doctor.py --json`` rather than importing it). Tests inject fake
+subscription rows and a fake session registry and therefore never touch a
+gateway, a board or a live registry.
 """
 
 from __future__ import annotations
@@ -398,6 +401,32 @@ def _fix(findings: List[Dict[str, Any]]) -> str:
             "or 'hscc main start' to set it. Do not restore the 2026-11-23 "
             "backup files ~/fleet-check/backups/notify-subs-*-20261123.txt — "
             "they are the posture this row reports." % (unsub, repoint))
+
+
+def _under_pytest() -> bool:
+    """True when this process is a pytest run — **or a process one spawned**.
+
+    ``"pytest" in sys.modules`` is process-local, and the door this row feeds is
+    a separate interpreter: ``doctor_tools.doctor_findings`` execs
+    ``python3 hscc-bootstrap/doctor.py --json`` instead of importing it (the
+    flat sibling imports only resolve when the script runs as a script). So the
+    row renders in a child that never imported pytest, and the fence alone would
+    refuse nothing there.
+
+    That is not hypothetical — it is why the door's own read-only guard went red
+    the moment this row was registered (t_14eae4b5): the child took the ambient
+    path, enumerated and opened the operator's boards, and the fail-closed
+    enumeration called ``autodown._note_kanban_unavailable``, whose once-per-
+    process WARN appended a line to ``$HOME/.hscc/daemon.log`` — a new file
+    inside a HOME the caller had sealed for exactly this assertion.
+
+    ``PYTEST_CURRENT_TEST`` is the channel that does cross the spawn: pytest
+    exports it for the duration of each item and every child inherits the
+    environment. It is the same marker the repo already asks of a child rather
+    than inventing a second one (``hscc_daemon/main_cli.py``,
+    ``hscc-api/repl_inject.py``, ``hscc-project/flightdeck/core/tmux_chat.py``).
+    """
+    return "pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 def doctor_check(hermes_home: Optional[str] = None, *,
