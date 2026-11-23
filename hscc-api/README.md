@@ -19,6 +19,7 @@ every live endpoint is the route table itself: each `/v1/...` endpoint is a
 | Area | Example endpoints |
 |---|---|
 | cluster | `/v1/cluster/status`, `/v1/cluster/up`, `/v1/cluster/down`, `/v1/cluster/stop` |
+| node pause (read-only) | `/v1/node-pauses` — the durable pause overlay (`host`/`owner`/`units`/`reason`/`since`/`until`/`span_nodes`/`stopped`); pause/resume mutations stay CLI + agent-tool with their printed plan and y/N gate |
 | project + kanban (read) | `/v1/projects`, `/v1/cards`, `/v1/standup`, `/v1/review/queue`, `/v1/qa/queue`, `/v1/kanban/blocked`, `/v1/kanban/stale`, `/v1/kanban/running` — card/board widgets use the CLI's own functions; see [`docs/WIDGET_ROUTES.md`](docs/WIDGET_ROUTES.md) |
 | actions (mutations, confirm-gated) | `POST /v1/cards`, `/v1/review/{id}/merge`, `/v1/template/apply`, `/v1/cards/{id}/comment`, `/v1/cards/{id}/block|close` |
 | orchestrator chat | `POST /v1/orchestrator/chat` (+ `/stop`, `/{id}` poll) |

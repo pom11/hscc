@@ -553,6 +553,43 @@ def _paused_nodes(overlay):
     return [dict({"node": node}, **overlay[node]) for node in sorted(overlay)]
 
 
+#: Every key one `/v1/node-pauses` row carries, in payload order. Additive
+#: only: a client may ignore one, but a rename is a breaking change.
+NODE_PAUSE_ROW_KEYS = ("host", "owner", "units", "reason", "since", "until",
+                       "span_nodes", "stopped")
+
+
+def _node_pause_record(host, entry):
+    """One overlay entry as the read route's row.
+
+    ``owner`` is the host the record is keyed to — the host ``hscc node
+    resume`` must be given. A node named only in another record's
+    ``span_nodes`` is covered by that record but is not itself an owner (the
+    CLI says so: resume the owner), which is why this route reports one row
+    per record rather than inventing a row for each spanned node; the span is
+    carried verbatim in ``span_nodes`` so a client can expand it.
+
+    ``units`` is the record's ``units`` key, exactly what ``hscc node paused
+    --json`` prints: the unit ids the pause recorded as stopped. The overlay
+    deliberately stores ids, not launch commands or model names — mapping them
+    back needs ``serving.json``, and this read must keep working when the
+    fleet does not.
+    """
+    units = entry.get("units")
+    span = entry.get("span_nodes")
+    reason = entry.get("reason")
+    return {
+        "host": host,
+        "owner": host,
+        "units": list(units) if isinstance(units, (list, tuple)) else [],
+        "reason": reason if isinstance(reason, str) else "",
+        "since": entry.get("since"),
+        "until": entry.get("until"),
+        "span_nodes": list(span) if isinstance(span, (list, tuple)) else [],
+        "stopped": bool(entry.get("stopped")),
+    }
+
+
 def _pause_overlay_for(ctx):
     """The pause overlay for the root THIS request carries, or nothing at all.
 
@@ -721,6 +758,14 @@ def _speak_cluster_info(data):
     if not isinstance(data, dict):
         return "cluster info unavailable"
     return "Cluster configuration loaded."
+
+
+def _speak_node_pauses(data):
+    """§B: a count sentence — never a host list, which a reader cannot scan."""
+    count = data.get("count", 0)
+    if not isinstance(count, int) or count <= 0:
+        return "No nodes paused."
+    return f"{count} node{'s' if count != 1 else ''} paused."
 
 
 def _humanize_age(seconds) -> str:
@@ -955,6 +1000,55 @@ def handle_cluster_info(server, ctx, query, body):
     if data is None or _is_error_dict(data):
         return 200, _degraded("Cluster info failed", data)
     return 200, {**data, "speak": _speak_cluster_info(data)}
+
+
+def handle_node_pauses(server, ctx, query, body):
+    """GET /v1/node-pauses — the durable pause overlay, READ-ONLY (t_787930b5).
+
+    The read half of the pause trio. ``hscc node pause|resume`` and the
+    ``node_pause``/``node_resume`` agent tools stay the only mutation doors:
+    a pause stops live models, and the CLI/tool pair owns the printed plan and
+    the y/N confirmation a route cannot reproduce. This handler therefore has
+    no body, writes nothing, and never touches the fleet — it reads the same
+    ``hscc_daemon.node_pauses`` store the CLI and the agent tool read, rooted
+    at the server's own ``hscc_dir``.
+
+    Response per pause record: ``host`` and ``owner`` (the keyed host — the
+    one ``hscc node resume`` takes), ``units`` (the unit ids recorded as
+    stopped), ``reason``, ``since``, ``until`` (``None`` is open-ended),
+    ``span_nodes`` (verbatim; a spanned node is covered by the owner's record)
+    and ``stopped``. Rows are sorted by host so the payload is reproducible.
+
+    Fail-open on an empty overlay (no file is genuinely "nothing parked");
+    a reader that raises or hands back a non-object is reported as degraded
+    with its own reason rather than rendered as a clean zero — "0 pauses" on a
+    broken read is the lie this route must not tell.
+    """
+    root = getattr(ctx, "hscc_dir", None)
+    if root is None:
+        # Same rule as the monitor overlay: never guess the default ~/.hscc
+        # for a request that named no root — a reader pointed at a tree the
+        # writer cannot have written is the root-split bug class.
+        return 200, _degraded(
+            "Node pause list failed",
+            data={"error": "request context carries no hscc_dir; refusing to "
+                           "guess the default ~/.hscc"})
+    try:
+        pauses = _backing_node_pauses(root)
+    except Exception as exc:  # noqa: BLE001 - report the real cause as degraded
+        return 200, _degraded("Node pause list failed", exc=exc)
+    if not isinstance(pauses, dict):
+        return 200, _degraded(
+            "Node pause list failed",
+            data={"error": f"overlay reader returned {type(pauses).__name__}, "
+                           f"not an object"})
+    rows = [_node_pause_record(host, pauses[host])
+            for host in sorted(h for h in pauses
+                               if isinstance(h, str)
+                               and isinstance(pauses[h], dict))]
+    payload = {"count": len(rows), "pauses": rows}
+    payload["speak"] = _speak_node_pauses(payload)
+    return 200, payload
 
 
 def handle_health(server, ctx, query, body):
@@ -1728,6 +1822,10 @@ def load():
         ("GET", r"^/v1/cluster/history$", handle_cluster_history),
         ("GET", r"^/v1/cluster/jobs$", handle_cluster_jobs),
         ("GET", r"^/v1/cluster/info$", handle_cluster_info),
+        # The pause overlay's read half (t_787930b5). Mutations are NOT
+        # registered here: pause/resume stay CLI + agent-tool with their
+        # printed plan and y/N gate (audit D10).
+        ("GET", r"^/v1/node-pauses$", handle_node_pauses),
         ("GET", r"^/v1/health$", handle_health),
         ('GET', r'^/v1/fleet/stats$', handle_fleet_stats),
         ('GET', r'^/v1/fleet/throughput$', handle_fleet_throughput),
