@@ -160,7 +160,10 @@ DESCRIPTIONS = [
     "Preview escalations — POST /v1/escalate mutates",
     "Project-portfolio commands: standup verify doctor ...",
     "HSCC HTTP API server: start stop status (external apps)",
-    "Board hygiene: blocked (show/recover), stale (list/archive)",
+    # t_00502a32 reworded this one entry on purpose (F3's defect class: it
+    # named 2 of the 7 verbs `hscc kanban` dispatches). Every other word in
+    # this list is still the base's, re-flowed only.
+    "Board hygiene: blocked stale monitor pause resume paused enforce",
 ]
 
 
