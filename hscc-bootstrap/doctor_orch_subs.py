@@ -451,8 +451,9 @@ def doctor_check(hermes_home: Optional[str] = None, *,
     Hermes' own enumeration — so this row declares ``row_kwargs=("hermes_home",)``
     and nothing else.
 
-    A pytest process that injects nothing gets :func:`refused`: a suite must not
-    decide its assertions from the operator's live boards, and must not open them.
+    A process that injects nothing gets :func:`refused` — a pytest process, or
+    one it spawned (see :func:`_under_pytest`): a suite must not decide its
+    assertions from the operator's live boards, and must not open them.
     Precisely, a *live* read is the ambient board enumeration (no ``boards=`` and
     no ``subscriptions=``) or the ambient lease files (no ``registry=``). Paths a
     test created itself are not live, so a suite may exercise the real read path
@@ -462,7 +463,7 @@ def doctor_check(hermes_home: Optional[str] = None, *,
     live_subs = subscriptions is None
     live_registry = registry is None
     ambient_boards = live_boards and live_subs
-    if "pytest" in sys.modules and (ambient_boards or live_registry):
+    if _under_pytest() and (ambient_boards or live_registry):
         return refused()
 
     modes = wake_modes()
