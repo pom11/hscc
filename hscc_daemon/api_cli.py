@@ -435,6 +435,12 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
     """
     if isinstance(binds, str):
         binds = [binds]
+    # A handler only runs if the signal is not BLOCKED. The mask is inherited
+    # from whoever spawned this process, so clear it here even when the caller
+    # installed the handlers itself (the test harness and any embedder do) —
+    # `_install_stop_handlers` already does this on the `hscc api start` path,
+    # and this keeps a direct `_serve` equally stoppable (t_7c2eb604).
+    _unblock_stop_signals()
     # Legacy call shape: _serve(api, bind_override, port_override)
     if (isinstance(tailscale, int) and not isinstance(tailscale, bool)
             and port_override is None):
@@ -650,6 +656,47 @@ def _sigterm_handler(signum, frame):
     global _last_signal
     _last_signal = signum
     _stop_requested.set()
+
+
+def _unblock_stop_signals():
+    """Clear an inherited BLOCK on SIGTERM/SIGINT.
+
+    `signal.signal()` sets a signal's DISPOSITION; it does not clear the calling
+    thread's signal MASK, and a mask survives fork/exec (`subprocess` restores
+    ignored dispositions, never the mask). A serving process spawned by one that
+    runs with SIGINT blocked therefore installs its handler, receives the
+    signal, and never dispatches it: the kernel keeps it pending, `_stop_requested`
+    is never set, `_serve` serves on, and the sidecar teardown in its `finally:`
+    only happens via the SIGKILL escalation, which skips it.
+
+    Measured (t_7c2eb604): one leg run failed BOTH SIGINT arms of the two stop
+    cases and neither SIGTERM arm; a child spawned with SIGINT blocked
+    reproduces that signature deterministically (`_last_signal` stays None).
+    Clearing the mask is what makes the stop independent of how the API was
+    launched.
+
+    `pthread_sigmask` is POSIX-only; where it is absent there is no inherited
+    pthread mask to clear.
+    """
+    try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK,
+                               {signal.SIGTERM, signal.SIGINT})
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _install_stop_handlers():
+    """Install the cooperative stop handlers AND clear any inherited block.
+
+    Called in the forked child before the second fork (see ``_handle_start``),
+    so the process that ends up serving inherits both the handlers and an
+    unmasked SIGTERM/SIGINT. A stop that was already pending when the child
+    starts is therefore dispatched as soon as this runs, and the flag survives
+    the second fork.
+    """
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    signal.signal(signal.SIGINT, _sigterm_handler)
+    _unblock_stop_signals()
 
 
 def _warn_payload_drift(repo_root=None, plugins_dir=None, theme_name=None):
@@ -931,8 +978,7 @@ def _handle_start(argv, theme_name=None):
 
     # Child — become a daemon, no controlling terminal.
     os.setsid()
-    signal.signal(signal.SIGTERM, _sigterm_handler)
-    signal.signal(signal.SIGINT, _sigterm_handler)
+    _install_stop_handlers()
     os.chdir(os.path.expanduser("~"))
     pid2 = os.fork()
     if pid2 > 0:
