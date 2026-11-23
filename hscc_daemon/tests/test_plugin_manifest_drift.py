@@ -191,7 +191,7 @@ def test_every_tools_table_reaches_the_register_loop(plugin_dir):
     )
 
 
-def test_cluster_manifest_is_exactly_the_28_registered_tools():
+def test_cluster_manifest_is_exactly_the_29_registered_tools():
     """The concrete GAP-A-7 receipt: the manifest and the registry are the same
     set, at the count that set currently has. If this count changes
     intentionally, the per-table tests above are the generic contract — update
@@ -212,10 +212,18 @@ def test_cluster_manifest_is_exactly_the_28_registered_tools():
     (add/remove/pause/resume/enable/disable) are deliberately NOT in the count —
     the queue force-pushes and squash-merges, so an agent-writable merge door is
     a self-merge path (docs/audits/2026-11-23-agent-surface.md D8).
+
+    Amended 28 -> 29 by t_7f570861: `doctor` (in `_READ_TOOLS`), the read-only
+    findings of the preflight doctor. The one MUTATING mode of that door is
+    deliberately NOT in the count: `--fix` calls `run_doctor_fix` →
+    `enable_plugins.enable` and rewrites the operator's `config.yaml`, so repair
+    stays CLI-only. Note §12.2's ruling on D11 — the *HTTP route* was refused
+    ("it reads this host's trees"); "the read-only agent *tool* is a different
+    surface and stands", which is what this row now counts.
     """
     declared = _manifest_tools(str(REPO / "hscc-cluster"))
     assert len(declared) == len(_registered_names(
-        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 28
+        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 29
     for previously_missing in ("orch_message", "apply_template", "list_templates",
                                "preview_template", "fleet_stats", "cluster_verify",
                                "cluster_throughput", "autoscale_advice",
@@ -247,6 +255,17 @@ def test_cluster_manifest_is_exactly_the_28_registered_tools():
         assert mutating not in declared, (
             f"{mutating} is a merge-queue mutation (force-push + squash-merge) — "
             "CLI only, per docs/audits/2026-11-23-agent-surface.md D8")
+    # The doctor read is part of the manifest, and its one mutating mode must
+    # stay out (t_7f570861): `--fix` is `run_doctor_fix` → `enable_plugins.enable`
+    # → a rewrite of the operator's config.yaml, which is operator scope.
+    assert "doctor" in declared, \
+        "t_7f570861 regression: doctor missing from the manifest"
+    for mutating in ("doctor_fix", "doctor_apply", "doctor_repair",
+                     "doctor_enable", "doctor_write"):
+        assert mutating not in declared, (
+            f"{mutating} would be the doctor's repair side (config.yaml rewrite "
+            "via enable_plugins.enable) — CLI + `--fix` only, per "
+            "docs/audits/2026-11-23-agent-surface.md §12.2 D11")
 
 
 @pytest.mark.parametrize("plugin_dir", MANIFESTED,

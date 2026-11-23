@@ -12,6 +12,7 @@ from . import orch_message
 from . import autodown_tools as adt
 from . import merge_queue_tools as mqt
 from . import node_pause_tools as npt
+from . import doctor_tools as dt
 
 
 def _stringify(handler):
@@ -63,6 +64,18 @@ _READ_TOOLS = [
      "waiting (non-green head), the in-flight PR and the last outcome. "
      "Read-only: same payload as `hscc merge-queue status --json`; it never "
      "enqueues, drops, pauses, enables or lands anything."),
+    # The preflight doctor (t_7f570861): the READ half of `hscc-bootstrap/
+    # doctor.py` — every check as data (name, ok, one-line cause). The repair
+    # half stays CLI-only: `--fix` rewrites the operator's config.yaml through
+    # enable_plugins.enable, so there is no doctor_fix tool to add here (audit
+    # §12.2 D11: the route was refused because doctor reads this host; the
+    # read-only tool runs on this host and stands).
+    ("doctor", dt.DOCTOR_SCHEMA, dt.doctor_findings, "🧾",
+     "Every HSCC doctor check as structured findings: check name, ok, and the "
+     "one-line cause (plus the fix text as advice, and which fatal checks "
+     "failed). Read-only: the same verdict as the operator's `doctor.py --json`, "
+     "read live from host/daemon/API state — it never repairs, and `--fix` "
+     "stays CLI-only."),
 ]
 
 _OPS_TOOLS = [

@@ -1,6 +1,6 @@
 ---
 name: hscc-cluster
-description: Manages DGX Spark GPU cluster — the 28 registered agent tools, each tool's state source, the CLI verbs, and node/NAS diagnostics
+description: Manages DGX Spark GPU cluster — the 29 registered agent tools, each tool's state source, the CLI verbs, and node/NAS diagnostics
 tags: [hsc, cluster, gpu, spark, hosts, monitor, jobs, agent-tools, serving]
 ---
 
@@ -9,7 +9,7 @@ tags: [hsc, cluster, gpu, spark, hosts, monitor, jobs, agent-tools, serving]
 The DGX Spark GPU cluster is reached through the `hscc-cluster` plugin. There are
 two ways in, and they are not interchangeable:
 
-- **Agent tools** — 28 tools registered by `hscc-cluster/__init__.py`. This is what
+- **Agent tools** — 29 tools registered by `hscc-cluster/__init__.py`. This is what
   a model calls. Most of them are read-only; the rest are confirm-gated.
 - **The `hscc` CLI** — what an operator (or a shell) runs. Fleet-wide and
   power-mutating verbs live only here and on confirm-gated API routes.
@@ -34,12 +34,12 @@ the decisions quoted below.
 - Diagnosing a node (GPU/disk/OOM/docker), a vLLM container's logs, or the NAS mount
 - Asked what the fleet would look like scaled (advice, not action)
 
-## The registered agent tools (28)
+## The registered agent tools (29)
 
 `confirm=true` is the plugin's spelling of the CLI's confirmation: **absent means
 "dry-run and report", never "do it".** Every tool returns a JSON string.
 
-### Read (8) — no confirmation, no side effects
+### Read (9) — no confirmation, no side effects
 
 | tool | answers | state source |
 |---|---|---|
@@ -51,10 +51,12 @@ the decisions quoted below.
 | `node_paused` | which nodes are paused, which units were stopped, reason, since, until | `~/.hscc/node_pauses.json` through `hscc_daemon/node_pauses.py` |
 | `autodown_status` | is idle down armed, the idle window, recorded state reconciled against the live serving probe, last activity, and which interlock (kanban work, PR/CI, watchdog block) is holding a teardown off | calls the CLI's own verb `autodown_cli._cmd_status` with `--json`; payload built by `autodown.status_snapshot()` from `~/.hscc/autodown.json` + `_interlock.json` |
 | `merge_queue_status` | per project: enabled (or why off — no repo / no GitHub remote / no gates), paused, queue depth and entries, waiting head, in-flight PR, last outcome | calls the CLI's own verb `merge_queue_cli.cmd_merge_queue(["status", "--json"])`; projection is `merge_queue._status_doc` over `~/.hscc/merge-queue-state.json` (+ the flightdeck registry, to explain a why-off) |
+| `doctor` | every HSCC preflight check as findings — `checks[]` rows of `name` / `ok` / `detail` (one-line cause) / `fix` / `fatal`, plus `ok` and `fatal_failures`. The `fix` text is advice copied from the payload, never an action | runs the operator's own door as a subprocess: `python3 hscc-bootstrap/doctor.py --json` (the line `bootstrap.sh` Stage 1 execs) and relays its payload. Live at call time, cached nowhere. `--fix` — the door's one mutating mode, which rewrites `config.yaml` via `enable_plugins.enable` — is unreachable from here |
 
-`autodown_status` and `merge_queue_status` take **no arguments at all**
+`autodown_status`, `merge_queue_status` and `doctor` take **no arguments at all**
 (`additionalProperties: false`) — the schema itself refuses an invented `host` or
 `confirm`, because neither has a meaning on a surface that is read-only by contract.
+On `doctor` a `fix` key would be worse: it is the mutation the tool exists to withhold.
 
 ### Ops (5) — per-unit, two of them guarded
 
@@ -141,7 +143,7 @@ looking for these, and do not "helpfully" add one — each row is pinned by a te
 | `hscc merge-queue add` / `remove` / `pause` / `resume` / `enable` / `disable` | **no** | the queue force-pushes and squash-merges — an agent-writable merge door is a self-merge path. The daemon tick is the only thing that runs git/gh for it | D8 |
 | `hscc autodown enable` / `disable` / `wake` / `cancel` | **no** | arming or disarming fleet power is daemon/operator scope, not a per-turn agent call | §2.4 |
 | `hscc notify` | **no** | an agent that can page the operator can train the operator to ignore pages | D7 |
-| `hscc doctor` | **no** (and no route) | `hscc project doctor` reads *this host's* trees — meaningless off the host | D11 |
+| `hscc doctor` (as an HTTP route) | **no route** — but the read-only **tool** `doctor` exists | D11 refused the *route*: `doctor.py` reads *this host's* trees and state, so answering it from elsewhere is answering a question the caller cannot ask. §12.2 closed the question — "the read-only agent *tool* is a different surface and stands". The repair half (`--fix`) is still CLI-only | §12.2 D11 |
 | `hscc main status`, `orch waker status` | **no tool** | pure reads wanted by the dashboards → read **routes**, not agent tools | D9 |
 | `hscc heal-status` / `heal-clear` | **no tool yet** | breaker strikes. D4 recommends a read-only `heal_status` tool and `clear` staying CLI-only; until that lands these are CLI verbs. Note `/heal` is a *different* subsystem (healing unhealthy workers) | D4, F7 |
 | `hscc template validate` | **no tool** (and no route yet) | D5 recommends `GET /v1/template/validate/{name}` + the `/template` hint. `validate` is the safe half of a family whose destructive half (`apply`) has every surface | D5, F10 |
@@ -152,6 +154,19 @@ looking for these, and do not "helpfully" add one — each row is pinned by a te
 `node_pause` / `node_resume` / `node_paused`, `autodown_status` and
 `merge_queue_status` all do the same thing: **they call the unified CLI's own verb
 functions in-process and report what the verb printed.** No second implementation.
+
+`doctor` is the one tool that reaches its door as a **subprocess**, and it is the
+same rule applied to a door that is a script, not a verb: it runs the operator's own
+command line (`python3 hscc-bootstrap/doctor.py --json`) and relays what it printed.
+It cannot import that file — `doctor.py`'s module-level imports are flat siblings
+(`_theme`, `doctor_rows`, `main_board`, `install_gpu_clock_cap`, …) which only resolve
+with `hscc-bootstrap` as the script dir, and `doctor.py` is a hyphenated dir so it is
+not an importable package (see `hscc_daemon/gateway_probe.py` for why that dir must not
+go on a long-lived process's `sys.path`). An in-process import would also answer
+*differently*: `_load_node_pauses()` and the `install_gpu_clock_cap` block have no
+`sys.path` fallback, so a bootstrap dir that is not reachable at call time renders a
+parked node as "module not deployed" and the GPU-clock row RED. The exception is
+therefore the same rule, not a licence to reimplement a check.
 
 Why it matters, and it is the whole point of the module docstrings:
 
