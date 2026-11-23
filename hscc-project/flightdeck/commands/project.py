@@ -150,7 +150,16 @@ def cmd_list(args: argparse.Namespace) -> int:
     # to plain text on a non-tty stdout — the --json path above stays untouched.
     t = table("projects")
     t.add_column("NAME")
-    t.add_column("REPO", no_wrap=True)
+    # REPO is a machine path, so it is the one column that can be longer than the
+    # console. It must NOT be `no_wrap=True`: a no-wrap column's minimum width is
+    # its full content, so on a deep repo path Rich cannot shrink REPO and shrinks
+    # the four flexible columns to zero instead, then clips REPO with an ellipsis
+    # anyway — the operator loses NAME/BOARD/TOPIC/HEALTH *and* the path tail
+    # (measured at t_89804ce6: `project list` on a 190-char tmp root rendered as
+    # `││ /private/…/… ││││`). `overflow="fold"` keeps every character: the path
+    # continues on the next line, the label columns keep their content. No console
+    # width is involved — `_theme.make_console` still pins 200 for a non-tty.
+    t.add_column("REPO", overflow="fold")
     t.add_column("BOARD")
     t.add_column("TOPIC")
     t.add_column("HEALTH")

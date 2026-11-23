@@ -15,6 +15,7 @@ from contextlib import redirect_stdout
 
 import pytest
 
+from rich_layout import _says
 from flightdeck.commands import map_sessions as cmd_mod
 from flightdeck.commands.map_sessions import run as map_run
 from flightdeck.core import map_sessions as core_mod
@@ -361,7 +362,14 @@ def test_cli_run_reports_real_totals(db_and_registry, tmp_path, capsys):
     captured = capsys.readouterr().out
     assert "resolved deterministic (repo-path): 3" in captured
     assert "left unknown: 2" in captured
-    assert "map-sessions-" in captured  # proposal file path printed
+    # The proposal path is printed inside the panel body, so a deep tmp root folds it
+    # mid-token — measured (t_89804ce6, verbatim tee, tmp root 190): `…/out/m` ⏎
+    # `ap-sessions-20261123-003350.md`, red from tmp root 179. `_says` recovers the
+    # fold; the two raw asserts above are short rows that carry no path, so they are
+    # the proof the panel rendered. The trailing `-` is what makes this the FILE name
+    # rather than the panel title: the title's `map-sessions` is followed by the body's
+    # first word, never by a hyphen.
+    assert _says(captured, "map-sessions-")  # proposal file path printed
 
 
 def test_cli_run_apply_writes_mapping(db_and_registry, tmp_path, capsys):
