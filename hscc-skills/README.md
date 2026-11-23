@@ -9,6 +9,13 @@ installed copy differs is snapshotted to `<home>/skills-backups/<name>.bak-<stam
 and then overwritten, so an existing copy is never a reason to skip (t_45fa38e2).
 Names outside `BUNDLED_SKILLS` are never written, moved or removed.
 
+The vendored tree and that list are **not the same set**: `install/hscc-skills/` holds
+13 skill dirs and `BUNDLED_SKILLS` names 12 of them — `hscc-lessons` is vendored but
+unlisted, so `hscc bootstrap` neither installs nor updates it (audit F12,
+`docs/audits/2026-11-23-agent-surface.md` §8). The full vendored inventory is in
+[`install/README.md`](../install/README.md); `BUNDLED_SKILLS` stays the only authority
+for what this installer touches, so the name is not repeated here.
+
 ## CLI (`hscc.py`)
 ```
 hscc.py install            # skills + templates (full)
