@@ -735,6 +735,83 @@ def test_orch_message_is_registered_in_init():
     assert "from . import orch_message" in init_src
 
 
+# ── The agent-facing registry strings (t_4ba9d95f) ──────────────────────────
+#
+# The description in `__init__.py` is what the model is shown when it decides
+# whether to call the tool at all, so its wording is a contract, not a comment.
+# It stated the pre-#635 allow-list ("Both ends must be *-orch") after #635 had
+# opened a second door, so a main orchestrator reading its own tool list was
+# told it does not qualify at either end — the same undiscoverability the
+# generated SOUL closed. Guarded both ways: the stale sentence stays gone, the
+# shipped rule stays present. Kept short on purpose: it is prompt budget on
+# every orchestrator turn. Guard logic stays in orch_message.py; these tests
+# pin only that the registry does not contradict it.
+
+def _init_source():
+    import os
+    from pathlib import Path
+    return (Path(os.path.dirname(os.path.abspath(om.__file__)))
+            / "__init__.py").read_text()
+
+
+def _registry_orch_message_description():
+    """The description string register() advertises for orch_message.
+
+    Parsed, not imported: `hscc-cluster` is a hyphenated dir, so __init__.py is
+    not importable from here (same reason test_plugin_manifest_drift parses).
+    """
+    import ast
+    for node in ast.parse(_init_source()).body:
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, (ast.List, ast.Tuple))
+                and any(getattr(t, "id", None) == "_ORCH_TOOLS" for t in node.targets)):
+            for entry in node.value.elts:
+                if (isinstance(entry, ast.Tuple)
+                        and getattr(entry.elts[0], "value", None) == "orch_message"):
+                    return ast.literal_eval(entry.elts[4])
+    raise AssertionError("orch_message entry not found in _ORCH_TOOLS")
+
+
+def _orch_tools_comment():
+    """The `#:` block immediately above the `_ORCH_TOOLS` table."""
+    import re
+    match = re.search(r"(?:^#:.*\n)+_ORCH_TOOLS", _init_source(), re.M)
+    assert match, "no #: comment block above _ORCH_TOOLS — the registry lost its note"
+    return match.group(0)
+
+
+def test_registry_description_states_the_shipped_allow_list():
+    desc = _registry_orch_message_description()
+    # The pre-#635 wording must not come back.
+    assert "Both ends must be *-orch" not in desc
+    assert "Both ends must be *-orch" not in _init_source()
+    # Both doors of the shipped allow-list, and both refusals.
+    assert "*-orch" in desc, "the *-orch door is not stated"
+    assert "main orchestrator" in desc, "the configured-main door is not stated"
+    low = desc.lower()
+    assert "worker" in low and "default" in low, "the refusals are not stated"
+    # What makes it safe to call, still named for the model.
+    for phrase in ("queue-only", "signed", "audited", "rate-limited"):
+        assert phrase in low, f"{phrase!r} missing from the tool description"
+    assert len(desc) <= 600, f"tool description grew to {len(desc)} chars — prompt budget"
+
+
+def test_registry_comment_states_the_shipped_allow_list():
+    comment = _orch_tools_comment()
+    assert "`*-orch` target" not in comment, "the comment still states the pre-#635 rule"
+    assert "main orchestrator" in comment, "the comment omits the configured-main door"
+    assert "orch_message.py owns" in comment, "the comment should defer the guard logic"
+
+
+def test_registry_describes_the_main_door_without_spelling_a_name():
+    """Doctrine from test_module_never_spells_the_main_orchestrator_identity:
+    a concrete profile name in the registry is a second source of truth that
+    survives a rename, which is exactly the bug class this card is about."""
+    surface = _registry_orch_message_description() + "\n" + _orch_tools_comment()
+    for spelling in ("hscc-orch", "'general'", '"general"'):
+        assert spelling not in surface, f"registry spells {spelling!r}"
+
+
 def test_schema_shape():
     schema = om.ORCH_MESSAGE_SCHEMA
     assert schema["type"] == "object"

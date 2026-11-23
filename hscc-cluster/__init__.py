@@ -136,13 +136,15 @@ _TEMPLATE_TOOLS = [
 
 
 #: Orchestrator-to-orchestrator messaging (t_a15f3047). Queue-only by design:
-#: the tool never interrupts a running turn and refuses anything but a
-#: `*-orch` sender and a `*-orch` target. See orch_message.py for the rules.
+#: it never interrupts a running turn. Each end must be a `*-orch` profile or
+#: the configured main orchestrator; `default` and worker profiles are refused.
+#: orch_message.py owns the guard logic — this comment only names the toolset.
 _ORCH_TOOLS = [
     ("orch_message", orch_message.ORCH_MESSAGE_SCHEMA, orch_message.orch_message, "✉️",
      "Nudge another orchestrator profile (queue-only, signed '[from <you>]', "
-     "audited). Both ends must be *-orch; never interrupts a running turn; "
-     "rate-limited per pair per hour. Not `hscc orch inject` (types into a "
+     "audited). Either end may be a *-orch profile or the configured main "
+     "orchestrator; workers and 'default' are refused. Rate-limited per pair "
+     "per hour. Not `hscc orch inject` (types into a "
      "live pane), not `/orch-restart` (restarts the orchestrator vLLM), not "
      "the `POST /v1/orchestrator/chat` route (one chat turn, by job id)."),
 ]
