@@ -76,6 +76,23 @@ DEFAULT_PROCESS_TIMEOUT_S = 120
 MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
 
+#: How many verbatim failure lines a red handback carries ahead of the tail.
+#:
+#: The tail alone cannot name a failing test: `scripts/run_tests.sh` runs 12
+#: legs, so a leg that goes red in the middle has ~60 lines of later legs and
+#: trailing stderr printed after its own `FAILED path::test` line, and the
+#: 40-line window is already full of them (measured on PR #673, 2026-11-23).
+#: Reading the FULL output is therefore the fix, and this cap is what keeps
+#: that safe: a branch whose fixture blew up can print hundreds of `FAILED`
+#: rows, and a card comment is a triage surface, not a log file.
+MAX_FAILURE_LINES = 25
+
+#: Per-line cap. A pytest short-summary line ends with the failure reason, and
+#: the reason is unbounded (`assert` can carry a whole dict). The part triage
+#: reads — `FAILED path::test` — is at the front, so a long line is shortened
+#: rather than dropped.
+MAX_FAILURE_LINE_CHARS = 300
+
 #: Task-policy class the gate asks for on macOS, and where that tool lives.
 #:
 #: The gate is a child of the `com.hermes.hscc_daemon` launchd job, whose plist
@@ -938,6 +955,96 @@ def _tail(text, lines=MAX_GATE_TAIL_LINES):
     return "\n".join(rows[-lines:])
 
 
+#: A gate's own words for "this went red", matched at the START of a line so a
+#: progress line, a dot line or prose that merely mentions a failure cannot join
+#: the digest.  Two buckets, because they answer two different questions:
+#:
+#: * `_TEST_FAILURE_RE` — `FAILED <path>::<test> - <reason>` / `ERROR ...`:
+#:   pytest's short test summary, printed by `-q` (`run_tests.sh` adds `-rs` for
+#:   the skips). This is the name of the thing that broke.
+#: * `_LEG_FAILURE_RES` — `  ✗ <leg> (pytest exit N)` and `N failed, M passed in
+#:   Xs`: `scripts/run_tests.sh`'s own summary row and pytest's per-leg count
+#:   line. Together they say WHICH leg went red and HOW MANY it lost.
+_TEST_FAILURE_RE = re.compile(r"^(?:FAILED|ERROR)\s")
+_LEG_FAILURE_RES = (
+    re.compile(r"^✗\s"),
+    re.compile(r"^\d+ failed\b"),
+)
+
+
+def _failure_lines(text, *, cap=MAX_FAILURE_LINES):
+    """The failure lines of a gate's output, VERBATIM, capped.
+
+    Read from the FULL text, never from the tail.  That is the whole point:
+    `_tail` keeps the last 40 lines of one 12-leg run, and a leg failing in the
+    middle has the legs after it — plus the stderr the API appends — sitting on
+    top of its `FAILED` line.  PR #673's handback measured as a run whose only
+    red evidence was `✗ hscc-api (pytest exit 1)`: enough to know the suite was
+    red, not enough to say whether the test or the branch broke.
+
+    Verbatim is also the point.  A paraphrase ("hscc-api failed") is what the
+    summary row already said and cannot be trusted for a flake call; the exact
+    `path::test - reason` line is what a re-queue-vs-fix decision is made from,
+    and it is what the author can grep their own tree for.
+
+    Ordering is by kind, not by position, and that is deliberate: the leg rows
+    lead, then the failing tests in the order pytest printed them.  A branch
+    with 40 failures is capped, and the rows printed last (the summary block)
+    would otherwise be the cap's first casualty — losing exactly the line that
+    names the leg.  Leading indentation is dropped: this is a list of failure
+    lines, not a transcript.
+
+    De-duplicated, capped at ``cap`` distinct lines, each line capped at
+    :data:`MAX_FAILURE_LINE_CHARS`; when anything is hidden the last entry says
+    how many, so a short digest never looks like a complete one.
+    """
+    legs, tests, seen = [], [], set()
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _TEST_FAILURE_RE.match(line):
+            bucket = tests
+        elif any(p.match(line) for p in _LEG_FAILURE_RES):
+            bucket = legs
+        else:
+            continue
+        if len(line) > MAX_FAILURE_LINE_CHARS:
+            line = line[:MAX_FAILURE_LINE_CHARS - 1].rstrip() + "…"
+        if line in seen:
+            continue
+        seen.add(line)
+        bucket.append(line)
+    legs = legs[:cap]
+    room = cap - len(legs)
+    kept = legs + tests[:room]
+    if len(tests) > room:
+        kept.append(f"… {len(tests) - room} more failure line(s) not shown …")
+    return kept
+
+
+def _gate_report(text, *, note=None):
+    """What a gate that did not pass hands back: the failure lines, then the tail.
+
+    The digest LEADS because the reader of a card comment reads from the top,
+    and in a 12-leg run the tail is the least informative part of the output: it
+    is mostly the legs that passed after the failure.  The tail itself is still
+    the plain :func:`_tail` of the full text — the digest is added to it, never
+    substituted for it — so nothing that used to be visible went away.
+
+    ``note`` is appended after the tail, which is where the timeout path's
+    `timeout after {N}s` line has always been read.
+    """
+    tail = _tail(text)
+    if note:
+        tail = f"{tail}\n{note}" if tail else note
+    lines = _failure_lines(text)
+    if not lines:
+        return tail
+    header = "━━━ Failed lines from the full gate output (verbatim) ━━━"
+    return "\n".join([header, *lines, "", tail])
+
+
 def _truthy_check(entry):
     """True/False/None for one statusCheckRollup entry (None = still pending)."""
     if not isinstance(entry, dict):
@@ -1316,6 +1423,12 @@ def _run_gate(command, worktree, timeout_s):
     3. carry the **real last lines** into the handback, so a timeout is
        distinguishable from a test failure by reading the PR comment.
 
+    And a fourth, learned from the other side of the same comment: the last
+    lines are not enough to name a failure.  A 12-leg run buries its
+    `FAILED path::test` line under everything printed after it, so a non-passing
+    leg goes through :func:`_gate_report`, which puts the verbatim failure lines
+    ahead of the tail.
+
     Internal contract only (``process_entry`` is the sole caller plus injected
     test runners); nothing outside this module parses this tuple.
     """
@@ -1341,9 +1454,15 @@ def _run_gate(command, worktree, timeout_s):
             # the kill raced the pipes, and the whole bug was picking one.
             out = _stream_text(stdout) or _stream_text(exc.stdout)
             err = _stream_text(stderr) or _stream_text(exc.stderr)
-            return "timeout", _tail(f"{out}\n{err}\ntimeout after {timeout_s}s")
-        return ("pass" if proc.returncode == 0 else "fail"), \
-            _tail(_stream_text(stdout) + _stream_text(stderr))
+            return "timeout", _gate_report(f"{out}\n{err}",
+                                           note=f"timeout after {timeout_s}s")
+        verdict = "pass" if proc.returncode == 0 else "fail"
+        full = _stream_text(stdout) + _stream_text(stderr)
+        # A passing leg keeps the plain tail it always kept — the digest is
+        # triage evidence for a red run, and scanning 12 green legs for markers
+        # would only risk reformatting output nobody reads.
+        return verdict, (_tail(full) if verdict == "pass"
+                         else _gate_report(full))
     except OSError as exc:
         # The gate could not be started at all.  That is a real failure with a
         # readable reason, and it must NOT be reported as a timeout: a timeout
@@ -1837,11 +1956,18 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             return {"pr": entry["pr"], "result": "gate-timeout",
                     "gate": command, "timeout_s": timeout_s}
         if verdict != "pass":
+            # `attempts` counts retries ALREADY SPENT (0 on a first pass), so the
+            # handback reports the 1-based attempt the reader expects to see.
+            attempt = int(entry.get("attempts") or 0) + 1
+            # Evidence first, boilerplate last: `output` leads with the verbatim
+            # failure lines, so the comment names the broken test above the
+            # resolve script instead of below six lines of it.
             body = (f"Merge queue: gate failed after rebasing onto "
                     f"origin/{base}.\n\n"
-                    f"Gate: {command}\n\n"
-                    f"{resolve_instructions(info.get('headRefName'), base)}\n"
-                    f"{output}")
+                    f"Gate: {command}\n"
+                    f"Attempt: {attempt}\n\n"
+                    f"{output}\n\n"
+                    f"{resolve_instructions(info.get('headRefName'), base)}\n")
             _finish(doc, project, state_path, ps, "red-gate", entry,
                     gate=command, head_sha=info.get("headRefOid"))
             _handback(entry, cfg, body, handback, gh_runner)
