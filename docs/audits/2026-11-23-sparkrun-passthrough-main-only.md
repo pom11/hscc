@@ -30,7 +30,7 @@ cards to cut from it after the operator reviews. nolive — nothing under `~/.he
    **(F1)** `sparkrun_exec` calls bypass the cluster-guard capacity gate **and** its
    audit log — `cluster-guard.py:123,155` exit on `toolset != "hscc-cluster"`, so the
    passthrough can `sparkrun stop --all` / `sparkrun proxy stop` ungated and unaudited.
-   **(F2)** the plugin's bundled `skills/{run,setup,registry}` are **inert**: a backend
+   **(F2)** the plugin's bundled `skills/` are **inert** (all four dirs: `run`, `setup`, `registry`, `data-engineer`): a backend
    plugin's `skills/` dir is never auto-registered, `register()` never calls
    `ctx.register_skill`, and `hscc-skills` never installs them — while the tool
    description tells agents to "Load the run/setup/registry skills".
@@ -64,12 +64,12 @@ register(ctx)                                    sparkrun-hermes/__init__.py:100
   -> _cluster_tools_allowed(ctx)                 __init__.py:62-97
      -> main_orch.plugin_tools_allowed(ctx)      hscc-roles/main_orch.py:364-371
         -> cluster_tools_allowed(profile=ctx.profile_name, home=$HERMES_HOME)
-                                                 main_orch.py:296-333
+                                                 main_orch.py:301-336
 ```
 
 `<main>` is resolved, never spelled (D-A): `cluster_tools_allowed` returns True **only**
 when the name equals `main_orch.main_profile()` (`~/.hscc/main-orchestrator.json`).
-Root-home sentinel `"default"` (`ROOT_PROFILE_NAME`, `main_orch.py:208` area) → **False**
+Root-home sentinel `"default"` (`ROOT_PROFILE_NAME`, `main_orch.py:225`) → **False**
 per the R3 tightening of D-B: a model chatting at the gateway root is not the
 orchestrator, and the root's wedge verbs live in `hscc-commands`, not in this tool.
 
@@ -93,7 +93,7 @@ Verdict table:
 | `<main>` profile | yes | **yes** | `plugins.enabled` tier + gate True |
 | root (`"default"`) | yes (parent §6 keeps it listed) | **no** | gate: root is not the orchestrator |
 | any other profile (workers, `*-orch`, qa…) | **no** | n/a (gate would also say no) | tier + defense-in-depth |
-| stub ctx (no usable `profile_name`) | n/a | yes — fail-open | `main_orch.py:347,364-371`: "no resolver is no gate"; deliberate (D-B), accepted residual |
+| stub ctx (no usable `profile_name`) | n/a | yes — fail-open | `main_orch.py:366-368` (`name is None → True`); the phrase "no resolver is no gate" is the plugin's own wording (`sparkrun-hermes/__init__.py:74`), not main_orch's; deliberate (D-B), accepted residual |
 | `main_orch` unimportable from the plugin | yes | yes — fail-open | `__init__.py:90,96-97`; same accepted residual |
 
 ## 3. Who can call it today (live measurement, read-only)
@@ -107,6 +107,10 @@ Measured 2026-11-23 against the live `~/.hermes` (read-only; probe recipe in §8
 * **51 profile configs: `sparkrun-hermes` enabled in exactly one — `general`.**
   `plugins.enabled` is ABSENT in **0** profiles → the `_migrate_to_21` widening path is
   inoculated everywhere (R5 holding in the live tree, not just in code).
+  *Counting:* the probe scans `~/.hermes/config.yaml` **plus** `profiles/*/config.yaml`
+  = **52 files**, of which 51 are profiles; "exactly one" counts profiles only, and the
+  root's own listing is F3(b) (loads, registers nothing). Re-measured on the review pass:
+  52 files, `plugins.enabled` absent in 0, enabled in 1 profile + root.
 
 So today: the only process that can register the tool is a session whose home is
 `profiles/general`; even a mis-enabled home registers nothing while the gate is
@@ -153,7 +157,7 @@ invariants each future card must preserve:
    `HSCC_PLUGINS` includes `sparkrun-hermes` (line 49);
    `ensure_plugins_tier_everywhere` / `..._for_home` / `..._for_new_home` seed explicit
    `plugins.enabled` (hooks-only tier `(hscc-cluster,)` off-main —
-   `main_orch.py:208` `HOOKS_ONLY_PLUGINS`), prune HSCC-owned cluster plugins from
+   `main_orch.py:218` `HOOKS_ONLY_PLUGINS`), prune HSCC-owned cluster plugins from
    homes the tier forbids, and never invent the main name (D-A). Escape hatch:
    `HSCC_CLUSTER_PLUGINS_MAIN_ONLY=0`.
 3. **Doctor reports drift**: `doctor_main_only.py` flags `sparkrun-hermes`
@@ -184,8 +188,11 @@ brick the tool).
 **F2 — the bundled skills are inert (prompt lie + dead payload).**
 `register()` never calls `ctx.register_skill`; hermes auto-registers a plugin's
 `skills/` dir only for portable/Agent-Plugin kinds (`hermes_cli/plugins_loader.py:746-
-748`), and `hscc-skills/hscc.py`'s BUNDLED_SKILLS does not include them. Result: `run`,
-`setup`, `registry` exist in no home's skill catalog, while `_DESC`
+748`), and `hscc-skills/hscc.py`'s BUNDLED_SKILLS does not include them. The plugin ships **four**
+inert dirs — `run`, `setup`, `registry` **and `data-engineer`** — none in BUNDLED_SKILLS
+(which spans `brainstorming`…`devops` only), so a follow-up card must clear all four;
+`_DESC` names only three, so `data-engineer` is dead payload without a prompt lie.
+Result: none of the four exist in any home's skill catalog, while `_DESC`
 (`sparkrun-hermes/__init__.py:58`) instructs every model to "Load the run/setup/registry
 skills". (Ruling 4 makes the current state *compliant* for non-main homes by accident —
 nobody gets them — but for `<main>` the guidance is unreachable, which is a functional
@@ -206,11 +213,23 @@ runs via argv, not a shell. F1 is the control that matters, not more prefix chec
 ## 8. Reproducing this audit
 
 * Gate suite (hermes venv python only — the plain/conda pythons produce a **no-verdict**
-  run, never a pass): `~/.hermes/hermes-agent/venv/bin/python -m pytest
-  sparkrun-hermes/tests/test_cluster_surface_gate.py hscc-cluster/tests/test_sparkrun_fence.py
-  hscc-bootstrap/tests/test_enable_plugins_cluster_tier.py
-  hscc-bootstrap/tests/test_enable_plugins_new_home_tier.py
-  hscc-bootstrap/tests/test_doctor_main_only_surface.py`.
+  run, never a pass). **One pytest process per file, never one combined invocation:** each
+  of these plugin suites does `import __init__ as plugin`, so two plugin test dirs collected
+  together collide on that module name and the run dies at collection (`ImportError:
+  attempted relative import with no known parent package`) — the same reason
+  `scripts/run_tests.sh` runs "one pytest process PER dir (true isolation, matching how they
+  deploy)". A combined run is a broken probe, not a red audited surface. Measured per leg:
+  **5 / 18 / 16 / 13 / 30 passed, RC=0 each (82 total).**
+
+  ```
+  for f in sparkrun-hermes/tests/test_cluster_surface_gate.py \
+           hscc-cluster/tests/test_sparkrun_fence.py \
+           hscc-bootstrap/tests/test_enable_plugins_cluster_tier.py \
+           hscc-bootstrap/tests/test_enable_plugins_new_home_tier.py \
+           hscc-bootstrap/tests/test_doctor_main_only_surface.py; do
+    ~/.hermes/hermes-agent/venv/bin/python -m pytest -q "$f" || echo "RED $f"
+  done
+  ```
 * Live-state probe (read-only): enumerate `~/.hermes/config.yaml` + every
   `~/.hermes/profiles/*/config.yaml`, print only (a) whether `plugins.enabled` exists and
   contains `sparkrun-hermes`, (b) whether `toolsets` names `sparkrun`. Print no tokens,
