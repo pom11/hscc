@@ -17,7 +17,7 @@ kind: Verified
 task: t_ed2f1abe
 
 * measured on macOS against the shipped watchdog, 5 trials per arm, real SIGKILL
-  of a real parent (chain parent -> watchdog -> serve): detection 0.0007-0.0010 s
+  of a real parent (chain parent -> watchdog -> serve): detection 0.0008-0.0010 s
   on the liveness-pipe arm, 0.2366-0.3387 s on the 0.25 s reparenting-poll arm,
   0.8962-1.0397 s at a 1.0 s tick; the serve is truly gone 0.065-0.174 s after
   the parent's death on the pipe arm and 0.290-0.504 s on the fallback arm.

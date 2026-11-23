@@ -22,14 +22,13 @@ real ephemeral loopback port. The assertion is that the sidecar's PID is GONE
 (plus the port stops answering), not that some flag was set.
 
 Measured on this host (5 trials per arm, real SIGKILL of the parent, chain
-parent -> watchdog -> serve; the watchdog's module docstring carries the same
-table):
+parent -> watchdog -> serve; ``changelog.d`` carries the same table):
 
-    detection, liveness pipe (shipped primary)    0.0007 - 0.0010 s
+    detection, liveness pipe (shipped primary)    0.0008 - 0.0010 s
     detection, reparenting poll (fallback, 0.25)  0.2366 - 0.3387 s
     serve truly gone, pipe arm                    0.065  - 0.174  s
     serve truly gone, fallback arm                0.290  - 0.504  s
-    serve truly gone, fallback at a 1.0 s tick    0.953  - 1.229  s
+    serve truly gone, fallback at a 1.0 s tick    0.953  - 1.157  s
 
 SO THE BLIND SPOT ACCEPTED, both numbers: detection costs ~1 ms on the shipped
 pipe path and ``_DEFAULT_POLL_S`` = 0.25 s in the reparenting-poll fallback (a
