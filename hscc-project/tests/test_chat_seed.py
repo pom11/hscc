@@ -396,6 +396,41 @@ def test_runtime_error_is_not_empty_neither_seeds(tmp_path, capsys):
     assert "cannot import the Hermes runtime" in err
 
 
+def test_seed_backstop_refuses_an_unreadable_runtime_called_directly(tmp_path, capsys):
+    """`_seed_empty_orchestrator`'s OWN guard stays live and provably armed.
+
+    `cmd_chat` now short-circuits on discovery's verdict before it calls
+    `ensure_session` (the site that raises), so the seed's check is no longer
+    what protects today's caller — which is exactly how a redundant guard
+    quietly dies. It is kept on purpose (a future caller must not reach the
+    seed uninformed) and pinned HERE: call the seed directly, with the archive
+    seeded so a deleted guard really does write the digest, and assert the
+    write never happens.
+    """
+    reg = _reg(tmp_path, "ecofire", session="20260921_abc")
+    orch = FakeOrchDBSession("ecofire", "20260921_abc", message_count=0)
+    _write_archive(tmp_path, "ecofire", [("s1", "Fire pipeline fix")])
+    ns = _ns(tmp_path, "ecofire", orch, archive_dir=str(tmp_path),
+             registry_path=reg)
+    discovery = {
+        "project": "ecofire", "topic": 8891,
+        "orch_profile": "ecofire-orch", "telegram_profile": "default",
+        "orchestrator": None, "telegram": [], "telegram_unmapped": 0,
+        "runtime_error": "cannot import the Hermes runtime (boom)",
+    }
+
+    rc = project_cmd._seed_empty_orchestrator(
+        "ecofire", "20260921_abc", "ecofire-orch", ns, discovery,
+        {"status": "created", "session": "20260921_abc"})
+    err = capsys.readouterr().err
+
+    assert rc == 3
+    assert orch.appended == [], "an env fault must never seed a digest"
+    assert "cannot read session history" in err
+    assert "cannot import the Hermes runtime" in err, \
+        "the backstop says it in the SAME words as cmd_chat (one wording owner)"
+
+
 def test_seed_write_failure_is_honest_but_still_attaches(tmp_path, capsys):
     """If the seed WRITE fails, say so on stderr and continue to exec (the
     operator can still chat blank); never claim the seed succeeded."""
