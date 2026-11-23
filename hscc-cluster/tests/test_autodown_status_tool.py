@@ -29,6 +29,7 @@ import ast
 import inspect
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,14 @@ def _seal_state(tmp_path, monkeypatch):
             (lifecycle, "BRIDGE_FILE", p("bridge.json")),
     ):
         monkeypatch.setattr(mod, attr, value)
+        # Self-verify the seal HERE, not only in the guard below: a patch that
+        # silently did not stick (an attribute renamed upstream, a descriptor, a
+        # second module object for the same file) must name the entry that
+        # failed instead of surfacing 21 identical guard failures.
+        if getattr(mod, attr) != value:
+            raise AssertionError(
+                f"seal did not stick: {mod.__name__}.{attr} reads "
+                f"{getattr(mod, attr)!r} after being set to {value!r}")
 
     # (c) the ambient probes. Defaults reproduce a fresh host: nothing active,
     # nothing evaluated, layer not probed — so a test that does not plant a
@@ -131,11 +140,14 @@ def _the_seal_is_actually_on(_seal_state):
     cluster instead of from the fixture it claims to control.
     """
     live = os.path.join(_REAL_HSCC, "autodown.json")
+    ident = (f"module id here={id(autodown)} "
+             f"id in sys.modules={id(sys.modules.get('hscc_daemon.autodown'))}")
     assert not autodown.AUTODOWN_FILE.startswith(_REAL_HSCC + os.sep), (
         f"AUTODOWN_FILE resolves to the live state dir ({live}) — the seal is "
-        "not applied, so nothing below is hermetic")
+        f"not applied, so nothing below is hermetic ({ident})")
     assert not autodown.CRON_JOBS_FILE.startswith(_REAL_HERMES + os.sep), (
-        "CRON_JOBS_FILE still points inside the live HERMES_HOME")
+        f"CRON_JOBS_FILE still points inside the live HERMES_HOME "
+        f"({autodown.CRON_JOBS_FILE!r}; {ident})")
 
 
 def cli_json():
