@@ -329,8 +329,8 @@ daemon's own streams.
   patch Hermes core.
 - "Strip/archive" = MOVE to `_archive/<date>/`, never delete.
 - Docs and commits carry placeholder addresses (`192.0.2.x` TEST-NET for the
-  cluster, `100.64.0.1` for a tailnet host), never the live ones — this repo
-  is public.
+  cluster; the fleet's documented placeholder token for a tailnet host),
+  never the live ones — this repo is public.
 
 **Archived 2026-06-08** (in `_archive/2026-06-08/`): hscc-agent-coordinator,
 hscc-projects, hscc-orchestrator, hscc-events, hscc-governance, hscc-mcp.
