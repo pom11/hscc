@@ -784,22 +784,36 @@ def _partition_up_plan(plan, parked_nodes):
     return startable, parked
 
 
-def _pause_display_reason(node):
-    """Best-effort pause reason for ONE already-parked node, display only.
+def _pause_display(node):
+    """Best-effort ``(reason, owner)`` for ONE already-parked node, display only.
+
+    ``owner`` is the pause record's KEY — the host ``hscc node resume`` accepts.
+    A node held only through its unit's ``span_nodes`` is not resumable itself:
+    the verb refuses it with "resume the owner, not this node". So the hint must
+    name the key, not the plan-ordered node that happened to be reported first
+    (t_c223d16f: keying a TP pause on its SECOND plan node was enough to make the
+    printed command a refusal). ``list_pauses()`` (not ``paused()``) because the
+    node may be held only through its unit's span, and reading the mapping is
+    what surfaces the key the entry itself does not carry.
 
     The skip DECISION never comes from here — it comes from the single
     ``paused_nodes()`` resolution above — so a second read used only to name the
-    reason cannot change what this pass skips. ``covering()`` (not ``paused()``)
-    because the node may be held only through its unit's ``span_nodes``.
+    reason and the owner cannot change what this pass skips.
     """
     try:
         from hscc_daemon import node_pauses
-        entry = node_pauses.covering(node)
-    except Exception:  # noqa: BLE001 - a missing reason must never sink a report
-        return None
-    if not isinstance(entry, dict):
-        return None
-    return (entry.get("reason") or "").strip() or None
+        node = str(node)
+        pauses = node_pauses.list_pauses()
+    except Exception:  # noqa: BLE001 - a missing hint must never sink a report
+        return (None, None)
+    entry = pauses.get(node)
+    if isinstance(entry, dict):
+        return ((entry.get("reason") or "").strip() or None, node)
+    for owner, candidate in pauses.items():
+        if node in (candidate.get("span_nodes") or []):
+            reason = (candidate.get("reason") or "").strip() or None
+            return (reason, owner)
+    return (None, None)
 
 
 def cmd_cluster_up(dry_run=False, nodes=None):
@@ -893,11 +907,11 @@ def cmd_cluster_up(dry_run=False, nodes=None):
     plan, parked = _partition_up_plan(plan, held)
     for entry, blocked in parked:
         names = ", ".join(str(n) for n in blocked)
-        reason = _pause_display_reason(blocked[0])
+        reason, owner = _pause_display(blocked[0])
         print(f"Unit {entry['unit_id']} SKIPPED — {names} "
               f"{'is' if len(blocked) == 1 else 'are'} parked by node_pauses"
               f"{f' ({reason})' if reason else ''}; not launched. "
-              f"Put it back with: hscc node resume {blocked[0]}")
+              f"Put it back with: hscc node resume {owner or blocked[0]}")
     if parked and not plan:
         print(f"cluster up: every unit in the plan is parked by node_pauses — "
               f"{len(parked)} unit(s) skipped, nothing launched "

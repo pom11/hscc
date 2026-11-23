@@ -119,7 +119,15 @@ def sandbox(tmp_path):
                          "HERMES_DELEGATED_CHILD_CONTEXT", "HSCC_SPARKRUN_BIN")}
     env.update({"HOME": str(home), "NO_COLOR": "1", "TERM": "dumb",
                 ENV_API_DIR: str(API_DIR), ENV_MARKERS: str(markers)})
-    return {"home": home, "hscc": hscc, "env": env, "markers": markers}
+    box = {"home": home, "hscc": hscc, "env": env, "markers": markers,
+           "procs": []}
+    yield box
+    # Every child this fixture spawned is reaped even when a case failed before
+    # its own finally: (_popen uses start_new_session, so this reaches a child
+    # that spawned helpers too). t_7c2eb604 found harness children orphaned for
+    # hours on this host; a pytest run must not leave one behind.
+    for proc in box["procs"]:
+        _reap(proc)
 
 
 # --------------------------------------------------------------------------- #
@@ -163,6 +171,12 @@ def _mark(word):
 sys.modules["gateway_bridge"] = _FakeBridge
 
 import api_server  # noqa: E402
+
+# The premise of the inherited-mask case: name every signal this child started
+# with BLOCKED, so that case can prove it measured a blocked stop rather than a
+# spawner that forgot to block one. Printed before serve_main installs anything.
+for _blocked_sig in signal.pthread_sigmask(signal.SIG_BLOCK, set()):
+    print(f"@@BLOCKED-{_blocked_sig.name}@@", flush=True)
 
 arm, port, signame = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 SIGNUM = getattr(signal, signame)
@@ -287,10 +301,52 @@ def _popen(sandbox, *args, program="HARNESS"):
                     .replace("@@SIDECAR_STARTED@@", SIDECAR_STARTED)
                     .replace("@@SIDECAR_SHUTDOWN@@", SIDECAR_SHUTDOWN))
     script.write_text(body)
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, "-u", str(script), *args],
         cwd=str(API_DIR), env=sandbox["env"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True)
+    sandbox["procs"].append(proc)
+    return proc
+
+
+def _popen_with_blocked_signal(sandbox, blocked, *args, program="HARNESS"):
+    """Spawn with `blocked` BLOCKED in the forking thread, so the child inherits it.
+
+    `signal.signal()` in the child sets only the disposition; POSIX carries the
+    thread's signal MASK across fork/exec, and `subprocess` never clears it. The
+    block lives in a throwaway thread (masks are per-thread), leaving pytest's
+    own Ctrl-C handling alone.
+    """
+    box = {}
+
+    def spawn():
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, set(blocked))
+        try:
+            box["proc"] = _popen(sandbox, *args, program=program)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
+
+    thread = threading.Thread(target=spawn)
+    thread.start()
+    thread.join()
+    return box["proc"]
+
+
+def _reap(proc):
+    """SIGKILL the child's process group (it is a session leader) and reap it."""
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _markers(sandbox):
@@ -303,7 +359,10 @@ def _communicate(proc, bound=STOP_BOUND_S):
     try:
         return proc.communicate(timeout=bound)[0]
     except subprocess.TimeoutExpired:
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
         out = proc.communicate()[0]
         pytest.fail(
             f"the stop was never answered: no exit within {bound}s.\n"
@@ -361,9 +420,7 @@ def test_a_stop_landing_inside_the_flag_poll_still_stops(sandbox, sig):
             "the gateway sidecar outlived the API: the teardown lives in the "
             f"finally: a lost stop never reaches.\n{out}")
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=10)
+        _reap(proc)
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
@@ -378,7 +435,10 @@ def test_the_event_shape_is_the_hazard(sandbox, sig):
     try:
         out = proc.communicate(timeout=10)[0]
     except subprocess.TimeoutExpired:
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
         proc.communicate()
         return                      # hung, exactly as the hazard says
     pytest.fail(
@@ -421,9 +481,49 @@ def test_a_cooperative_stop_names_its_signal_and_tears_the_sidecar_down(
             "the sidecar was not started-then-torn-down by this run: "
             f"{_markers(sandbox)}\n{out}")
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=10)
+        _reap(proc)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
+    """`serve_main` must clear an inherited BLOCK, not just install a handler.
+
+    t_7c2eb604: one full-leg run failed BOTH SIGINT arms of the stop cases and
+    neither SIGTERM arm. `signal.signal()` sets a DISPOSITION; the thread's
+    signal MASK survives fork/exec and `subprocess` never clears it. A unit
+    started by a supervisor that runs with SIGINT blocked would therefore have
+    a handler that is never dispatched: the stop stays pending, `serve_forever`
+    never sees the flag, and this process's sidecar is orphaned by the SIGKILL
+    escalation.
+
+    The child here is spawned with `sig` blocked and says so on stdout before
+    `serve_main` runs (the premise assertion), then stops itself after ready —
+    the ordinary cooperative path. Without the mask clear in `serve_main` this
+    times out; with it the run goes through the `finally:` and tears the
+    sidecar down.
+    """
+    port = _free_port()
+    proc = _popen_with_blocked_signal(
+        sandbox, {sig}, "stop-after-ready", str(port), sig.name)
+    out = _communicate(proc, bound=30)
+    try:
+        assert f"@@BLOCKED-{sig.name}@@" in out, (
+            f"the child did not start with {sig.name} blocked, so this case "
+            f"would not measure an inherited mask.\nchild output:\n{out}")
+        assert f"@@SERVE_MAIN_RETURNED rc=0@@" in out, (
+            f"serve_main left by a door other than its finally:.\n{out}")
+        assert proc.returncode == 0, (
+            f"{sig.name} inherited as BLOCKED ended the process with "
+            f"rc={proc.returncode}; the supervised sidecar would be orphaned."
+            f"\n{out}")
+        assert STOPPED_LINE in out, (
+            f"no {STOPPED_LINE!r} after a blocked {sig.name}: the run did not "
+            f"come back through the teardown.\n{out}")
+        assert _markers(sandbox) == [SIDECAR_STARTED, SIDECAR_SHUTDOWN], (
+            "the sidecar was not started-then-torn-down by this run: "
+            f"{_markers(sandbox)}\n{out}")
+    finally:
+        _reap(proc)
 
 
 # --------------------------------------------------------------------------- #

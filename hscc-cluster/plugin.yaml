@@ -21,6 +21,7 @@ provides_tools:
   - autodown_status
   - merge_queue_status
   - doctor
+  - heal_status
   # _OPS_TOOLS
   - provision_model
   - stop_model

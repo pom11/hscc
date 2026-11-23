@@ -140,6 +140,44 @@ def load_repl_inject():
         return None
 
 
+def load_orch_subscribe():
+    """Import ``hscc-roles/orch_subscribe.py`` (the subscription policy), or None.
+
+    Same sibling-plugin loader shape as ``load_repl_inject``: the module may
+    already be importable in-process (repo/plugin layout), otherwise hscc-roles
+    sits beside hscc_daemon in both layouts. Returns None only when the plugin
+    is genuinely absent; the caller reports and continues.
+    """
+    try:
+        import orch_subscribe  # noqa: F401  (already importable)
+        return orch_subscribe
+    except ImportError:
+        pass
+    roles_dir = Path(__file__).resolve().parent.parent / "hscc-roles"
+    if not roles_dir.is_dir():
+        return None
+    if str(roles_dir) not in sys.path:
+        sys.path.insert(0, str(roles_dir))
+    try:
+        import orch_subscribe  # noqa: F401
+    except ImportError:
+        return None
+    return orch_subscribe
+
+
+def _subscription_policy(profile, *, pane_backed=True):
+    """Apply the t_31c8b258 panes-wake-this-orch policy; never raise."""
+    policy = load_orch_subscribe()
+    if policy is None:
+        return {"action": "unavailable", "changed": False,
+                "profile": profile}
+    try:
+        return policy.apply_subscription_policy(profile, pane_backed=pane_backed)
+    except Exception as exc:  # noqa: BLE001 — policy is best-effort
+        return {"action": "error", "changed": False, "profile": profile,
+                "error": str(exc)}
+
+
 def _hermes_root() -> str:
     """The Hermes install root from ``HERMES_HOME`` (profile-scoped aware)."""
     home = (os.environ.get("HERMES_HOME")
@@ -256,9 +294,11 @@ def start(*, profile=None, hscc_dir=None, runner=None, repl=None,
     """Ensure exactly one tmux pane runs the main orchestrator's REPL.
 
     Returns ``{ok, action, name, profile, board, pane, target, session,
-    command, detail}``. Never raises for an expected refusal (ambiguous
-    panes, missing Hermes/tmux, a failed tmux command) — the caller prints
-    the detail and exits non-zero.
+    command, detail, subscription}``. ``subscription`` is the
+    t_31c8b258 policy receipt (a pane start turns Hermes' gateway
+    auto-subscribe gate OFF for this profile). Never raises for an expected
+    refusal (ambiguous panes, missing Hermes/tmux, a failed tmux command) —
+    the caller prints the detail and exits non-zero.
     """
     try:
         main_orch = _load_main_orch()
@@ -289,7 +329,8 @@ def start(*, profile=None, hscc_dir=None, runner=None, repl=None,
         return {**_receipt(name, profile, board), "ok": True,
                 "action": "reused", "pane": pane.get("pane"),
                 "target": pane.get("target"), "session": None,
-                "command": None, "detail": "already running"}
+                "command": None, "detail": "already running",
+                "subscription": _subscription_policy(profile)}
     if len(panes) > 1:
         where = ", ".join(f"{p.get('pane')}@{p.get('target')}" for p in panes)
         return {**_receipt(name, profile, board), "ok": False,
@@ -341,7 +382,8 @@ def start(*, profile=None, hscc_dir=None, runner=None, repl=None,
                            f"tmux exited {rc}")}
     return {**_receipt(name, profile, board), "ok": True, "action": action,
             "pane": out.strip() or None, "target": None, "session": session,
-            "command": command, "detail": "started"}
+            "command": command, "detail": "started",
+            "subscription": _subscription_policy(profile)}
 
 
 # --------------------------------------------------------------------------- #

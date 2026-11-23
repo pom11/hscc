@@ -79,6 +79,7 @@ BUNDLED_SKILLS = [
     # toolset; container lifecycle via sparkrun + the model-onboard skill).
     "hscc",
     "hscc-cluster",
+    "hscc-lessons",
     "hscc-model-onboard",
     "sdlc-review",
     # devops skill group (architecture, plugins, kanban/webhook, migration helpers)

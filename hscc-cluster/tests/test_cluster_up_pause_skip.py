@@ -298,6 +298,52 @@ class TestSpanIsOneUnit:
         assert res["paused"] == ["tp"] and res["units"] == 1
         assert all(HOST_WK2 not in " ".join(c) for c in calls)
 
+    @staticmethod
+    def _hint_host(capsys):
+        """The host named by the skip line's ``Put it back with:`` hint."""
+        marker = "Put it back with: hscc node resume "
+        lines = [ln for ln in capsys.readouterr().out.splitlines()
+                 if marker in ln]
+        assert len(lines) == 1, lines
+        return lines[0].split(marker, 1)[1].strip()
+
+    def test_a_solo_units_hint_names_the_record_key(
+            self, monkeypatch, overlay, capsys):
+        """Green control: the keyed host is the only blocked plan node."""
+        mod, _, _ = _load_cli(monkeypatch, _units())
+        _park(overlay, HOST_WK1, units=["wk1"])
+        mod.cmd_cluster_up(dry_run=True)
+        assert self._hint_host(capsys) == HOST_WK1
+
+    def test_a_first_node_span_hint_names_the_record_key(
+            self, monkeypatch, overlay, capsys):
+        """Green control: a TP pause issued against the FIRST plan node."""
+        mod, _, _ = _load_cli(monkeypatch, self._tp_units())
+        _park(overlay, HOST_WK1, span_nodes=[HOST_WK1, HOST_WK2], units=["tp"])
+        mod.cmd_cluster_up(dry_run=True)
+        assert self._hint_host(capsys) == HOST_WK1
+
+    def test_a_second_node_span_hint_names_the_record_key(
+            self, monkeypatch, overlay, capsys):
+        """REFUSED shape before t_c223d16f: the record is keyed on the SECOND
+        plan node, so ``blocked[0]`` (the first blocked node, WK1) is not the
+        resumable host — ``hscc node resume WK1`` refuses and says to resume
+        the owner. The hint must name WK2, the record's key."""
+        mod, _, _ = _load_cli(monkeypatch, self._tp_units())
+        _park(overlay, HOST_WK2, span_nodes=[HOST_WK1, HOST_WK2], units=["tp"])
+        mod.cmd_cluster_up(dry_run=True)
+        assert self._hint_host(capsys) == HOST_WK2
+
+    def test_an_off_plan_span_hint_names_the_record_key(
+            self, monkeypatch, overlay, capsys):
+        """REFUSED shape before t_c223d16f: the record is keyed OFF-PLAN (so
+        ``blocked[0]`` is merely a span-held node), yet the hint must still name
+        the key — plan order knows nothing about the record."""
+        mod, _, _ = _load_cli(monkeypatch, self._tp_units())
+        _park(overlay, HOST_OUTSIDE, span_nodes=[HOST_WK2], units=["tp"])
+        mod.cmd_cluster_up(dry_run=True)
+        assert self._hint_host(capsys) == HOST_OUTSIDE
+
 
 # ── 6: nodes= narrows the launch, not the pause rule, not the claim ────────
 class TestNodesNarrowing:

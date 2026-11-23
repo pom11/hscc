@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import secrets
+import signal
 import socket
 import subprocess
 import threading
@@ -1354,6 +1355,33 @@ class _StopFlag:
 _last_signal = None
 
 
+def _unblock_stop_signals():
+    """Clear an inherited BLOCK on SIGTERM/SIGINT.
+
+    `signal.signal()` changes a signal's DISPOSITION; it does not clear the
+    calling thread's signal MASK. A mask is inherited across fork/exec —
+    `subprocess` restores ignored dispositions, never the mask — so a server
+    spawned by a process that runs with SIGINT (or SIGTERM) blocked starts with
+    the signal blocked. The handler is installed, the signal is delivered, and
+    it stays pending forever: the interpreter never dispatches the Python
+    handler, `serve_forever` never sees the flag, and the only way out is the
+    supervisor's SIGKILL, which skips this process's sidecar teardown.
+
+    Measured (t_7c2eb604): a leg run failed BOTH SIGINT arms and no SIGTERM arm
+    while a child spawned with SIGINT blocked reproduced it every time — no
+    handler line, sidecar alive. Clearing the mask here is what makes "SIGINT is
+    always honoured" independent of how the process was launched.
+
+    `pthread_sigmask` is POSIX-only; on a platform without it there is no
+    inherited pthread mask to clear.
+    """
+    try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK,
+                               {signal.SIGTERM, signal.SIGINT})
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 def serve_main(bind_override=None, port_override=None, *,
                tailscale=False, bind_overrides=None) -> int:
     """Bind + serve in the foreground; returns a process exit code.
@@ -1394,8 +1422,6 @@ def serve_main(bind_override=None, port_override=None, *,
     # point after spawn regardless, so the handler has to cover the whole
     # startup and not just the part after a socket exists. Ordering pinned by
     # tests/test_api_server_entrypoint.py::TestStopHandlersInstallBeforeTheBind.
-    import signal as _signal
-
     stopping = _StopFlag()         # "a stop was requested"; see serve_forever
 
     def _on_term(signum, frame):
@@ -1449,10 +1475,13 @@ def serve_main(bind_override=None, port_override=None, *,
         stopping.set()
 
     try:
-        _signal.signal(_signal.SIGTERM, _on_term)
-        _signal.signal(_signal.SIGINT, _on_term)
+        signal.signal(signal.SIGTERM, _on_term)
+        signal.signal(signal.SIGINT, _on_term)
     except (ValueError, OSError):
         pass                      # not the main thread / not installable
+    # ...and a handler alone is not enough: a mask inherited from the spawner
+    # keeps the signal pending, so the handler would never be dispatched.
+    _unblock_stop_signals()
 
     if bind_overrides is None and bind_override is not None:
         bind_overrides = ([bind_override] if isinstance(bind_override, str)

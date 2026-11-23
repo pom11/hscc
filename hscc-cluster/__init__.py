@@ -10,6 +10,7 @@ from . import fleet
 from . import template_tools
 from . import orch_message
 from . import autodown_tools as adt
+from . import heal_tools as hlt
 from . import merge_queue_tools as mqt
 from . import node_pause_tools as npt
 from . import doctor_tools as dt
@@ -76,6 +77,16 @@ _READ_TOOLS = [
      "failed). Read-only: the same verdict as the operator's `doctor.py --json`, "
      "read live from host/daemon/API state — it never repairs, and `--fix` "
      "stays CLI-only."),
+    # Heal breaker (t_14b86753, audit D4): the READ half of `hscc heal-status`.
+    # `heal-clear` stays CLI-only — re-arming the daemon's repair paths is an
+    # operator decision after investigating the hardware, not a per-turn agent
+    # call. The handler reads the same `heal_breaker` module the daemon writes.
+    ("heal_status", hlt.HEAL_STATUS_SCHEMA, hlt.heal_status, "🩹",
+     "Per-node heal-breaker strikes: how many actions landed in the rolling "
+     "window, how old they are, whether the daemon is refusing to heal that "
+     "node right now and for how long. Read-only: the ledger "
+     "`hscc heal-status` prints, as numbers. It never clears strikes — "
+     "`hscc heal-clear <node>` stays an operator CLI verb."),
 ]
 
 _OPS_TOOLS = [
