@@ -106,7 +106,10 @@ _HEAL_TOOLS = [
     ("repair_nas_export", S.REPAIR_NAS_EXPORT_SCHEMA, heal.repair_nas_export, "🛠️",
      "Re-publish QNAP NFS exports (backup first). HIGH-RISK. GUARDED: confirm=true."),
     ("reap_orphans", S.REAP_ORPHANS_SCHEMA, heal.reap_orphans, "🧹",
-     "Stop sparkrun containers not in serving.json. GUARDED: confirm=true."),
+     "Stop sparkrun containers not in serving.json. GUARDED: confirm=true, and "
+     "REFUSED outright when serving.json is absent/unparseable/unit-less or does "
+     "not name the orphan's node (stale copy = live workload; force=true to "
+     "override the guard only)."),
 ]
 
 
@@ -139,7 +142,9 @@ _ORCH_TOOLS = [
     ("orch_message", orch_message.ORCH_MESSAGE_SCHEMA, orch_message.orch_message, "✉️",
      "Nudge another orchestrator profile (queue-only, signed '[from <you>]', "
      "audited). Both ends must be *-orch; never interrupts a running turn; "
-     "rate-limited per pair per hour."),
+     "rate-limited per pair per hour. Not `hscc orch inject` (types into a "
+     "live pane), not `/orch-restart` (restarts the orchestrator vLLM), not "
+     "the `POST /v1/orchestrator/chat` route (one chat turn, by job id)."),
 ]
 
 

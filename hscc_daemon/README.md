@@ -92,7 +92,7 @@ not by a per-handler JSON config — there is no `~/.hscc/daemon/config.json`.
 | `hscc triggers` | Show trigger-engine rules + recent firings |
 | `hscc notify <title> <body>` | Post an alert to the HSCC alert feed (`POST /v1/alerts`; `--level`, `--key`) |
 | `hscc notify list` / `ack <id>` | Read the feed newest first (`--since`, `--limit`, `--json`) / mark one alert seen |
-| `hscc heal-status` | List per-node heal-breaker strikes (read-only) |
+| `hscc heal-status` | List per-node heal-breaker strikes (read-only). The breaker, not the `/heal` slash command — that restarts unhealthy workers |
 | `hscc heal-clear <node>` | Clear one node's strikes after investigating (MUTATES the ledger) |
 | `hscc install` / `hscc uninstall` | Install / remove the launchd (macOS) or systemd (Linux) service |
 | `hscc plist` | Print the launchd plist (no install) |

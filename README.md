@@ -101,8 +101,11 @@ pointer drifts, with the one-line `hermes kanban boards switch <name>` fix.
 
 **It runs in its own pane.** `hscc main start` ensures one tmux pane runs the
 main orchestrator's REPL; `hscc main status` reports it and `hscc orch inject`
-resolves that pane like any other orchestrator. With no tmux server running,
-bootstrap prints the command rather than starting a server behind your back.
+resolves that pane like any other orchestrator. (`hscc orch inject` types into
+that live pane; the `orch_message` agent tool, the `/orch-restart` slash
+command and `POST /v1/orchestrator/chat` are separate capabilities that
+merely share the "orch" name.) With no tmux server running, bootstrap prints
+the command rather than starting a server behind your back.
 
 **It wakes itself.** The hscc daemon owns four editable wake-ups, delivered into
 the same running session you talk to (queued while it is busy, never

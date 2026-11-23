@@ -165,8 +165,9 @@ The background watcher that does the checking and the healing.
 - `hscc escalate` — which failures are waiting for a human, without touching
   them.
 - `hscc heal-clear <node>` — clear one machine's heal-breaker strikes; this
-  mutates the ledger, and `--help` clears nothing.
+  mutates the ledger, and `--help` clears nothing. Not the `/heal` chat command.
 - `hscc heal-status` — list the heal-breaker strikes per machine, read-only.
+  Not the `/heal` chat command, which restarts unhealthy workers instead.
 
 ### Cluster & templates
 
@@ -204,7 +205,9 @@ The background watcher that does the checking and the healing.
 - `hscc main` — the main orchestrator (`general` by default): bring its pane up,
   see whether it is busy, and edit the wake-up schedule the watcher fires into
   it.
-- `hscc orch inject` — send a message into a running agent's session.
+- `hscc orch inject` — type a message into a running agent's live pane. (Three
+  other things share the "orch" name and are not this: the `orch_message`
+  agent tool, the `/orch-restart` chat command, `/v1/orchestrator/chat`.)
 - `hscc orch waker` — the built-in orchestrator waker: `status`, `enable`,
   `disable`.
 - `hscc node pause <host>` — park one machine and only that machine. It prints

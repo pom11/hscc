@@ -61,4 +61,10 @@ REMOUNT_NAS_SCHEMA = {"type": "object", "properties": {
 REPAIR_NAS_EXPORT_SCHEMA = {"type": "object", "properties": {
     "confirm": {"type": "boolean", "default": False}}, "additionalProperties": False}
 REAP_ORPHANS_SCHEMA = {"type": "object", "properties": {
-    "confirm": {"type": "boolean", "default": False}}, "additionalProperties": False}
+    "confirm": {"type": "boolean", "default": False},
+    "force": {"type": "boolean", "default": False,
+              "description": "override the serving.json staleness guard (it refuses when "
+                             "the file is absent/unparseable/unit-less, or does not name "
+                             "the node a would-be orphan lives on). Never overrides the "
+                             "head-node exemption."}},
+    "additionalProperties": False}
