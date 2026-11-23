@@ -108,6 +108,17 @@ class _Harness:
         self.probe = {"ok": True, "models": [ALIAS], "error": ""}
         monkeypatch.setattr(health, "_proxy_models_probe",
                             lambda url, timeout=5: dict(self.probe))
+        # t_f0b8051b added a through-proxy completion probe to check_proxy's
+        # healthy path. This module is about VERDICT LOGGING, not the completion
+        # verdict, so it is neutralised to the probe's no-evidence (healthy)
+        # shape — the same injection seam every other check_proxy rig uses — so
+        # a green tick here never dials the operator's live :4000 (which a dev
+        # machine answers and a CI runner does not, making the healthy-path pins
+        # pass here and fail there). The real probe is covered in test_health.py.
+        monkeypatch.setattr(health, "_proxy_completion_probe",
+                            lambda url=None, model=None, timeout=None:
+                            {"ok": True, "status": None, "skipped": True,
+                             "error": ""})
 
         # ── the repair machinery: never reached, and loud if it is ──
         def _no_command(*a, **k):

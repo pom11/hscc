@@ -150,6 +150,11 @@ def _proxy_forbidden(monkeypatch):
                         forbidden("_router_drift_probe"))
     monkeypatch.setattr(health, "_proxy_models_probe", forbidden("_proxy_models_probe"))
     monkeypatch.setattr(health, "_proxy_backend_probe", forbidden("_proxy_backend_probe"))
+    # t_f0b8051b: the through-proxy completion probe is part of the same
+    # stay-down promise — a deliberate `cluster down` must not spend a 10 s
+    # completion probe on a proxy the operator stopped on purpose.
+    monkeypatch.setattr(health, "_proxy_completion_probe",
+                        forbidden("_proxy_completion_probe"))
     monkeypatch.setattr(health, "_proxy_relaunch_hosts", forbidden("_proxy_relaunch_hosts"))
     monkeypatch.setattr(health, "_reap_orphan_proxy_listener",
                         forbidden("_reap_orphan_proxy_listener"))
