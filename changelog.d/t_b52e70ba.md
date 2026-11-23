@@ -18,23 +18,24 @@ task: t_b52e70ba
   review lane and worker authoring depend on them and they grant no cluster
   control. Profile-authored skills are never touched.
 * `status` now resolves the main-only skills against the main profile (so it
-  cannot report "not installed" for a tree that moved there), and `install`
-  (full bootstrap) routes through the same destination function as
-  `install-skills` so the two verbs cannot drift. An unreadable/tampered
+  cannot report "not installed" for a tree that moved there), `install` (full
+  bootstrap) routes through the same destination function as `install-skills`
+  so the two verbs cannot drift, and `uninstall` reverses both destinations
+  instead of missing the main-profile copies. An unreadable/tampered
   main-orchestrator name fails closed before any write.
 ---
 kind: Verified
 task: t_b52e70ba
 
-* New `hscc-bootstrap/tests/test_skill_install_main_only.py` (7 cases) drives
+* New `hscc-bootstrap/tests/test_skill_install_main_only.py` (8 cases) drives
   the real CLI as a subprocess with throwaway `HERMES_HOME` / `HSCC_DIR`: the
   three skills land under the resolved (non-default) main name, the root home
   and two fake profiles keep zero copies, every moved tree is byte-recoverable
   under `skills-backups/removed-<stamp>/`, a profile-authored skill and a
   same-named non-skill reference dir survive, a category-depth copy is moved,
   the sweep is idempotent, a non-main `HERMES_HOME` is cleaned, `status` reads
-  the main profile, a tampered name fails closed, and the full `install` verb
-  follows the same route.
+  the main profile, a tampered name fails closed, the full `install` verb
+  follows the same route, and `uninstall` reverses both destinations.
 * Revised `hscc-bootstrap/tests/test_skill_install_update.py` (13 cases) to run
   with `HERMES_HOME` as the main profile home plus sandboxed `HSCC_DIR`; the
   backup-first update, collision-guard, retention and fail-closed pins are

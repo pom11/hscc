@@ -205,3 +205,15 @@ def test_install_full_verb_uses_the_same_main_only_route(tmp_path):
     assert "Moved 1" in r.stdout, r.stdout
     assert len(backup_dirs(root)) == 1, (
         sorted(str(p) for p in root.rglob("removed-*")), r.stdout)
+
+
+def test_uninstall_reverses_both_destinations(tmp_path):
+    root, hscc, main_home = make_sandbox(tmp_path, main="ops")
+    assert run_installer(root, hscc).returncode == 0
+    assert (main_home / "skills" / "hscc" / "SKILL.md").is_file()
+
+    r = run_installer(root, hscc, cmd="uninstall")
+    assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+    for skill in _MAIN_ONLY:
+        assert not (main_home / "skills" / skill).exists(), skill
+    assert not (root / "skills" / "sdlc-review").exists()

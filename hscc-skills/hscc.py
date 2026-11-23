@@ -351,7 +351,7 @@ def _main_only_copies(skills_root):
         keep = []
         for name in sorted(dirs):
             path = os.path.join(root, name)
-            if name in MAIN_ONLY_SKILLS and \
+            if name in CLUSTER_SKILLS and \
                     os.path.isfile(os.path.join(path, "SKILL.md")):
                 found.append((path, name))
                 continue  # moving the parent already carries this subtree
@@ -896,7 +896,7 @@ def cmd_status():
 
 
 def cmd_uninstall():
-    """Remove all installed skills and templates."""
+    """Remove all installed skills and templates (the reverse of install)."""
     print("─── Uninstalling HSCC Skills & Templates ───")
     print(f"  Removing from: {HERMES_HOME}")
     print()
@@ -904,17 +904,23 @@ def cmd_uninstall():
     removed = 0
     removed_dir = 0
 
-    # Remove skills
-    if os.path.isdir(SKILLS_DEST):
-        for skill in BUNDLED_SKILLS:
-            skill_path = os.path.join(SKILLS_DEST, skill)
-            if os.path.isdir(skill_path):
-                shutil.rmtree(skill_path)
-                removed += 1
-                print(f"  Removed skill: {skill}")
-            else:
-                print(f"  (skipped, not installed): {skill}")
-        print()
+    # Remove skills from the SAME destinations install uses, or the main-only
+    # trio would survive a reverse install whenever the caller ran it from the
+    # root home (t_b52e70ba).
+    for skill in BUNDLED_SKILLS:
+        try:
+            dest, _guard_home = skill_destination(skill, HERMES_HOME)
+        except MainProfileUnresolved as exc:
+            print(f"  (skipped, main unresolved): {skill} — {exc}")
+            continue
+        skill_path = os.path.join(dest, skill)
+        if os.path.isdir(skill_path):
+            shutil.rmtree(skill_path)
+            removed += 1
+            print(f"  Removed skill: {skill}")
+        else:
+            print(f"  (skipped, not installed): {skill}")
+    print()
 
     # Remove templates
     if os.path.isdir(TEMPLATES_DEST):
