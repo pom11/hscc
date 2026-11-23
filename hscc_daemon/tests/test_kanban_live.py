@@ -15,6 +15,7 @@ import pytest
 from hscc_daemon import kanban_live
 from hscc_daemon.cli_theme import make_console
 from hscc_daemon.kanban_cli import _parse_monitor_args, cmd_kanban
+from hscc_daemon.tests import door_sandbox
 
 NOW = 1_800_000_000
 
@@ -1332,3 +1333,57 @@ def test_attach_merge_queue_renders_a_table_per_project(tmp_path):
     assert "merge queue — alpha" in out
     assert "#7" in out and "#8" in out
     assert "queued" in out
+
+
+# ---------------------------------------------------------------------------
+# t_4564c680 — `hscc kanban monitor` is advertised read-only: no daemon.log
+# ---------------------------------------------------------------------------
+
+class TestTheMonitorWritesNoDaemonLog:
+    """``hscc kanban monitor --json`` must not create ``$HSCC_HOME/daemon.log``.
+
+    ``monitor``'s help says read-only, and it is the card surface both
+    ``hscc kanban monitor`` and ``hscc cards monitor`` render from. Its pass
+    borrows autodown's seam — ``kanban_live.collect`` ->
+    ``autodown._load_kanban_db_or_default`` at ``kanban_live.py:382`` — and that
+    seam's unreachable-library branch appends one WARN through
+    ``daemon_ops.log`` (docs/audits/read-surface-logging_t_88abe739.md §2). The
+    read now borrows the logger for that ONE call; the reason is still reported
+    in ``result["errors"]`` two lines below, so the operator loses nothing but a
+    file write.
+
+    The guard lives in this file — the suite that owns ``monitor`` — so no other
+    file can move the invariant (#704).
+    """
+
+    @pytest.fixture()
+    def seal(self, tmp_path, monkeypatch):
+        return door_sandbox.seal(tmp_path, monkeypatch)
+
+    def test_monitor_json_creates_no_daemon_log(self, seal):
+        door_sandbox.the_seal_actually_took()
+        before = door_sandbox.snapshot(seal.hscc)
+        proc = door_sandbox.run_read(seal, ["kanban", "monitor", "--json"])
+        assert proc.returncode == 0, (
+            f"kanban monitor --json exited {proc.returncode}\n"
+            f"stdout: {proc.stdout[:800]}\nstderr: {proc.stderr[:800]}")
+        payload = json.loads(proc.stdout)
+        # The leaf this guard is about was REACHED, and the reason names the
+        # SANDBOX path — possible only if the child resolved ``~`` to the seal.
+        assert payload["boards"] == [] and payload["running"] == [], payload
+        assert len(payload["errors"]) == 1, payload
+        assert str(seal.home) in payload["errors"][0], payload["errors"]
+        assert "hermes_cli.kanban_db" in payload["errors"][0]
+        log = seal.hscc / "daemon.log"
+        assert not log.exists(), (
+            f"`hscc kanban monitor --json` created {log} — a read-only surface "
+            f"wrote the daemon's log:\n{log.read_text()}")
+        after = door_sandbox.snapshot(seal.hscc)
+        assert after == before, (
+            f"a read wrote HSCC state: {sorted(set(after) ^ set(before))}")
+        # Control: the snapshot sees a write, so the asserts above are not
+        # vacuous.
+        (seal.hscc / "canary.json").write_text("{}", encoding="utf-8")
+        assert door_sandbox.snapshot(seal.hscc) != before, (
+            "the snapshot cannot see a write — the read-only assertion proves "
+            "nothing")

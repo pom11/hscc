@@ -4305,3 +4305,88 @@ class TestLockAndGates:
         assert verify_ids == {"orch", "wk-keep"}
         cfg = ad.load_config()
         assert cfg["state"] == "down"               # recorded down
+
+
+# ── t_4564c680: the borrowed logger, and the alarm it may not spend ─────────
+
+class TestSilentReadDefersTheWarnBudget:
+    """``autodown.silent_read`` borrows the logger; it never spends the alarm.
+
+    The read doors mute ONE WARN so a documented read cannot create
+    ``$HSCC_HOME/daemon.log``. Muting the logger alone would be a fail-open:
+    both ``_note_kanban_unavailable`` and ``_note_prci_unavailable`` set
+    ``warned = True`` *before* they log, so a borrowed read would silently burn
+    the process's only WARN and the daemon would never report a genuine
+    interlock failure. These pins are the difference between "quiet" and
+    "deaf": the file write is deferred, the reason stays recorded, the budget
+    comes back exactly as it was, and the logger comes back even if the read
+    raises.
+    """
+
+    @staticmethod
+    def _fake_logger():
+        lines = []
+
+        def _log(msg, level="INFO"):
+            lines.append((level, msg))
+        return _log, lines
+
+    def test_warn_in_the_window_is_quiet_but_still_recorded(self, monkeypatch):
+        fake, lines = self._fake_logger()
+        monkeypatch.setattr(ad, "log", fake)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "warned", False)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "ok", True)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "reason", "")
+
+        with ad.silent_read():
+            ad._note_kanban_unavailable("hermes lib unreachable")
+
+        assert lines == [], "the read wrote during the muted window"
+        # The surface that owns the answer still has it: ok/reason are recorded
+        # BEFORE the log call, and the mute does not touch them.
+        assert ad.kanban_check_state() == {
+            "ok": False, "reason": "hermes lib unreachable"}
+        assert ad._KANBAN_LOAD["warned"] is False, (
+            "the once-per-process WARN was SPENT by a read — the daemon has "
+            "lost its alarm")
+
+    def test_the_warn_still_fires_after_the_window(self, monkeypatch):
+        fake, lines = self._fake_logger()
+        monkeypatch.setattr(ad, "log", fake)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "warned", False)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "ok", True)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "reason", "")
+        with ad.silent_read():
+            ad._note_kanban_unavailable("quiet inside")
+        ad._note_kanban_unavailable("loud outside")
+        warns = [m for lvl, m in lines if lvl == "WARN"]
+        assert warns == ["Autodown kanban interlock unevaluable: loud outside"], (
+            f"a deferred WARN never came back: {lines}")
+
+    def test_both_budgets_come_back_untouched(self, monkeypatch):
+        fake, _lines = self._fake_logger()
+        monkeypatch.setattr(ad, "log", fake)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "warned", True)
+        monkeypatch.setitem(ad._PRCI_LOAD, "warned", True)
+        with ad.silent_read():
+            ad._note_kanban_unavailable("x")
+            ad._note_prci_unavailable("y")
+        assert ad._KANBAN_LOAD["warned"] is True, (
+            "restoring the budget by resetting it to False would re-arm a WARN "
+            "the process had already spent — and log it twice")
+        assert ad._PRCI_LOAD["warned"] is True
+
+    def test_the_logger_is_handed_back_even_when_the_read_raises(self, monkeypatch):
+        fake, _lines = self._fake_logger()
+        monkeypatch.setattr(ad, "log", fake)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "warned", False)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "ok", True)
+        monkeypatch.setitem(ad._KANBAN_LOAD, "reason", "")
+        with pytest.raises(RuntimeError):
+            with ad.silent_read():
+                raise RuntimeError("the read blew up")
+        assert ad.log is fake, "the mute leaked past the window"
+        # The budget was deferred, so the next call still gets the process's
+        # one line — the window ending in an exception must not have spent it.
+        ad._note_kanban_unavailable("after the raise")
+        assert ad._KANBAN_LOAD["warned"] is True

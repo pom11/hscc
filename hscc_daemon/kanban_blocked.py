@@ -196,7 +196,13 @@ def list_blocked_tasks(kanban_db=None, registered_only: bool = False):
     never crash the listing.
     """
     if kanban_db is None:
-        kanban_db = autodown._load_kanban_db_or_default()
+        # t_4564c680: this is a documented list verb (``hscc kanban blocked``),
+        # and the seam it borrows reports an unreachable library by appending a
+        # WARN to ``$HSCC_HOME/daemon.log``. Borrow the logger for the ONE load
+        # call so the read stays read-only; the reason stays in the ``errors``
+        # payload below, and the WARN budget is deferred, not spent.
+        with autodown.silent_read():
+            kanban_db = autodown._load_kanban_db_or_default()
     if kanban_db is None:
         return {"boards": 0, "tasks": [], "errors": ["kanban lib unreachable"]}
 
@@ -259,7 +265,15 @@ def recover_blocked_task(task_id, reason=None, kanban_db=None):
     ALWAYS an audit trail for why the card was re-run.
     """
     if kanban_db is None:
-        kanban_db = autodown._load_kanban_db_or_default()
+        # t_4564c680: the ONE import-seam call this verb borrows. ``--recover``
+        # is the mutating sibling of the listing, but this call is a read of
+        # Hermes' library and the WARN it emits is the daemon's alarm, not this
+        # command's. The mute is scoped to that single load (NOT the UPDATE
+        # below), and the WARN budget is deferred rather than spent, so the
+        # reason stays recorded in ``autodown._KANBAN_LOAD`` for the surface
+        # that owns the answer (``hscc autodown status``).
+        with autodown.silent_read():
+            kanban_db = autodown._load_kanban_db_or_default()
     if kanban_db is None:
         return None, False
 

@@ -379,7 +379,14 @@ def collect(kanban_db=None, now=None, board=None, read_caps=None,
     result = {"boards": [], "running": [], "ready": [], "events": [],
               "outcomes": {}, "caps": (None, None), "errors": [], "at": now_s}
     if kanban_db is None:
-        kanban_db = autodown._load_kanban_db_or_default()
+        # t_4564c680: ``hscc kanban monitor`` / ``hscc cards monitor`` are
+        # advertised as read-only, and the seam they borrow appends a WARN to
+        # ``$HSCC_HOME/daemon.log`` when the Hermes library is unreachable.
+        # Borrow the logger for this ONE load call; the reason is still
+        # reported in ``result["errors"]`` just below, and the WARN budget is
+        # deferred rather than spent.
+        with autodown.silent_read():
+            kanban_db = autodown._load_kanban_db_or_default()
     if kanban_db is None:
         result["errors"].append(autodown._KANBAN_LOAD.get("reason")
                                 or "kanban lib unreachable")

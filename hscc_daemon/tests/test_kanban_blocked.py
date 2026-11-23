@@ -23,6 +23,7 @@ import pytest
 
 from hscc_daemon import kanban_blocked as kbx
 from hscc_daemon import autodown
+from hscc_daemon.tests import door_sandbox
 
 
 _TASK_COLS = (
@@ -505,3 +506,53 @@ class TestListingsReadOnlyDoor:
         assert not [e for e in out["errors"] if "hermes_state" in e]
         assert "a" in out["boards"]
         assert [t["id"] for t in out["tasks"]] == ["t_old"]
+
+
+# ---------------------------------------------------------------------------
+# t_4564c680 — `hscc kanban blocked` is a list verb: it writes no daemon.log
+# ---------------------------------------------------------------------------
+
+class TestTheListingWritesNoDaemonLog:
+    """``hscc kanban blocked --json`` must not create ``$HSCC_HOME/daemon.log``.
+
+    ``kanban_blocked`` is sold as "List every BLOCKED task across ALL boards"
+    (SUBCOMMAND_HELP, and the group help), and ``--json`` is a machine channel.
+    It borrows autodown's board enumeration, including
+    ``autodown._load_kanban_db_or_default`` at ``kanban_blocked.py:199``, whose
+    failure branch appends one WARN through ``daemon_ops.log`` — measured in
+    docs/audits/read-surface-logging_t_88abe739.md §2. The door now borrows the
+    logger for that ONE call (``autodown.silent_read``); this guard is the
+    surface's own so the invariant cannot be moved by another file (#704).
+    """
+
+    @pytest.fixture()
+    def seal(self, tmp_path, monkeypatch):
+        return door_sandbox.seal(tmp_path, monkeypatch)
+
+    def test_blocked_json_creates_no_daemon_log(self, seal):
+        door_sandbox.the_seal_actually_took()
+        before = door_sandbox.snapshot(seal.hscc)
+        proc = door_sandbox.run_read(seal, ["kanban", "blocked", "--json"])
+        assert proc.returncode == 0, (
+            f"kanban blocked --json exited {proc.returncode}\n"
+            f"stdout: {proc.stdout[:800]}\nstderr: {proc.stderr[:800]}")
+        payload = json.loads(proc.stdout)
+        # The unreachable-library branch — the only one that reaches the WARN
+        # leaf. Under the operator's live HOME the library IS importable and
+        # ``errors`` would be empty, so this assert doubles as proof the child
+        # read the sandbox rather than the live tree.
+        assert payload == {"boards": 0, "tasks": [],
+                           "errors": ["kanban lib unreachable"]}, payload
+        log = seal.hscc / "daemon.log"
+        assert not log.exists(), (
+            f"`hscc kanban blocked --json` created {log} — a list verb wrote "
+            f"the daemon's log:\n{log.read_text()}")
+        after = door_sandbox.snapshot(seal.hscc)
+        assert after == before, (
+            f"a read wrote HSCC state: {sorted(set(after) ^ set(before))}")
+        # Control: the snapshot sees a write, so the asserts above are not
+        # vacuous.
+        (seal.hscc / "canary.json").write_text("{}", encoding="utf-8")
+        assert door_sandbox.snapshot(seal.hscc) != before, (
+            "the snapshot cannot see a write — the read-only assertion proves "
+            "nothing")

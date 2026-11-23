@@ -17,6 +17,7 @@ import sqlite3
 import pytest
 
 import hscc_daemon.autodown as ad
+from hscc_daemon.tests import door_sandbox
 from hscc_daemon.kanban_cli import (cmd_kanban, _parse_older_than,
                                     DEFAULT_STALE_DAYS)
 
@@ -481,3 +482,57 @@ class TestStatusNamesBlockingTasks:
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert "t-a (forgotten A)" in data["blocked_by"]
+
+
+# ---------------------------------------------------------------------------
+# t_4564c680 — `hscc kanban stale` is a list verb: it writes no daemon.log
+# ---------------------------------------------------------------------------
+
+class TestTheStaleListingWritesNoDaemonLog:
+    """``hscc kanban stale --json`` must not create ``$HSCC_HOME/daemon.log``.
+
+    ``stale`` is the board-hygiene list verb (``--archive`` is its only
+    mutating mode), and it reuses autodown's single enumeration —
+    ``_cmd_stale`` -> ``autodown.list_stale_tasks`` ->
+    ``_load_kanban_db_or_default``, whose unreachable-library branch appends one
+    WARN through ``daemon_ops.log`` (measured:
+    docs/audits/read-surface-logging_t_88abe739.md §2). The read now borrows the
+    logger for that ONE call; the reason stays in ``result["errors"]``, which
+    this handler prints on stderr and puts in the ``--json`` payload, so nothing
+    becomes invisible — only the file write is muted.
+
+    The guard is in THIS file (the suite that owns the ``stale`` surface) so the
+    invariant cannot be moved by another file, per the #704 lesson.
+    """
+
+    @pytest.fixture()
+    def seal(self, tmp_path, monkeypatch):
+        return door_sandbox.seal(tmp_path, monkeypatch)
+
+    def test_stale_json_creates_no_daemon_log(self, seal):
+        door_sandbox.the_seal_actually_took()
+        before = door_sandbox.snapshot(seal.hscc)
+        proc = door_sandbox.run_read(seal, ["kanban", "stale", "--json"])
+        assert proc.returncode == 0, (
+            f"kanban stale --json exited {proc.returncode}\n"
+            f"stdout: {proc.stdout[:800]}\nstderr: {proc.stderr[:800]}")
+        payload = json.loads(proc.stdout)
+        # The leaf this guard is about was REACHED, and the reason names the
+        # SANDBOX path — possible only if the child resolved ``~`` to the seal.
+        assert payload["tasks"] == [] and payload["boards"] == [], payload
+        assert len(payload["errors"]) == 1, payload
+        assert str(seal.home) in payload["errors"][0], payload["errors"]
+        assert "hermes_cli.kanban_db" in payload["errors"][0]
+        log = seal.hscc / "daemon.log"
+        assert not log.exists(), (
+            f"`hscc kanban stale --json` created {log} — a list verb wrote the "
+            f"daemon's log:\n{log.read_text()}")
+        after = door_sandbox.snapshot(seal.hscc)
+        assert after == before, (
+            f"a read wrote HSCC state: {sorted(set(after) ^ set(before))}")
+        # Control: the snapshot sees a write, so the asserts above are not
+        # vacuous.
+        (seal.hscc / "canary.json").write_text("{}", encoding="utf-8")
+        assert door_sandbox.snapshot(seal.hscc) != before, (
+            "the snapshot cannot see a write — the read-only assertion proves "
+            "nothing")

@@ -22,6 +22,7 @@ import pytest
 import hscc_daemon.autodown as ad
 from hscc_daemon import lifecycle
 from hscc_daemon.tests.rich_layout import _says
+from hscc_daemon.tests import door_sandbox
 from hscc_daemon.autodown_cli import (cmd_autodown, _parse_idle_minutes,
                                       DEFAULT_IDLE_MINUTES)
 
@@ -1153,3 +1154,73 @@ class TestDispatch:
         out = capsys.readouterr().out
         assert "unknown autodown subcommand" in out
         assert "bogus" in out
+
+
+# ---------------------------------------------------------------------------
+# t_4564c680 — the door whose own docstring promises it writes nothing
+# ---------------------------------------------------------------------------
+
+class TestTheReadWritesNoDaemonLog:
+    """``hscc autodown status`` must not create ``$HSCC_HOME/daemon.log``.
+
+    ``autodown_cli.py:223-229``: "Never writes, never creates, never acts."
+    Measured in docs/audits/read-surface-logging_t_88abe739.md §2 it did write —
+    one WARN from ``autodown._note_kanban_unavailable``, reached through
+    ``status_snapshot`` -> ``_has_active_work`` -> ``_load_kanban_db_or_default``,
+    because that seam is the repo's only kanban-library import and its failure
+    path logs. The fix (``autodown.silent_read``) borrows the logger for the one
+    call; the guard here is the door's own, in this file, so no other suite can
+    move the invariant (the #704 lesson).
+
+    The command runs as a subprocess in the sealed sandbox
+    (``hscc_daemon/tests/door_sandbox.py``: HOME/HERMES_HOME redirected,
+    transports stubbed, TEST-NET--1 + closed ports), ``$HSCC_HOME`` snapshotted
+    before and after. Both documented views are checked — ``--json`` is a
+    machine channel that may well be snapshotted by its caller, and the human
+    panel is what the operator reads.
+    """
+
+    @pytest.fixture()
+    def seal(self, tmp_path, monkeypatch):
+        return door_sandbox.seal(tmp_path, monkeypatch)
+
+    def _assert_quiet(self, seal, argv):
+        """Run the door in the sandbox; fail if it touched HSCC state."""
+        door_sandbox.the_seal_actually_took()
+        before = door_sandbox.snapshot(seal.hscc)
+        proc = door_sandbox.run_read(seal, argv)
+        assert proc.returncode == 0, (
+            f"{' '.join(argv)} exited {proc.returncode}\n"
+            f"stdout: {proc.stdout[:800]}\nstderr: {proc.stderr[:800]}")
+        log = seal.hscc / "daemon.log"
+        assert not log.exists(), (
+            f"`{' '.join(argv)}` created {log} — a documented read wrote the "
+            f"daemon's log:\n{log.read_text()}")
+        after = door_sandbox.snapshot(seal.hscc)
+        assert after == before, (
+            f"a read wrote HSCC state: {sorted(set(after) ^ set(before))}")
+        # Control: the snapshot DOES see a write, so the two asserts above are
+        # not vacuous (the same control the doctor door guard uses).
+        (seal.hscc / "canary.json").write_text("{}", encoding="utf-8")
+        assert door_sandbox.snapshot(seal.hscc) != before, (
+            "the snapshot cannot see a write — the read-only assertion proves "
+            "nothing")
+        return proc
+
+    def test_json_view_creates_no_daemon_log(self, seal):
+        proc = self._assert_quiet(seal, ["autodown", "status", "--json"])
+        payload = json.loads(proc.stdout)
+        # The leaf this guard is about was REACHED (the sandbox has no
+        # ``.hermes/hermes-agent``) and the reason it recorded names the SANDBOX
+        # path — so the child read the seal rather than the operator's tree, and
+        # the green above means the mute worked, not that the branch was skipped.
+        assert payload["kanban_ok"] is False, payload
+        assert str(seal.home) in payload["kanban_reason"], payload["kanban_reason"]
+        assert "hermes_cli.kanban_db" in payload["kanban_reason"]
+
+    def test_human_view_creates_no_daemon_log(self, seal):
+        proc = self._assert_quiet(seal, ["autodown", "status"])
+        assert "UNEVALUABLE" in proc.stdout, (
+            "the human panel did not report the unevaluable kanban interlock, "
+            "so the quiet assert above ran a read that never reached the leaf "
+            f"it guards:\n{proc.stdout[:800]}")
