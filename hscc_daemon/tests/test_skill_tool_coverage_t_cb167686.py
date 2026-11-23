@@ -17,11 +17,14 @@ gate that keeps it fixed. It bites on the two ways the audit says the drift happ
   ``kanban_paused``, ``main_status`` and ``doctor`` as tools this wave "adds", and
   §10 decided all three against (D6, D9, D11). §12.2 (the operator verdict) then
   ruled that D11 was about the *route* and that the read-only ``doctor`` **tool**
-  stands, so two of the three are still refused and ``doctor`` is now registered —
-  which is exactly the kind of move this gate is built to notice rather than let
-  drift: the count, the table and the decided-against list have to be edited in the
-  same deliberate commit. A document that names a phantom tool is worse than one
-  that omits a real one, because an agent wastes a turn calling it.
+  stands, so ``doctor`` is now registered. t_c920b0ca then shipped
+  ``main_status``: D9 asked for read **routes** for the dashboards (still
+  deferred), while the card that owns the agent-tool read is this wave's
+  ``main_status`` card. ``kanban_paused`` remains refused here. That is exactly
+  the kind of move this gate is built to notice rather than let drift: the count,
+  the table and the decided-against list have to be edited in the same deliberate
+  commit. A document that names a phantom tool is worse than one that omits a real
+  one, because an agent wastes a turn calling it.
 
 So the tool tables and the registry must be the SAME SET, in both directions — the
 same both-directions rule ``test_plugin_manifest_drift.py`` applies to ``plugin.yaml``,
@@ -75,7 +78,12 @@ DECIDED_AGAINST = [
     ("heal-clear", "D4"),                    # the read landed as heal_status; clear stays operator-only
     ("template validate", "D5"),             # route + slash hint recommended, no tool
     ("hscc notify", "D7"),                   # an agent that can page the operator trains them to ignore pages
-    ("hscc main status", "D9"),              # dashboards get a read ROUTE, not an agent tool
+    # ("hscc main status", "D9") was here. It came out deliberately on
+    # t_c920b0ca: that card ships the read-only agent tool `main_status` (the
+    # audit's new-tool wave names it). D9's separate ask — read *routes* for the
+    # dashboards — is still deferred, and `main start` / `main wakeups` remain
+    # CLI-only. The tool is registered and documented, so this list — which means
+    # "no tool, and the skill says so" — no longer describes it.
     # ("hscc doctor", "D11") was here. It came out deliberately on t_7f570861:
     # the operator verdict (§12.2) ruled that D11 refused the HTTP *route*
     # ("it reads this host's trees") and that "the read-only agent *tool* is a

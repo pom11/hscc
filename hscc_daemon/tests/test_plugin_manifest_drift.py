@@ -225,10 +225,16 @@ def test_cluster_manifest_is_exactly_the_30_registered_tools():
     read-only agent half of `hscc heal-status`. `heal-clear` is deliberately
     NOT in the count — clearing a breaker re-arms the daemon's repair paths, so
     it stays an operator CLI verb (docs/audits/2026-11-23-agent-surface.md D4).
+
+    Amended 30 -> 31 by t_c920b0ca: `main_status` (in `_READ_TOOLS`), the
+    read-only agent half of `hscc main status` + `hscc orch waker status`. The
+    lifecycle verbs (`start`, `wakeups`, and any rename) are deliberately NOT in
+    the count — an agent that can spawn, re-attach or re-schedule the operator's
+    main orchestrator is the door this tool exists to withhold.
     """
     declared = _manifest_tools(str(REPO / "hscc-cluster"))
     assert len(declared) == len(_registered_names(
-        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 30
+        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 31
     for previously_missing in ("orch_message", "apply_template", "list_templates",
                                "preview_template", "fleet_stats", "cluster_verify",
                                "cluster_throughput", "autoscale_advice",
@@ -279,6 +285,15 @@ def test_cluster_manifest_is_exactly_the_30_registered_tools():
     assert "heal_clear" not in declared, (
         "heal_clear is an operator mutation — CLI only, per "
         "docs/audits/2026-11-23-agent-surface.md D4")
+    # The main-orchestrator read is part of the manifest, and the lifecycle
+    # verbs stay out: spawning/re-attaching the operator's pane or rewriting its
+    # wake schedule is operator scope, not a per-turn agent action.
+    assert "main_status" in declared, \
+        "t_c920b0ca regression: main_status missing from the manifest"
+    for lifecycle in ("main_start", "main_wakeups", "main_rename"):
+        assert lifecycle not in declared, (
+            f"{lifecycle} is a main-orchestrator lifecycle mutation — CLI only, "
+            "per t_c920b0ca")
 
 
 @pytest.mark.parametrize("plugin_dir", MANIFESTED,
