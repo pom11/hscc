@@ -186,6 +186,12 @@ class _FakeApi:
     def load_token(self):
         raise RuntimeError("no token (test)")
 
+    # t_cc7b6023: `status` reads via peek_token, never load_token — so the
+    # "no token" fake has to answer the name status actually calls, or every
+    # QR assertion below would pass only because no QR can ever render.
+    def peek_token(self):
+        return self.load_token()
+
 
 def _run_status(monkeypatch, tmp_path, pid_text=None, probe=None,
                 argv=None, plist=True):
@@ -252,6 +258,9 @@ def test_status_never_prints_the_token_under_launchd(monkeypatch, tmp_path):
     class _Tok(_FakeApi):
         def load_token(self):
             return "SUPERSECRETTOKEN"
+
+        def peek_token(self):
+            return self.load_token()
     monkeypatch.setattr(api_cli, "_load_api_server", lambda: _Tok())
     monkeypatch.setattr(api_cli, "API_PID_FILE", str(tmp_path / "api.pid"))
     from hscc_daemon import api_launchd

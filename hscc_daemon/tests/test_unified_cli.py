@@ -1203,6 +1203,10 @@ class TestApiStatusNeverPrintsToken:
                     raise RuntimeError("token file is unreadable")
                 return token_value
 
+            # t_cc7b6023: `status` reads via peek_token, never load_token.
+            def peek_token(self):
+                return self.load_token()
+
         monkeypatch.setattr(api_cli_mod, "_load_api_server", lambda: _FakeApi())
         pid_file = str(tmp_path / "api.pid")
         monkeypatch.setattr(api_cli_mod, "API_PID_FILE", pid_file)
