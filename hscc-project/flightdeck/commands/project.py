@@ -49,6 +49,18 @@ from orchestrators import (                      # noqa: E402
     UnknownProjectError,
     resolve_orchestrator,
 )
+import orch_subscribe                            # noqa: E402
+
+
+def _apply_orch_subscription_policy(profile):
+    """A pane chat is starting: a pane-backed orch must not keep Hermes'
+    gateway auto-subscribe gate on (t_31c8b258). Best-effort — opening the
+    chat must never fail because the policy could not be applied."""
+    try:
+        return orch_subscribe.apply_subscription_policy(
+            profile, pane_backed=True)
+    except Exception:  # noqa: BLE001 — policy is advisory, the chat is not
+        return {"action": "error", "changed": False, "profile": profile}
 
 
 def _not_implemented() -> int:
@@ -710,6 +722,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     profile = resolved["profile"]
     session = resolved["session"]
+    _apply_orch_subscription_policy(profile)
 
     resume_id = getattr(args, "resume_id", None)
     if resume_id:
@@ -806,6 +819,7 @@ def _cmd_chat_resume(name: str, resume_id: str, args, resolved: dict) -> int:
         return 2
 
     profile, argv = target
+    _apply_orch_subscription_policy(profile)
     make_console().print(panel(
         "project chat",
         f"[accent]project {esc(name)} -> profile {esc(profile)}, resuming session "

@@ -1297,3 +1297,49 @@ class TestNoAnsiProject:
                 session_db=_db_session("hscc"))))
         assert "project hscc -> profile hscc-orch" in out
 
+
+def test_chat_applies_the_pane_subscription_policy(tmp_path, monkeypatch):
+    """t_31c8b258: the pane door marks the orchestrator pane-backed before it
+    opens, so Hermes' auto-subscribe gate is off for a chat that is about to
+    live in tmux. Policy failure is fail-soft: the chat still opens."""
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    calls = []
+
+    def fake_policy(profile, **kw):
+        calls.append((profile, kw))
+        return {"action": "written", "changed": True}
+
+    monkeypatch.setattr(project_cmd.orch_subscribe,
+                        "apply_subscription_policy", fake_policy)
+    seam = CaptureExec()
+    rc = project_cmd.cmd_chat(
+        _ns(registry=reg, session_db=_db_session("hscc"), exec_seam=seam,
+            name="hscc"))
+    assert rc == 0
+    assert calls == [("hscc-orch", {"pane_backed": True})]
+
+
+def test_chat_resume_applies_the_pane_subscription_policy(tmp_path, monkeypatch):
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    resolved = {"profile": "hscc-orch", "session": "hscc", "board": "hscc",
+                "project": "hscc", "repo": str(tmp_path / "hscc")}
+    calls = []
+    monkeypatch.setattr(project_cmd, "_resume_argv",
+                        lambda rid, discovery: ("hscc-orch", ["hermes"]))
+    monkeypatch.setattr(project_cmd.tmux_chat, "launch_interactive_chat",
+                        lambda *a, **k: 0)
+    monkeypatch.setattr(project_cmd.orch_subscribe,
+                        "apply_subscription_policy",
+                        lambda profile, **kw: calls.append((profile, kw)) or {})
+    rc = project_cmd._cmd_chat_resume(
+        "hscc", "sess-1",
+        _ns(registry=reg, session_db=_db_session("hscc"),
+            exec_seam=CaptureExec()),
+        resolved)
+    assert rc == 0
+    assert calls == [("hscc-orch", {"pane_backed": True})]
+

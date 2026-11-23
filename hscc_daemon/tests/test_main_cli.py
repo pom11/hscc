@@ -9,6 +9,7 @@ switch the operator's window" are pinned.
 
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -379,3 +380,41 @@ def test_unified_cli_dispatches_main(monkeypatch):
         unified.main()
     assert exc.value.code == 0
     assert calls == [["status", "--json"]]
+
+
+# --------------------------------------------------------------------------- #
+# t_31c8b258 — starting the main pane turns Hermes' auto-subscribe gate off
+# --------------------------------------------------------------------------- #
+
+def _profile_with_auto_subscribe(_pin_state, enabled=True):
+    import yaml
+    profile_dir = os.path.join(os.environ["HERMES_HOME"], "profiles", "general")
+    os.makedirs(profile_dir, exist_ok=True)
+    path = os.path.join(profile_dir, "config.yaml")
+    with open(path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"kanban": {"auto_subscribe_on_create": enabled}}, fh)
+    return path
+
+
+def _auto_subscribe(path):
+    import yaml
+    with open(path, encoding="utf-8") as fh:
+        return yaml.safe_load(fh)["kanban"]["auto_subscribe_on_create"]
+
+
+def test_start_creates_the_pane_and_disables_gateway_auto_subscribe(_pin_state):
+    path = _profile_with_auto_subscribe(_pin_state)
+    res = mc.start(repl=FakeRepl([]), runner=FakeRunner(
+        sessions=[{"name": "work", "attached": True}]))
+    assert res["ok"] is True and res["action"] == "created-window"
+    assert res["subscription"]["allowed"] is False
+    assert res["subscription"]["action"] == "written"
+    assert _auto_subscribe(path) is False
+
+
+def test_start_reusing_a_pane_also_disables_the_gate(_pin_state):
+    path = _profile_with_auto_subscribe(_pin_state)
+    res = mc.start(repl=FakeRepl([_pane()]), runner=FakeRunner())
+    assert res["ok"] is True and res["action"] == "reused"
+    assert res["subscription"]["allowed"] is False
+    assert _auto_subscribe(path) is False
