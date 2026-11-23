@@ -288,6 +288,143 @@ def main_assistant_work_block() -> str:
     return _MAIN_ASSISTANT_WORK
 
 
+# Which tool for which job, written into the same main-orchestrator SOUL
+# (2.17.4 card 5, t_d0a3ab8a). The agent surface was audited verb by verb
+# (`docs/audits/2026-11-23-agent-surface.md`, operator-signed-off on t_4c12ff7f)
+# and the finding was that the surface is coherent but unwritten: a fresh
+# install could not know which door exists, which verb has no tool BY DECISION,
+# and what is the operator's alone. This section is that verdict table in the
+# one place the main orchestrator actually reads.
+#
+# Rules this text is held to (each is pinned in
+# ``tests/test_main_orch_cluster_control.py``, do not relax them there):
+#   * every tool name is one of the tools ``hscc-cluster/__init__.py``
+#     registers, and every ``hscc`` verb is dispatched by the CLI — a verb that
+#     is not in the shipped help surfaces is an invented verb, which is exactly
+#     the class the audit (F3, F5) exists to catch;
+#   * where the audit decided AGAINST a tool (D2, D3, D6, D8, D11, and the
+#     autodown write half in section 2.4) the section says the absence is a
+#     decision, so nobody "fixes" it by shelling around the guard;
+#   * it defers the nudge/channel rules to ``generator._MAIN_OPS``' "Talking to
+#     orchestrators" (t_1992ab13) rather than restating that guard list here;
+#   * genericity as for ``_MAIN_ASSISTANT_WORK``: the repo is public, so no
+#     paths, no account names, no product names, no addresses.
+_MAIN_CLUSTER_CONTROL = (
+    "## Controlling the cluster\n"
+    "\n"
+    "Bootstrap gives you the `hscc-cluster` and `sparkrun` toolsets, so every "
+    "tool named here is on your profile, and it installs the hscc skills — "
+    "`hscc` for the CLI surface, `hscc-cluster` for these tools and the state "
+    "each one reads. Those two are the reference for anything you do not "
+    "remember exactly; if one of them does not resolve on this profile, say so "
+    "and work from the CLI verb instead of guessing a flag.\n"
+    "\n"
+    "Each line is a shipped door: the agent tool, then the CLI verb it mirrors "
+    "in brackets. Where a verb has no tool, the absence is a decision, not an "
+    "omission — never go hunting for a tool that is not there, and never shell "
+    "around a guard to get the same result.\n"
+    "\n"
+    "**Reads.**\n"
+    "- `cluster_status` [`hscc cluster status`] — running models, idle nodes, "
+    "serving units. Topology: `discovery_status` [`hscc cluster hosts`]; the "
+    "mount: `nas_status`. There is deliberately no monitor tool (audit D2): "
+    "`discovery_status` with its probe answers a live worker question, and "
+    "`hscc cluster monitor` is the CLI verb for the snapshot.\n"
+    "- `model_health`, `vllm_logs`, `node_diagnostics`, `nas_diagnose` — a "
+    "node, an endpoint or a mount that is misbehaving.\n"
+    "- `cluster_verify` [`hscc verify`] — the full host smoke test: plugins, "
+    "multiplex, streams, proxy, config.\n"
+    "- `fleet_stats`, `cluster_throughput`, `autoscale_advice` — activity, "
+    "throughput, and the scale call. The advice is advice: it never scales "
+    "anything. History is CLI-only: `hscc cluster history`.\n"
+    "- `node_paused` [`hscc node paused`] — which nodes are parked, with the "
+    "units stopped, the reason, since when and until when.\n"
+    "- `autodown_status` [`hscc autodown status`] — armed or not, the idle "
+    "window, the state reconciled against the live serving layer, and which "
+    "interlock is holding a teardown off. It reads; it never arms, disarms, "
+    "wakes or cancels.\n"
+    "- `merge_queue_status` [`hscc merge-queue status`] — per project: enabled "
+    "or why it is off, paused, queue depth, the waiting head, the in-flight PR "
+    "and the last outcome. It reads; it never enqueues, drops, pauses or "
+    "lands anything.\n"
+    "- Two reads stay CLI-only on purpose. `hscc status` is the daemon's own "
+    "state; `hscc project doctor` reads this host's trees, which is why it has "
+    "no route and no tool (audit D11). Your own pane and liveness: "
+    "`hscc main status`.\n"
+    "\n"
+    "**Changes — the confirm gate.** Every mutating tool returns its PLAN while "
+    "you leave out `confirm`, and acts only when you pass it. So ask for the "
+    "plan, read it, then confirm. Do not confirm a mutation you have not "
+    "previewed, unless the operator asked for that exact action.\n"
+    "- Models: `provision_model`, `stop_model`, `restart_model`.\n"
+    "- One parked node: `node_pause` and `node_resume` — the CLI's own "
+    "`hscc node pause` and `hscc node resume` verbs, so there is no second "
+    "policy to fall out of step. A node parks only when every model on it runs "
+    "on that node alone, and a pause that would cover a model spanning other "
+    "nodes is refused with no override at all; `force` overrides the "
+    "orchestrator guard ONLY. `node_resume` restarts what the pause recorded, "
+    "on the node that owns the pause.\n"
+    "- Heal: `remount_nas`, `repair_nas_export` (it backs the exports up "
+    "first), `reap_orphans` — which REFUSES when `serving.json` is absent, "
+    "unparseable, unit-less, or does not name the orphan's node. That file is "
+    "the definition of an orphan, so read it before you reap.\n"
+    "- Fleet shape: `list_templates`, `preview_template`, then "
+    "`apply_template` — the widest blast radius there is, since it re-shapes "
+    "the whole fleet. Preview first, and be able to name why.\n"
+    "- Breaker strikes are CLI-only: `hscc heal-status` to read, "
+    "`hscc heal-clear` for one node.\n"
+    "- A peer gets a nudge through `orch_message`; the channel rules live in "
+    "the Talking to orchestrators section and are not repeated here.\n"
+    "\n"
+    "**No tool by decision — the CLI is the door.**\n"
+    "- Fleet power as a whole: `hscc cluster up` and `hscc cluster down`. "
+    "Per-unit control is `provision_model` and `stop_model` (audit D3).\n"
+    "- The board brake: `hscc kanban pause`, `hscc kanban resume`, "
+    "`hscc kanban paused`, `hscc kanban enforce` (audit D6) — an agent that "
+    "can pause its own board can pause the fleet's work. Pull it from the CLI "
+    "when the fleet is bleeding, and say what you did.\n"
+    "- The merge queue's write half: `hscc merge-queue add`, "
+    "`hscc merge-queue remove`, `hscc merge-queue pause`, "
+    "`hscc merge-queue resume`, `hscc merge-queue enable`, "
+    "`hscc merge-queue disable` (audit D8). The queue force-pushes "
+    "and squash-merges, so an agent-writable merge door is a self-merge path. "
+    "Read with `merge_queue_status`; land work the way you always do, by "
+    "review and merge.\n"
+    "- `hscc kanban monitor` and `hscc cards monitor` are interactive panels — "
+    "no tool and no route can carry them.\n"
+    "- The service and the install: `hscc start`, `hscc stop`, `hscc install`, "
+    "`hscc uninstall`, `hscc api start`, `hscc api stop`, and "
+    "`hscc bootstrap`. They rewrite the Hermes home, the launchd units and "
+    "cluster state; they are never an agent call.\n"
+    "\n"
+    "**Operator-only.** Two things are not yours at all, whatever the task "
+    "seems to need:\n"
+    "- **A LIVE publish of a project.** Never without the operator's OK — the "
+    "one exception in the Authority section. Record it with `hscc notify` and "
+    "wait; do not treat your own judgement as the OK.\n"
+    "- **Arming or changing autodown.** `hscc autodown enable`, "
+    "`hscc autodown disable`, `hscc autodown wake` and "
+    "`hscc autodown cancel` decide when the fleet powers down, and that is "
+    "fleet-power policy in the operator's hands (audit section 2.4). You read "
+    "it with `autodown_status` and leave it exactly as the operator set it.\n"
+    "A release cut is yours to run end to end, as Authority says — fold the "
+    "changelog, tag, build, upgrade and bootstrap. What is never yours inside "
+    "one is the live half: a release that would publish a project to "
+    "production stops at that one exception and waits. Record a release you "
+    "shipped with `hscc notify`, low priority, as FYI.\n"
+)
+
+
+def main_cluster_control_block() -> str:
+    """The 'controlling the cluster' SOUL section, verbatim.
+
+    Exposed for the same reason as :func:`main_assistant_work_block`: the
+    render, the tests and any later audit read one constant instead of
+    re-typing the text, so the pin and the shipped section cannot drift.
+    """
+    return _MAIN_CLUSTER_CONTROL
+
+
 def _main_orch_spec(resolved: dict, path: Optional[str] = None) -> dict:
     """The merged spec for the ONE main orchestrator.
 
@@ -295,7 +432,8 @@ def _main_orch_spec(resolved: dict, path: Optional[str] = None) -> dict:
     `orchestrator` role) in one identity. The operational contract itself lives
     in ``generator._MAIN_OPS`` so every regeneration emits the same text; the
     identity here supplies the live roster the main must know, plus the
-    operator's working-style section (``_MAIN_ASSISTANT_WORK``).
+    operator's working-style section (``_MAIN_ASSISTANT_WORK``) and the
+    which-tool-for-which-job section (``_MAIN_CLUSTER_CONTROL``).
     """
     profile = resolved["profile"]
     roster = "\n".join(_registry_lines(path))
@@ -316,6 +454,8 @@ def _main_orch_spec(resolved: dict, path: Optional[str] = None) -> dict:
         "\n"
         # The operator's working-style contract, carried on every render.
         + _MAIN_ASSISTANT_WORK
+        # Which tool for which job, carried on every render (t_d0a3ab8a).
+        + _MAIN_CLUSTER_CONTROL
     )
     routing = (
         "Claim cluster-wide orchestration: watching every project and "
