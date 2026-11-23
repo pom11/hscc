@@ -307,17 +307,39 @@ def main_assistant_work_block() -> str:
 #     decision, so nobody "fixes" it by shelling around the guard;
 #   * it defers the nudge/channel rules to ``generator._MAIN_OPS``' "Talking to
 #     orchestrators" (t_1992ab13) rather than restating that guard list here;
+#   * OPERATOR RULE 2026-11-23 07:24 (main-only cluster surface): the section
+#     states out loud that this profile is the ONLY one with cluster control —
+#     the cluster tools, the slash commands, the sparkrun passthrough and the
+#     hscc skills — and that any other profile asks the main instead of taking
+#     the action itself. The main's name is never spelled here (the bootstrap
+#     config owns it, so a renamed main is still correct), and no sentence may
+#     phrase cluster access as available to a worker or a project orchestrator.
+#     Both directions are pinned in
+#     ``tests/test_main_orch_cluster_control.py``.
 #   * genericity as for ``_MAIN_ASSISTANT_WORK``: the repo is public, so no
 #     paths, no account names, no product names, no addresses.
 _MAIN_CLUSTER_CONTROL = (
     "## Controlling the cluster\n"
     "\n"
-    "Bootstrap gives you the `hscc-cluster` and `sparkrun` toolsets, so every "
-    "tool named here is on your profile, and it installs the hscc skills — "
-    "`hscc` for the CLI surface, `hscc-cluster` for these tools and the state "
-    "each one reads. Those two are the reference for anything you do not "
+    "This profile — the one bootstrap named as the main orchestrator, whatever "
+    "it was called — is the ONLY profile on this fleet with cluster control. "
+    "The `hscc-cluster` tools, the `hscc` slash commands, the `sparkrun` "
+    "passthrough and the hscc skills live here alone: no worker and no project "
+    "orchestrator carries them, and nobody borrows this surface to change the "
+    "fleet. Bootstrap is what puts it here — the `hscc-cluster` and `sparkrun` "
+    "toolsets are written into this profile's config, and the cluster skills "
+    "belong to this profile alone: `hscc` for the CLI surface, `hscc-cluster` "
+    "for these tools and the state each one reads, `hscc-model-onboard` when a "
+    "new model comes up. Those are the reference for anything you do not "
     "remember exactly; if one of them does not resolve on this profile, say so "
-    "and work from the CLI verb instead of guessing a flag.\n"
+    "and work from the CLI verb instead of guessing a flag, and do not go "
+    "reading another profile's tree for it.\n"
+    "\n"
+    "When another profile needs the cluster changed, it asks you — a card on "
+    "its own board, or `orch_message` — and you run it or say why not. That is "
+    "the only path: a cluster verb is never handed to a profile that does not "
+    "hold this surface, and you do not talk a worker into running one for "
+    "you.\n"
     "\n"
     "Each line is a shipped door: the agent tool, then the CLI verb it mirrors "
     "in brackets. Where a verb has no tool, the absence is a decision, not an "
@@ -328,8 +350,8 @@ _MAIN_CLUSTER_CONTROL = (
     "- `cluster_status` [`hscc cluster status`] — running models, idle nodes, "
     "serving units. Topology: `discovery_status` [`hscc cluster hosts`]; the "
     "mount: `nas_status`. There is deliberately no monitor tool (audit D2): "
-    "`discovery_status` with its probe answers a live worker question, and "
-    "`hscc cluster monitor` is the CLI verb for the snapshot.\n"
+    "`discovery_status` with its probe answers a live question about one node, "
+    "and `hscc cluster monitor` is the CLI verb for the snapshot.\n"
     "- `model_health`, `vllm_logs`, `node_diagnostics`, `nas_diagnose` — a "
     "node, an endpoint or a mount that is misbehaving.\n"
     "- `cluster_verify` [`hscc verify`] — the full host smoke test: plugins, "

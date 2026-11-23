@@ -113,6 +113,37 @@ DECISIONS = {
 NON_TOOL_TOKENS = {"confirm", "force"}
 
 
+#: The operator's 07:24 rule (main-only cluster surface), clause by clause. The
+#: SOUL must state it out loud — the shipped role text already claims "Only the
+#: orchestrator profile has this toolset; workers do not", and the operator's
+#: measurement today is that every profile inherits the plugins, so the claim is
+#: only true once it is written down here AND enforced by the bootstrap/skills
+#: cards the same brief lists. This file pins the statement; those cards own the
+#: enforcement (and ``test_a_worker_still_lacks_the_cluster_toolsets`` pins the
+#: half that is already true in code).
+MAIN_ONLY_CLAUSES = (
+    "is the ONLY profile on this fleet with cluster control",
+    "whatever it was called",                      # resolver-driven, never spelled
+    "The `hscc-cluster` tools",
+    "the `hscc` slash commands",
+    "the `sparkrun` passthrough",
+    "the hscc skills live here alone",
+    "no worker and no project orchestrator carries them",
+    "it asks you",
+    "a cluster verb is never handed to a profile",
+)
+
+#: Phrasings that would quietly hand the cluster surface to a profile that must
+#: ask for it instead. The operator's rule is not only "do not give it to them";
+#: the SOUL must not imply it either, because the SOUL is what an agent follows.
+WORKER_ACCESS_PHRASES = (
+    "workers can", "worker can", "workers may", "worker may",
+    "workers have", "worker has", "workers get", "worker gets",
+    "workers call", "worker calls", "any profile has", "every profile has",
+    "all profiles have", "both profiles have", "other profiles have",
+)
+
+
 # --------------------------------------------------------------------------
 # the shipped surface these pins read (pure source reads — no imports of the
 # plugin package, no hermes runtime, no fleet)
@@ -494,6 +525,83 @@ def test_the_section_defers_the_channel_rules_to_the_shared_block():
 
 
 # --------------------------------------------------------------------------
+# 3b. the operator's main-only cluster rule (07:24 brief), stated out loud
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("clause", MAIN_ONLY_CLAUSES)
+def test_the_main_only_cluster_rule_is_stated(clause):
+    """The section says the MAIN profile alone holds the cluster surface.
+
+    The operator rule (2026-11-23 07:24) is that the cluster control and monitor
+    surface — cluster tools, slash commands, the sparkrun passthrough and the
+    hscc skills — is hooked to the bootstrap-created main orchestrator alone.
+    Each clause here is one piece of that sentence; the whole sentence is what an
+    agent reads before deciding whether to act or to ask.
+    """
+    section = _section_only(orchestrators.main_cluster_control_block())
+    assert clause in section, f"main-only clause missing: {clause!r}"
+
+
+def test_the_main_is_named_by_the_resolver_never_spelled():
+    """The exclusivity is keyed on the bootstrap-configured main, not a name.
+
+    The operator may call the main anything at bootstrap; a SOUL that spells the
+    default name is wrong on every install that does, and is the same
+    hardcoding class ``orch_message`` was fixed for (#635).
+    """
+    section = _section_only(orchestrators.main_cluster_control_block())
+    assert "general" not in section.lower(), (
+        "a hardcoded main-orchestrator name in the section — read it from the "
+        "bootstrap config, as the resolver does")
+    assert "whatever it was called" in section
+
+
+def test_cluster_access_is_never_phrased_as_available_to_a_worker():
+    """No sentence may imply a worker or project orchestrator holds the surface.
+
+    Two halves: no access phrase aimed at another profile kind, and every line
+    that DOES name one either denies it or routes it to the main. Plus a positive
+    control, because a phrasing guard that cannot fail is worth nothing.
+    """
+    section = _section_only(orchestrators.main_cluster_control_block())
+    lowered = section.lower()
+    for phrase in WORKER_ACCESS_PHRASES:
+        assert phrase not in lowered, (
+            f"the section phrases cluster access as available to another "
+            f"profile: {phrase!r}")
+    for line in section.splitlines():
+        low = line.lower()
+        if not any(kind in low for kind in ("worker", "project orchestrator",
+                                            "-orch")):
+            continue
+        assert any(mark in low for mark in ("ask", "no worker", "never",
+                                            "alone", "not ")), (
+            f"a line names another profile kind without denying it the surface "
+            f"or sending it to the main: {line!r}")
+    # Positive control: the predicates are satisfiable.
+    violation = "- workers may also call `cluster_status` on any profile has it"
+    assert any(p in violation for p in WORKER_ACCESS_PHRASES)
+    bad_line = "- a worker can run the same tools directly"
+    assert not any(mark in bad_line for mark in
+                   ("ask", "no worker", "never", "alone", "not "))
+
+
+def test_a_worker_profile_is_still_written_without_the_cluster_toolsets():
+    """The half of the operator's rule that is already true in code.
+
+    ``rolelib`` keeps the cluster tools on the orchestrator side of one boundary
+    (``_FULL_TOOLSETS`` versus ``_ORCH_TOOLSETS``); a generated worker config that
+    grew them would make the SOUL's exclusivity sentence a lie in the other
+    direction. The rest of the rule — scoping the plugins, reversing the skill
+    fan-out — is the operator's own follow-up cards, not this one, and the
+    worker-template wording sweep is t_c3a29c37 (not this card).
+    """
+    assert all(ts not in generator.rolelib.role_toolsets()
+               for ts in CLUSTER_TOOLSETS)
+    assert set(CLUSTER_TOOLSETS) <= set(generator.rolelib.orchestrator_toolsets())
+
+
+# --------------------------------------------------------------------------
 # 4. the profile-level guarantee the section claims (sandboxed home)
 # --------------------------------------------------------------------------
 
@@ -531,7 +639,12 @@ def test_the_main_profile_is_written_with_the_cluster_toolsets(
 
 
 def test_a_worker_still_lacks_the_cluster_toolsets():
-    """The guarantee is main/orchestrator-scoped; widening it is the bug class."""
+    """The guarantee is main/orchestrator-scoped; widening it is the bug class.
+
+    (Pinned from the operator-rule side too in
+    ``test_a_worker_profile_is_still_written_without_the_cluster_toolsets``;
+    this one is the config-generation side, on a generated profile.)
+    """
     assert all(ts not in generator.rolelib.role_toolsets()
                for ts in CLUSTER_TOOLSETS)
 

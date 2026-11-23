@@ -26,17 +26,28 @@ task: t_d0a3ab8a
   The nudge/channel rules are NOT restated: `orch_message` is mapped to its job
   and the guard list stays owned by the single `## Talking to orchestrators`
   section (#644), because two copies of a guard list is how one goes stale.
+* **The section opens by stating the main-only cluster rule (operator,
+  2026-11-23 07:24).** The main orchestrator profile — named by the bootstrap
+  config, never spelled in the text — is the ONLY profile with cluster control:
+  the `hscc-cluster` tools, the `hscc` slash commands, the `sparkrun` passthrough
+  and the hscc skills live there alone, and a worker or project orchestrator asks
+  the main for a cluster action (a card on its board, or `orch_message`) instead
+  of taking it. No sentence in the section phrases cluster access as available to
+  another profile. That is the rule written down; scoping the plugins in
+  bootstrap and reversing the hscc-skill fan-out are the operator's own follow-up
+  cards from the same brief, and the worker/project-orch template sweep is
+  t_c3a29c37 — none of them is done here.
 ---
 kind: Verified
 task: t_d0a3ab8a
 
-* `hscc-roles/tests/test_main_orch_cluster_control.py` (new, 67 items) renders
+* `hscc-roles/tests/test_main_orch_cluster_control.py` (new, 79 items) renders
   the section through BOTH write paths (`compose_soul`, and bootstrap's
   `ensure_orchestrator` -> `SOUL.md` in a tmp home), asserts it lands once inside
   the role section a regeneration owns, that it follows a RENAMED main through
   `main_orch`, and that a project orchestrator and a worker never get it.
-  `hscc-roles` leg, sealed env, one pytest process: **439 passed, 0 failed**
-  (372 pre-existing + 67 new) at this head.
+  `hscc-roles` leg, sealed env, one pytest process: **451 passed, 0 failed**
+  (372 pre-existing + 79 new) at this head.
 * No invented verbs — the audit's own F3/F5 class, pinned against this card.
   Every backticked tool name must be in the set `hscc-cluster/__init__.py`
   registers (its parser asserts >= 28 tools so the read cannot go vacuous) and
@@ -47,17 +58,24 @@ task: t_d0a3ab8a
   inspected, so a thin section fails the gate instead of passing it.
 * The toolset + skill guarantee is asserted on the GENERATED PROFILE, not on the
   prose: `config.yaml` for the main profile (default name and a renamed one)
-  carries `hscc-cluster` + `sparkrun`, a worker profile still lacks both, and
-  every skill the section points at is in `hscc-skills`' `BUNDLED_SKILLS` — a
-  reference bootstrap cannot install is caught at the sentence that promises it,
-  not at spawn time.
+  carries `hscc-cluster` + `sparkrun`, a generated worker profile still lacks
+  both, and every skill the section points at (`hscc`, `hscc-cluster`,
+  `hscc-model-onboard`) is in `hscc-skills`' `BUNDLED_SKILLS` — a reference
+  bootstrap cannot install is caught at the sentence that promises it, not at
+  spawn time.
+* The operator's main-only rule is pinned in both directions: nine named clauses
+  (the ONLY-profile sentence, the four surfaces, the ask-instead-of-take path),
+  no spelled main name (so a renamed main stays correct), and a phrasing guard
+  that refuses any line handing the surface to a worker or project orchestrator —
+  with a positive control proving the phrasing predicate can fire.
 * Genericity guards re-run against this section (public repo): no path-shaped
   token, no home-relative path, no account or home name checked against the
   RUNTIME user, no address literal, no assistant product name, no fixture project
   name baked in — plus a positive control that proves each predicate is
   satisfiable. `hscc notify` is the named escalation path; no raw transport is
   offered (`docker`, `ssh`, `launchctl`, `sudo` are all asserted absent).
-* Six mutation probes on a copy of the section, each reverted and re-verified:
-  invent a tool name (red), rename `merge_queue_status` to a mutating verb
-  (red), invent a CLI verb (red), drop the D6 board-brake line (red), restate
-  the nudge guard list (red), drop the `hscc-cluster` toolset claim (red).
+* Eight mutation probes on a copy of the section, each reverted and re-verified
+  (file byte-identical after the run): invent a tool name, rename a read tool to
+  a mutating verb, invent a CLI verb, drop the D6 board-brake line, restate the
+  nudge guard list, drop the toolset claim, drop the ONLY-profile sentence, and
+  phrase access as available to workers. 8/8 bite.
