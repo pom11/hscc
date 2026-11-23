@@ -267,8 +267,8 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _alive(pid) -> bool:
-    """Is this pid still a RUNNING process?
+def _alive(pid, marker=None) -> bool:
+    """Is this pid still a RUNNING process — and, given ``marker``, still OURS?
 
     ``kill(pid, 0)`` alone is not enough and this is the trap that bites every
     supervisor test: a process that has exited but has not been reaped yet is a
@@ -277,6 +277,18 @@ def _alive(pid) -> bool:
     only way to tell "exited" from "running" from the outside is the process
     state, so one ``ps`` per liveness answer — the loops below exit on the first
     "no", so it is a couple of calls per case, not hundreds.
+
+    ``marker`` closes the second half of the same trap. macOS has no ``/proc``
+    and recycles pids, and under a full leg (1300 items, heavy process churn) an
+    unrelated process can be handed a dead serve's number within microseconds of
+    it dying — it happened on the third of three leg runs, arm=poison, where the
+    wait had already seen the pid go and the very next ``_alive`` answered
+    "running". Existence is not identity, and asserting on existence alone makes
+    a passing teardown look like a failure. The marker is a path that appears in
+    the argv of the process this test started and in no one else's, so the one
+    ``ps`` call answers existence, zombie-ness and identity at once. Without a
+    marker the answer stays deliberately conservative: no output from ``ps`` is
+    not proof of death.
     """
     if not pid:
         return False
@@ -287,12 +299,22 @@ def _alive(pid) -> bool:
     except (PermissionError, TypeError, ValueError):
         return True
     try:
-        state = subprocess.run(
-            ["ps", "-o", "state=", "-p", str(int(pid))],
+        out = subprocess.run(
+            ["ps", "-o", "state=,command=", "-p", str(int(pid))],
             capture_output=True, text=True, timeout=5).stdout.strip()
     except Exception:  # noqa: BLE001 — no answer from ps is not "dead"
         return True
-    return not state.startswith("Z")
+    if not out:
+        # ps found no such pid. Without a marker that is treated as "alive"
+        # (never let a flaky ps turn a survivor into a pass); with a marker the
+        # absence of our argv IS the answer.
+        return marker is None
+    state, _, command = out.partition(" ")
+    if state.startswith("Z"):
+        return False
+    if marker is not None:
+        return marker in command
+    return True
 
 
 def _port_free(port: int) -> bool:
@@ -305,22 +327,39 @@ def _port_free(port: int) -> bool:
     return False
 
 
-def _wait_until_gone(pid, timeout: float) -> float:
-    """Seconds until ``pid`` is gone; ~``timeout`` if it never is."""
+def _wait_until_gone(pid, timeout: float, marker=None) -> float:
+    """Seconds until ``pid`` is gone; ~``timeout`` if it never is.
+
+    With ``marker`` "gone" means "no longer the process we started", which is the
+    only statement that survives pid recycling.
+    """
     start = time.monotonic()
     while time.monotonic() - start < timeout:
-        if not _alive(pid):
+        if not _alive(pid, marker):
             return time.monotonic() - start
         time.sleep(0.05)
     return time.monotonic() - start
 
 
-def _kill_soft(pid) -> None:
-    if _alive(pid):
-        try:
-            os.kill(int(pid), signal.SIGKILL)
-        except OSError:
-            pass
+def _signal(pid, sig, marker=None) -> bool:
+    """Send ``sig`` to ``pid`` only if it is still the process we started.
+
+    Returns whether it was sent. Every kill in this file goes through here, for
+    the same reason the assertions do: a cleanup that signals a recycled number
+    signals somebody else's test.
+    """
+    if not _alive(pid, marker):
+        return False
+    try:
+        os.kill(int(pid), sig)
+    except OSError:
+        return False
+    return True
+
+
+def _kill_soft(pid, marker=None) -> None:
+    """SIGKILL ``pid``, but never a process this test did not start."""
+    _signal(pid, signal.SIGKILL, marker)
 
 
 # --------------------------------------------------------------------------- #
@@ -359,6 +398,21 @@ class Sidecar:
                 (self.sandbox / "supervised.pid").read_text())
         return self._supervised
 
+    # -- identity markers: each process this harness starts has a path in its
+    # argv that no other process in the leg has, which is what turns a pid into
+    # an answer that means something (see _alive's second paragraph). --
+    @property
+    def serve_marker(self) -> str:
+        return str(self.sandbox / "fake_serve.py")
+
+    @property
+    def parent_marker(self) -> str:
+        return str(self.sandbox / "fake_api.py")
+
+    @property
+    def watchdog_marker(self) -> str:
+        return str(WATCHDOG)
+
     def signals(self) -> list:
         path = self.sandbox / "signals.log"
         if not path.exists():
@@ -382,10 +436,10 @@ class Sidecar:
         return text in self.marks()
 
     def wait_sidecar_gone(self, timeout: float) -> float:
-        return _wait_until_gone(self.serve_pid, timeout)
+        return _wait_until_gone(self.serve_pid, timeout, self.serve_marker)
 
     def kill_parent(self):
-        os.kill(self.parent.pid, signal.SIGKILL)
+        _signal(self.parent.pid, signal.SIGKILL, self.parent_marker)
         self.parent.wait(timeout=30)
 
 
@@ -470,13 +524,14 @@ def sidecar(request, tmp_path):
     finally:
         # Cleanup: never leak a process into the rest of the leg, whatever
         # failed above.
-        _kill_soft(proc.pid)
+        _kill_soft(proc.pid, handle.parent_marker)
         try:
             proc.wait(timeout=10)
         except Exception:  # noqa: BLE001
             pass
-        _kill_soft(handle._supervised)
-        _kill_soft(handle._report and handle._report.get("pid"))
+        _kill_soft(handle._supervised, handle.watchdog_marker)
+        _kill_soft(handle._report and handle._report.get("pid"),
+                   handle.serve_marker)
         err_fh.close()
 
 
@@ -503,14 +558,15 @@ def test_sigkilled_api_parent_does_not_orphan_the_sidecar(sidecar):
         f"sidecar pid {serve_pid} was still alive {_SIDECAR_GONE_BOUND_S}s "
         f"after its API parent was SIGKILLed — the orphaned-serve / "
         f"stale-token 403 shape")
-    assert not _alive(serve_pid)
+    assert not _alive(serve_pid, sidecar.serve_marker)
     # The observable consequence, not a flag the test set itself: the port the
     # dead API's sidecar held is released. An orphan keeps it, dead token and all.
     assert _port_free(sidecar.port), f"port {sidecar.port} still answering"
     # And the watcher must not outlive the process it was watching either. Same
     # bounded wait, because between "exited" and "reaped by launchd" (its new
     # parent now that the API is gone) it is still a pid that answers signal 0.
-    wd_elapsed = _wait_until_gone(supervised_pid, _SIDECAR_GONE_BOUND_S)
+    wd_elapsed = _wait_until_gone(supervised_pid, _SIDECAR_GONE_BOUND_S,
+                                  sidecar.watchdog_marker)
     assert wd_elapsed <= _SIDECAR_GONE_BOUND_S, (
         f"watchdog pid {supervised_pid} outlived its API parent")
 
@@ -529,7 +585,7 @@ def test_the_same_kill_orphans_the_sidecar_without_the_watchdog(sidecar):
     sidecar.kill_parent()
     elapsed = sidecar.wait_sidecar_gone(_SIDECAR_GONE_BOUND_S)
 
-    assert _alive(serve_pid), (
+    assert _alive(serve_pid, sidecar.serve_marker), (
         f"the orphan did not reproduce with the watchdog disabled (gone after "
         f"{elapsed:.2f}s): something other than the watchdog is now reaping it")
     assert not _port_free(sidecar.port), "the orphan should still hold the port"
@@ -551,7 +607,8 @@ def test_cooperative_shutdown_still_takes_the_sidecar_down(sidecar):
     assert sidecar.wait_for(SHUTDOWN_DONE,
                             bridge._SHUTDOWN_WAIT_S + 10.0), (
         f"shutdown() never returned; marks={sidecar.marks()!r}")
-    assert not _alive(sidecar.serve_pid), "sidecar survived a clean shutdown()"
+    assert not _alive(sidecar.serve_pid, sidecar.serve_marker), (
+        "sidecar survived a clean shutdown()")
     assert _port_free(sidecar.port)
 
 
@@ -563,7 +620,10 @@ def test_sigterm_of_the_supervised_process_takes_the_sidecar_down(sidecar):
     that dies on the API's stop signal without forwarding it re-creates the
     orphan from inside the fix. ``watch()`` traps TERM/INT/HUP for this reason.
     """
-    os.kill(sidecar.supervised_pid, signal.SIGTERM)
+    assert _signal(sidecar.supervised_pid, signal.SIGTERM,
+                   sidecar.watchdog_marker), (
+        f"watchdog {sidecar.supervised_pid} was not ours to signal — it is gone "
+        f"or someone else holds the number")
     elapsed = sidecar.wait_sidecar_gone(_SIDECAR_GONE_BOUND_S)
     assert elapsed <= _SIDECAR_GONE_BOUND_S, (
         f"the sidecar outlived a SIGTERM to its watchdog by {elapsed:.2f}s — "
@@ -579,8 +639,11 @@ def test_sidecar_dying_on_its_own_leaves_no_watchdog_behind(sidecar):
     until the API itself restarts.
     """
     supervised_pid = sidecar.supervised_pid
-    os.kill(sidecar.serve_pid, signal.SIGKILL)          # the serve "crashes"
-    elapsed = _wait_until_gone(supervised_pid, _SIDECAR_GONE_BOUND_S)
+    assert _signal(sidecar.serve_pid, signal.SIGKILL, sidecar.serve_marker), (
+        f"serve {sidecar.serve_pid} was not ours to signal — it is already gone "
+        f"or someone else holds the number")
+    elapsed = _wait_until_gone(supervised_pid, _SIDECAR_GONE_BOUND_S,
+                               sidecar.watchdog_marker)
     assert elapsed <= _SIDECAR_GONE_BOUND_S, (
         f"watchdog {supervised_pid} is still watching a serve that died "
         f"{elapsed:.2f}s ago")
@@ -628,7 +691,8 @@ while True:
 def _run_watchdog_alone(tmp_path, arm: str):
     """Spawn the shipped watchdog under a throwaway parent process.
 
-    Returns (parent, serve report, watchdog pid, watchdog log path).
+    Returns (parent, serve report, watchdog pid, watchdog log path, serve path).
+    The last one is the identity marker for the serve's pid.
     """
     sandbox = tmp_path / f"wd_{arm}"
     sandbox.mkdir()
@@ -659,11 +723,11 @@ def _run_watchdog_alone(tmp_path, arm: str):
             break
         time.sleep(0.02)
     if not report.exists():
-        _kill_soft(parent.pid)
+        _kill_soft(parent.pid, str(parent_py))
         pytest.fail(f"the watchdog never brought its child up (arm={arm})")
     info = json.loads(report.read_text())
     watchdog_pid = int((sandbox / "watchdog.pid").read_text())
-    return parent, info, watchdog_pid, log
+    return parent, info, watchdog_pid, log, serve_py
 
 
 @pytest.mark.parametrize("arm", ["pipe", "poison", "none"])
@@ -675,21 +739,27 @@ def test_watchdog_buries_its_child_when_the_parent_is_sigkilled(tmp_path, arm):
     parametrisation, so a claim about the fallback cannot quietly stop being
     tested while the primary still passes.
     """
-    parent, info, watchdog_pid, log = _run_watchdog_alone(tmp_path, arm)
+    parent, info, watchdog_pid, log, serve_py = _run_watchdog_alone(tmp_path,
+                                                                    arm)
+    serve_marker = str(serve_py)
+    watchdog_marker = str(WATCHDOG)
+    parent_marker = str(tmp_path / f"wd_{arm}" / "wd_parent.py")
     try:
         assert info["liveness_env_in_serve"] is None, (
             "the watchdog handed the liveness env down to the serve — it must "
             "stop at its own child")
         t0 = time.monotonic()
-        os.kill(parent.pid, signal.SIGKILL)
+        assert _signal(parent.pid, signal.SIGKILL, parent_marker), (
+            f"arm={arm}: the sandbox parent was not ours to signal")
         parent.wait(timeout=30)
-        elapsed = _wait_until_gone(info["pid"], _SIDECAR_GONE_BOUND_S)
+        elapsed = _wait_until_gone(info["pid"], _SIDECAR_GONE_BOUND_S,
+                                   serve_marker)
         assert elapsed <= _SIDECAR_GONE_BOUND_S, (
             f"arm={arm}: serve pid {info['pid']} still alive {elapsed:.2f}s "
             f"after the parent was SIGKILLed")
-        assert not _alive(info["pid"])
-        assert _wait_until_gone(watchdog_pid, _SIDECAR_GONE_BOUND_S) \
-            <= _SIDECAR_GONE_BOUND_S
+        assert not _alive(info["pid"], serve_marker)
+        assert _wait_until_gone(watchdog_pid, _SIDECAR_GONE_BOUND_S,
+                                watchdog_marker) <= _SIDECAR_GONE_BOUND_S
         # The reason the watchdog itself recorded, which is the only way to tell
         # the pipe path from the fallback without timing both.
         reason = log.read_text() if log.exists() else ""
@@ -698,9 +768,9 @@ def test_watchdog_buries_its_child_when_the_parent_is_sigkilled(tmp_path, arm):
         else:
             assert "reparented-to" in reason, reason
     finally:
-        _kill_soft(info["pid"])
-        _kill_soft(watchdog_pid)
-        _kill_soft(parent.pid)
+        _kill_soft(info["pid"], serve_marker)
+        _kill_soft(watchdog_pid, watchdog_marker)
+        _kill_soft(parent.pid, parent_marker)
 
 
 def test_watchdog_rejects_a_liveness_fd_that_is_not_a_pipe(tmp_path):
