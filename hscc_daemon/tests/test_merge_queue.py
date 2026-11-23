@@ -2837,6 +2837,35 @@ def test_ci_pending_is_rechecked_in_place_without_rerunning_the_gates(
     assert len(gate_calls) == 1, "the pushed head was re-gated on resume"
 
 
+def test_post_push_unknown_mergeable_keeps_the_claim_not_waiting(
+        tmp_path, monkeypatch):
+    """Green checks + still-UNKNOWN mergeable after a push is not "ready" yet."""
+    monkeypatch.setattr(mq, "MERGEABLE_POLL_DELAY_S", 0.0)
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    unknown = {"mergeable": "UNKNOWN"}
+    gh = FakeGh(
+        {22: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={22: [{}, unknown, unknown, unknown]})
+    mq.add_to_queue("alpha", 22, path=_state(tmp_path))
+
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+
+    assert first["processed"][0]["result"] == "ci-pending", first
+    assert gh.merged == []
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"]["stage"] == "ci-pending"
+    assert ps["waiting"] == []
+
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [22]
+
+
 def test_ci_red_on_the_pushed_head_hands_the_card_back(tmp_path):
     """A red CI is a real verdict, unlike a pending one: resolve, not wait."""
     pair = _repo_pair(tmp_path)

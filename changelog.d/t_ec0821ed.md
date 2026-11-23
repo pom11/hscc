@@ -21,9 +21,10 @@ task: t_ec0821ed
 * `check_merge_queue` now passes the daemon log into the tick, so merge-queue
   outcomes actually appear in `~/.hscc/daemon.log` (the previous default `log`
   was a no-op lambda); the `ci-pending` stage renders in the monitor table.
-* Tests: `hscc_daemon/tests/test_merge_queue.py` 92 -> 100. New cases cover
+* Tests: `hscc_daemon/tests/test_merge_queue.py` 100 -> 109. New cases cover
   UNKNOWN -> MERGEABLE re-poll, still-UNKNOWN keeping the FIFO head, a green
   waiting PR draining while the FIFO is non-empty, a `ci-pending` claim resumed
-  without a second gate run, red CI handing back as resolve, the CI timeout
-  releasing to `waiting`, the tri-state checks verdict, and the daemon-log
-  wiring. Existing post-push cases were updated to the held-claim contract.
+  without a second gate run, still-UNKNOWN after a push keeping the claim, red
+  CI handing back as resolve, the CI timeout releasing to `waiting`, the
+  tri-state checks verdict, and the daemon-log wiring. Existing post-push cases
+  were updated to the held-claim contract.

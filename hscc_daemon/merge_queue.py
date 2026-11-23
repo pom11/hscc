@@ -2303,6 +2303,20 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
                              base=base, since=since, log=log)
             return {"pr": pr, "result": CI_PENDING_STAGE}
+        if _mergeable_unknown(info):
+            # Checks are green but GitHub has not recomputed mergeability yet:
+            # "not decided" is still not "not ready", so keep the claim rather
+            # than parking a validated, pushed head in the wait list.
+            if _ci_pending_expired(since):
+                _requeue_waiting(state_path, project, entry)
+                log(f"merge-queue {project}: PR #{pr} mergeable still UNKNOWN "
+                    f"after {CI_PENDING_TIMEOUT_S}s; released to the wait list",
+                    "WARN")
+                return {"pr": pr, "result": "ci-timeout",
+                        "timeout_s": CI_PENDING_TIMEOUT_S}
+            _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
+                             base=base, since=since, log=log)
+            return {"pr": pr, "result": CI_PENDING_STAGE}
         # Checks are green but the PR itself is not mergeable now (draft,
         # review requested changes, ...): not a CI verdict, park it.
         _requeue_waiting(state_path, project, entry)
