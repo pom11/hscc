@@ -21,6 +21,7 @@ the fence and the seam routing inside ``run_doctor()``.
 import json
 import os
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -381,6 +382,115 @@ def test_a_board_without_the_table_or_file_is_unchecked_not_empty(tmp_path):
         "stale": str(stale), "gone": str(tmp_path / "nope.db")})
     assert subs == []
     assert sorted(unreadable) == ["gone", "stale"]
+
+
+# ── silence: a read that logs is not a read ─────────────────────────────────
+# t_2c218de8: this row shipped red on main because the enumeration it borrows
+# writes a WARN into $HSCC_HOME/daemon.log when Hermes' library is unreachable.
+# The guard that caught it lives in a DIFFERENT top-level directory
+# (hscc-cluster/tests/test_doctor_tool.py::TestReadOnly), so the row's own suite
+# has to hold the same line — otherwise the next borrowed call that logs goes
+# red on main again, one directory away from the test that would have caught it.
+
+def _unreachable_hermes(tmp_path, monkeypatch):
+    """Make ``autodown``'s kanban import fail, and point its log at a tmp file.
+
+    Returns the log path. ``HERMES_AGENT_PATH`` is autodown's own documented
+    override, so the failure is provoked the way the module expects to be
+    provoked; ``LOG_FILE``/``PID_FILE`` are redirected so a real WARN lands in
+    the tmp tree instead of the operator's ~/.hscc.
+    """
+    autodown = pytest.importorskip("hscc_daemon.autodown")
+    daemon_ops = pytest.importorskip("hscc_daemon.daemon_ops")
+    monkeypatch.setenv("HERMES_AGENT_PATH", str(tmp_path / "no-such-hermes"))
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    log_file = hscc / "daemon.log"
+    monkeypatch.setattr(daemon_ops, "LOG_FILE", str(log_file))
+    monkeypatch.setattr(daemon_ops, "PID_FILE", str(hscc / "daemon.pid"))
+    # Arm the once-per-process WARN: without this the note function may already
+    # have fired in this process and the test below would pass while proving
+    # nothing (no write was ever attempted).
+    for key, value in (("ok", None), ("reason", ""), ("warned", False)):
+        monkeypatch.setitem(autodown._KANBAN_LOAD, key, value)
+    return log_file
+
+
+def test_the_rows_read_writes_no_daemon_log_even_unmuted_rig(tmp_path,
+                                                             monkeypatch):
+    """The row's read is silent, and the rig that proves it actually bites.
+
+    Both halves in one test, in this order: the row's own call first (the
+    claim), then the same call made directly through ``autodown`` (the control).
+    The control has to run second — the direct call spends the WARN budget, so
+    run first it would leave the row's call with nothing to say either way.
+    """
+    autodown = pytest.importorskip("hscc_daemon.autodown")
+    log_file = _unreachable_hermes(tmp_path, monkeypatch)
+
+    assert dos.enumerate_boards() == {}, (
+        "the seam fails closed to {} when Hermes is unreachable — that is the "
+        "path being read here")
+    assert not log_file.exists(), (
+        "the row's read wrote a daemon.log: doctor is a read and the "
+        "hscc-cluster read-only guard snapshots the tree around this exact door "
+        "child (t_2c218de8)")
+
+    autodown._KANBAN_LOAD["warned"] = False
+    assert autodown.board_db_paths() == {}
+    assert log_file.exists(), (
+        "the control is vacuous: this call never writes the log even un-muted, "
+        "so the assertion above proved nothing about the row")
+    assert b"interlock unevaluable" in log_file.read_bytes()
+
+
+def test_the_silent_window_gives_the_logger_and_the_warn_budget_back(
+        tmp_path, monkeypatch):
+    """Muting a read must not spend somebody else's alarm.
+
+    ``_note_kanban_unavailable`` marks ``warned`` BEFORE it logs, so a caller
+    that swapped the logger and never gave the budget back would leave the
+    process permanently deaf: a daemon that ran this row would then never log a
+    genuine interlock failure — a fail-open wearing the fix's clothes. The
+    state that ``hscc autodown status`` reads is still recorded, because only
+    the log call is muted.
+    """
+    autodown = pytest.importorskip("hscc_daemon.autodown")
+    log_file = _unreachable_hermes(tmp_path, monkeypatch)
+    real_log = autodown.log
+
+    dos.enumerate_boards()
+
+    assert autodown.log is real_log, (
+        "the window leaked a no-op logger into autodown — every later daemon "
+        "log line in this process would vanish")
+    assert autodown._KANBAN_LOAD["warned"] is False, (
+        "the row spent the process's one WARN: autodown can no longer warn "
+        "about a real interlock failure in this process")
+    assert autodown._KANBAN_LOAD["ok"] is False, (
+        "the failure must still be RECORDED (hscc autodown status owns the "
+        "answer); only the file write is muted")
+    assert autodown._KANBAN_LOAD["reason"], "the reason is recorded too, not just the flag"
+    assert not log_file.exists()
+
+
+def test_the_window_restores_the_logger_even_when_the_read_raises():
+    """The ``finally`` is the whole design: a leaked no-op logger would silence
+    the daemon for the rest of the process, and a raise is exactly when a
+    cleanup is easy to forget."""
+    borrowed = SimpleNamespace(
+        # Instance attributes, deliberately: a function defined in a class BODY
+        # would be re-bound on every attribute access, so the identity assertion
+        # below would fail for a reason that has nothing to do with the window.
+        log=lambda *a, **k: None,
+        _KANBAN_LOAD={"ok": None, "reason": "", "warned": True})
+    original = borrowed.log
+    with pytest.raises(RuntimeError):
+        with dos._silent_read(borrowed):
+            raise RuntimeError("the read died")
+    assert borrowed.log is original
+    assert borrowed._KANBAN_LOAD["warned"] is True, (
+        "a budget that was already spent must not be re-armed")
 
 
 def test_pane_resolution_uses_the_shared_resolver_and_its_surface_rule():
