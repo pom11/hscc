@@ -191,7 +191,7 @@ def test_every_tools_table_reaches_the_register_loop(plugin_dir):
     )
 
 
-def test_cluster_manifest_is_exactly_the_27_registered_tools():
+def test_cluster_manifest_is_exactly_the_28_registered_tools():
     """The concrete GAP-A-7 receipt: the manifest and the registry are the same
     set, at the count that set currently has. If this count changes
     intentionally, the per-table tests above are the generic contract — update
@@ -206,10 +206,16 @@ def test_cluster_manifest_is_exactly_the_27_registered_tools():
     read-only agent half of `hscc autodown`. The four MUTATING verbs
     (enable/disable/wake/cancel) are deliberately NOT in the count — the audit
     (docs/audits/2026-11-23-agent-surface.md §2.4) closed that door.
+
+    Amended 27 -> 28 by t_96134d32: `merge_queue_status` (in `_READ_TOOLS`), the
+    read-only agent half of `hscc merge-queue`. The six MUTATING verbs
+    (add/remove/pause/resume/enable/disable) are deliberately NOT in the count —
+    the queue force-pushes and squash-merges, so an agent-writable merge door is
+    a self-merge path (docs/audits/2026-11-23-agent-surface.md D8).
     """
     declared = _manifest_tools(str(REPO / "hscc-cluster"))
     assert len(declared) == len(_registered_names(
-        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 27
+        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 28
     for previously_missing in ("orch_message", "apply_template", "list_templates",
                                "preview_template", "fleet_stats", "cluster_verify",
                                "cluster_throughput", "autoscale_advice",
@@ -230,6 +236,17 @@ def test_cluster_manifest_is_exactly_the_27_registered_tools():
         assert mutating not in declared, (
             f"{mutating} is a fleet-power mutation — CLI + confirm-gated route "
             "only, per docs/audits/2026-11-23-agent-surface.md §2.4")
+    # The merge-queue read is part of the manifest, and its six mutating verbs
+    # must stay out (audit D8: the queue force-pushes and squash-merges, so an
+    # agent-writable merge door is a self-merge path).
+    assert "merge_queue_status" in declared, \
+        "t_96134d32 regression: merge_queue_status missing from the manifest"
+    for mutating in ("merge_queue_add", "merge_queue_remove", "merge_queue_pause",
+                     "merge_queue_resume", "merge_queue_enable",
+                     "merge_queue_disable"):
+        assert mutating not in declared, (
+            f"{mutating} is a merge-queue mutation (force-push + squash-merge) — "
+            "CLI only, per docs/audits/2026-11-23-agent-surface.md D8")
 
 
 @pytest.mark.parametrize("plugin_dir", MANIFESTED,

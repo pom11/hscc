@@ -10,6 +10,7 @@ from . import fleet
 from . import template_tools
 from . import orch_message
 from . import autodown_tools as adt
+from . import merge_queue_tools as mqt
 from . import node_pause_tools as npt
 
 
@@ -51,6 +52,17 @@ _READ_TOOLS = [
      "which interlock (kanban work, PR/CI, watchdog block) is holding a "
      "teardown off. Read-only: same payload as `hscc autodown status --json`; "
      "it never arms, disarms, wakes or cancels anything."),
+    # Local merge queue (t_96134d32): the READ half of `hscc merge-queue`. The
+    # write half stays CLI-only — the queue force-pushes and squash-merges, so
+    # an agent-writable merge door is a self-merge path (audit D8). There is no
+    # merge_queue_add/remove/pause/resume/enable/disable tool to add here.
+    ("merge_queue_status", mqt.MERGE_QUEUE_STATUS_SCHEMA,
+     mqt.merge_queue_status, "🚦",
+     "Per-project local merge-queue state: enabled (or why it is off — no "
+     "repo / no GitHub remote / no gates), paused, queue depth and entries, "
+     "waiting (non-green head), the in-flight PR and the last outcome. "
+     "Read-only: same payload as `hscc merge-queue status --json`; it never "
+     "enqueues, drops, pauses, enables or lands anything."),
 ]
 
 _OPS_TOOLS = [
