@@ -718,19 +718,25 @@ def _hermetic_sparkrun_resolution(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _hermetic_process_table(monkeypatch):
-    """Empty process table by default: no test walks the operator's real PIDs.
+    """No parent readable by default: no test walks the operator's real PIDs.
 
-    t_640be7a2 gave the proxy repair verifier a DESCENDANT walk, which reads
-    THIS machine's process table (``ps -o pid= -P``) — ambient state on exactly
-    the same footing as the real ``sparkrun`` CLI pinned directly above. Default
-    it to an empty table (fail closed: the tracked proxy has no children, which
-    is the pre-fix ``owner == tracked`` semantics), so no test can turn green or
-    red depending on what else happens to be running on the box. A test that
-    cares about process identity installs its own parent -> children table.
+    "Is this PID ours?" (:func:`hscc_daemon.health._pid_ancestry_walk`,
+    t_0df7fc35) answers with an UPWARD ``ps -o ppid= -p`` walk — this machine's
+    process table, ambient state on exactly the same footing as the real
+    ``sparkrun`` CLI pinned directly above. Fence the seam to "no parent can be
+    read", which is the tri-state's NOT-EVALUABLE answer: a test that forgot to
+    install its own tree can therefore never turn green (the repair verifier
+    reports UNVERIFIED) and can never become a kill either (the reap refuses on
+    ``None``) — failing closed is the whole point of the third state.
+
+    t_640be7a2 fenced the DOWNWARD seam (``_proc_children``) for the same
+    reason. That walk is deleted, so the fence moved onto the one seam left;
+    there is now exactly ONE process-table seam to fake, never one per direction.
+    A test that cares about process identity installs its own parent map.
     """
     from hscc_daemon import health
 
-    monkeypatch.setattr(health, "_proc_children", lambda pid: [])
+    monkeypatch.setattr(health, "_proc_ppid", lambda pid: None)
     yield
 
 

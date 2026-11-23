@@ -2183,84 +2183,6 @@ def _proc_cmdline(pid):
         return None
 
 
-# How far the repair verifier may walk DOWNWARD from sparkrun's tracked PID
-# before it stops calling a port owner "our proxy" (t_640be7a2). The live shape
-# is one level (`uvx litellm` wrapper -> litellm child that binds :4000); the
-# cap exists so a mis-stated identity costs a couple of `ps` calls, never a
-# process-table scan.
-PROXY_TRACKED_TREE_MAX_DEPTH = int(
-    os.environ.get("HSCC_PROXY_TRACKED_TREE_MAX_DEPTH", "3"))
-# Hard ceiling on how many PIDs one walk may visit, so a chatty parent (a shell
-# with dozens of children) cannot turn the bounded-depth rule into a wide one.
-PROXY_TRACKED_TREE_MAX_PIDS = int(
-    os.environ.get("HSCC_PROXY_TRACKED_TREE_MAX_PIDS", "64"))
-
-
-def _proc_children(pid):
-    """Direct children of `pid` from the process table, or [] if unreadable.
-
-    Seam for the proxy identity check, same discipline as :func:`_proc_cmdline`:
-    the answer comes from `ps`, never from a guess, and an unreadable answer is
-    an empty list (fail closed — no children means no descendant may be
-    credited with owning the port).
-    """
-    try:
-        out = subprocess.run(
-            ["ps", "-o", "pid=", "-P", str(pid)],
-            capture_output=True, text=True, timeout=5).stdout
-        return [int(p) for p in out.split() if p.strip().isdigit()]
-    except Exception:
-        return []
-
-
-def _proxy_owner_is_tracked_proxy(owner, tracked_pid, max_depth=None):
-    """(matched, depth) — is the port owner the tracked proxy, or ITS OWN child?
-
-    THE PIDS ARE NOT THE SAME PROCESS (t_640be7a2). For ``uvx litellm``
-    sparkrun's state file tracks the WRAPPER, while the socket on :4000 is held
-    by a litellm CHILD of that wrapper — the hollow-PID shape already documented
-    in :func:`_proxy_kill_hollow_tracked`. Comparing the two with ``==`` (the
-    old rule) called a working proxy "repair UNVERIFIED" and then "FAILED" at
-    ERROR level on 2026-11-22 while :4000 answered every request.
-
-    So identity is the tracked PID's PROCESS TREE, walked breadth-first from the
-    tracked PID to at most ``PROXY_TRACKED_TREE_MAX_DEPTH`` levels /
-    ``PROXY_TRACKED_TREE_MAX_PIDS`` processes, and no wider: a port owner that
-    is NOT in that tree stays unmatched. This widens identity to the proxy's own
-    descendants, never to "any pid that happens to own the port".
-
-    Depth is 0 for the tracked PID itself and 1..N for descendants, so callers
-    can say in the log WHICH process served the port.
-    """
-    if not owner or not tracked_pid or int(owner) <= 0 or int(tracked_pid) <= 0:
-        return False, None
-    owner, root = int(owner), int(tracked_pid)
-    if owner == root:
-        return True, 0
-    depth_cap = (PROXY_TRACKED_TREE_MAX_DEPTH if max_depth is None
-                 else int(max_depth))
-    seen = {root}
-    frontier = [root]
-    for depth in range(1, max(0, depth_cap) + 1):
-        nxt = []
-        for pid in frontier:
-            for child in _proc_children(pid):
-                if child == owner:
-                    return True, depth
-                if child in seen:
-                    continue
-                seen.add(child)
-                nxt.append(child)
-                if len(seen) > PROXY_TRACKED_TREE_MAX_PIDS:
-                    # Ceiling reached: stop widening. An owner we never reached
-                    # stays unverified, which is the honest answer.
-                    return False, None
-        frontier = nxt
-        if not frontier:
-            break
-    return False, None
-
-
 def _proxy_listener():
     """(pid, cmdline) of the process LISTENING on PROXY_PORT, or (None, None).
 
@@ -2438,7 +2360,7 @@ def _proxy_repair_orphan(relaunch_hosts):
          after 1+2 the port is genuinely free, and --restart's own state-file
          assumptions are what failed us.
       4. verify the port is now owned by the tracked PID **or a descendant of
-         it** (see :func:`_proxy_owner_is_tracked_proxy` — sparkrun tracks the
+         it** (see :func:`_pid_is_tracked_or_descendant` — sparkrun tracks the
          launcher, the child holds the socket).
 
     STALE-PID REFUSAL (t_90958eb8, step 3b): step 1+2 do NOT guarantee a free
@@ -2497,10 +2419,23 @@ def _proxy_repair_orphan(relaunch_hosts):
     # UNVERIFIED -> FAILED, which is the false alarm the operator measured on
     # 2026-11-22 ("port owner 15706, sparkrun tracks 15701" over a proxy that
     # answered every request).
-    verified, depth = _proxy_owner_is_tracked_proxy(owner, tracked_after)
-    if not verified:
+    # ONE PREDICATE, ONE CALL (t_0df7fc35): the verifier consults the same
+    # tri-state upward walk the reap's kill guard consults — the BFS it used to
+    # ask with is gone. `verified` is True ONLY for PROVEN OURS: an unreadable
+    # process table is UNVERIFIED here exactly as it is a refusal on the kill
+    # path, never silently green and never a licence to signal. Depth rides
+    # along from the same walk for the log line, and for nothing else.
+    ours, depth = _pid_ancestry_walk(owner, tracked_after)
+    verified = ours is True
+    if ours is None:
         log(f"proxy repair UNVERIFIED on :{PROXY_PORT} — port owner {owner}, "
-            f"sparkrun tracks {tracked_after} ({owner_cmd!r})", "WARN")
+            f"sparkrun tracks {tracked_after} ({owner_cmd!r}): its parent chain "
+            f"could not be read to the end, so it is NOT PROVEN OURS — which is "
+            f"also not proof it belongs to someone else", "WARN")
+    elif not verified:
+        log(f"proxy repair UNVERIFIED on :{PROXY_PORT} — port owner {owner} is "
+            f"PROVEN FOREIGN: its parent chain completes at a root without "
+            f"sparkrun's tracked {tracked_after} ({owner_cmd!r})", "WARN")
     elif depth:
         log(f"proxy repaired on :{PROXY_PORT}, owned by PID {owner} — a "
             f"depth-{depth} descendant of tracked PID {tracked_after} "
@@ -2557,11 +2492,6 @@ def _proxy_repair_orphan(relaunch_hosts):
 # way for both processes, and a FOREIGN listener is still never trusted — the
 # F4 orphan posture is unchanged.
 
-#: How far up the parent chain a listener may be walked to find sparkrun's
-#: tracked PID. `uv tool uvx` → python → uvicorn is 2-3 hops; the bound exists
-#: so a malformed process table can never make this loop.
-PROXY_TRACKED_TREE_DEPTH = 6
-
 #: Identity kinds that prove the listener IS this host's sparkrun gateway.
 PROXY_TRUSTED_KINDS = ("tracked", "child", "stale")
 
@@ -2585,7 +2515,57 @@ def _proc_ppid(pid):
 #: stops trying to prove the owner is ours (t_af7d5486). The live shape is ONE
 #: hop (`uv tool uvx` wrapper -> litellm child that binds :4000); the bound
 #: exists so a malformed process table costs a few `ps` calls, never a scan.
+#: THE one ancestry budget: every consumer of "is this PID ours" walks with this
+#: bound and no other (t_0df7fc35).
 PROXY_ANCESTRY_MAX_HOPS = 5
+
+
+def _pid_ancestry_walk(pid, tracked_pid, max_hops=PROXY_ANCESTRY_MAX_HOPS,
+                       ppid_fn=None):
+    """(ours, depth) — the ONE implementation of "is this PID ours".
+
+    ``ours`` is the tri-state documented on :func:`_pid_is_tracked_or_descendant`
+    (that function is this value with the depth dropped, so the two can never
+    disagree). ``depth`` is the number of parent-hops from ``pid`` UP to
+    ``tracked_pid``: 0 for the tracked PID itself, 1..``max_hops`` for a proven
+    descendant, and None whenever ``ours`` is not True.
+
+    Depth exists for LOG LINES that name which process served :4000 — the
+    nicety t_640be7a2 shipped with its BFS (t_0df7fc35 keeps it without keeping
+    the BFS). It is never a verdict: a caller that needs to decide whether a PID
+    is ours reads ``ours``, never ``depth is not None``.
+
+    One walk, one budget, and no PID-table scan: at most ``max_hops`` ``ppid``
+    lookups, stopping at the tracked PID, at a root, at a cycle, or when the
+    table stops answering. There is deliberately no DOWNWARD direction — a
+    fan-out cap was only ever needed because a downward walk can visit hundreds
+    of PIDs to answer this one question (deleted with the BFS, t_0df7fc35).
+
+    `ppid_fn` is the seam tests inject; it defaults to :func:`_proc_ppid`.
+    """
+    if not pid or not tracked_pid:
+        return None, None
+    pid, tracked_pid = int(pid), int(tracked_pid)
+    if pid == tracked_pid:
+        return True, 0
+    step = ppid_fn or _proc_ppid
+    seen = {pid}
+    current = pid
+    for hop in range(1, max(0, int(max_hops)) + 1):
+        try:
+            parent = step(current)
+        except Exception:
+            return None, None
+        if parent is None:
+            return None, None                   # chain unreadable: not evaluable
+        parent = int(parent)
+        if parent == tracked_pid:
+            return True, hop
+        if parent in seen or parent <= 1:
+            return False, None                  # hit a root (or a cycle): done
+        seen.add(parent)
+        current = parent
+    return None, None                           # budget spent, root never seen
 
 
 def _pid_is_tracked_or_descendant(pid, tracked_pid,
@@ -2605,45 +2585,32 @@ def _pid_is_tracked_or_descendant(pid, tracked_pid,
              on the chain was unreadable or the hop budget ran out before a
              root was reached. Unknown is not the same statement as "not mine".
 
-    WHY THREE VALUES AND NOT A BOOLEAN (t_af7d5486). Both consumers need
+    THE ONE ANSWER TO THIS QUESTION (t_0df7fc35). The module had three
+    spellings of it — this upward walk, a downward BFS from the tracked PID
+    returning ``(matched, depth)``, and an inline upward loop inside
+    :func:`_proxy_gateway_identity`. The other two are gone; everything that
+    asks "is this PID ours" walks here, and a consumer that wants the hop count
+    for a log line reads :func:`_pid_ancestry_walk`, not another walk.
+
+    WHY THREE VALUES AND NOT A BOOLEAN (t_af7d5486). Every consumer needs
     ``None`` kept apart from ``False``, and they read it differently ON PURPOSE:
       - the kill path (:func:`_reap_orphan_proxy_listener`) reads ``None`` as
         REFUSE TO KILL — a signal cannot be unsent, so an unfinished walk fails
         closed;
-      - the repair verifier must read ``None`` as UNVERIFIED — not-evaluable is
-        not green, and it is not evidence that someone else owns the port
-        either. It does NOT call this helper yet: on main it still answers with
-        :func:`_proxy_owner_is_tracked_proxy`, and adopting the tri-state is
-        what t_0df7fc35 exists to do.
+      - the repair verifier (:func:`_proxy_repair_orphan`) reads ``None`` as
+        UNVERIFIED — not-evaluable is not green, and it is not evidence that
+        someone else owns the port either;
+      - the drift identity check (:func:`_proxy_gateway_identity`) has no third
+        kind to give it, so both ``None`` and ``False`` answer ``foreign`` —
+        which there means "not adopted, not trusted, and NOT killed".
     Collapsing ``None`` into ``False`` is what turns a ``ps`` hiccup into a
     fleet outage: the caller concludes "not our proxy" and SIGKILLs the gateway.
 
     `ppid_fn` is the seam tests inject; it defaults to :func:`_proc_ppid`, the
     same ``ps`` lookup the rest of this module already trusts.
     """
-    if not pid or not tracked_pid:
-        return None
-    pid, tracked_pid = int(pid), int(tracked_pid)
-    if pid == tracked_pid:
-        return True
-    step = ppid_fn or _proc_ppid
-    seen = {pid}
-    current = pid
-    for _ in range(max(0, int(max_hops))):
-        try:
-            parent = step(current)
-        except Exception:
-            return None
-        if parent is None:
-            return None                        # chain unreadable: not evaluable
-        parent = int(parent)
-        if parent == tracked_pid:
-            return True
-        if parent in seen or parent <= 1:
-            return False                       # hit a root (or a cycle): done
-        seen.add(parent)
-        current = parent
-    return None                                # budget spent, root never seen
+    return _pid_ancestry_walk(pid, tracked_pid, max_hops=max_hops,
+                              ppid_fn=ppid_fn)[0]
 
 
 def _proc_alive(pid):
@@ -2715,12 +2682,19 @@ def _proxy_gateway_identity():
     if owner == tracked:
         return "tracked", owner, owner_cmd, tracked
     if is_gateway:
-        pid, depth = owner, 0
-        while pid is not None and depth < PROXY_TRACKED_TREE_DEPTH:
-            pid = _proc_ppid(pid)
-            depth += 1
-            if pid == tracked:
-                return "child", owner, owner_cmd, tracked
+        # THE SAME PREDICATE THE KILL PATH CONSULTS (t_0df7fc35) — one upward
+        # walk, one budget, and no children table anywhere in this answer. It
+        # replaces this function's own inline `ppid` loop, which was the third
+        # spelling of the same question. `None` (chain unreadable) and `False`
+        # (chain completed at a root without the tracked PID) BOTH answer
+        # ``foreign``: the drift check then refuses to adopt the listener, and
+        # `foreign` here is not a licence to signal it either — the only
+        # signalling path is the reap, which refuses on `None`.
+        # max_hops is passed EXPLICITLY so PROXY_ANCESTRY_MAX_HOPS stays the
+        # live knob a test (or an operator) can turn.
+        if _pid_is_tracked_or_descendant(
+                owner, tracked, max_hops=PROXY_ANCESTRY_MAX_HOPS) is True:
+            return "child", owner, owner_cmd, tracked
     if (not _proc_alive(tracked)) and is_gateway and _is_sparkrun_gateway_config(
             _litellm_config_from_cmdline(owner_cmd)):
         return "stale", owner, owner_cmd, tracked
