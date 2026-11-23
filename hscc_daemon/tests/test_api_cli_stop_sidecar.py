@@ -46,6 +46,20 @@ to "not available" (the sandbox has a pid file, which would otherwise make
 would make the stop bootout the LIVE job) and makes ``_launchctl_run`` raise,
 so a future edit that routes around the stub reddens here instead of touching
 the machine.
+
+THE INHERITED-MASK CASE (t_7c2eb604). One full-leg run failed BOTH SIGINT arms
+of the stop cases and neither SIGTERM arm. A Python signal handler only runs if
+its signal is not BLOCKED, and a thread's signal MASK survives fork/exec
+(`subprocess` restores ignored dispositions, never the mask) — so a server
+spawned by a process that runs with SIGINT blocked has a handler that is never
+dispatched: the stop stays pending, `_serve` serves on, and the sidecar is only
+orphaned by the SIGKILL escalation. The case below reproduces that environment
+by blocking the signal in the forking thread; the fix is product-side (clear
+the inherited mask where the handlers are installed, and again in `_serve`).
+
+Every child this file spawns is its own session (`start_new_session=True`) and
+is reaped by PROCESS GROUP, so a failed case cannot leave a harness child or a
+fake sidecar orphaned on the host (measured for 7 h before this card).
 """
 import ast
 import collections
@@ -266,7 +280,15 @@ import sys
 # The parent waits on this file's progress (:func:`_await_child`), so a stage
 # line has to exist before the imports that ran 25 s long on CI — otherwise the
 # parent has nothing to be patient about and guesses from a stopwatch.
-print("@@MARK_STAGE@@ harness-up", flush=True)
+# The blocked-signal list is the premise of the inherited-mask case
+# (test_a_stop_signal_the_spawner_blocked_is_still_honoured): it proves the
+# child really did start with the signal BLOCKED, so a green there cannot be a
+# test that forgot to block anything.
+import signal as _signal_probe
+print("@@MARK_STAGE@@ harness-up blocked=%s"
+      % ",".join(sorted(s.name for s in
+                        _signal_probe.pthread_sigmask(
+                            _signal_probe.SIG_BLOCK, set()))), flush=True)
 
 sys.path.insert(0, os.environ["@@REPO_ROOT_ENV@@"])
 sys.path.insert(0, os.environ["@@GATEWAY_DIR_ENV@@"])
@@ -279,13 +301,13 @@ print("@@MARK_STAGE@@ api_cli-imported", flush=True)
 verb, rest = sys.argv[1], sys.argv[2:]
 
 if verb == "serve":
-    # Install the stop handlers EXACTLY the way `hscc api start` does in its
-    # forked child (api_cli._handle_start). This arm skips the double fork only
-    # so the exit code stays observable, and skipping the registration would
-    # leave the SIGTERM answered by the kernel's default action — the case
-    # would then measure the harness, not the handler. Pin
-    # TestStopPathIsCooperative.test_the_serving_process_is_given_the_handler
-    # keeps `_handle_start` registering both signals, so this line cannot drift
+    # Install the stop handlers the way `hscc api start` does in its forked
+    # child (api_cli._handle_start), which also clears an inherited BLOCK on
+    # them. This arm installs the DISPOSITIONS only, so the stop below tests
+    # `_serve`'s own unblock as well as the handler: a serving process must be
+    # stoppable even when its spawner left the signal blocked (t_7c2eb604).
+    # Pin TestStopPathIsCooperative.test_the_serving_process_is_given_the_handler
+    # keeps `_handle_start` installing both signals, so this line cannot drift
     # away from production on its own.
     import signal as _signal
     _signal.signal(_signal.SIGTERM, api_cli._sigterm_handler)
@@ -480,18 +502,18 @@ def sandbox(tmp_path):
            "sidecar": sidecar_dir, "harness": harness, "env": env,
            "marker": sidecar_dir / "marker.log",
            "sidecar_pid": sidecar_dir / "sidecar.pid",
-           "pid_file": hscc / "api.pid", "log": hscc / "api.log"}
+           "pid_file": hscc / "api.pid", "log": hscc / "api.log",
+           "procs": []}
     yield box
     # No test may leave a bound API or an orphaned sidecar behind for the next
-    # one: both are read from the sandbox files the children wrote.
-    for path, sig in ((box["pid_file"], signal.SIGKILL),
-                      (box["sidecar_pid"], signal.SIGKILL)):
-        pid = _read_int(path)
-        if pid is not None and _alive(pid):
-            try:
-                os.kill(pid, sig)
-            except OSError:
-                pass
+    # one: both are read from the sandbox files the children wrote. Every child
+    # this fixture's helpers spawned is reaped by its PROCESS GROUP (the helpers
+    # use start_new_session), and the double-forked server is a session leader
+    # of its own, so killpg takes the sidecar with it.
+    for path in (box["pid_file"], box["sidecar_pid"]):
+        _kill_pid(_read_int(path))
+    for proc in box["procs"]:
+        _reap(proc)
 
 
 # --------------------------------------------------------------------------- #
@@ -515,6 +537,50 @@ def _alive(pid):
     except OSError:
         return False
     return True
+
+
+def _kill_pid(pid):
+    """SIGKILL a pid, taking its process group when it owns one.
+
+    The grandchild of `hscc api start` calls setsid(), so its pgid is its pid
+    and the gateway sidecar it spawned shares that group. Signalling the GROUP
+    is what guarantees the sidecar cannot outlive the server this test killed.
+    `getpgid` is checked first: signalling some other group (pytest's own) for
+    a pid that is not a leader would take the test run down with it.
+    """
+    if pid is None or not _alive(pid):
+        return
+    try:
+        if os.getpgid(int(pid)) == int(pid):
+            os.killpg(int(pid), signal.SIGKILL)
+        else:
+            os.kill(int(pid), signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _reap(proc):
+    """SIGKILL `proc`'s process group (it was spawned as a session leader) and wait.
+
+    The children in this file spawn their own subprocesses: the fake sidecar is
+    a real process, and `hscc api start` double-forks. Killing only `proc` can
+    leave a grandchild/sidecar running for hours — measured on this host
+    (t_7c2eb604). Every Popen here uses start_new_session, so proc.pid is the
+    group id, and killpg reaches all of them; wait() then reaps the direct child
+    so no zombie is left for pytest.
+    """
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _marker_lines(sandbox):
@@ -586,12 +652,13 @@ def _start_api(sandbox, port):
     out_path = sandbox["home"].parent / START_OUTPUT
     with open(out_path, "w") as fh:
         proc = subprocess.Popen(argv, env=sandbox["env"], stdout=fh,
-                                stderr=subprocess.STDOUT, text=True)
+                                stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+        sandbox["procs"].append(proc)
         try:
             rc = proc.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=10)
+            _reap(proc)
             raise AssertionError(
                 f"`hscc api start` did not return within 60s; its own output:\n"
                 f"{out_path.read_text()}\n{_describe(sandbox)}") from None
@@ -608,20 +675,50 @@ def _run(sandbox, verb, *args):
     """
     proc = subprocess.Popen(_harness_argv(sandbox, verb, *args),
                             env=sandbox["env"], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True)
+                            stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
+    sandbox["procs"].append(proc)
     try:
         out, err = proc.communicate(timeout=90)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        out, err = proc.communicate()
+        _reap(proc)
+        out, err = "", ""
     return Done(proc.returncode, out, err, proc.pid)
 
 
 def _popen(sandbox, verb, *args):
     """Run one verb in the background (the arm that signals it afterwards)."""
-    return subprocess.Popen(_harness_argv(sandbox, verb, *args),
+    proc = subprocess.Popen(_harness_argv(sandbox, verb, *args),
                             env=sandbox["env"], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True)
+                            stderr=subprocess.STDOUT, text=True,
+                            start_new_session=True)
+    sandbox["procs"].append(proc)
+    return proc
+
+
+def _popen_with_blocked_signal(sandbox, blocked, verb, *args):
+    """Spawn with `blocked` signals BLOCKED in the forking thread.
+
+    POSIX inherits a thread's signal MASK across fork/exec, and `subprocess`
+    restores ignored dispositions but never the mask — so the child starts with
+    the signal blocked, exactly as the leg's serving process did. The block is
+    applied in a throwaway thread because a mask is per-thread: pytest's own
+    Ctrl-C handling is untouched, and the fork that creates the child happens
+    on the thread that holds the block.
+    """
+    box = {}
+
+    def spawn():
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, set(blocked))
+        try:
+            box["proc"] = _popen(sandbox, verb, *args)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
+
+    thread = threading.Thread(target=spawn)
+    thread.start()
+    thread.join()
+    return box["proc"]
 
 
 # --------------------------------------------------------------------------- #
@@ -706,12 +803,7 @@ ChildRun = collections.namedtuple(
 
 
 def _kill_child(proc):
-    if proc.poll() is None:
-        proc.kill()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
+    _reap(proc)
 
 
 def _stuck_verdict(trail):
@@ -880,8 +972,7 @@ def test_api_stop_tears_the_sidecar_down(sandbox):
             f"`_serve` never reported its teardown, so the stop left no trace "
             f"of the server having finished: {_describe(sandbox)}")
     finally:
-        if _alive(pid):
-            os.kill(pid, signal.SIGKILL)
+        _kill_pid(pid)
 
 
 # --------------------------------------------------------------------------- #
@@ -947,9 +1038,72 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
             f"the sidecar (pid {sidecar_pid}) survived {sig.name}: "
             f"{_describe(sandbox)}")
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=10)
+        _reap(proc)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
+    """A serving process must not inherit its stop signal BLOCKED.
+
+    t_7c2eb604: one full-leg run failed BOTH SIGINT arms and neither SIGTERM
+    arm. `signal.signal()` sets a DISPOSITION, not the thread's signal MASK,
+    and a mask survives fork/exec (`subprocess` restores ignored dispositions,
+    never the mask). So a server spawned by a process that runs with SIGINT
+    blocked installs its handler, is sent the signal, and never dispatches it:
+    the stop stays pending, `_serve` serves on, the sidecar is never torn down,
+    and the only exit left is the escalation SIGKILL that skips the teardown.
+
+    Measured on this host with the child spawned under a blocked SIGINT: the
+    child reproduces the leg signature exactly — `_last_signal` stays None,
+    the sidecar starts, and the trail stops after the startup lines. The fix
+    clears the inherited mask, so the same child now goes through `_serve`'s
+    `finally:` and kills a real sidecar.
+
+    The premise is asserted from the child's own `stage: harness-up` line: a
+    green here cannot be a run that forgot to block the signal.
+    """
+    port = _free_port()
+    proc = _popen_with_blocked_signal(sandbox, {sig}, "serve", str(port))
+    trail = _ChildTrail(proc)
+    try:
+        _wait_listening(sandbox, port)
+        upstream = next(
+            (line for line in trail.text().splitlines()
+             if line.startswith(STAGE_PREFIX + " harness-up")), "")
+        assert sig.name in upstream, (
+            f"the child did not start with {sig.name} blocked, so this case "
+            f"would not measure an inherited mask.\nchild output: {trail.text()}")
+        assert _have(sandbox, SIDECAR_STARTED), (
+            f"the sidecar never started, so nothing below proves a teardown: "
+            f"{_describe(sandbox)}")
+        sidecar_pid = _read_int(sandbox["sidecar_pid"])
+        trail.mark()
+        os.kill(proc.pid, sig)
+        # A healthy stop is one line and one exit; this is a load budget, not
+        # the defect's own timeout (a blocked signal never stops, by design).
+        run = _await_child(proc, trail, stall=30)
+        out = run.output
+        if run.verdict != "clean":
+            pytest.fail(f"{sig.name} inherited as BLOCKED was never honoured: "
+                        f"the child {run.verdict} ({run.detail}). A handler that "
+                        f"is installed over a blocked signal is never dispatched, "
+                        f"so the stop is pending forever and the sidecar is "
+                        f"orphaned by the SIGKILL escalation.\n"
+                        f"child output: {out}\n{_describe(sandbox)}")
+        assert proc.returncode == 0, (
+            f"{sig.name} ended the process with rc={proc.returncode} instead "
+            f"of a clean cooperative stop.\n{out}\n{_describe(sandbox)}")
+        assert SERVE_RETURNED in out, (
+            f"the process exited WITHOUT returning through `_serve`.\n"
+            f"child output: {out}\n{_describe(sandbox)}")
+        assert _have(sandbox, SIDECAR_SHUTDOWN, timeout=5), (
+            f"{sig.name} inherited as BLOCKED never reached the sidecar "
+            f"teardown: {_describe(sandbox)}")
+        assert sidecar_pid is not None and not _alive(sidecar_pid), (
+            f"the sidecar (pid {sidecar_pid}) survived {sig.name}: "
+            f"{_describe(sandbox)}")
+    finally:
+        _reap(proc)
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
@@ -1042,9 +1196,7 @@ def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
             "no closing line in the API log: the teardown did not finish, or it "
             f"moved off the guaranteed path: {_describe(sandbox)}")
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=10)
+        _reap(proc)
 
 
 # --------------------------------------------------------------------------- #
@@ -1294,16 +1446,20 @@ class TestStopPathIsCooperative:
         that never registers them falls back to the kernel's default action,
         which is the same orphaned sidecar by a third route.
 
-        This is also what makes the harness's `serve` arm honest: it registers
-        the same two signals for the same callable, and this pin is what stops
-        that copy drifting from production.
+        The install is also where an inherited BLOCK is cleared (t_7c2eb604:
+        a disposition without a mask is a stop that never dispatches), so both
+        halves are pinned on the one helper the child actually calls.
         """
         body = self._body(api_cli._handle_start)
-        registered = self._calls(body, "signal")
+        installed = self._calls(body, "_install_stop_handlers")
+        assert installed, (
+            "`hscc api start`'s child no longer installs the stop handlers, so "
+            "the process that ends up serving has no answer to the stop signal "
+            "and the kernel's default action skips _serve's teardown")
+        helper = self._body(api_cli._install_stop_handlers)
+        registered = self._calls(helper, "signal")
         assert registered, (
-            "`hscc api start`'s child registers no signal handler, so the "
-            "process that ends up serving has no answer to the stop signal and "
-            "the kernel's default action skips _serve's teardown")
+            "`_install_stop_handlers` registers no signal handler")
         # The argument of `signal.signal(signal.SIGTERM, ...)` is itself an
         # Attribute: `signal.SIGTERM`, i.e. Name('signal') + attr 'SIGTERM'.
         handled = {arg.attr for node in registered for arg in node.args
@@ -1314,9 +1470,27 @@ class TestStopPathIsCooperative:
             f"the child handles {sorted(handled) or 'nothing'}; `hscc api stop` "
             f"sends SIGTERM and an operator in the foreground sends SIGINT, and "
             f"either unhandled signal skips the sidecar teardown")
+        unmask_helper = self._calls(helper, "_unblock_stop_signals")
+        assert unmask_helper, (
+            "`_install_stop_handlers` no longer clears the inherited signal "
+            "mask: a spawner that blocks SIGINT leaves the handler installed "
+            "but never dispatched, so the stop is pending forever (t_7c2eb604)")
+        unmask_body = self._body(api_cli._unblock_stop_signals)
+        unmasked = [
+            node for node in self._calls(unmask_body, "pthread_sigmask")
+            if any(isinstance(arg, ast.Attribute)
+                   and arg.attr == "SIG_UNBLOCK" for arg in node.args)
+        ]
+        assert unmasked, (
+            "`_unblock_stop_signals` no longer asks pthread_sigmask to "
+            "SIG_UNBLOCK the stop signals, so an inherited block survives")
+        assert self._calls(self._body(api_cli._serve), "_unblock_stop_signals"), (
+            "`_serve` no longer clears an inherited block itself: a caller "
+            "that installs the handlers without the helper (the test harness, "
+            "an embedder) would serve on a stop it can never receive")
         served = self._calls(body, "_serve")
         assert served, "_handle_start no longer calls _serve at all"
-        assert (min(n.lineno for n in registered)
+        assert (min(n.lineno for n in installed)
                 < min(n.lineno for n in served)), (
             "the registration now sits after the serve call, so the process "
             "reaches the accept loop before it can answer a stop")
