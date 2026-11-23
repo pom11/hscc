@@ -338,12 +338,12 @@ def test_two_live_servers_refuse_to_guess(sandbox):
 
     with pytest.raises(InjectError) as ei:
         repl_inject.tmux_server_socket()
-    assert ei.value.kind == "ambiguous"
+    assert ei.value.kind == "ambiguous_server"
     assert "TMUX_TMPDIR" in ei.value.message
 
     with pytest.raises(InjectError) as ei:
         repl_inject.hermes_panes()
-    assert ei.value.kind == "ambiguous"
+    assert ei.value.kind == "ambiguous_server"
     assert not sandbox.calls.find("send-keys"), "injected despite refusing"
 
 

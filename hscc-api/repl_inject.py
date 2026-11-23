@@ -88,7 +88,12 @@ VERB_PREFIX = {"plain": "", "queue": "/queue add ", "steer": "/steer "}
 
 
 class InjectError(Exception):
-    """Refusal or transport failure. ``kind``: no_panes | ambiguous | tmux | empty."""
+    """Refusal or transport failure.
+
+    ``kind``: no_panes | ambiguous | ambiguous_server | tmux | empty.
+    ``ambiguous`` is several PANES for one profile; ``ambiguous_server`` is
+    several live tmux SERVERS with no ``TMUX_TMPDIR`` naming one (t_4b3e3806)
+    — two different operator fixes, so they never share a reason code."""
 
     def __init__(self, kind: str, message: str):
         super().__init__(message)
@@ -319,7 +324,7 @@ def tmux_server_socket(env=None) -> str | None:
     live = [s for s in discover_tmux_sockets(env) if probe_socket(s)]
     if len(live) > 1:
         raise InjectError(
-            "ambiguous",
+            "ambiguous_server",
             f"{len(live)} live tmux servers ({', '.join(live)}) and TMUX_TMPDIR "
             "is unset — name the one that holds your panes in TMUX_TMPDIR "
             "rather than let hscc guess")
@@ -495,7 +500,7 @@ def hermes_panes() -> list[dict]:
         # must not make a waker tick explode). A REFUSAL to pick between two
         # live servers is not an empty answer: swallowing it is exactly how a
         # transport problem reappears as the misleading "found: none".
-        if exc.kind == "ambiguous":
+        if exc.kind in ("ambiguous", "ambiguous_server"):
             raise
         return []
     panes = []
