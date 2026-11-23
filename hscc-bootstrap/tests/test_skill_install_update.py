@@ -73,12 +73,13 @@ def hscc_state_dir(home):
     return os.path.join(os.path.dirname(root), "hscc")
 
 
-def run_installer(home, cmd="install-skills"):
+def run_installer(home, cmd="install-skills", extra_env=None):
     """The exact invocation bootstrap.sh:417 uses, in a sandboxed home."""
     env = dict(os.environ)
     env["HERMES_HOME"] = home
     env["HSCC_DIR"] = hscc_state_dir(home)
     env["HSCC_SKILLS_SRC"] = _TEMPLATE
+    env.update(extra_env or {})
     r = subprocess.run([sys.executable, _INSTALLER, cmd], env=env,
                        capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, f"{cmd} rc={r.returncode}\n{r.stdout}\n{r.stderr}"
@@ -311,3 +312,80 @@ def test_report_names_the_backup_it_just_made(home):
     bak = backups_of(home, "hscc")
     assert len(bak) == 1
     assert bak[0] in row[0], f"backup not named in the report:\n{row[0]}"
+
+
+# ── retiring an installed-only orphan (t_60d2ef4e) ─────────────────────────
+
+ORPHAN = "hscc-master-knowledge"
+ORPHAN_TEXT = ("---\nname: hscc-master-knowledge\n---\n\n"
+               "# JULY ORPHAN — operator edits must survive\n")
+
+
+def removed_backups_of(home, skill):
+    """Every ``skills-backups/removed-<stamp>/<skill>`` tree in the home."""
+    root = os.path.join(home, "skills-backups")
+    if not os.path.isdir(root):
+        return []
+    return sorted(os.path.join(root, name, skill)
+                  for name in os.listdir(root)
+                  if name.startswith("removed-")
+                  and os.path.isdir(os.path.join(root, name, skill)))
+
+
+def test_retired_orphan_is_moved_to_a_dated_backup_with_its_edits(home):
+    """The July-only orphan leaves the scan root, byte for byte recoverable.
+
+    The card's default is retire, not merge: repo content wins, but operator
+    edits must not vanish. A move — not a delete — is what pins both halves.
+    """
+    installed = write_skill(home, ORPHAN, "SKILL.md", text=ORPHAN_TEXT)
+    edit = write_skill(home, ORPHAN, "references", "operator-note.md",
+                       text="# added after July\n")
+    before = (md5(installed), md5(edit))
+    out = run_installer(home)
+
+    assert not os.path.exists(os.path.join(home, "skills", ORPHAN)), \
+        f"the orphan is still discoverable under skills/\n{out}"
+    moved = removed_backups_of(home, ORPHAN)
+    assert len(moved) == 1, f"expected one moved copy, got {moved}\n{out}"
+    assert os.path.basename(os.path.dirname(moved[0])).startswith("removed-")
+    assert (md5(os.path.join(moved[0], "SKILL.md")),
+            md5(os.path.join(moved[0], "references", "operator-note.md"))) == before
+    assert "MOVED" in out and ORPHAN in out, out
+
+
+def test_a_clean_home_is_not_given_an_empty_removed_dir(home):
+    """Nothing to retire -> no ``skills-backups`` tree, and a second run
+    after the move does not mint another dated directory."""
+    run_installer(home)
+    assert not os.path.exists(os.path.join(home, "skills-backups"))
+
+    write_skill(home, ORPHAN, "SKILL.md", text=ORPHAN_TEXT)
+    run_installer(home)
+    first = removed_backups_of(home, ORPHAN)
+    out = run_installer(home)
+    assert removed_backups_of(home, ORPHAN) == first, "a clean run moved it again"
+    assert "MOVED" not in out, out
+
+
+def test_full_install_verb_retires_the_orphan_too(home):
+    """``install`` and ``install-skills`` share the seam, so neither path can
+    leave the orphan behind."""
+    write_skill(home, ORPHAN, "SKILL.md", text=ORPHAN_TEXT)
+    out = run_installer(home, cmd="install",
+                        extra_env={"HSCC_SKILLS_DIR": home})
+    assert not os.path.exists(os.path.join(home, "skills", ORPHAN)), out
+    assert len(removed_backups_of(home, ORPHAN)) == 1, out
+
+
+def test_same_stamp_retirement_appends_instead_of_overwriting(home, monkeypatch):
+    """Two moves in one second must both survive; the stamp is second-wide."""
+    mod = _load_installer_module(monkeypatch, home)
+    stamp = "20261123-120000"
+    for _ in range(2):
+        write_skill(home, ORPHAN, "SKILL.md", text=ORPHAN_TEXT)
+        moved = mod.retire_skill_copies(home, stamp=stamp)
+        assert len(moved) == 1
+    names = sorted(os.listdir(os.path.join(home, "skills-backups",
+                                           f"removed-{stamp}")))
+    assert names == [ORPHAN, ORPHAN + "-2"], names

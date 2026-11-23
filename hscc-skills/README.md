@@ -7,7 +7,11 @@ and `~/.hermes/templates/`. The skill **sources** are vendored in
 that already matches the repo is left alone; an hscc-**owned** skill whose
 installed copy differs is snapshotted to `<home>/skills-backups/<name>.bak-<stamp>`
 and then overwritten, so an existing copy is never a reason to skip (t_45fa38e2).
-Names outside `BUNDLED_SKILLS` are never written, moved or removed.
+Names outside `BUNDLED_SKILLS` are never written, moved or removed, except for
+`RETIRED_SKILLS`: a retired orphan (today `hscc-master-knowledge`, an installed-only
+July copy) is moved — never deleted — to `<home>/skills-backups/removed-<stamp>/` on
+every install run, so any operator edits survive as a recoverable backup
+(t_60d2ef4e).
 
 The cluster-control skills (`hscc`, `hscc-cluster`, `hscc-model-onboard`) are
 **main-profile only** (R4, t_b52e70ba). They install to

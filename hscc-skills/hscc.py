@@ -125,6 +125,19 @@ OWNED_SKILLS = tuple(BUNDLED_SKILLS)
 #: doctor's verdict and this installer's ownership boundary from disagreeing.
 CLUSTER_SKILLS = ("hscc", "hscc-cluster", "hscc-model-onboard")
 
+#: Skills hscc no longer ships (or that reached a home outside this
+#: installer). A copy is MOVED out of the scanned ``skills/`` tree into
+#: ``<home>/skills-backups/removed-<stamp>/`` — never deleted, so operator
+#: edits in an orphan survive as a backup (t_60d2ef4e).
+#:
+#: ``hscc-master-knowledge`` is a July-era installed-only orphan: it is not
+#: vendored under ``install/hscc-skills/``, so no bootstrap ever updated it.
+#: Repo content wins; the audit's default is retire, not merge
+#: (t_4c12ff7f F12).
+RETIRED_SKILLS = [
+    "hscc-master-knowledge",
+]
+
 #: Where a replaced owned-skill copy is kept: a SIBLING of the scanned
 #: ``skills/`` dir, never inside it. hermes collects skill candidates by
 #: directory name AND frontmatter ``name:`` at ANY depth under the scan root
@@ -417,6 +430,50 @@ def skill_backups_dir(skills_dest):
                         SKILLS_BACKUPS_DIRNAME)
 
 
+def retire_skill_copies(hermes_home=None, stamp=None):
+    """Move ``RETIRED_SKILLS`` copies into dated backups. -> ``[(skill, dst)]``
+
+    The move is ``os.rename`` into ``<home>/skills-backups/removed-<stamp>/``,
+    a sibling of the scanned ``skills/`` tree, so (a) the orphan stops being
+    discovered without any ``rm``/``shutil.rmtree`` touching operator data,
+    and (b) its bytes stay recoverable even when the copy diverged from the
+    July original. One stamp per run, so every skill retired by this run lands
+    in one dated directory; a same-second re-run appends ``-2`` rather than
+    overwriting or raising.
+
+    Only names in ``RETIRED_SKILLS`` are candidates. A clean home — or a home
+    already swept — creates no directory and returns ``[]``.
+    """
+    home = os.path.abspath(os.path.expanduser(
+        hermes_home if hermes_home is not None else HERMES_HOME))
+    skills = os.path.join(home, "skills")
+    if not os.path.isdir(skills):
+        return []
+    stamp = stamp or _backup_stamp()
+    moved = []
+    for skill in RETIRED_SKILLS:
+        src = os.path.join(skills, skill)
+        if not os.path.isdir(src):
+            continue
+        backups = os.path.join(home, SKILLS_BACKUPS_DIRNAME,
+                               f"removed-{stamp}")
+        ensure_dir(backups)
+        dst = os.path.join(backups, skill)
+        n = 1
+        while os.path.lexists(dst):
+            n += 1
+            dst = os.path.join(backups, f"{skill}-{n}")
+        os.rename(src, dst)
+        moved.append((skill, dst))
+    return moved
+
+
+def _retire_rows(moved, hermes_home):
+    """Report rows naming every moved tree and where it went."""
+    return [(skill, "MOVED", os.path.relpath(dst, hermes_home))
+            for skill, dst in moved]
+
+
 def owned_skill_drift(src_dir, dest_dir, skill_name):
     """Files this template ships that the installed copy lacks or differs on.
 
@@ -627,6 +684,14 @@ def cmd_install():
         print(f"       Setting HSCC_SKILLS_DIR env var or placing templates at ~/hermes-cc/Resources/templates/")
         print()
 
+    # Retire orphans before installing: a retired name is no longer ours to
+    # update, and leaving it in the scan root keeps it discoverable forever.
+    retired = retire_skill_copies(HERMES_HOME)
+    if retired:
+        print("─── Retired skills ───")
+        print(format_status_table(_retire_rows(retired, HERMES_HOME)))
+        print()
+
     # Install skills
     print("─── Skills ───")
     skills_results = {}
@@ -737,6 +802,14 @@ def cmd_install_skills():
         print(f"[ERROR] Skills source not found: {SKILLS_SOURCE}")
         sys.exit(1)
 
+    # Bootstrap's step. Moving the orphan first means the rest of the run
+    # cannot rediscover it as a skill candidate, and its bytes survive under
+    # skills-backups/removed-<stamp>/ (t_60d2ef4e).
+    retired = retire_skill_copies(HERMES_HOME)
+    if retired:
+        print(format_status_table(_retire_rows(retired, HERMES_HOME)))
+        print()
+
     results = []
     copied = 0
     guarded = 0
@@ -785,6 +858,10 @@ def cmd_install_skills():
         print(f"Moved {len(moved)} main-only skill tree(s) out of non-main "
               "homes into dated skills-backups/removed-<stamp>/ dirs "
               "(move, not delete).")
+    if retired:
+        print(f"Retired {len(retired)} orphan skill(s) to "
+              f"{os.path.join(skill_backups_dir(SKILLS_DEST), 'removed-*')} "
+              "(moved, never deleted).")
     print(f"Done. {copied} file(s) installed, rest unchanged.")
 
 
