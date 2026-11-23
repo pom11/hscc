@@ -67,6 +67,12 @@ REPO = Path(__file__).resolve().parents[2]
 API_DIR = REPO / "hscc-api"
 WATCHDOG = API_DIR / "gateway_serve_watchdog.py"
 
+#: The env name the watchdog reads. Read through ``getattr`` with the literal
+#: default on purpose: the harness must still run (and still fail for the
+#: behavioural reason) on a tree where the seam does not exist yet, so that the
+#: red-at-base arm demonstrates an orphan, not an ImportError.
+LIVENESS_ENV = getattr(bridge, "ENV_LIVENESS_FD", "HSCC_GATEWAY_LIVENESS_FD")
+
 #: Fixture DATA, never a real credential, and never printed in a message.
 FIXTURE_TOKEN = "sandbox-dummy-token-for-watchdog"
 
@@ -407,8 +413,7 @@ def sidecar(request, tmp_path):
     # and because ``start_serve`` execs it directly: the watchdog runs it, not an
     # interpreter pointed at it.
     serve_py.write_text("#!" + sys.executable + "\n"
-                        + FAKE_SERVE.replace("@@ENV_LIVENESS@@",
-                                             bridge.ENV_LIVENESS_FD))
+                        + FAKE_SERVE.replace("@@ENV_LIVENESS@@", LIVENESS_ENV))
     serve_py.chmod(0o755)
     parent_py = sandbox / "fake_api.py"
     parent_py.write_text(FAKE_API_PARENT
@@ -430,7 +435,7 @@ def sidecar(request, tmp_path):
     })
     if mode == "no_watchdog":
         env["HSCC_TEST_NO_WATCHDOG"] = "1"
-    env.pop(bridge.ENV_LIVENESS_FD, None)
+    env.pop(LIVENESS_ENV, None)
     env.pop("HERMES_DASHBOARD_SESSION_TOKEN", None)
 
     # The parent's stderr goes to a file, because "start_serve returned False"
@@ -629,14 +634,13 @@ def _run_watchdog_alone(tmp_path, arm: str):
     sandbox = tmp_path / f"wd_{arm}"
     sandbox.mkdir()
     serve_py = sandbox / "fake_serve.py"
-    serve_py.write_text(FAKE_SERVE.replace("@@ENV_LIVENESS@@",
-                                           bridge.ENV_LIVENESS_FD))
+    serve_py.write_text(FAKE_SERVE.replace("@@ENV_LIVENESS@@", LIVENESS_ENV))
     report = sandbox / "serve_report.json"
     log = sandbox / "watchdog.log"
     parent_py = sandbox / "wd_parent.py"
     parent_py.write_text(WD_PARENT
                          .replace("@@ARM@@", arm)
-                         .replace("@@ENV_LIVENESS@@", bridge.ENV_LIVENESS_FD)
+                         .replace("@@ENV_LIVENESS@@", LIVENESS_ENV)
                          .replace("@@WATCHDOG@@", str(WATCHDOG))
                          .replace("@@SERVE@@", str(serve_py))
                          .replace("@@LOG@@", str(log))
@@ -645,7 +649,7 @@ def _run_watchdog_alone(tmp_path, arm: str):
     env.update({"WD_DIR": str(sandbox),
                 "FAKE_SERVE_REPORT": str(report),
                 "PYTHONDONTWRITEBYTECODE": "1"})
-    env.pop(bridge.ENV_LIVENESS_FD, None)
+    env.pop(LIVENESS_ENV, None)
     parent = subprocess.Popen([sys.executable, str(parent_py)], env=env,
                               stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL,
