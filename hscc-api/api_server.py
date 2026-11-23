@@ -32,6 +32,7 @@ import secrets
 import socket
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 # The profile-root INTENT gate (t_c443c001). Imported at module level so the
@@ -965,6 +966,17 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
 # Server orchestration (used by /v1/* tests and, later, the api_cli `start`)
 # ---------------------------------------------------------------------------
 
+# How long the cooperative stop may wait for a listener loop to return before it
+# gives up on that listener, says so loudly, and finishes the teardown anyway
+# (`_MultiServer.serve_forever`'s flag branch). It has to sit inside the 10 s
+# `hscc api stop` gives the pid before SIGKILLing it
+# (hscc_daemon/api_cli.py::_wait_for_pid_gone), because a SIGKILL skips the
+# teardown exactly like a hang does — the point of the bound is that the
+# `finally:` runs, and the sidecar teardown inside it is the reason that matters.
+# Tests pin this window; the healthy path never waits here at all.
+_SHUTDOWN_WAIT_SECONDS = 5.0
+
+
 class _MultiServer:
     """One process serving the SAME app on every bound address.
 
@@ -982,6 +994,9 @@ class _MultiServer:
         self.server_address = self.servers[0].server_address
         self._threads = []
         self._started = False
+        # Hosts a bounded stop had to abandon (empty = every loop came back).
+        # Read by the caller that owns the operator line, after serve_forever.
+        self.wedged_listeners = []
 
     @property
     def hosts(self) -> list[str]:
@@ -1008,6 +1023,22 @@ class _MultiServer:
         lock-free answer here, and t_56552ecc puts the same shape in the
         sibling plugin). Do not grow this surface to ``wait()`` / ``clear()``: a
         test pins it to one ``is_set()``.
+
+        Returns True when every listener loop came back, False when the stop had
+        to abandon one (named in ``wedged_listeners``). The caller decides what to
+        say and what to exit with; this class only stops and reports.
+
+        THE BOUND, and why it is here: this flag branch is the ONLY thing that
+        stops a foreground serve (t_49f4c69b left the signal handler with no call
+        but the flag's ``set()``), and ``BaseServer.shutdown()`` waits for the
+        listener's own loop to return — so waiting on it here without a bound lets
+        one wedged loop (``service_actions()`` is the seam stdlib calls every pass)
+        hold ``serve_forever``, hold ``serve_main``'s ``finally:``, and orphan the
+        gateway sidecar holding this process's token. Measured before the bound was
+        put in: 0.09 s for a healthy listener, still blocked at 5.15 s with
+        ``service_actions`` wedged. The bound is deliberately NOT inside
+        ``shutdown()`` — that method's contract is "the loop has returned", and
+        ``server_close()`` is only safe to call afterwards because of it.
         """
         self._started = True
         self._threads = [
@@ -1023,13 +1054,39 @@ class _MultiServer:
             while any(t.is_alive() for t in self._threads):
                 if stop_event is not None and stop_event.is_set():
                     # Same path a real shutdown() takes, just asked for by the
-                    # flag instead of by the caller's thread.
-                    self.shutdown()
-                    return
+                    # flag instead of by the caller's thread — bounded, because
+                    # this thread is the one the stop was asked to unblock.
+                    self.wedged_listeners = self._shutdown_bounded(
+                        _SHUTDOWN_WAIT_SECONDS)
+                    return not self.wedged_listeners
                 for thread in self._threads:
                     thread.join(0.5)
         except KeyboardInterrupt:  # pragma: no cover - terminal foreground path
             pass
+        return True
+
+    def _shutdown_bounded(self, timeout):
+        """Ask every listener to stop; give up after ``timeout`` seconds.
+
+        Returns the hosts whose loop had not returned. One waiter per listener, on
+        purpose: ``BaseServer.shutdown()`` blocks until THAT loop returns, so
+        looping the servers in order let a single wedged listener keep the healthy
+        ones from ever being asked to stop — and left the operator with no name to
+        debug. The give-up costs nothing an exit does not already pay: the abandoned
+        loop's socket closes when the process does.
+        """
+        waiters = {}
+        for server in self.servers:
+            waiter = threading.Thread(
+                target=server.shutdown, daemon=True,
+                name=f"hscc-api-stop-{server.server_address[0]}")
+            waiters[waiter] = server
+            waiter.start()
+        deadline = time.monotonic() + timeout
+        for waiter in waiters:
+            waiter.join(max(0.0, deadline - time.monotonic()))
+        return sorted(str(server.server_address[0])
+                      for waiter, server in waiters.items() if waiter.is_alive())
 
     def shutdown(self):
         # `BaseServer.shutdown()` blocks until serve_forever returns, so never
@@ -1456,6 +1513,7 @@ def serve_main(bind_override=None, port_override=None, *,
     # The handlers that make this a clean stop were installed at the top of
     # serve_main, before anything was bound — see the note there for why the
     # ordering is the whole point (t_6eff6258).
+    stop_clean = True         # False once a bounded stop had to abandon a listener
     try:
         if stopping.is_set():
             # A stop was requested while the listeners were still coming up —
@@ -1475,7 +1533,7 @@ def serve_main(bind_override=None, port_override=None, *,
             # cannot carry that promise.
             print("hscc-api: ready", flush=True)
             try:
-                server.serve_forever(stop_event=stopping)
+                stop_clean = server.serve_forever(stop_event=stopping)
             except Exception as exc:
                 print(f"hscc-api: crashed: {exc}", file=sys.stderr)
                 return 1
@@ -1493,8 +1551,25 @@ def serve_main(bind_override=None, port_override=None, *,
                 bridge.shutdown()
             except Exception:
                 pass
+        if not stop_clean:
+            # Loud, on stderr, and AFTER the teardown the bound just bought: an
+            # abandoned loop means something is wedged inside that listener
+            # (nothing in this plugin overrides service_actions today, so it is a
+            # bug elsewhere), and the operator needs its name to go find it.
+            wedged = ", ".join(getattr(server, "wedged_listeners", None) or [])
+            where = f" on {wedged}" if wedged else ""
+            print(f"hscc-api: WARNING: listener loop{where} did not stop within "
+                  f"{_SHUTDOWN_WAIT_SECONDS:g}s — abandoned so the teardown "
+                  f"above could run; its socket closes when this process exits. "
+                  f"Something is wedged inside that listener: the API stopped, "
+                  f"but it did not shut down cleanly.",
+                  file=sys.stderr, flush=True)
         print("hscc-api: stopped", flush=True)
-    return 0
+    # Non-zero ONLY for the abandoned stop: the supervisor has to be able to tell
+    # "stopped" from "stopped by giving up on a wedged loop". launchd's KeepAlive
+    # restarts on either code, and `hscc api stop` stops by bootout rather than by
+    # signalling, so this code changes no restart behaviour — it is a report.
+    return 0 if stop_clean else 1
 
 
 def main(argv=None) -> int:
