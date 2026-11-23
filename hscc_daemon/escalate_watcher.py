@@ -7,12 +7,28 @@ decision logic from escalate.py, and takes action:
   * "human"     — notify a human operator.
   * "none"      — no action needed (below failure threshold).
 
+A card the orchestrator has RETIRED is skipped entirely — no announce, no
+reassign. Retirement is the exact marker phrase ``RETIRED_MARKER`` appearing in
+one of the card's own comments (see ``_retired_comment_times``); the orchestrator
+writes it when it dispositions a card out-of-band (superseded and re-cut, or
+frozen as a crash artifact of record) and deliberately leaves it ``blocked`` with
+a high ``consecutive_failures`` — which is precisely the shape the decision below
+reads as "the strong tier is also failing". A retired card is never dispatched
+again, so paging a human about it is pure noise (t_0c602cd1: it fired live on
+t_0f214ba0 at 2026-11-23 07:45, on every 15-minute tick after the disposition).
+Retirement is per-card state, not a lifetime mute: a card that is unblocked,
+dispatched again and fails AGAIN re-announces (see ``_failed_after_retirement``).
+
 Best-effort: never raises on missing DB, unreachable hermes CLI, or
-absent notification subsystem.
+absent notification subsystem. The two reads that implement the retirement skip
+are advisory — if either fails, nothing is treated as retired and the watcher
+behaves exactly as it did before, because weakening escalation is the worse
+failure.
 """
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -63,6 +79,127 @@ def _default_notify(title, body):
         pass
 
 
+# The orchestrator's retirement marker (t_0c602cd1). Written as the first words
+# of a comment by @hscc-orch on a card it has dispositioned out-of-band —
+# superseded and re-cut under a new id, or frozen as the crash artifact of
+# record — and left ``blocked`` on purpose. ``kanban_comment`` bodies are
+# free text, so this is a phrase convention, not a schema field; it is matched
+# below with whitespace/case/dash folding so that the WORDS decide, because the
+# cost of missing one is the exact false page this code exists to stop (the
+# operator types the dash by hand, and a hyphen is one keystroke from an em
+# dash). The words themselves stay exact and in order: no partial-match slop.
+RETIRED_MARKER = "SUPERSEDED \u2014 DO NOT DISPATCH"
+
+# Dash-ish codepoints folded to "-" before comparing (em, en, minus, horizontal
+# bar, hyphen, non-breaking hyphen).
+_DASH_FOLD = {0x2014: "-", 0x2013: "-", 0x2212: "-", 0x2015: "-",
+              0x2010: "-", 0x2011: "-"}
+
+# task_runs.outcome/status values that mean "this attempt did not succeed".
+# `blocked` is deliberately absent: a block is a disposition, not a failure, and
+# treating one as a failure would un-mute a retired card on the very next tick.
+_FAILED_RUN = ("crashed", "timed_out", "spawn_failed", "failed", "gave_up",
+               "reclaimed")
+
+
+def _fold(text):
+    """Normalise a comment body for marker matching.
+
+    Collapse whitespace (a marker wrapped across a line break is still the
+    marker), fold the dash variants, casefold. Applied to BOTH sides so the
+    comparison stays honest.
+    """
+    return " ".join((text or "").translate(_DASH_FOLD).split()).casefold()
+
+
+_MARKER_FOLDED = _fold(RETIRED_MARKER)
+
+# Word-boundary test on the folded phrase, so the marker has to appear as ITSELF
+# and not as the middle of a longer word ("…DO NOT DISPATCHING that worker…" is
+# prose about dispatching, not a disposition).
+_MARKER_RE = re.compile(r"(?<!\w)" + re.escape(_MARKER_FOLDED) + r"(?!\w)")
+
+
+def _is_retirement_comment(body):
+    """True when `body` carries the retirement marker as a phrase."""
+    return _MARKER_RE.search(_fold(body)) is not None
+
+
+def _retired_comment_times(conn, task_ids):
+    """Newest retirement-marker comment per candidate task: {task_id: created_at}.
+
+    The comment text is read for the CANDIDATE set only (tasks that are already
+    failing at least once and still dispatchable — a handful per tick), not for
+    the whole board, so the extra read stays proportional to the work the tick
+    can actually do. Comments are matched in Python rather than with SQL LIKE so
+    the fold above is the single definition of "is the marker".
+
+    Advisory: any error yields {} — "nothing is retired", which is the behaviour
+    before this existed. A comment read that breaks must never mute a real
+    escalation.
+    """
+    if not task_ids:
+        return {}
+    try:
+        marks = ",".join("?" for _ in task_ids)
+        rows = conn.execute(
+            f"SELECT task_id, created_at, body FROM task_comments "
+            f"WHERE task_id IN ({marks})",
+            tuple(task_ids),
+        ).fetchall()
+    except Exception:
+        return {}
+    newest = {}
+    for row in rows:
+        try:
+            if not _is_retirement_comment(row["body"]):
+                continue
+            task_id, created_at = row["task_id"], row["created_at"] or 0
+        except Exception:
+            continue  # an unreadable row is not evidence of retirement
+        if created_at >= newest.get(task_id, 0):
+            newest[task_id] = created_at
+    return newest
+
+
+def _failed_after_retirement(conn, retired):
+    """Ids in `retired` that have a failed attempt ending AFTER their marker.
+
+    Retirement is per-card state, not a lifetime mute: if the card is unblocked,
+    dispatched again and fails again, a human must be paged about the new
+    failure. The marker comment's own timestamp is the boundary — the crash the
+    orchestrator retired the card FOR is by definition older than the comment
+    that records the retirement, so only a failure that ENDED later counts as
+    evidence the card came back.
+
+    Advisory in the same direction as the read above: on error, nothing is
+    revived (a card is only ever un-muted by positive evidence of a new failure).
+    """
+    if not retired:
+        return set()
+    try:
+        marks = ",".join("?" for _ in retired)
+        outcomes = ",".join("?" for _ in _FAILED_RUN)
+        rows = conn.execute(
+            f"SELECT task_id, MAX(ended_at) FROM task_runs "
+            f"WHERE task_id IN ({marks}) "
+            f"  AND COALESCE(outcome, status) IN ({outcomes}) "
+            f"GROUP BY task_id",
+            (*retired, *_FAILED_RUN),
+        ).fetchall()
+    except Exception:
+        return set()
+    revived = set()
+    for row in rows:
+        try:
+            task_id, last_failed = row[0], row[1]
+        except Exception:
+            continue
+        if last_failed and task_id in retired and last_failed > retired[task_id]:
+            revived.add(task_id)
+    return revived
+
+
 def scan_and_escalate(*, fail_limit=3, strong_profile=None,
                        _kb=None, _reassign=None, _notify=None,
                        _notified=None):
@@ -73,6 +210,11 @@ def scan_and_escalate(*, fail_limit=3, strong_profile=None,
     instead of silently rewriting the card's assignee. Pass an explicit
     ``strong_profile`` (e.g. from ``HSCC_STRONG_PROFILE`` env) to turn the
     acting reassign back on.
+
+    A card the orchestrator retired — one of its comments carries
+    ``RETIRED_MARKER`` — is skipped outright: no entry in the returned list, no
+    notify, no reassign. Unless a run has FAILED since that comment, which means
+    the card was unblocked and is failing for real again.
 
     Args:
         fail_limit: consecutive failures before escalation kicks in.
@@ -136,6 +278,15 @@ def scan_and_escalate(*, fail_limit=3, strong_profile=None,
                 "WHERE status IN ('running', 'ready', 'blocked') "
                 "  AND consecutive_failures >= 1"
             ).fetchall()
+            # Advisory reads on the SAME connection (no second connect per tick).
+            # Both are best-effort by construction; the outer guard is here so a
+            # malformed row shape can never turn this pass into no-escalation-at-
+            # all, which would be strictly worse than the false page it prevents.
+            try:
+                retired = _retired_comment_times(conn, [row["id"] for row in rows])
+                revived = _failed_after_retirement(conn, retired)
+            except Exception:
+                retired, revived = {}, set()
     except Exception:
         return []
 
@@ -149,6 +300,12 @@ def scan_and_escalate(*, fail_limit=3, strong_profile=None,
             "status": row["status"],
             "last_failure_error": row["last_failure_error"],
         }
+
+        # Retired by the orchestrator (its comment carries RETIRED_MARKER and
+        # nothing has failed on the card since): skip BEFORE the decision, so a
+        # retired card gets no announce AND no reassign. t_0c602cd1.
+        if task["id"] in retired and task["id"] not in revived:
+            continue
 
         decision = escalate.decide_escalation(
             task, fail_limit=fail_limit, strong_profile=strong_profile

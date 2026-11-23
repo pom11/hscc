@@ -1,7 +1,12 @@
 # Main-only cluster surface: per-profile plugin/toolset resolution and the hooks that must survive
 
 **Card:** t_1700dfc8 (clean re-cut of t_0f214ba0) — read-only investigation
-**Measured:** 2026-11-23 at `origin/main` = `e88c1bb7` (worktree `wt/t_1700dfc8`)
+**Measured:** analysis + probe sweep 2026-11-23 07:2x from worktree `wt/t_1700dfc8` at
+`origin/main` = `e88c1bb7`. **Every `file:line` citation was then re-pointed to the repo
+tree at `origin/main` = `3cb11669`** by `t_66c77e6c`: the first cut quoted the *deployed*
+copies under `~/.hermes/plugins/`, whose line numbers differ (§1, §0.4). Fleet
+denominators re-swept 2026-11-23 10:06 +02:00 (§5.1). Unqualified citations are
+**repo-tree**; deployed-tree readings are labelled *deployed*.
 **Operator rule this doc implements (verbatim, 2026-11-23 07:24):** *"all this control and
 monitor cluster plugins should be hooked only to general profile or whatever the users in
 bootstrap call it"*.
@@ -28,7 +33,7 @@ is answered here in §3.
    `get_hermes_home()/config.yaml` (`hermes_cli/config.py:2215-2262`, path from
    `config.py:433-435`) — and a kanban worker is *spawned with that home*: the dispatcher
    injects `HERMES_HOME=<profile dir>` into the child (`hermes_cli/kanban_db_dispatch.py:2800-2808`,
-   "so the worker reads the profile-scoped config.yaml"). Measured: **0 of 52 profile
+   "so the worker reads the profile-scoped config.yaml"). Measured: **0 of 51 profile
    configs has a `plugins` key** (§5.1), so for every profile `_get_enabled_plugins()`
    returns `None` → `gate_manifest` returns *"not enabled in config"* for all three
    cluster plugins and they never load. Proven by running the production gate against a
@@ -47,10 +52,10 @@ is answered here in §3.
    `hscc-roles/main_orch.py:1-30`, `DEFAULT_NAME = "general"`). So the operator's rule is
    an **ADD + REMOVE**, not a remove: someone must put the surface *on* the main profile.
 
-3. **The 52 clean profile configs are one migration away from all having the surface.**
+3. **The 51 clean profile configs are one migration away from all having the surface.**
    `_migrate_to_21` writes `plugins.enabled` = **every directory under
    `$HERMES_HOME/plugins/` that has a manifest** (`hermes_cli/config_migrations.py:300-325`,
-   `:328-347`) for any config lacking the key. Every one of the 52 profile homes
+   `:328-347`) for any config lacking the key. Every profile home that has a `plugins/` dir — **53 of the 54** profile dirs —
    *currently carries* `plugins/hscc-cluster`, `hscc-commands`, `sparkrun-hermes`,
    `hscc_daemon`, `hscc-api`, … (§5.1: 21 entries per profile `plugins/` dir). The next
    time `migrate_config()` reaches a profile config (`hermes_cli/profiles_config.py:26`,
@@ -61,7 +66,13 @@ is answered here in §3.
 4. **Hooks cannot be separated from tools by config, and 6 of 6 hooks are worker-lane.**
    Hermes gates at *plugin load*: `gate_manifest` → `_load_plugin` → `register(ctx)`, and
    `hscc-cluster`'s `register()` registers the 28 tools **and** all 6 hooks in the same
-   call (`hscc-cluster/__init__.py:124-167`; declared at `hscc-cluster/plugin.yaml:13-62`).
+   call (`hscc-cluster/__init__.py:151-196`; declared at `hscc-cluster/plugin.yaml:13-64`).
+   **That 28 is a repo-tree count, and it matters:** the *deployed* copy the worker and
+   gateway lanes actually load (`~/.hermes/plugins/hscc-cluster/__init__.py`) is 169 lines
+   and registers **26** tools — no `autodown_status`, no `merge_queue_status` — against
+   196 lines / 28 declared tools in the repo at `3cb11669`. The deployed plugin trees lag
+   main, so a line number read there need not resolve in the repo; this doc's citations
+   are repo-tree unless labelled *deployed* (§1).
    There is no per-hook or per-tool enable anywhere in the loader. Meanwhile the hooks
    fire where the *worker* is: `post_api_request`/`transform_tool_result` are the
    `[budget]` note the worker SOUL promises and are explicitly worker-only
@@ -91,8 +102,8 @@ is answered here in §3.
 | what | path | why this path is authoritative |
 |---|---|---|
 | hermes source | `~/.hermes/hermes-agent` @ `v0.23.0-7-g045881137d` | It is the **editable** install the runtime uses: `venv/lib/python3.14/site-packages/__editable__.hermes_agent-0.0.0.pth` + `__editable___hermes_agent_0_0_0_finder.py` point at this checkout, so there is no separate site-packages copy to diverge from. Every hermes file:line below is from here. |
-| hscc source | this worktree at `origin/main` = `e88c1bb7` | plugin/SOUL/CLI text under audit |
-| deployed plugins | `~/.hermes/plugins/` (root) and `~/.hermes/profiles/*/plugins/` | discovery's *user* dir is `get_hermes_home()/plugins` (`hermes_cli/plugins_discovery.py:210-212`) |
+| hscc source — **repo tree**, the authority for every unqualified `file:line` below | this worktree at `origin/main` = `3cb11669` (the five plugin files cited are blob-identical at `15d3cad6`, the merge base the review measured) | plugin/SOUL/CLI text under audit, cited so a reader opening the repo finds that exact line |
+| hscc source — **deployed copies**, labelled *deployed* wherever a figure comes from here | `~/.hermes/plugins/` (root) and `~/.hermes/profiles/*/plugins/` | discovery's *user* dir is `get_hermes_home()/plugins` (`hermes_cli/plugins_discovery.py:210-212`) — this is what actually loads for the lanes this doc is about, **but it lags main** (`hscc-cluster/__init__.py` 169 lines / 26 tools vs 196 / 28 in the repo). The first cut of this doc read plugin line numbers from here and labelled them repo-tree; `t_66c77e6c` re-pointed them and verified each against `git show 3cb11669:<file>` |
 | configs | `~/.hermes/config.yaml`, `~/.hermes/profiles/*/config.yaml` | read via `yaml.safe_load` in three probe scripts (below); no writes |
 | main-orchestrator identity | `~/.hscc/main-orchestrator.json` via `hscc-roles/main_orch.py` | the single resolver; never a hard-coded name |
 
@@ -156,7 +167,7 @@ run, (c) make sure nothing else ever enables it per profile (see the §0.3 landm
 | read `plugins.disabled` / `plugins.enabled` | `hermes_cli/plugins_discovery.py:112-131` |
 | decide per manifest (disabled wins → kind → bundled auto-load → **opt-in list**) | `plugins_discovery.py:269-334`; the opt-in refusal is `:320-324` |
 | load survivors in `requires_plugins` order | `hermes_cli/plugins.py:1337-1355` |
-| `register(ctx)` runs → tools *and* hooks are registered together | `hscc-cluster/__init__.py:124-167` |
+| `register(ctx)` runs → tools *and* hooks are registered together | `hscc-cluster/__init__.py:151-196` |
 | hook callbacks stored on the manager (`self._hooks`) | `hermes_cli/plugins_dispatch.py:559-566`, `track_hook` `:567-580` |
 | delivery resolves **the active home's manager** | `hermes_cli/plugins.py:1800-1812` (`invoke_hook` → `_delivery_manager()` `:1784-1798`) |
 
@@ -169,15 +180,15 @@ exactly that, so a disabled plugin's hooks are silently dead, not degraded.
 
 ### 3.2 The six hooks
 
-Registered at `hscc-cluster/__init__.py`: claimed `:135`, blocked `:142`, completed `:149`,
-pre_tool_call `:156`, post_api_request `:166`, transform_tool_result `:167`. Declared in
-`hscc-cluster/plugin.yaml:54-62`.
+Registered at `hscc-cluster/__init__.py`: claimed `:162`, blocked `:169`, completed `:176`,
+pre_tool_call `:183`, post_api_request `:193`, transform_tool_result `:194`. Declared in
+`hscc-cluster/plugin.yaml:56-64`.
 
 | hook | what hscc does with it | process that fires it (hermes file:line) | lane | must survive workers losing the **tools**? |
 |---|---|---|---|---|
-| `kanban_task_claimed` | WS4 idempotent-resume note so a re-dispatched worker continues instead of redoing work (`__init__.py:131-133`) | dispatcher, **inside the board's dispatch lock** (`hermes_cli/kanban_db.py:2202`; `kanban_db_dispatch.py:1360`) | dispatcher→worker | **YES.** Fires in the dispatcher process (root home) → survives a per-profile move *only if* the dispatcher keeps running with the home that has the plugin. |
-| `kanban_task_blocked` | surface blocked tasks to ops (`:142`) | the process calling `block_task` — the worker's own tool call (`kanban_db.py:3211`), and the dispatcher on breaker/reclaim paths | worker + dispatcher | **YES** (worker-initiated blocks are the majority). |
-| `kanban_task_completed` | record completions + auto-unblock (`:149`) | the worker's own `complete_task` call (`kanban_db.py:2743`) | worker | **YES.** |
+| `kanban_task_claimed` | WS4 idempotent-resume note so a re-dispatched worker continues instead of redoing work (`__init__.py:157-158`) | dispatcher, **inside the board's dispatch lock** (`hermes_cli/kanban_db.py:2202`; `kanban_db_dispatch.py:1360`) | dispatcher→worker | **YES.** Fires in the dispatcher process (root home) → survives a per-profile move *only if* the dispatcher keeps running with the home that has the plugin. |
+| `kanban_task_blocked` | surface blocked tasks to ops (`:169`) | the process calling `block_task` — the worker's own tool call (`kanban_db.py:3211`), and the dispatcher on breaker/reclaim paths | worker + dispatcher | **YES** (worker-initiated blocks are the majority). |
+| `kanban_task_completed` | record completions + auto-unblock (`:176`) | the worker's own `complete_task` call (`kanban_db.py:2743`) | worker | **YES.** |
 | `pre_tool_call` | stamp `profile_name` + `tool_name` into the HSCC tool-event ledger (`workflow.py:639-655`) | every agent turn, in that agent's process | worker (and orch) | **YES** — without it the per-profile observability the fleet dashboards read goes blank exactly where it is most needed. |
 | `post_api_request` | worker budget watch: per-session `prompt_tokens` + call count, **worker-only by construction** (`budget_watch.py:8-16,126,292-301`) | the agent process, per API call | worker | **YES** — this is the `[budget]` note the worker SOUL promises. Losing it is a documented-promise regression. |
 | `transform_tool_result` | append the one `[budget]` line (`budget_watch.py:14-16`) | the agent process, per tool result | worker | **YES** — same promise. |
@@ -208,9 +219,9 @@ plugin loads.
 
 | surface | today's reach | evidence |
 |---|---|---|
-| `orch_message` (tool) | Reachable by any home whose manager loads `hscc-cluster` (i.e. the root home today). Its **own** policy already refuses every worker and `default` at **both** ends: `ORCH_PROFILE_RE = ^…-orch$` (`hscc-cluster/orch_message.py:87-88`), "worker profiles and `default` are refused" (`:15-16,131,242-243,517`), plus a same-turn loop guard (`:33-37,412`) and rate limit. Non-`*-orch` admission of the *main* name is resolved through `hscc-roles/main_orch.py`, never hard-coded. | §4 of `2026-11-23-agent-surface.md:243` |
-| `orch_message` **callers** (text that tells agents to use it) | `hscc-roles/generator.py:702-705` — work rule **11** ("`orch_message` is a nudge, not a work order") is emitted into the generated SOUL of profiles. Measured: it lands in the 22 `*-orch` SOULs *and* the worker-role SOULs (525 SOUL hits across 52 profiles in `surface-refs.tsv`); the rule text itself is not profile-conditional in `generator.py`. | `hscc-roles/generator.py:685-706` |
-| `hscc-commands` slash verbs (12) | Registered whenever the plugin loads — `hscc-commands/__init__.py:853-906`, twelve `ctx.register_command` calls, **no profile/identity gate anywhere in the module** (its only "orchestrator" references are about the *serving* unit, e.g. `:168,225-236`). A worker that can load the plugin can run `/cluster-down`, `/cluster-docker-prune`, `/heal`. | `hscc-commands/__init__.py:853-906`; wedge-safety rationale at `:5` |
+| `orch_message` (tool) | Reachable by any home whose manager loads `hscc-cluster` (i.e. the root home today). Its **own** policy already refuses every worker and `default` at **both** ends: `ORCH_PROFILE_RE = ^…-orch$` (`hscc-cluster/orch_message.py:92`), "worker profiles and `default` are refused" (`:17-18,150,323-326,620`), plus a same-turn loop guard (`:33-39` prose, `:514` `_loop_guard_refusal`) and rate limit. Non-`*-orch` admission of the *main* name is resolved through `hscc-roles/main_orch.py`, never hard-coded. | §4 of `2026-11-23-agent-surface.md:243` |
+| `orch_message` **callers** (text that tells agents to use it) | `hscc-roles/generator.py:709-713` — work rule **11** ("`orch_message` is a nudge, not a work order") is emitted into the generated SOUL of profiles. Measured: it lands in the 21 `*-orch` SOULs *and* the worker-role SOULs (525 SOUL rows across the 50 profile SOULs in `surface-refs.tsv`, the 07:2x sweep artifact); the rule text itself is not profile-conditional in `generator.py`. | `hscc-roles/generator.py:692-713` |
+| `hscc-commands` slash verbs (12) | Registered whenever the plugin loads — `hscc-commands/__init__.py:965-1020`, twelve `ctx.register_command` calls, **no profile/identity gate anywhere in the module** (its only "orchestrator" references are about the *serving* unit, e.g. `:168,225-236`). A worker that can load the plugin can run `/cluster-down`, `/cluster-docker-prune`, `/heal`. | `hscc-commands/__init__.py:965-1020`; wedge-safety rationale at `:5` |
 | `/v1/commands` | republishes the same catalog to clients (`2026-11-23-agent-surface.md:318-319`) — so a profile-scoped verb list would need this route to agree. | sibling doc §6 |
 
 Because slash commands are gateway-side and *deterministic* (they exist precisely so the
@@ -223,16 +234,19 @@ already correct; the SOUL rule text is what misleads (card `t_c3a29c37`).
 
 ## 5. Q3 — what breaks when workers lose the toolset (card `t_c3a29c37` + `t_b52e70ba` consume this)
 
-### 5.1 Measured state of the fleet's config surface (2026-11-23)
+### 5.1 Measured state of the fleet's config surface
 
 | measurement | value | source |
 |---|---|---|
-| root `plugins.enabled` | `[hscc-cluster, hscc-commands, sparkrun-hermes]` | `~/.hermes/config.yaml:529-535` |
-| profile configs with any `plugins` key | **0 / 52** | `plugins-sweep.tsv` |
-| profile configs naming `hscc-cluster` + `sparkrun` in top-level `toolsets:` | **26 / 52** — incl. `general`, `general-orch`, `orchestrator`, every `*-orch`, **and the worker roles `backend-engineer`, `ecofire-flows-executor`** | `toolsets-sweep.tsv` |
+| root `plugins.enabled` | `[hscc-cluster, hscc-commands, sparkrun-hermes]` | *deployed* `~/.hermes/config.yaml:529-535` (a root-config reading, not a repo line) |
+| profile dirs | **54** | re-swept 2026-11-23 10:06 +02:00 |
+| profile `config.yaml` files | **51** (of the 54 dirs) | same |
+| profile configs with any `plugins` key | **0 / 51** configs | same |
+| profile configs naming `hscc-cluster` + `sparkrun` in top-level `toolsets:` | **25 / 51** configs — incl. `general`, `general-orch`, `orchestrator`, every `*-orch`, **and the worker roles `backend-engineer`, `ecofire-flows-executor`** | re-swept 2026-11-23 10:06 +02:00; the 07:2x `toolsets-sweep.tsv` had **26 / 52** |
 | root `toolsets:` | `[hermes-cli, hscc-cluster, kanban, sparkrun, delegation]` | same |
-| profile homes carrying hscc plugin dirs | **52 / 52** (`plugins/` = 21 entries each, incl. `hscc-cluster`, `hscc-commands`, `sparkrun-hermes`, `hscc_daemon`, `hscc-api`, `hscc-roles`, `hscc-bootstrap`, `hscc-skills`) | `profile-homes.tsv` |
-| hscc-owned skill dirs per profile | 0–20 (e.g. `backend-engineer` 20, `ios-engineer` 19, `devops-engineer` 11) — the `t_45fa38e2` fan-out | same |
+| profile homes carrying hscc plugin dirs | **53 / 54** profile homes (`plugins/` present in 53, **21 entries in every one**, incl. `hscc-cluster`, `hscc-commands`, `sparkrun-hermes`, `hscc_daemon`, `hscc-api`, `hscc-roles`, `hscc-bootstrap`, `hscc-skills`) | re-swept 2026-11-23 10:06 +02:00; `profile-homes.tsv` is the 07:2x sweep |
+| profile `SOUL.md` files | **51** (of the 54 dirs); **0** carry the cluster-ops block of §5.3 | re-swept 2026-11-23 10:06 +02:00 |
+| hscc-owned skill dirs per profile | 0–20 (e.g. `backend-engineer` 20, `ios-engineer` 19, `devops-engineer` 11) — the `t_45fa38e2` fan-out | `profile-homes.tsv` (07:2x sweep) |
 
 ### 5.2 The gate, run (not reasoned)
 
@@ -260,10 +274,10 @@ everything that would bring them back: the plugin trees in every profile home, t
 
 | what | file:line | verdict |
 |---|---|---|
-| "## Cluster ops = hscc-cluster toolset" … 7 named read tools, `provision_model`/`stop_model`/`restart_model`, `remount_nas`/`repair_nas_export`/`reap_orphans`, `confirm=true`, **and the claim "Only the orchestrator profile has this toolset; workers do not."** | template `hscc-bootstrap/install_soul.py:75-100` (claim at `:86`); deployed copy **`~/.hermes/SOUL.md:37-48`** | The claim is **true of the root home's own tools and false about its audience**: the block is installed only into the ROOT home SOUL (`install_soul.py:289-300` + `_root_home()` `:267-287` — "the ROOT install by default; `--home` to target one profile deliberately"). Measured: it appears in **1 of 53** deployed SOULs. So the file that asserts the rule is the one file whose reader is *not* the main orchestrator profile. |
+| "## Cluster ops = hscc-cluster toolset" … 7 named read tools, `provision_model`/`stop_model`/`restart_model`, `remount_nas`/`repair_nas_export`/`reap_orphans`, `confirm=true`, **and the claim "Only the orchestrator profile has this toolset; workers do not."** | template `hscc-bootstrap/install_soul.py:75-100` (claim at `:86`); deployed copy **`~/.hermes/SOUL.md:37-48`** | The claim is **true of the root home's own tools and false about its audience**: the block is installed only into the ROOT home SOUL (`install_soul.py:289-300` + `_root_home()` `:267-287` — "the ROOT install by default; `--home` to target one profile deliberately"). Measured: it appears in exactly **1** deployed SOUL — the **root** `~/.hermes/SOUL.md` — and in **0 of the 51** profile `SOUL.md` files (re-swept 2026-11-23 10:06 +02:00). So the file that asserts the rule is the one file whose reader is *not* the main orchestrator profile. |
 | "`sparkrun_exec` — a raw `sparkrun ...` CLI passthrough (**orchestrator-only**)" | `install_soul.py:89-94`, deployed `~/.hermes/SOUL.md:41` | Same single-file problem. `sparkrun_exec` is a `sparkrun-hermes` tool, so its reach == that plugin's reach. |
 | Operator slash commands `/cluster`, `/orch-restart`, `/cluster-restart` + "wedged engine … `/orch-restart` is the fix" | `install_soul.py:95-107`, deployed `~/.hermes/SOUL.md:44-48` | Fine for the main/operator reader; must not be presented as worker-reachable. |
-| Work rule 11 "`orch_message` is a nudge, not a work order" | `hscc-roles/generator.py:702-705` | Emitted into generated role SOULs. Tool-level policy already refuses workers (`orch_message.py:15-16,87-88`), so for a worker this rule is a promise of a tool it cannot call. Either gate rule 11 to `*-orch`/main or add "(not available to you)". |
+| Work rule 11 "`orch_message` is a nudge, not a work order" | `hscc-roles/generator.py:709-713` | Emitted into generated role SOULs. Tool-level policy already refuses workers (`orch_message.py:17-18,92`), so for a worker this rule is a promise of a tool it cannot call. Either gate rule 11 to `*-orch`/main or add "(not available to you)". |
 | "Rely on sparkrun and hermes — do not reimplement what they own" (≈10 lines, `cluster_status`/`sparkrun` wording) | 29 non-`-orch` profile SOULs × 10 lines (`surface-refs.tsv`, worker bucket: `sparkrun=264` hits) | This is the *only* cluster-adjacent prose workers actually carry, and it is a **constraint**, not a capability grant — it says fleet facts come from sparkrun via `hscc_daemon/health.py`. It should stay, with one added sentence: workers get fleet facts through the **routes/CLI read surface**, not the cluster toolset. |
 | Bundled skills naming the tools: `install/hscc-skills/hscc-cluster/SKILL.md` (57 hits), `hscc/SKILL.md` (53), `hscc/hscc-default-tools/SKILL.md` (12), `hscc-model-onboard/SKILL.md` (11), `devops/hscc-architecture/SKILL.md` (11) | `install/hscc-skills/**` | These are installed into **every** profile skills tree by `t_45fa38e2`. Card `t_b52e70ba` must reconcile the operator's "every profile has all the cluster-control info" ruling (`2026-11-23-agent-surface.md:564-571`) with "only the main profile has the tools": documentation of a toolset a profile cannot call is a lie in the prompt. Recommended split in §8. |
 | `doctor`'s plugin checks (`hscc-bootstrap/doctor.py`, 135 surface hits) and `verify.check_plugins` | `hscc-bootstrap/doctor.py`, `hscc_daemon/verify.py` | Both currently assert the plugins are *installed*; per-profile expectations ("must be loadable by `<main>` only") are card `t_caf98114`. |
@@ -300,7 +314,7 @@ Design decisions (mine, as owner of this card — both subtree cards must inheri
 # The ROOT home = the operator's interactive `hermes`, the gateway process and
 # the kanban dispatcher. It keeps the plugins so the dispatcher-fired lane
 # (kanban_task_claimed, kanban_db.py:2202) and the operator wedge-path slash
-# verbs (hscc-commands/__init__.py:853-906) stay alive.
+# verbs (hscc-commands/__init__.py:965-1020) stay alive.
 plugins:
   enabled: [hscc-cluster, hscc-commands, sparkrun-hermes]   # unchanged
 # The root home is NOT the main orchestrator and must not be described as one
@@ -341,7 +355,7 @@ Three rules the cards must hold so this stays true:
    profile created by `hermes profile add` after this change must be seeded the same way
    (card `t_e98c6ad4`, and `hermes_cli/profiles_config.py:26` is the migration entry
    point).
-2. **Removing `hscc-cluster`/`sparkrun` from the 26 profiles' top-level `toolsets:` is
+2. **Removing `hscc-cluster`/`sparkrun` from those 25 configs' top-level `toolsets:` is
    cosmetic, not a control.** Only two readers exist for that key — the legacy kanban
    fallback (`hermes_cli/tools_config.py:633`) and `tools/kanban_tools.py:46` — and
    neither gates plugin tools. Cards that "fix" the surface by editing that list fix
@@ -356,9 +370,9 @@ Three rules the cards must hold so this stays true:
 | id | gap | why hscc cannot close it alone | ask |
 |---|---|---|---|
 | **G-1** | **No hooks-vs-tools split.** `gate_manifest` (`plugins_discovery.py:269-334`) is load/no-load; `register(ctx)` is all-or-nothing. The operator rule needs "this home loads the plugin for its hooks, and gets no tools". | hscc can emulate it in `register()` (D-B) — a workaround that lives in the plugin and depends on `profile_name()` staying accurate for routed/managed homes (`plugins.py:401-407`). If hermes ever gains a first-class notion it should replace the workaround. | `plugins.enabled` entries that can carry `{hooks_only: true}` (or a `plugins.tools_disabled: [names]` per-home list) honoured by `PluginContext.register_tool()`. |
-| **G-2** | **Plugin toolsets are default-ON unless `known_plugin_toolsets.<platform>` bookkeeping says otherwise** (`tools_config.py:520-527`), and `agent.disabled_toolsets` (`:637-643` → `model_tools.py:300-328`) has to pass `validate_toolset()` for a *registry-only* name (`toolsets.py:278,367-380`). Nothing I measured proves a worker profile can name `hscc-cluster` there and have its 28 tools pruned. | It is a hermes resolution question, answerable only by running hermes. **Must be measured, not assumed** — this is exactly the class of "assumption underneath correct code" that shipped the v1.15.0 grace bug. | One assertion in the QA sandbox (`t_035b1b0b`): with `plugins.enabled=[hscc-cluster]` + `agent.disabled_toolsets=[hscc-cluster]`, `hermes tools --summary` and a live session show **zero** `cluster_*` tools, and `has_hook("post_api_request")` is still `True`. If it passes, config becomes a usable second lock; if not, G-1 becomes mandatory. |
+| **G-2** | **Plugin toolsets are default-ON unless `known_plugin_toolsets.<platform>` bookkeeping says otherwise** (`tools_config.py:520-527`), and `agent.disabled_toolsets` (`:637-643` → `model_tools.py:300-328`) has to pass `validate_toolset()` for a *registry-only* name (`toolsets.py:278,367-380`). Nothing I measured proves a worker profile can name `hscc-cluster` there and have its 28 tools (repo-tree count; the deployed tree registers 26) pruned. | It is a hermes resolution question, answerable only by running hermes. **Must be measured, not assumed** — this is exactly the class of "assumption underneath correct code" that shipped the v1.15.0 grace bug. | One assertion in the QA sandbox (`t_035b1b0b`): with `plugins.enabled=[hscc-cluster]` + `agent.disabled_toolsets=[hscc-cluster]`, `hermes tools --summary` and a live session show **zero** `cluster_*` tools, and `has_hook("post_api_request")` is still `True`. If it passes, config becomes a usable second lock; if not, G-1 becomes mandatory. |
 | **G-3** | **`_migrate_to_21` grandfathers every manifest-bearing dir under `$HERMES_HOME/plugins/`** (`config_migrations.py:300-347`) — so "install the plugin into all profiles" and "keep profiles opt-in clean" are mutually unsatisfiable until bootstrap writes an explicit `plugins.enabled` everywhere. | hscc's installer is the thing putting plugin trees into profile homes; but the *behaviour* (a migration silently enabling third-party code) is hermes'. | Either (a) grandfather only plugins that were enabled-or-installed **in that home before the plugin dir existed**, or (b) log a WARNING naming the plugins it just enabled. Cheap; hscc can also neutralise it (card `t_e98c6ad4` writes the key). |
-| **G-4** | **No per-profile view of "what is loaded here".** `hermes plugins list` is home-scoped and requires running as that profile; the fleet's truth is spread across 53 files. | Would be a hermes read-surface. | `hermes plugins list --all-profiles` (or `--profile X`) reporting each home's `plugins.enabled` + the gate verdict, i.e. exactly what `probe_gate.py` had to reconstruct. Until then hscc should ship the same check in `doctor` (card `t_caf98114`). |
+| **G-4** | **No per-profile view of "what is loaded here".** `hermes plugins list` is home-scoped and requires running as that profile; the fleet's truth is spread across 54 profile homes plus the root home. | Would be a hermes read-surface. | `hermes plugins list --all-profiles` (or `--profile X`) reporting each home's `plugins.enabled` + the gate verdict, i.e. exactly what `probe_gate.py` had to reconstruct. Until then hscc should ship the same check in `doctor` (card `t_caf98114`). |
 
 G-3/G-4 are worth filing upstream; **G-2 must be measured by the QA card before anyone
 relies on the YAML in §6 as enforcement.**
@@ -371,7 +385,7 @@ relies on the YAML in §6 as enforcement.**
 |---|---|---|
 | `t_e98c6ad4` bootstrap | write the §6 shape: `plugins.enabled` into `<main>` (via `main_orch.main_name()`), `[hscc-cluster]` into every worker/project-orch home; seed the same for newly added profiles | §0.1-0.3, §2 (per-home), §6 rule 1, **G-3** |
 | `t_b52e70ba` install-skills | stop installing cluster-*tool* docs into homes that cannot call them: keep the *concept* + read-path skills, drop/defer `hscc-cluster` tool catalogs to `<main>`; keep the operator's "fold curated knowledge back into bundled source" ruling | §5.3 last two rows, §6 rule 3 |
-| `t_c3a29c37` SOUL templates | rewrite `install_soul.py:74-100` per-audience: the cluster-ops block goes to `<main>` **and the root home must stop claiming to be the orchestrator** (`:86`); gate `generator.py:702-705` rule 11 to `*-orch`/main; keep the sparkrun-reliance paragraph for workers, with the read-path sentence | §5.3 rows 1-3, §4 |
+| `t_c3a29c37` SOUL templates | rewrite `install_soul.py:74-100` per-audience: the cluster-ops block goes to `<main>` **and the root home must stop claiming to be the orchestrator** (`:86`); gate `generator.py:709-713` rule 11 to `*-orch`/main; keep the sparkrun-reliance paragraph for workers, with the read-path sentence | §5.3 rows 1-3, §4 |
 | `t_caf98114` doctor drift | assert per home: `<main>` loads all three; every other home loads `hscc-cluster` **and no `hscc-commands`/`sparkrun-hermes`**; flag any home whose `plugins.enabled` was auto-written by migration | §5.1-5.2, §6, **G-4** |
 | `t_035b1b0b` QA sandbox | prove **G-2** (toolsets knob actually prunes a plugin toolset) and prove the hooks still fire for a worker (`has_hook("post_api_request")` True; a `[budget]` line appears) **in a non-safe-mode worker** (§3.3) | §3.2-3.3, §7 |
 
@@ -389,13 +403,14 @@ Nobody in that list should merge anything; each hands off to `@hscc-orch`.
   are `kind: backend` in every profile home and currently not enabled anywhere; if any of
   them is *supposed* to load per-profile (e.g. `hscc-roles` hooks/SOUL authoring), that is
   a separate decision — this card only covers the operator's control+monitor set.
-* **LEFT-4** — no test pins "`hscc-cluster/plugin.yaml:54-62` hook list == the
+* **LEFT-4** — no test pins "`hscc-cluster/plugin.yaml:56-64` hook list == the
   `register_hook` sites" *plus* "each hook's firing process" — the drift test
-  (`hscc_daemon/tests/test_plugin_manifest_drift.py`, cited at `plugin.yaml:47-53`)
+  (`hscc_daemon/tests/test_plugin_manifest_drift.py`, cited at `plugin.yaml:49-55`)
   covers the declaration half only.
 
 ---
 
 *Prepared by @devops-engineer. Read-only: no config, plugin, skill, SOUL or fleet state was
 modified by this card. Probes and raw TSVs live in the worker scratch dir; the commands
-that produced each number are named in §1.*
+that produced each number are named in §1. Citation re-point to the repo tree at
+`3cb11669` and the denominator refresh: `t_66c77e6c`, same read-only posture.*

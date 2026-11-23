@@ -582,6 +582,16 @@ COMMAND_HELP = {
     # (F5 card t_fc307a51: the base blocked/stale sentences measured 121 and
     # 111 cols — (B) overflow at width 80 and, for blocked, at width 120.
     # Wording verbatim; re-flowed onto hanging-indent continuations).
+    #
+    # F3 (card t_46d03105): this entry must name EVERY verb the group
+    # dispatches. `hscc kanban --help` (kanban_blocked.HELP_TEXT) listed all
+    # seven; this one listed three — pause/resume/paused/enforce were added to
+    # the dispatcher and never advertised here, so `hscc help kanban` hid half
+    # the group. The verb set is NOT a literal here: it is derived from the
+    # dispatcher's own unknown-verb inventory and asserted against BOTH help
+    # surfaces by hscc_daemon/tests/test_kanban_help_honesty.py, which is what
+    # keeps the two surfaces from drifting again. A new kanban verb must be
+    # advertised in this entry in the same change that dispatches it.
     "kanban": "Board hygiene for autodown.\n"
               "  blocked [--json]: list BLOCKED cards with why; blocked --recover\n"
               "    <id> [--reason <t>]: recover one blocked card to ready\n"
@@ -589,6 +599,12 @@ COMMAND_HELP = {
               "    stale --archive <id>: archive one (t_e751e652)\n"
               "  monitor [--live] [--interval <s>] [--board <slug>]: workers\n"
               "    on every board, running/ready/counts/outcomes (read-only)\n"
+              "  pause <board>... [--reason <t>] | resume <board>...: hold or\n"
+              "    release whole boards (reclaim + block running/ready; resume\n"
+              "    restores exactly those)\n"
+              "  paused: list paused boards and what they hold; enforce: block\n"
+              "    cards that became ready or running on a paused board since\n"
+              "  Try 'hscc kanban --help' for each verb's full flag list.\n"
               "  Usage: hscc kanban <subcommand> [args]",
     # merge-queue (MQ1): local FIFO of green PRs run by the daemon. Lines
     # authored <=76 for the same (B)-gate reason as kanban/cards above.
