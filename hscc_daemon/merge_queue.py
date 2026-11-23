@@ -21,6 +21,16 @@ Everything the queue needs to survive a daemon restart is persisted in
 ``~/.hscc/merge-queue-state.json`` (atomic replace + fsync); a run that dies
 mid-flight is recovered to the head of its project's queue on the next tick.
 
+A PR that is not green yet sits in ``waiting``; EVERY tick re-checks that list
+(one cheap ``gh pr view`` per entry) and returns the green ones to the FIFO,
+whether or not the active queue is empty. After a push the new head's CI is
+usually pending, so the entry keeps its in-flight claim at ``ci-pending`` and
+is re-read each tick until green (merge that exact SHA), red (hand back) or the
+CI budget expires (release to the rechecked wait list) — never re-gated on the
+same pushed head. GitHub answers ``mergeable: UNKNOWN`` for a few seconds after
+the base moves; that is re-polled, and a still-undecided entry keeps the head
+slot instead of being parked in ``waiting``.
+
 The queue is **on by default** for a project that has all three of: a git
 checkout at its registry ``repo``, a ``github.com`` ``origin`` remote, and
 declared gates (``merge_queue.gates``) or hscc's built-in gates::
