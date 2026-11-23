@@ -324,15 +324,69 @@ def _archive_proxy_log_before_start(reason):
     return res
 
 
+#: sparkrun keeps ONE gateway per cache dir
+#: (``src/sparkrun/proxy/_supervisor.py:241`` — ``state_dir`` has no port in it)
+#: and ``is_running()`` reads the PID out of that single shared state file, so it
+#: is port-agnostic (``:987-992``). A second ``proxy start`` while a gateway is
+#: live is therefore REFUSED before any port comparison:
+#: ``src/sparkrun/api/proxy/_ops.py:533-540`` raises
+#: ``ProxyAlreadyRunning("Proxy is already running (PID %s) on port %d.")`` and
+#: ``src/sparkrun/cli/_proxy.py:181-190`` prints it to stderr and ``sys.exit(1)``
+#: — exit code alone cannot tell "this exact port is already served" (an
+#: idempotent re-apply) from "some OTHER port holds the single gateway slot"
+#: (this family's port is dead). The port the refusal names is the LIVE
+#: gateway's, so the wording is the only signal that distinguishes them.
+_ALREADY_RUNNING_RE = re.compile(
+    r"already running \(pid\s+(\d+)\)\s+on port\s+(\d+)", re.IGNORECASE)
+
+
+def _classify_proxy_refusal(text, requested_port):
+    """Classify a failed ``sparkrun proxy start`` as ``(benign, live_port)``.
+
+    ``benign`` is True ONLY when the refusal named the port we asked for: the
+    gateway that refused is the one this call wanted, nothing is broken, and
+    re-applying is genuinely idempotent. When it names a DIFFERENT port the
+    requested port has nothing listening on it — a real failure, reported as
+    one. Anything the regex cannot parse is a failure too (fail closed: an
+    unrecognised message is never treated as success).
+    """
+    m = _ALREADY_RUNNING_RE.search(text or "")
+    if not m:
+        return False, None
+    live_port = int(m.group(2))
+    try:
+        wanted = int(requested_port)
+    except (TypeError, ValueError):
+        return False, live_port
+    return live_port == wanted, live_port
+
+
 def install_proxy(family) -> dict:
     """Start the native sparkrun proxy for a family. Returns action summary.
 
-    Delegates to ``sparkrun proxy start`` which auto-discovers running endpoints,
-    generates LiteLLM config, and launches the proxy as a daemon. Re-applying is
-    idempotent — if the proxy is already running on the requested port, sparkrun
-    reports success without disruption.
+    Delegates to ``sparkrun proxy start``, which auto-discovers running
+    endpoints, generates LiteLLM config, and launches the proxy as a daemon.
 
-    Returns a dict keyed: port, loaded, error, via.
+    Re-applying IS idempotent — but not because sparkrun reports success: it
+    refuses the start of a gateway that is already up (see
+    ``_ALREADY_RUNNING_RE`` for what sparkrun actually does and why the exit
+    code is not enough), and the refusal is classified HERE. Two outcomes:
+
+      * the live gateway is on the port THIS family asked for → success, with
+        ``already_running: True`` and no ``error``. The gateway is left running
+        untouched, which also means settings this apply supplied were NOT pushed
+        into it — sparkrun's own refusal says to restart to apply them, and
+        apply must not restart a serving gateway behind the operator's back.
+      * the refusal names a DIFFERENT port (or is unrecognised) → failure: this
+        family's port is not served by anything. ``error`` keeps sparkrun's
+        message verbatim and ``running_port`` names the port that does hold the
+        single gateway slot.
+
+    Returns a dict keyed: family, port, loaded, already_running, running_port,
+    error, via. ``loaded`` answers the only question apply and the report care
+    about — is this family's proxy port served by a live gateway when the call
+    returns — whether this call started it or it was already running on that
+    exact port.
     """
     import subprocess
 
@@ -348,6 +402,8 @@ def install_proxy(family) -> dict:
 
     loaded = False
     load_error = ""
+    already_running = False
+    running_port = None
     try:
         r = subprocess.run(
             ["sparkrun", "proxy", "start",
@@ -357,15 +413,73 @@ def install_proxy(family) -> dict:
         loaded = r.returncode == 0
         if not loaded:
             load_error = (r.stderr or r.stdout or "").strip() or "sparkrun proxy start failed"
+            already_running, running_port = _classify_proxy_refusal(
+                load_error, family.proxy_port)
+            if already_running:
+                # The gateway that refused IS the one this family wanted, so the
+                # port is served and this apply changed nothing observable. It is
+                # not an error and must not be reported as one.
+                loaded = True
+                load_error = ""
     except Exception as e:
         load_error = str(e)
 
     return {
+        "family": family.name,
         "port": family.proxy_port,
         "loaded": loaded,
+        "already_running": already_running,
+        "running_port": running_port,
         "error": load_error or None,
         "via": "sparkrun-proxy",
     }
+
+
+def _proxy_step_report(proxy_actions, pruned) -> dict:
+    """Build apply's ``proxies/`` step from what the families actually reported.
+
+    The step used to be appended with a HARDCODED ``"status": "ok"`` while the
+    per-family results were only copied into ``details`` — so an apply whose
+    proxy never loaded still printed success. The status is now DERIVED from
+    those same results: any family whose port is not served makes the step
+    ``warn``, which apply's non-OK sweep below turns into ``success: False``.
+    ``warn`` is the vocabulary this function already had for "the cluster was
+    only partially brought up"; a benign "already running on this exact port"
+    refusal is NOT a failure (see ``install_proxy``) and keeps the step ok.
+    """
+    already = [a for a in proxy_actions if a.get("already_running")]
+    failed = [a for a in proxy_actions if not a.get("loaded")]
+    failed_named = [{
+        "family": a.get("family"),
+        "port": a.get("port"),
+        "error": ((a.get("error") or "").splitlines() or [""])[0][:160],
+    } for a in failed]
+    step = {
+        "step": "proxies/",
+        "status": "warn" if failed else "ok",
+        "proxies": len(proxy_actions),
+        "failed": failed_named,
+        "pruned_orphans": pruned,
+        "details": proxy_actions,
+    }
+    notes = []
+    if failed_named:
+        notes.append(
+            "%d of %d proxy famil%s did not load: %s" % (
+                len(failed_named), len(proxy_actions),
+                "y" if len(failed_named) == 1 else "ies",
+                "; ".join("%s(:%s) %s" % (f["family"], f["port"], f["error"])
+                          for f in failed_named)))
+    if already:
+        step["already_running"] = sorted({a.get("port") for a in already})
+        notes.append(
+            "gateway already serving port(s) %s — left running untouched, so "
+            "settings from this apply were NOT pushed into it (restart the "
+            "proxy to apply them)"
+            % ", ".join(str(a.get("port")) for a in already))
+    if notes:
+        step["note"] = " | ".join(notes)
+    return step
 
 
 def remove_proxy(family) -> dict:
@@ -1376,13 +1490,11 @@ def apply_template(template_name: str, confirm: bool = False,
         # in the plan, so orphan families don't leak config.json.bak.* forever.
         active = [f.name for f in plan.families if f.proxy_port is not None]
         pruned = _prune_orphan_proxies(active)
-        result["steps"].append({
-            "step": "proxies/",
-            "status": "ok",
-            "proxies": len(proxy_actions),
-            "pruned_orphans": pruned,
-            "details": proxy_actions,
-        })
+        # The status is DERIVED from what the families reported (_proxy_step_report
+        # — it used to be a hardcoded "ok" that survived any proxy failure), so the
+        # non-OK sweep below can flip this apply to failure when a proxy port is
+        # not served.
+        result["steps"].append(_proxy_step_report(proxy_actions, pruned))
 
         # Step 5: Rewire worker-facing model ids (config.yaml delegation.* +
         # fallback_providers; worker role profiles' model.default) to the family
