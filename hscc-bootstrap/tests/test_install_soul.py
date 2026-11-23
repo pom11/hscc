@@ -12,7 +12,8 @@ def test_creates_when_absent(tmp_path):
     assert IS.install_soul(p) == "created"
     text = open(p).read()
     assert IS.BEGIN in text and IS.END in text
-    assert "sparkrun_exec" in text and "/orch-restart" in text
+    assert "/orch-restart" in text and IS.CLUSTER_ACTIONS_RULE in text
+    assert "sparkrun_exec" not in text
 
 
 def test_appends_when_no_sentinels(tmp_path):
@@ -46,7 +47,8 @@ def test_identity_is_hscc_and_topology_free(tmp_path):
     assert "HSCC" in text
     assert IS.HEAD_BEGIN in text and IS.HEAD_END in text
     assert "~/dev/" in text                        # working-dir discipline (D6)
-    assert "discovery_status" in text              # discovery referenced
+    assert "main orchestrator" in text.lower()     # main-only cluster rule
+    assert "ONLY profile on this fleet with cluster control" in text
     assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", text)  # no IPs
 
 
@@ -63,7 +65,8 @@ def test_replaces_in_place_preserving_surroundings(tmp_path):
     assert "FOOTER stays." in text
     assert "Old identity line." not in text                     # preamble replaced
     assert "OLD STALE BLOCK" not in text
-    assert "sparkrun_exec" in text
+    assert IS.CLUSTER_ACTIONS_RULE in text
+    assert "sparkrun_exec" not in text
     assert text.count(IS.BEGIN) == 1                            # exactly one block
 
 
@@ -96,7 +99,8 @@ def test_personality_seeded_when_absent(tmp_path):
     assert IS.install_personality(path) == "seeded"
     cfg = yaml.safe_load(open(path))
     ops = cfg["personalities"]["ops"]
-    assert IS.BEGIN in ops and "sparkrun_exec" in ops
+    assert IS.BEGIN in ops and IS.CLUSTER_ACTIONS_RULE in ops
+    assert "sparkrun_exec" not in ops
     assert cfg["model"]["default"] == "X"                       # preserved
     assert "personality" not in cfg.get("display", {})         # display untouched
 
@@ -111,7 +115,8 @@ def test_personality_block_updated_preserving_prose(tmp_path):
     ops = yaml.safe_load(open(path))["personalities"]["ops"]
     assert "## My rules" in ops and "keep me." in ops and "OLD" not in ops
     assert "Old persona line." not in ops
-    assert "sparkrun_exec" in ops
+    assert IS.CLUSTER_ACTIONS_RULE in ops
+    assert "sparkrun_exec" not in ops
 
 
 def test_personality_idempotent(tmp_path):
@@ -171,6 +176,29 @@ def test_soul_and_personality_share_one_block(tmp_path):
     ops = yaml.safe_load(open(cp))["personalities"]["ops"]
     pers_block = ops.split(IS.BEGIN, 1)[1].split(IS.END, 1)[0]
     assert soul_block == pers_block
+
+
+def test_root_block_states_main_only_and_carries_no_cluster_tool_catalog():
+    """The ROOT home is not the main orchestrator (main-only audit §5.3/§8).
+
+    The root home is the operator's CLI/gateway/dispatcher. Its SOUL may keep
+    the operator slash commands, but it must not claim cluster control or name
+    the cluster tools as available here — those live on the main profile's own
+    section (``hscc-roles/orchestrators._MAIN_CLUSTER_CONTROL``).
+    """
+    text = IS.HSCC_SOUL_BLOCK
+    assert IS.CLUSTER_ACTIONS_RULE in text
+    assert "the ONLY profile on this fleet with cluster control" in text
+    assert "## You orchestrate" not in text
+    assert "Only the orchestrator profile has this toolset; workers do not" \
+        not in text
+    for cluster_word in ("hscc-cluster", "sparkrun_exec", "cluster_status",
+                         "provision_model", "restart_model", "reap_orphans"):
+        assert cluster_word not in text, (
+            f"the ROOT block still presents cluster capability {cluster_word!r}")
+    # The operator wedge path is gateway-side and must stay.
+    for verb in ("/cluster", "/orch-restart", "/cluster-restart"):
+        assert verb in text
 
 
 # ── NO-ANSI regression (RICH CLI hscc-bootstrap card) ──────────────────────
