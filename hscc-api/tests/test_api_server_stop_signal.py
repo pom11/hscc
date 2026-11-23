@@ -22,12 +22,13 @@ What this file measures (probe, this interpreter, both signals):
     may not make a call whose locking it has to borrow from someone else's
     design — but this file does not claim a measured hang for it.
 
-The replacement shape is the one t_56552ecc measured into `hscc_daemon/api_cli.py`
-in the sibling plugin: a handler body of plain attribute writes plus one call —
-`set()` on a lock-free `_StopFlag` — and the operator-visible lines on the
-`finally:` that a cooperative stop always reaches. `server.shutdown()` is not
-in the stop path at all: `BaseServer.shutdown()` waits for the serving loop to
-return, and on this path the serving loop is the interrupted thread.
+The replacement shape is the one t_56552ecc measured in the sibling plugin's
+stop path (`hscc_daemon/api_cli.py`): a handler body of plain attribute writes
+plus one call — `set()` on a lock-free `_StopFlag` — and the operator-visible
+lines on the `finally:` that a cooperative stop always reaches.
+`server.shutdown()` is not in the stop path at all: `BaseServer.shutdown()`
+waits for the serving loop to return, and on this path the serving loop is the
+interrupted thread.
 
 Hermetic: a throwaway HOME (fixture token, never the operator's), an ephemeral
 loopback port, and a FAKE `gateway_bridge` so the sidecar markers are this
@@ -435,7 +436,7 @@ class TestStopPathHoldsNothing:
     A signal handler is a callback the interpreter runs at an arbitrary
     bytecode boundary on whatever thread it interrupts, so "it usually works"
     is not a property a stop path can be trusted to keep. These pins are the
-    same doctrine t_56552ecc landed in `hscc_daemon/api_cli.py` and
+    same doctrine t_56552ecc applied in the sibling plugin's stop path and
     t_6eff6258 used for the ordering in this very file.
     """
 

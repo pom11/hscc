@@ -1005,7 +1005,7 @@ class _MultiServer:
         this loop runs on — a ``threading.Event`` answers ``is_set()`` while
         holding a lock ``set()`` also needs, so a stop landing here deadlocks
         against its own thread (t_49f4c69b; ``api_server._StopFlag`` is the
-        lock-free answer here, and t_56552ecc lands the same shape in the
+        lock-free answer here, and t_56552ecc puts the same shape in the
         sibling plugin). Do not grow this surface to ``wait()`` / ``clear()``: a
         test pins it to one ``is_set()``.
         """
