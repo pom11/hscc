@@ -39,6 +39,9 @@ import pytest
 
 import hscc_daemon.hscc as unified
 from hscc_daemon import workspace_clean as wc
+# t_701e22fc: same reason as in test_workspace_clean.py — the engine's apply
+# path now runs the cache tiers, so every test in this file gets the sandbox.
+from hscc_daemon.tests.test_workspace_clean_deep import cache_sandbox  # noqa: F401,E402
 
 REPO = Path(__file__).resolve().parents[2]
 BUDGET = 78            # the (B) gate's render budget
@@ -341,6 +344,14 @@ class TestJsonIsTheEngineDict:
         direct = wc.plan_clean(kanban_db=lib)           # the engine's own dict
         assert set(payload) == set(direct)
         assert payload == json.loads(json.dumps(direct))
+        # t_701e22fc extends this contract DELIBERATELY, in that card's commit:
+        # the workspace keys keep their exact meaning, and the cache tiers are
+        # two additive top-level keys. A third card that grows the dict without
+        # naming it here is changing card t_fc9296a7's --json contract.
+        assert {"days", "cutoff", "actions", "skipped", "errors"} <= set(payload)
+        assert {"cache_actions", "report_only"} <= set(payload)
+        assert all(a["kind"] == wc.KIND for a in payload["actions"]), \
+            "a cache row must never join the workspace actions"
         for entry in payload["actions"] + payload["skipped"]:
             assert set(entry) == set(direct["actions"][0]) | set() or \
                 set(entry) <= set(direct["actions"][0]) | {"reason"}

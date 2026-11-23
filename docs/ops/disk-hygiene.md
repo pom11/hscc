@@ -65,6 +65,57 @@ again in the executor. `tasks.workspace_path` is treated as untrusted input and
 is never used as a removal target — a row pointing at a real repository would
 otherwise turn a cleanup into a repo delete.
 
+## The two cache tiers, and `--confirm`
+
+`--apply` runs the **safe set**. Everything below rebuilds itself, and every
+command is probed first: a tool that is not installed is planned as skipped
+`not-installed` and the run stays green, so a Mac without Xcode does not make
+`hscc clean` red.
+
+| command | what it drops |
+| --- | --- |
+| `uv cache prune` | unused uv wheels (the whole cache is `--deep`) |
+| `npm cache clean --force` | the npm cache |
+| `conda clean --all -y` | conda packages, only when a conda binary is found |
+| `brew cleanup --prune=30` | Homebrew downloads older than 30 days |
+| `python3 -m pip cache purge` | the pip cache |
+| `xcrun simctl delete unavailable` | simulators Xcode no longer knows about |
+| pytest temp dirs | `$TMPDIR/pytest-of-$USER/*` older than a day |
+| `$HOME/.cache/hscc-uitest*` | this repo's Playwright UI-test caches |
+
+`--deep` on its own **reports** the deep set and changes nothing — looking is
+free. The deep set is `uv cache clean` (instead of `prune`), Xcode's
+`DerivedData`, the CoreSimulator `Caches`, and the Trash. It runs only with
+`hscc clean --apply --deep --confirm`; `--apply --deep` without `--confirm`
+exits 2 and names the missing token, so the refusal is legible rather than
+silent. `--confirm` is the same token `hscc template apply` uses — one word
+for "this really mutates", not a second magic word.
+
+The Trash goes through `osascript -e 'tell application "Finder" to empty
+trash'`, the call `~/bin/clean-mac.sh` makes, so it follows the user's real
+Trash flow. The engine has no recursive-delete path for `~/.Trash` at all.
+
+Every external command is bounded by a 300 s timeout with its output captured.
+A failing or timed-out command is one entry in `errors` and the run continues:
+a hung `brew cleanup` cannot hang the verb, or the cron that calls it.
+
+### Report-only
+
+Measured, printed, and never touched by this verb — these are hermes' own data
+or things only the operator can judge:
+
+| path | why it is only reported |
+| --- | --- |
+| `~/Library/Developer/CoreDevice/DeviceFS` | Xcode re-downloads it per device |
+| `~/.hermes/profiles` | hermes data |
+| `~/.lmstudio` | downloaded models |
+| `~/.Trash` | sized here; emptied only by the deep set, via Finder |
+
+A dry run that includes the deep set has to walk those trees: on the gateway
+`hscc clean --deep` measured 1 m 25 s, and a plain `du` sweep costs the same,
+so the cost is the walk itself — paid only when you ask for deep numbers. The
+default dry run and `--apply` do not walk them.
+
 ## What it never touches
 
 * anything under `~/dev` — no repo, no worktree registration is pruned or

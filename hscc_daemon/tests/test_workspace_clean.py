@@ -39,6 +39,10 @@ from pathlib import Path
 import pytest
 
 from hscc_daemon import workspace_clean as wc
+# t_701e22fc: this file's --apply tests now drive an engine that also runs cache
+# commands. Its autouse sandbox gives every test a fake HOME/TMPDIR and shimmed
+# binaries, so nothing here can prune the operator's real caches.
+from hscc_daemon.tests.test_workspace_clean_deep import cache_sandbox  # noqa: F401,E402
 from hscc_daemon.tests import real_hermes
 from hscc_daemon.tests.hermes_cli_plant import (evict_planted, is_planted_path,
                                                restore_planted)
