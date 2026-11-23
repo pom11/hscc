@@ -328,10 +328,15 @@ def _fallback_parked_nodes(directory=None):
     """Standalone read of the overlay: keyed hosts ∪ their ``span_nodes``.
 
     The SAME set ``node_pauses.paused_nodes`` returns, reached without the
-    package: every record counts (no clock — rule 2 above), a non-dict record
-    still parks its own key, and ``span_nodes`` is honoured because that is the
-    half a naive per-host test misses. Unreadable/malformed file -> empty set
-    (rule 3); :func:`parked_nodes` is the caller that must report it.
+    package, mirroring its normalisation rule for rule: no clock (rule 2); a
+    non-string host key or a NON-OBJECT record drops the whole record — so the
+    keyed host is NOT parked either, which is the shared reader's fail-open and
+    not a licence to park; a non-list ``span_nodes`` degrades to empty instead
+    of crashing; a blank span entry is dropped. A fallback that quietly
+    disagrees with the daemon is the bug, so
+    :mod:`test_model_onboard_pause_aware_t_ed77d757` diffs the two on fabricated
+    overlays every run, the way ``test_hermes_home_ladder.py::test_ladder_drift``
+    pins the Hermes-home ladder.
     """
     path = os.path.join(directory or HSCC_HOME, OVERLAY_NAME)
     try:
@@ -344,12 +349,38 @@ def _fallback_parked_nodes(directory=None):
         return set()
     out = set()
     for host, entry in pauses.items():
-        if isinstance(host, str) and host.strip():
-            out.add(host.strip())
-        span = entry.get("span_nodes") if isinstance(entry, dict) else None
+        if not isinstance(host, str) or not host.strip():
+            continue
+        if not isinstance(entry, dict):
+            continue                    # unusable record: fails open, like the reader
+        out.add(host.strip())
+        span = entry.get("span_nodes")
         if isinstance(span, (list, tuple)):
-            out.update(str(n).strip() for n in span if str(n).strip())
+            out.update(n.strip() for n in span if isinstance(n, str) and n.strip())
     return out
+
+
+def _overlay_readable(directory=None):
+    """Whether ``node_pauses.json`` can be read, independent of what it says.
+
+    The shared reader normalises a corrupt overlay to "no pauses" and WARNs on
+    its OWN log, so its return value alone cannot distinguish "nothing is
+    parked" from "your pause record is unreadable and every seam just failed
+    open" — and the second one is the situation the operator must hear about,
+    because it means a node they parked is about to be healed under them. So the
+    SET comes from the shared reader (parity) and this check comes from the file
+    (honesty). An absent file IS readable: no overlay genuinely means nothing is
+    parked.
+    """
+    path = os.path.join(directory or HSCC_HOME, OVERLAY_NAME)
+    if not os.path.exists(path):
+        return True
+    try:
+        with open(path) as f:
+            json.load(f)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def parked_nodes(directory=None):
@@ -371,14 +402,17 @@ def parked_nodes(directory=None):
     np = _load_node_pauses()
     if np is not None:
         try:
-            return set(np.paused_nodes(directory)), True
+            # The set from the shared reader (parity with every other seam); the
+            # readable flag from the file, because the reader normalises
+            # corruption away and its return value cannot report it.
+            return set(np.paused_nodes(directory)), _overlay_readable(directory)
         except Exception:
             # A raising shared reader is an unreadable overlay, not "no pauses":
             # fall through so the caller still learns it could not tell.
             return _fallback_parked_nodes(directory), False
     path = os.path.join(directory, OVERLAY_NAME)
     if os.path.exists(path):
-        return _fallback_parked_nodes(directory), False
+        return _fallback_parked_nodes(directory), _overlay_readable(directory)
     return set(), True
 
 
@@ -630,6 +664,14 @@ def _refreshed_serve_cmds(d):
     rather than keep them, because a recorded ``serve_cmd`` is a promise about
     the exact argv a resume will replay — and after :func:`wire_serving` moved
     every unit to a new ``model``/``recipe``, the old promise is false.
+
+    ``fleet_up_plan`` is used because it is the public entry to the one builder
+    (``_unit_run_cmd``) and because it derives every argv from the unit's FIELDS
+    — ``prefer_serve_cmd`` is the node-resume path only, so the stale record
+    already in ``d`` cannot leak into what comes back. That is the property this
+    function depends on, and
+    :func:`test_wire_serving_refresh_derives_from_fields_not_the_record` is what
+    fails if anyone ever routes it through the record.
     """
     serving = _load_serving_module()
     if serving is None:
@@ -649,14 +691,14 @@ def wire_serving(model_id, recipe):
     """Point every declared unit at the new model + recipe, keeping the record true.
 
     ``model`` and ``recipe`` are the fields; ``serve_cmd`` is the RECORDED argv
-    the apply path wrote and the node-resume path replays verbatim
-    (``serving._unit_run_cmd(prefer_serve_cmd=True)``). Rewriting the fields and
-    leaving the record behind is the trap this used to ship: ``--served-model-name
-    `` and ``--tp`` ride in that argv and feed sparkrun's INTENT HASH, so a
-    record still naming the old model makes the next stop/resume compute a
-    different intent, match nothing, and leave the container running while the
-    caller logs a clean stop (t_8ad06a53 — the pause that "stopped" a node and
-    changed nothing). So the record is refreshed from the sanctioned plan
+    the apply path wrote and the node-resume path replays. Leaving it describing
+    the old launch costs three things, all of them silent at wire time:
+    ``_unit_run_cmd(prefer_serve_cmd=True)`` replays a placement-matching record
+    with its non-placement flags intact (so ``--tp`` keeps the old value while
+    the field says otherwise), ``serving._serve_cmd_mismatch`` fires the serve_cmd
+    drift canary on every daemon tick afterwards, and the moment the recipe
+    differs the planner logs ``serve_cmd refused ... using derived command`` on
+    every plan. The record is therefore refreshed from the sanctioned plan
     builder in the same write, or CLEARED with a printed reason. Never left
     describing a launch that no longer exists.
 
@@ -667,11 +709,16 @@ def wire_serving(model_id, recipe):
     """
     d = _load("serving.json")
     units = d.get("units", []) or []
-    fresh = _refreshed_serve_cmds(d)
-    stale = 0
+    # Fields FIRST, plan SECOND. ``fleet_up_plan`` derives --served-model-name
+    # from ``model`` and the recipe position from ``recipe``; deriving before
+    # the rewrite re-rendered the record from the values we had just replaced
+    # and printed a confident "re-rendered" over a stale intent.
     for u in units:
         u["model"] = model_id
         u["recipe"] = recipe
+    fresh = _refreshed_serve_cmds(d)
+    stale = 0
+    for u in units:
         key = str(u.get("id") or ",".join(u.get("nodes") or []))
         if fresh.get(key):
             u["serve_cmd"] = fresh[key]
