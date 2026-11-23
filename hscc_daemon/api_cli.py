@@ -436,9 +436,13 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
     RETURNS the exit code for the serving process (t_54159e29): 0 for a stop that
     got every listener loop back, 1 when ``serve_forever``'s bounded stop had to
     abandon one — in which case the abandoned hosts are named in a WARN on the API
-    log, the same report ``serve_main`` makes on the launchd path. Callers must
-    pass this through rather than exit 0 unconditionally, or the two entry paths
-    disagree about what the same stop cost.
+    log, the same report ``serve_main`` makes on the launchd path. 1 also when the
+    serving loop raised (t_242506d7), the crash this function's ``except Exception``
+    arm already logs at ERROR and which ``serve_main`` likewise exits 1 for; the two
+    conditions are tracked by separate flags so the abandoned-listener WARN stays a
+    report about a wedged loop and nothing else. Callers must pass this through
+    rather than exit 0 unconditionally, or the two entry paths disagree about what
+    the same failure cost.
     """
     if isinstance(binds, str):
         binds = [binds]
@@ -527,6 +531,14 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
     # `serve_main` tracks (t_60932269), same meaning on both entry paths: the
     # stop happened, but it happened by giving something up.
     stop_clean = True
+    # True once the serving loop raised. A SEPARATE flag rather than
+    # `stop_clean = False`, for the reason `serve_main` keeps them separate too:
+    # `stop_clean` is what turns the abandoned-listener WARN on in the `finally:`
+    # below, and a crash abandoned nothing — it never got as far as a stop. Reusing
+    # the one flag would have this process report a wedged listener loop it never
+    # had, and send someone to debug one. Both conditions cost 1; only one of them
+    # says why.
+    crashed = False
     try:
         if _stop_requested.is_set():
             # A stop was requested while the listeners were still coming up —
@@ -555,6 +567,13 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
             # code, with a wedged loop and its socket silently left behind.
             stop_clean = server.serve_forever(stop_event=_stop_requested)
     except Exception as exc:
+        # The verdict is decided HERE, in the arm. The `return` below reports what
+        # the stop cost, and a crash never reached a stop — so a crash that only
+        # left a log line behind exits with the code of a clean one. Nor is it a
+        # stop that abandoned something, so it cannot borrow `stop_clean`:
+        # `serve_main` returns 1 for this same exception, and an operator should not
+        # have to know which entry path they ran (t_242506d7).
+        crashed = True
         daemon_ops.log(
             f"HSCC API crashed: {exc}", "ERROR",
             log_file=API_LOG_FILE, pid_file=API_PID_FILE,
@@ -605,14 +624,16 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
                            log_file=API_LOG_FILE, pid_file=API_PID_FILE)
         daemon_ops.log("HSCC API stopped",
                        log_file=API_LOG_FILE, pid_file=API_PID_FILE)
-    # 0 for a stop that got every loop back, 1 for one that had to abandon a
-    # listener — the same report `serve_main` makes. It is a REPORT: `hscc api
+    # 0 for a stop that got every loop back; 1 for one that had to abandon a
+    # listener, and 1 for a serving loop that raised — the same pair of prices
+    # `serve_main` charges, where the abandoned stop falls out of this same
+    # expression and the crash returns 1 from its own arm. It is a REPORT: `hscc api
     # stop` stops by SIGTERMing the pid file's instance and waits for it to be
     # gone, not by reading this status (the grandchild is reparented the moment
     # the intermediate fork exits), so nothing restarts or fails on it. What it
-    # buys is that "stopped" and "stopped by giving up" are tellable apart by
-    # anything that ever does look, instead of the two being the same number.
-    return 0 if stop_clean else 1
+    # buys is that "stopped", "stopped by giving up", and "died" are tellable apart
+    # by anything that ever does look, instead of all three being the same number.
+    return 0 if (stop_clean and not crashed) else 1
 
 
 def _abandoned_listener_report(server, api) -> str:

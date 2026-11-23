@@ -115,6 +115,19 @@ WEDGE_MARKER_TEXT = "wedge entered"
 #: is what tells a wrong verdict from a harness that stopped forwarding one.
 SERVE_RC_PREFIX = "rc="
 
+#: The message the `serve-crashed` arm raises with, and the string the parent
+#: looks for in the child's API log — one constant for both sides, so a rename
+#: reddens the assertion that reads the other instead of silencing the case.
+#: "harness-injected" is part of it on purpose: a line that says so cannot be
+#: mistaken later for a failure the product itself had.
+CRASH_TEXT = "harness-injected serving-loop failure"
+#: The `serve-crashed` arm's mode argument. `NO_CRASH` is the control — the same
+#: arm with the seam left alone, stopped by SIGTERM like any ordinary stop — and
+#: it is `'-'` for the same reason the wedge arm's control is: the two arms then
+#: differ in one argument rather than in a code path.
+CRASH_MODE = "crash"
+NO_CRASH = "-"
+
 # ━━━ load budgets, not behaviour budgets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # None of these can turn a wrong answer into a right one: they only decide how
 # long a LIVE child may take. Every one of them is measured, and the measurement
@@ -274,6 +287,10 @@ machine-derived path has to be a spawn argument of the caller's Popen.
                    `service_actions`, so the bounded stop has to abandon it. The
                    exit code and the WARN are what the arm exists to make
                    observable; see `test_a_wedged_listener_is_abandoned_reported`.
+  serve-crashed -> the same, with the serving loop replaced by one that raises,
+                   after the binds and the sidecar startup have run for real. The
+                   exit code and the ERROR line are what the arm exists to make
+                   observable; see `test_a_crash_in_the_serving_loop_reports_1`.
 
 The fake gateway_bridge is imported BEFORE anything else:
 `api_cli._load_gateway_bridge()` puts the hscc-api dir on sys.path and then
@@ -376,6 +393,62 @@ if verb == "serve-wedged":
 
     _api.create_servers = _create_servers_with_a_wedge
     print("@@MARK_STAGE@@ serve-wedged-enter", flush=True)
+    _rc = api_cli._serve(_api, _binds, False, _port)
+    print("@@SERVE_RETURNED@@ @@SERVE_RC_PREFIX@@%s" % _rc, flush=True)
+    raise SystemExit(_rc)
+
+if verb == "serve-crashed":
+    # The CRASH path seen from this entry path — the one `hscc api start` takes.
+    # An exception escapes the serving loop AFTER every listener is bound and the
+    # fake sidecar is really up, so `_serve`'s `except Exception` arm runs, its
+    # `finally:` still owns the sidecar teardown, and the process's exit status is
+    # the only thing left that can say the API died rather than stopped. See
+    # `test_a_crash_in_the_serving_loop_reports_1_and_still_tears_down`.
+    #
+    # The raise is injected AT THE `serve_forever` SEAM rather than deep inside it,
+    # deliberately and for the reason t_60932269 gave for injecting its wedge at
+    # `service_actions`: nothing in the product raises out of
+    # `_MultiServer.serve_forever` today — the listener loops run on their own
+    # threads (so an exception there dies in the thread, it does not reach
+    # `_serve`) and the bounded stop RETURNS rather than raising. The arm therefore
+    # stands in for the class of failure `serve_main`'s own `except Exception`
+    # catches, and everything it makes observable is real: a real `except Exception`
+    # in the product's `_serve`, a real teardown of a real child process, a real
+    # exit status.
+    #
+    # argv: <port> <binds-csv> <crash|->   — '-' injects nothing, which is the
+    # control arm: byte-identical below the seam, stopped by SIGTERM like any
+    # ordinary stop, so the pair says whether the 1 and the ERROR line track the
+    # crash or merely accompany every exit.
+    import signal as _signal
+    _signal.signal(_signal.SIGTERM, api_cli._sigterm_handler)
+    _signal.signal(_signal.SIGINT, api_cli._sigterm_handler)
+
+    _port, _binds, _mode = int(rest[0]), rest[1].split(","), rest[2]
+    _api = api_cli._load_api_server()
+    if _mode != "@@NO_CRASH@@":
+        _real_create_servers = _api.create_servers
+
+        def _create_servers_with_a_crash(*a, **kw):
+            # The real `create_servers` still runs, so the binds, the bind report
+            # and the sidecar startup are the product's own; only the serving loop
+            # that `_serve` then calls is replaced.
+            _srv = _real_create_servers(*a, **kw)
+
+            def _serving_loop_that_raises(**_kw):
+                # `**_kw` is load-bearing: `_serve` calls
+                # `serve_forever(stop_event=...)`, so a def that accepts nothing
+                # would die of TypeError before the injected failure ever ran and
+                # the case would pass on the wrong exception. And NO `self` — this
+                # is an INSTANCE attribute replacement, the same trap the wedge arm
+                # documents at its own seam.
+                raise RuntimeError("@@CRASH_TEXT@@")
+
+            _srv.serve_forever = _serving_loop_that_raises
+            return _srv
+
+        _api.create_servers = _create_servers_with_a_crash
+    print("@@MARK_STAGE@@ serve-crashed-enter", flush=True)
     _rc = api_cli._serve(_api, _binds, False, _port)
     print("@@SERVE_RETURNED@@ @@SERVE_RC_PREFIX@@%s" % _rc, flush=True)
     raise SystemExit(_rc)
@@ -496,6 +569,8 @@ HARNESS = (HARNESS
            .replace("@@WEDGE_ENTERED@@", WEDGE_MARKER_TEXT)
            .replace("@@SERVE_RC_PREFIX@@", SERVE_RC_PREFIX)
            .replace("@@SERVE_RETURNED@@", SERVE_RETURNED)
+           .replace("@@CRASH_TEXT@@", CRASH_TEXT)
+           .replace("@@NO_CRASH@@", NO_CRASH)
            .replace("@@MARK_STAGE@@", STAGE_PREFIX)
            .replace("@@MARK_RACE@@", RACE_ENTERED)
            .replace("@@MARK_INTERRUPTED@@", INTERRUPTED_INSIDE_LOG)
@@ -1332,6 +1407,183 @@ def test_a_stop_that_lost_nothing_reports_nothing(sandbox):
             proc.wait(timeout=10)
 
 
+# --------------------------------------------------------------------------- #
+# the crash path: the serving loop raises instead of stopping cleanly
+# --------------------------------------------------------------------------- #
+
+#: Identifies the crash report in the child's API log. `daemon_ops.log` renders the
+#: level right-aligned in five columns (`f"[{level:>5s}] {msg}"`), so the level half
+#: of the line is matched by pattern rather than by a literal `[ERROR]` that never
+#: occurs in the file.
+CRASH_ERROR = "HSCC API crashed:"
+_ERROR_LEVEL = re.compile(r"\[\s*ERROR\]")
+
+
+def _crash_lines(sandbox):
+    """The crash-report lines in the child's API log (usually zero or one).
+
+    Filtered on BOTH the message and the level, because the two halves of this
+    card's claim are different: the message says the crash was noticed, the level
+    says an operator filtering by severity finds it. A line that lost either one
+    would otherwise still satisfy a case that read only the other.
+    """
+    try:
+        text = sandbox["log"].read_text()
+    except FileNotFoundError:
+        return []
+    return [line for line in text.splitlines()
+            if CRASH_ERROR in line and _ERROR_LEVEL.search(line)]
+
+
+def _run_the_crash_arm(sandbox, port, mode):
+    """Run `serve-crashed`, wait for a sidecar that really exists, then act.
+
+    -> (run, proc, sidecar_pid)
+
+    Both modes wait for the same two things — the child's own `listening` line, then
+    a sidecar that is actually up — because a crash is only interesting if there was
+    something below it to tear down. Only the ending differs: the crash arm dies of
+    its own injected failure, the control has to be stopped, and signalling the crash
+    arm would measure the signal instead of the crash.
+    """
+    proc = _popen(sandbox, "serve-crashed", str(port), ",".join(BOTH_BINDS), mode)
+    trail = _ChildTrail(proc)
+    _wait_listening(sandbox, port)
+    assert _have(sandbox, SIDECAR_STARTED), (
+        f"the sidecar never started, so nothing below can prove a teardown: "
+        f"{_describe(sandbox)}")
+    sidecar_pid = _read_int(sandbox["sidecar_pid"])
+    # From here the silence is the measurement (:meth:`_ChildTrail.mark`): the
+    # control has nothing to say until it stops, and the crash arm says its last
+    # line from inside `_serve`.
+    trail.mark()
+    if mode == NO_CRASH:
+        os.kill(proc.pid, signal.SIGTERM)
+    return _await_child(proc, trail), proc, sidecar_pid
+
+
+def test_a_crash_in_the_serving_loop_reports_1_and_still_tears_down(sandbox):
+    """The API died rather than stopped, and the exit status has to say so.
+
+    `_serve`'s `except Exception` arm already wrote its ERROR line, and then fell
+    through to the same `finally:` a clean stop uses — so it returned
+    `0 if stop_clean else 1` with `stop_clean` still True, and the serving
+    grandchild of `hscc api start` exited **0** having crashed. `serve_main`
+    returns 1 for the identical failure (`except Exception as exc: print(...);
+    return 1`), which is the same disagreement t_54159e29 closed one path over:
+    two entrypoints, one failure, two prices.
+
+    Three witnesses, and the third is the one that constrains the fix. The run came
+    back through `_serve` reporting 1 (so the verdict is carried, not hard-exited
+    past), the process agrees, and the sidecar a crashed process started is really
+    gone — the teardown that `finally:` owns still ran, which is the half an
+    `os._exit` in that handler would have lost. The log assertions hold the report
+    to its own shape: an ERROR line naming the failure, and NO abandoned-listener
+    WARN, because a crash abandoned nothing — it never got as far as stopping.
+    """
+    port = _free_port()
+    run, proc, sidecar_pid = _run_the_crash_arm(sandbox, port, CRASH_MODE)
+    try:
+        if run.verdict != "clean":
+            pytest.fail(
+                f"a crash in the serving loop did not return through `_serve`: it "
+                f"{run.verdict} ({run.detail}) instead of exiting on its own. The "
+                f"crash arm must fall through to the `finally:` that owns the "
+                f"teardown, not escape it or be cut short.\n"
+                f"child output: {run.output}\n{_describe(sandbox)}")
+        assert SERVE_RETURNED + " " + SERVE_RC_PREFIX + "1" in run.output, (
+            f"the run came back through `_serve` but reported "
+            f"{run.output.splitlines()[-1]!r}: a crashed API still returns the clean "
+            f"verdict, so `hscc api start`'s grandchild exits 0 on a death — the "
+            f"divergence from `serve_main`'s `return 1` this card is about.\n"
+            f"child output: {run.output}\n{_describe(sandbox)}")
+        assert proc.returncode == 1, (
+            f"the process exited {proc.returncode} after a crash: `_handle_start` "
+            f"exits with `_serve`'s verdict, so a 0 here means the verdict was "
+            f"computed clean rather than that the handoff was dropped (the harness "
+            f"line above says which).\nchild output: {run.output}\n"
+            f"{_describe(sandbox)}")
+
+        crash = _crash_lines(sandbox)
+        assert crash, (
+            f"the API log has no ERROR-level {CRASH_ERROR!r} line. The exit code is "
+            f"the machine's witness; this is the operator's, and it is the only "
+            f"channel this entry path has (stdout here is the CLI's own, and the pid "
+            f"file closes even `daemon_ops.log`'s stderr echo).\n"
+            f"{_describe(sandbox)}")
+        assert CRASH_TEXT in crash[0], (
+            f"the crash line does not name the failure that reached it: "
+            f"{crash[0]!r}. A crash the log cannot quote is a crash nobody can "
+            f"diagnose.\n{_describe(sandbox)}")
+        assert not _warn_lines(sandbox), (
+            f"a crash wrote the abandoned-listener WARN: {_warn_lines(sandbox)}. The "
+            f"two conditions are not the same and must not share a report: that line "
+            f"says a stop gave up on a listener loop that could not return, and a "
+            f"crash never reached a stop. Reporting one as the other sends someone to "
+            f"debug a wedged listener that was never wedged.\n{_describe(sandbox)}")
+
+        # The point of keeping the crash inside the try instead of letting it out:
+        # the teardown below it still runs. Everything from here is what
+        # t_56552ecc made this file guarantee on the stop path, on the crash path.
+        assert _have(sandbox, SIDECAR_SHUTDOWN, timeout=10), (
+            f"the API crashed and never tore its sidecar down — the crash left the "
+            f"`finally:` that owns it: {_describe(sandbox)}")
+        assert sidecar_pid is not None and not _alive(sidecar_pid), (
+            f"the sidecar (pid {sidecar_pid}) outlived a crashed API: it is still "
+            f"alive holding this process's token, which is the orphan the teardown "
+            f"exists to prevent. {_describe(sandbox)}")
+        assert "HSCC API stopped" in sandbox["log"].read_text(), (
+            f"the closing line is missing, so the `finally:` did not finish: "
+            f"{_describe(sandbox)}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+def test_a_serving_loop_that_returns_normally_reports_no_crash(sandbox):
+    """The control for the case above: same arm, same binds, no injected raise.
+
+    Without it, "reports a crash on 1" is satisfied by a build that reports a crash
+    on every exit, and both halves of the report stop being signals: the ERROR line
+    would greet an operator on every ordinary `hscc api stop`, and the 1 would stop
+    separating anything. Byte-identical below the seam — the real `serve_forever`
+    runs, the stop is the ordinary SIGTERM — and every one of those witnesses is
+    absent.
+    """
+    port = _free_port()
+    run, proc, sidecar_pid = _run_the_crash_arm(sandbox, port, NO_CRASH)
+    try:
+        assert run.verdict == "clean", (
+            f"an ordinary stop on this arm did not return through `_serve`: it "
+            f"{run.verdict} ({run.detail}).\nchild output: {run.output}\n"
+            f"{_describe(sandbox)}")
+        assert SERVE_RETURNED + " " + SERVE_RC_PREFIX + "0" in run.output, (
+            f"the same arm without a crash reported "
+            f"{run.output.splitlines()[-1]!r} instead of 0 — a 1 that appears whether "
+            f"or not the serving loop raised is not a verdict.\n"
+            f"child output: {run.output}\n{_describe(sandbox)}")
+        assert proc.returncode == 0, (
+            f"a healthy cooperative stop exited {proc.returncode} on this arm; the "
+            f"non-zero is reserved for a stop that gave something up and for a "
+            f"crash.\nchild output: {run.output}\n{_describe(sandbox)}")
+        assert not _crash_lines(sandbox), (
+            f"a clean stop wrote a crash line: {_crash_lines(sandbox)}. An operator "
+            f"who finds `HSCC API crashed:` in the log after every `hscc api stop` "
+            f"learns to ignore it, which is worse than the silence it replaced.\n"
+            f"{_describe(sandbox)}")
+        assert _have(sandbox, SIDECAR_SHUTDOWN, timeout=10), (
+            f"the healthy stop on this arm did not tear the sidecar down: "
+            f"{_describe(sandbox)}")
+        assert sidecar_pid is not None and not _alive(sidecar_pid), (
+            f"the sidecar (pid {sidecar_pid}) survived an ordinary stop on this arm: "
+            f"{_describe(sandbox)}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
 class TestTheVerdictIsCarried:
     """Source pins for the handoff the behavioural cases cannot enforce.
 
@@ -1379,6 +1631,54 @@ class TestTheVerdictIsCarried:
             f"— False when a listener loop had to be abandoned — and not keeping it "
             f"is the divergence t_54159e29 closes. `_serve` must assign it "
             f"(`stop_clean = ...`) or return it")
+
+    def test_a_crash_changes_what_serve_returns(self):
+        """The crash arm must reach the verdict, not only the log.
+
+        An `except Exception` that logs and falls through is syntactically legal and
+        was the defect: `stop_clean` was still True when the `return` ran, so an API
+        whose serving loop raised reported the same code as one that stopped with
+        every listener back. Nothing in the log distinguishes them either — the ERROR
+        line was already there before the fix — so the only witness is the exit
+        status, and only this arm decides it.
+
+        Pinned structurally rather than by name: whatever the handler writes has to
+        be something the returned expression reads. `crashed = True` satisfies that,
+        and so would `stop_clean = False` — the behavioural pair above is what says
+        which of the two is honest, because the second one also turns the
+        abandoned-listener WARN on for a crash that abandoned nothing.
+        """
+        body = self._body(api_cli._serve)
+        guarded = [n for n in self._walk(body)
+                   if isinstance(n, ast.Try) and n.finalbody and n.handlers]
+        assert guarded, (
+            "_serve no longer has a try/except with the teardown in its finally: — "
+            "the shape t_56552ecc pinned, and the only place a crash can be turned "
+            "into a verdict instead of an exit code nobody computed")
+        returns = [n for n in self._walk(body)
+                   if isinstance(n, ast.Return) and n.value is not None]
+        assert returns, (
+            "_serve no longer returns a verdict, so `_handle_start`'s "
+            "`os._exit(_serve(...))` has nothing to exit with")
+        read = {node.id for r in returns for node in self._walk(r.value)
+                if isinstance(node, ast.Name)}
+        written = set()
+        for handler in (h for t in guarded for h in t.handlers):
+            for node in self._walk(handler):
+                if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                    targets = (node.targets if isinstance(node, ast.Assign)
+                               else [node.target])
+                    for target in targets:
+                        for name in self._walk(target):
+                            if isinstance(name, ast.Name):
+                                written.add(name.id)
+        assert written & read, (
+            f"the except arm(s) at line(s) "
+            f"{[h.lineno for t in guarded for h in t.handlers]} write "
+            f"{sorted(written) or 'nothing'}, while the return at line(s) "
+            f"{[r.lineno for r in returns]} reads {sorted(read)}: the crash is logged "
+            f"and then falls through to the clean verdict — `serve_main` returns 1 "
+            f"for the same exception, and that disagreement is this card")
 
     def test_the_start_path_exits_with_serves_verdict(self):
         """`os._exit(0)` after `_serve` reports every stop as clean.
