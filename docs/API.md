@@ -216,6 +216,34 @@ endpoints (confirm-gated, see below).
 | GET | `/v1/review/{card_id}` | **Dry-run** review facts for one card (branch state, merge conflicts, the VERIFY line). Read-only — never merges, never closes. `404` if the card does not resolve to a reviewable branch. | read |
 | GET | `/v1/qa/queue` | The pre-merge QA queue + the manual-QA store. Returns `{queue, manual_qa, speak}`. | read |
 
+### Profiles (read)
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/profiles` | **The `hscc profiles` answer** — running kanban card counts per profile. Returns `{counts, total_running, profiles, speak}`: `counts` maps profile name → running cards, `total_running` is their sum, `profiles` is the list of profile **name strings** that have running cards (never the full roster). `speak` reads e.g. "2 profiles running 3 tasks." The payload has ONE implementation — `cluster_engine.cmd_profile_status()`, the same single call the CLI verb renders — and this handler adds nothing but `speak`. Shipped consumer: iOS `ProfilesResponse`. | read |
+| GET | `/v1/profiles/list` | The profile **roster** — every profile the API can see, running or not. Returns `{count, profiles, speak}`, where `profiles` is a list of per-profile **objects** with the safe summary keys `{name, is_default, gateway_running, model, provider, skill_count, description, description_auto, distribution_name, distribution_version}` and `speak` reads e.g. "5 profiles total." It counts nothing: no `counts`, no `total_running`. Shipped consumer: iOS `ProfileListResponse` (the create-card assignee picker). | read |
+| GET | `/v1/profiles/{name}` | One profile: the same summary object as a roster entry, under `summary`, plus the config **whitelist** under `config` (`model.default`/`model.provider`, `toolsets`, `skills.preload`, the `compression` block — never `api_key`, `base_url` or anything from `.env`). `404 not_found` if the profile does not exist. | read |
+
+> **These are two questions, not two answers to one** (audit F2, measured).
+> `GET /v1/profiles` is the canonical — and only — door to the running-card
+> counts that `hscc profiles` prints; `GET /v1/profiles/list` answers "which
+> profiles exist" and is the only door to the config whitelist. The two payloads
+> share the key name `profiles` with different meanings (a list of NAMES here, a
+> list of OBJECTS there), which is what made them read as one answer. Neither is
+> an alias of the other, neither is deprecated, and neither should be "unified"
+> into the other: each has a shipped decoder that the other cannot satisfy. A
+> profile-status read that fails answers `{"speak": "Profile status
+> unavailable."}` with no `counts` and no zeroes — absence is never reported as
+> "nothing running". Pinned by
+> `hscc-api/tests/test_profiles_route_canonical.py` (the payload boundary) and
+> `hscc-api/tests/test_profiles_routes_documented.py` (these rows).
+
+Per-profile lifecycle writes (`POST /v1/profiles/create`,
+`/v1/profiles/{name}/delete`, `/v1/profiles/{name}/rename`,
+`/v1/profiles/{name}/describe`) and the description read
+(`GET /v1/profiles/{name}/describe`) are registered in `hscc-api/routes_profiles.py`;
+every one of them is confirm-gated and is documented there rather than here.
+
 ### Actions (mutating — confirm-gated)
 
 All mutating endpoints require `"confirm": true` in the JSON body and return
