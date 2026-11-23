@@ -437,6 +437,13 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
     inside the join loop. The three ``os._exit``
     calls above stay: they are pre-bind failures, where nothing bound, no sidecar
     started and there is no teardown to skip.
+
+    RETURNS the exit code for the serving process (t_54159e29): 0 for a stop that
+    got every listener loop back, 1 when ``serve_forever``'s bounded stop had to
+    abandon one — in which case the abandoned hosts are named in a WARN on the API
+    log, the same report ``serve_main`` makes on the launchd path. Callers must
+    pass this through rather than exit 0 unconditionally, or the two entry paths
+    disagree about what the same stop cost.
     """
     if isinstance(binds, str):
         binds = [binds]
@@ -527,6 +534,10 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
     global _served_server
     _served_server = server
 
+    # False once the bounded stop had to abandon a listener loop. Same verdict
+    # `serve_main` tracks (t_60932269), same meaning on both entry paths: the
+    # stop happened, but it happened by giving something up.
+    stop_clean = True
     try:
         if _stop_requested.is_set():
             # A stop was requested while the listeners were still coming up —
@@ -544,7 +555,16 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
             # `stop_event` is the sliver the pre-serve check cannot cover: a
             # stop landing after this line is passed but before the accept
             # loops are joinable, where `shutdown()` would still be a no-op.
-            server.serve_forever(stop_event=_stop_requested)
+            #
+            # The RETURN is the verdict on the stop and has to be kept: once the
+            # flag wakes the join loop up, `_MultiServer.serve_forever` waits at
+            # most `api_server._SHUTDOWN_WAIT_SECONDS` on each listener loop
+            # (t_60932269), returns False when it had to abandon one, and leaves
+            # the hosts it abandoned in `server.wedged_listeners`. Discarding it
+            # is what made this entry path diverge from `serve_main`: the stop
+            # would look exactly like a clean one in the log and in the exit
+            # code, with a wedged loop and its socket silently left behind.
+            stop_clean = server.serve_forever(stop_event=_stop_requested)
     except Exception as exc:
         daemon_ops.log(
             f"HSCC API crashed: {exc}", "ERROR",
@@ -587,6 +607,50 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
         # message about the pid it signalled, not about the server finishing.
         daemon_ops.log("HSCC API stopped",
                        log_file=API_LOG_FILE, pid_file=API_PID_FILE)
+    # 0 for a stop that got every loop back, 1 for one that had to abandon a
+    # listener — the same report `serve_main` makes. It is a REPORT: `hscc api
+    # stop` stops by SIGTERMing the pid file's instance and waits for it to be
+    # gone, not by reading this status (the grandchild is reparented the moment
+    # the intermediate fork exits), so nothing restarts or fails on it. What it
+    # buys is that "stopped" and "stopped by giving up" are tellable apart by
+    # anything that ever does look, instead of the two being the same number.
+    return 0 if stop_clean else 1
+
+
+def _abandoned_listener_report(server, api) -> str:
+    """The WARN line for a stop that had to abandon a listener loop.
+
+    Split out of `_serve`'s ``finally:`` because it is the half of the bounded
+    stop an operator reads, and it belongs on the API log rather than on stdout.
+    Two measured reasons, and they point the same way:
+
+    * ``daemon_ops.log`` echoes to stderr only while the pid file is ABSENT
+      (``if not os.path.exists(pid_file)``, daemon_ops.py:630), and this path has
+      one — ``_handle_start`` writes it in the grandchild before calling
+      ``_serve`` — so even the echo channel is closed here. The file is the only
+      guaranteed one.
+    * stdio on this path is inherited from the CLI, not redirected: t_22f4a99f's
+      ``DEVNULL`` dup2 is still unmerged, and until it lands the serving
+      grandchild holds the caller's own descriptors open (which is why the
+      sibling tests redirect `start` to a FILE rather than a pipe). A ``print``
+      here therefore either lands on a pipe the caller has already closed — and
+      a ``BrokenPipeError`` raised inside this ``finally:`` would abort the block
+      that owns the gateway sidecar teardown — or, once that card lands, on
+      ``/dev/null``, where nobody reads it.
+
+    Same sentence ``serve_main`` prints, on the channel this path's operator
+    actually reads. The bound is read from the module that owns it rather than
+    repeated here, so the two entry paths cannot report different numbers for
+    the same wait.
+    """
+    wedged = ", ".join(getattr(server, "wedged_listeners", None) or [])
+    where = f" on {wedged}" if wedged else ""
+    bound = getattr(api, "_SHUTDOWN_WAIT_SECONDS", None)
+    within = f" within {bound:g}s" if isinstance(bound, (int, float)) else ""
+    return (f"HSCC API: WARNING: listener loop{where}{within} did not stop — "
+            f"abandoned so the gateway sidecar teardown above could run; its "
+            f"socket closes when this process exits. Something is wedged inside "
+            f"that listener: the API stopped, but it did not shut down cleanly.")
 
 
 def _bridge_default_serve_port(server) -> int:
@@ -1019,8 +1083,11 @@ def _handle_start(argv, theme_name=None):
 
     # Write the real PID and run the serve loop.
     daemon_ops.save_pid(API_PID_FILE)
-    _serve(api, binds, tailscale, port_override)
-    os._exit(0)
+    # `_serve`'s verdict is the process's exit status (t_54159e29). It used to be
+    # `os._exit(0)` after the call, which reported a stop that had to abandon a
+    # wedged listener loop as a clean one — the divergence `serve_main` closed on
+    # the launchd path in t_60932269 and this path had to close too.
+    os._exit(_serve(api, binds, tailscale, port_override))
 
 
 def _wait_for_pid_gone(pid, timeout_s=10.0, first_delay=0.1, delay=1.0):
