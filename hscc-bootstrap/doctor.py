@@ -31,6 +31,7 @@ alias is safe.
 from __future__ import annotations
 
 import copy
+import inspect
 import os
 import re
 import shutil
@@ -1188,6 +1189,22 @@ def _sparkrun_default_cluster_matches_serving(_runner=None,
         return Check("sparkrun cluster vs serving", True,
                      detail="unparseable cluster default output — skipped",
                      fatal=False)
+    if not isinstance(data, dict):
+        # ``sparkrun cluster default --json`` prints the literal ``null`` on a host
+        # with no default cluster — measured under the roster-wide HOME seal (empty
+        # HOME, so the real sparkrun resolves no ``~/.config/sparkrun``; that posture
+        # is what a CI runner has too). ``json.loads`` ACCEPTS ``null``, so the only
+        # thing between that host and a traceback was this branch: without it the
+        # mapping access below crashed doctor's preflight and the whole installer
+        # died with it — 4 isolated-install cases in hscc-bootstrap went from skip
+        # (blind ~ gate) to RED (honest gate) the moment the leg grew a real-tree
+        # seam (t_5b560adf). A document that is not a mapping carries no hosts, so
+        # it is the same "nothing to compare" answer as an empty cluster, and
+        # report-only like every other branch in this check.
+        return Check("sparkrun cluster vs serving", True,
+                     detail=f"cluster default returned {type(data).__name__}, "
+                            "not a mapping — skipped",
+                     fatal=False)
     cluster_hosts = {h for h in (data.get("hosts") or []) if h}
     serving_nodes = set()
     for u in _serving_units(_serving_raw):
@@ -1372,11 +1389,21 @@ def _orch_waker_check_row(injected=None, hscc_dir=None) -> "Check":
     (a human CLI run), and the in-suite refusal (pytest with no seam — never a
     real read of the operator's daemon state). A module that cannot be imported
     at all reports itself UNVERIFIABLE rather than vanishing from the list, the
-    same honesty rule as the notifier-mask check. ``hscc_dir`` is forwarded to
-    the real check exactly like ``doctor_notifier_mask.check`` takes it: a
-    sandboxed bootstrap (doctor is Stage 1, HOME stays real there) must read
-    the SANDBOX's ~/.hscc root — config, stream state and daemon.pid — or the
-    check fires a fatal verdict over the operator's live daemon.
+    same honesty rule as the notifier-mask check.
+
+    ``hscc_dir`` is accepted because every feature row's function takes the same
+    shape, and is deliberately NOT forwarded (t_be690204). Every writer of what
+    this row reads resolves from ``$HOME`` — the waker's config
+    (``orch_waker.DEFAULT_CONFIG_PATH``), its stream stamp
+    (``state.STATE_DIR``) and ``daemon.pid`` (``daemon_ops``) — and not one of
+    them reads ``HSCC_DIR`` from the environment. A row handed the ambient root
+    was reading a directory nothing can write to and answering "the daemon is
+    not running" about a daemon that had ticked seconds ago (and FATAL, once a
+    pid file happened to sit at that root — both measured). The registry entry
+    for this row declares no ``row_kwargs``, so the wiring itself cannot hand a
+    root to a row that must not choose one; ``orch_waker.doctor_check`` keeps the
+    parameter purely as t_e9b0f048's caller-threaded seam, and refuses a redirect
+    onto a root that has never held a waker artefact.
     """
     if injected is not None:
         res = injected()
@@ -1391,7 +1418,9 @@ def _orch_waker_check_row(injected=None, hscc_dir=None) -> "Check":
                          fix="Deploy the hscc_daemon plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = waker.doctor_check(hscc_dir=hscc_dir)
+        # No hscc_dir: the waker's root is its writers' root, not this
+        # process's environment (t_be690204, above).
+        res = waker.doctor_check()
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 
@@ -1422,15 +1451,18 @@ def _load_cron_watchers():
 
 
 #: Fallback for the check name when the module itself cannot be imported —
-#: same trick as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints.
-_CRON_WATCHERS_CHECK_NAME = "cron watchers (dep_pr/escalate)"
+#: same trick as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints. Must stay
+#: byte-identical to ``cron_watchers.CHECK_NAME``, which enumerates every stream
+#: in its WATCHERS roster (dep_pr, escalate, alone_sweep).
+_CRON_WATCHERS_CHECK_NAME = "cron watchers (dep_pr/escalate/alone_sweep)"
 
 
 def _refused_cron_watchers_check() -> dict:
     """In-suite stand-in for the cron-watcher check when no seam was injected.
 
     The check's real targets are ``~/.hscc/state/dep_pr_watcher.json``,
-    ``~/.hscc/state/escalate_watcher.json`` and the install marker beside them
+    ``~/.hscc/state/escalate_watcher.json``,
+    ``~/.hscc/state/alone_sweep_gate.json`` and the install marker beside them
     — the OPERATOR's live tree when the suite runs from a dispatched worker.
     Same fence shape as ``_refused_orch_waker_check``: an ERROR naming the
     missing seam, never a silent pass and never a real read.
@@ -1449,11 +1481,20 @@ def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
     Three sources, in order of trust: an injected callable (tests pass a
     fixture-backed lambda), the real :func:`hscc_daemon.cron_watchers.doctor_check`
     (a human CLI run), and the in-suite refusal (pytest with no seam — never a
-    real read of the operator's watcher stamps). ``hscc_dir`` is forwarded to
-    the real check exactly like ``doctor_notifier_mask.check`` takes it, so a
-    sandboxed bootstrap reads the SANDBOX's ~/.hscc root; the check itself is
-    warn-only (fatal=False always) — GAP-B-4 asks for detection, not for a
-    bootstrap that dies over an out-of-band cron job.
+    real read). ``hscc_dir`` is accepted because every feature row's function
+    takes the same shape, and is deliberately NOT forwarded (t_adb66608): the
+    watcher ledger — ``~/.hscc/state/<stream>.json`` plus the install marker
+    beside it — has one root, the canonical state writer's, and the writers
+    (Hermes cron jobs, the installers) never see ``HSCC_DIR``. A row that read
+    wherever the ambient variable pointed was reading a root nothing can write
+    to and reporting live watchers as "not configured" — the live-host
+    measurement in the t_572b4856 audit §10.1. ``cron_watchers.doctor_check``
+    keeps the parameter as a caller-threaded test seam only, and this row's
+    registry entry declares no ``row_kwargs``, so the wiring itself cannot hand
+    a root to a row that must not choose one.
+
+    The check itself is warn-only (fatal=False always) — GAP-B-4 asks for
+    detection, not for a bootstrap that dies over an out-of-band cron job.
     """
     if injected is not None:
         res = injected()
@@ -1468,7 +1509,20 @@ def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
                          fix="Deploy the hscc_daemon plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = cw.doctor_check(hscc_dir=hscc_dir)
+        # No hscc_dir: the ledger's root is the writer's root, not this
+        # process's environment (t_adb66608, above).
+        #
+        # t_95eb9f15: the live doctor also compares each watcher's DEPLOYED copy
+        # against the repo copy the installer took it from. Opt-in on purpose --
+        # doctor_check reads no host scripts dir unless it is asked to -- and
+        # probed rather than assumed, because the cron_watchers this row loads
+        # may predate the seam (the deployed plugin payload is a release, not
+        # this checkout): a warn-only row must degrade to the stamp read, not
+        # raise out of the whole doctor run.
+        if "check_deployed_copies" in inspect.signature(cw.doctor_check).parameters:
+            res = cw.doctor_check(check_deployed_copies=True)
+        else:
+            res = cw.doctor_check()
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 
@@ -1597,9 +1651,21 @@ def _kanban_enforce_check_row(injected=None, hscc_dir=None) -> "Check":
     Three sources, same trust order as the waker row: an injected callable
     (tests), the real :func:`hscc_daemon.kanban_pause.doctor_check` (a human
     CLI run), and the in-suite refusal (pytest with no seam — never a real
-    read of the operator's daemon state). ``hscc_dir`` is forwarded exactly
-    like ``doctor_notifier_mask.check`` takes it, so a sandboxed bootstrap
-    (doctor is Stage 1, HOME stays real) reads the SANDBOX's ~/.hscc root.
+    read of the operator's daemon state).
+
+    ``hscc_dir`` is accepted because every feature row's function takes the same
+    shape, and is deliberately NOT forwarded (t_be690204). Both files this row
+    reads are written by writers that resolve from ``$HOME`` — the paused-policy
+    document (``kanban_pause.STATE_PATH``) and the ``kanban_enforce`` stream
+    stamp (``state.STATE_DIR``), plus ``daemon.pid`` from ``daemon_ops`` — and
+    none of them reads ``HSCC_DIR``. A row handed the ambient root read a
+    directory nothing can write to and answered "the daemon is not running —
+    nothing enforces" about a daemon whose enforce stream had stamped seconds
+    ago (and FATAL, once a pid file happened to sit there — both measured). The
+    registry entry declares no ``row_kwargs``, so the wiring cannot hand a root
+    to a row that must not choose one; ``kanban_pause.doctor_check`` keeps the
+    parameter purely as t_e9b0f048's caller-threaded seam, and refuses a redirect
+    onto a root that has never held an enforcer artefact.
     """
     if injected is not None:
         res = injected()
@@ -1615,7 +1681,9 @@ def _kanban_enforce_check_row(injected=None, hscc_dir=None) -> "Check":
                          fix="Deploy the hscc_daemon plugin next to "
                              "hscc-bootstrap (re-run bootstrap).",
                          fatal=False)
-        res = kp.doctor_check(hscc_dir=hscc_dir)
+        # No hscc_dir: the enforcer's root is its writers' root, not this
+        # process's environment (t_be690204, above).
+        res = kp.doctor_check()
     return Check(name=res["name"], ok=res["ok"], detail=res["detail"],
                  fix=res["fix"], fatal=res["fatal"])
 
@@ -1834,6 +1902,319 @@ def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
                  fix=res["fix"], fatal=res["fatal"])
 
 
+def _load_main_board():
+    """Import the main-board feature module (M3, t_7b55db57).
+
+    The verdict lives in ``hscc-bootstrap/main_board.py`` with the resolver
+    (``hscc-roles/main_orch.py``) and the Hermes current-board reader, so doctor
+    only adapts it to its five Check fields. Returns None when the module is
+    not deployed next to bootstrap — the row then reports itself unverifiable
+    instead of vanishing.
+    """
+    try:
+        import main_board
+        return main_board
+    except Exception:
+        pass
+    bootstrap_dir = os.path.dirname(os.path.abspath(__file__))
+    if bootstrap_dir not in sys.path:
+        sys.path.insert(0, bootstrap_dir)
+    try:
+        import main_board
+        return main_board
+    except Exception:
+        return None
+
+
+#: Fallback for the row name when the module itself cannot be imported — same
+#: trick as ``_ORCH_WAKER_CHECK_NAME`` so the row still prints.
+_MAIN_BOARD_CHECK_NAME = "kanban current board (main orchestrator)"
+
+
+def _refused_main_board_check() -> dict:
+    """In-suite stand-in for the main-board check when no seam was injected.
+
+    The check reads Hermes' machine-wide kanban current pointer — the
+    OPERATOR's live board state when the suite runs from a dispatched worker.
+    Same fence shape as ``_refused_kanban_enforce_check``: an ERROR naming the
+    missing seam, never a silent pass and never a real read.
+    """
+    return {"name": _MAIN_BOARD_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "main-board check refused inside a pytest process — "
+                      "inject _main_board_check",
+            "fix": "Pass _main_board_check=lambda: {...} built from a tmp "
+                   "HERMES_HOME/kanban fixture; a suite must never read the "
+                   "operator's current board."}
+
+
+def _load_main_wakeups():
+    """Import ``hscc_daemon/main_wakeups.py`` for the M5 doctor check.
+
+    The verdict lives with the feature (config loader, state, schedule math and
+    the pane seam), so doctor only adapts it to its five Check fields. Returns
+    None when the daemon plugin is not deployed next to bootstrap — the row
+    then reports itself unverifiable rather than vanishing.
+    """
+    try:
+        from hscc_daemon import main_wakeups
+        return main_wakeups
+    except Exception:
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import main_wakeups
+        return main_wakeups
+    except Exception:
+        return None
+
+
+#: Fallback for the row name when the module itself cannot be imported.
+_MAIN_WAKEUPS_CHECK_NAME = "main wakeups (daemon-owned schedule)"
+
+
+def _refused_main_wakeups_check() -> dict:
+    """In-suite stand-in when no wake-up verdict was injected.
+
+    The real check reads ``~/.hscc/main_wakeups.json``, its state file and the
+    operator's tmux panes. Same fence shape as the other daemon rows: an ERROR
+    naming the seam, never a silent pass and never a real read.
+    """
+    return {"name": _MAIN_WAKEUPS_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "main-wakeups check refused inside a pytest process — "
+                      "inject _main_wakeups_check",
+            "fix": "Pass _main_wakeups_check=lambda: {...} built from tmp "
+                   "config/state fixtures; a suite must never read the "
+                   "operator's wake-ups or panes."}
+
+
+#: Fallback for the check name when the feature module cannot be imported at
+#: all — same trick as ``_MAIN_BOARD_CHECK_NAME`` so the row still prints. The
+#: authoritative spelling lives in the feature module
+#: (``doctor_node_pauses.CHECK_NAME``); the two are pinned equal by
+#: tests/test_doctor_node_pauses.py.
+_NODE_PAUSES_CHECK_NAME = "node pauses (operator overlay)"
+
+
+def _load_doctor_node_pauses():
+    """Import the node-pause feature module (2.17.3, t_ba1fec3e).
+
+    The verdict lives next to the reader it wraps —
+    ``hscc-bootstrap/doctor_node_pauses.py`` owns what counts as a malformed
+    overlay (it listens to ``node_pauses``' own warnings instead of
+    re-implementing the overlay's validation) and the wording that separates an
+    operator's parked node from a broken one. doctor only adapts the result to
+    its five Check fields. Returns None when the module is not deployed next to
+    bootstrap, and the row reports itself unverifiable rather than vanishing.
+    """
+    try:
+        import doctor_node_pauses
+        return doctor_node_pauses
+    except Exception:  # noqa: BLE001 - any import failure means "not deployed"
+        return None
+
+
+def _refused_node_pauses_check() -> dict:
+    """In-suite stand-in for the node-pause check when no seam was injected.
+
+    The row's real target is ``~/.hscc/node_pauses.json`` — the OPERATOR's
+    overlay, whose contents would decide what the suite asserts. Same fence
+    shape as ``_refused_kanban_enforce_check``: an ERROR naming the missing
+    seam, never a silent pass and never a real read. The feature module applies
+    the identical fence to its own default-root path
+    (:func:`doctor_node_pauses.doctor_check` with ``directory=None``), so a
+    caller cannot walk past it by skipping the registry.
+    """
+    return {"name": _NODE_PAUSES_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "node-pause check refused inside a pytest process — "
+                      "inject _node_pauses_check",
+            "fix": "Call doctor_node_pauses.doctor_check(directory=<tmp "
+                   "overlay root>) for the real read path, or pass "
+                   "_node_pauses_check=lambda: {...} to pin the row's "
+                   "routing; a suite must never read the operator's overlay."}
+
+
+#: Fallback for the check name when the stream's module cannot be imported —
+#: same trick as ``_KANBAN_ENFORCE_CHECK_NAME`` so the row still prints.
+_NODE_PAUSE_EXPIRY_CHECK_NAME = "node pause expiry (durable-until stream)"
+
+
+def _load_node_pause_exec():
+    """Import ``hscc_daemon/node_pause_exec.py`` for the expiry-stream row.
+
+    The verdict lives with the stream (t_32a06db9's rule): its cadence SOT is
+    ``daemon_ops.PERIODIC_INTERVALS``, its stamp shape is what
+    ``expiry_tick`` writes, and its definition of "past due" is the tick's own
+    ``_due_entries`` — a row written down here in bootstrap would drift from all
+    three. doctor only adapts the result to its five Check fields. Two-step
+    import like :func:`_load_kanban_pause` (deployed plugin, then repo root),
+    and None means the row reports itself unverifiable rather than vanishing.
+    """
+    try:
+        from hscc_daemon import node_pause_exec
+        return node_pause_exec
+    except Exception:  # noqa: BLE001 - any import failure means "not deployed"
+        pass
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    try:
+        from hscc_daemon import node_pause_exec
+        return node_pause_exec
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _refused_node_pause_expiry_check() -> dict:
+    """In-suite stand-in for the expiry-stream row when no seam was injected.
+
+    The row's real targets are ``~/.hscc/state/node_pause_expiry.json`` and
+    ``~/.hscc/node_pauses.json`` — the operator's live stamp and overlay, which
+    would decide what the suite asserts. Same fence as
+    :func:`_refused_node_pauses_check`, and the feature module applies the
+    identical fence to its own default-root path
+    (:func:`hscc_daemon.node_pause_exec.doctor_check` with ``root=None``), so a
+    caller cannot walk past it by skipping the registry.
+    """
+    return {"name": _NODE_PAUSE_EXPIRY_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "node-pause-expiry check refused inside a pytest process "
+                      "— inject _node_pause_expiry_check",
+            "fix": "Call node_pause_exec.doctor_check(root=<tmp ~/.hscc-shaped "
+                   "root>) for the real read path, or pass "
+                   "_node_pause_expiry_check=lambda: {...} to pin the row's "
+                   "routing; a suite must never read the operator's stamp."}
+
+
+# ── main-only cluster surface (t_caf98114) ─────────────────────────────────
+# Why this row exists: the 2026-11-23 main-only audit (PR #666) had to MEASURE,
+# by hand over 52 profile homes, which homes carried the cluster control surface.
+# Bootstrap had never written a per-profile ``plugins.enabled`` at all
+# (``enable_plugins.enable()`` wires only the config.yaml it is handed), so the
+# homes that did name the tool plugins were written by something else — the
+# class the audit called the ``_migrate_to_21`` landmine — and nothing in the
+# fleet's own health surface could see it. This row is that comparison: the
+# cluster tools/skills must sit on the main orchestrator's home and nowhere
+# else, while the hscc-cluster HOOKS stay everywhere (binding ruling R2/D-C —
+# hook presence is NOT drift and this row never reports it).
+
+#: Fallback for the check name when the feature module cannot be imported — same
+#: trick as ``_NODE_PAUSES_CHECK_NAME`` so the row still prints, and pinned equal
+#: to ``doctor_main_only.CHECK_NAME`` by the row's own suite.
+_MAIN_ONLY_SURFACE_CHECK_NAME = \
+    "main-only cluster surface (cluster tools/skills off <main>)"
+
+
+def _load_doctor_main_only():
+    """Import the main-only-surface feature module (t_caf98114).
+
+    The verdict lives with the feature: ``doctor_main_only.py`` owns which
+    surface counts (the ``plugins.enabled`` tool plugins and the hscc-owned
+    cluster skills), which does not (the ``hscc-cluster`` hooks, an on-disk
+    plugin dir, a cosmetic ``toolsets:`` entry), and the wording that names the
+    profile, the surface and the repair. It also refuses to hardcode the main
+    identity and reads it through ``hscc-roles/main_orch.main_name()``
+    (R2/D-A). doctor only adapts the result to its five Check fields.
+
+    Returns None when the module is not deployed next to bootstrap; the row then
+    reports itself unverifiable rather than vanishing from the list.
+    """
+    try:
+        import doctor_main_only
+        return doctor_main_only
+    except Exception:  # noqa: BLE001 - any import failure means "not deployed"
+        return None
+
+
+def _refused_main_only_check() -> dict:
+    """In-suite stand-in for the main-only check when no seam was injected.
+
+    Its real target is the operator's ``~/.hermes`` profile trees — their
+    contents would decide what the suite asserts. Same fence shape as
+    ``_refused_node_pauses_check``: an ERROR naming the missing seam, never a
+    silent pass and never a real read. The wording is delegated to the feature
+    module when it is importable, so doctor and the check cannot state two
+    different rules for the same refusal.
+    """
+    mod = _load_doctor_main_only()
+    refused_hook = getattr(mod, "refused", None)
+    if callable(refused_hook):
+        verdict = refused_hook()
+        if isinstance(verdict, dict):
+            return verdict
+    return {"name": _MAIN_ONLY_SURFACE_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "main-only-surface check refused inside a pytest process "
+                      "— inject _main_only_surface_check",
+            "fix": "Pass _main_only_surface_check=lambda: {...} built from "
+                   "tmp fake profile trees, or call "
+                   "doctor_main_only.doctor_check(hermes_home=...) directly; a "
+                   "suite must never read the operator's profile trees."}
+
+
+# --- kanban notify+wake subscription posture (t_639b2834) ------------------
+#
+# The 2026-11-23 duplicate-orchestrator incident was 307 notify+wake
+# subscriptions pointing at one gateway session while the real orchestrator sat
+# in a tmux pane; the gateway kept waking a SECOND copy of that identity, which
+# worked the boards alongside the pane REPL for about two weeks. The
+# subscribe-side gate is ``hscc-roles/orch_subscribe.py`` (t_31c8b258); this row
+# is the regression alarm behind it, because a pane can appear long after a
+# profile was provisioned and the gate is new.
+
+#: Fallback for the check name when the feature module cannot be imported — same
+#: trick as ``_MAIN_ONLY_SURFACE_CHECK_NAME``, pinned equal to
+#: ``doctor_orch_subs.CHECK_NAME`` by the row's own suite.
+_ORCH_WAKE_SUBS_CHECK_NAME = \
+    "orch wake subs (notify+wake target = live pane session)"
+
+
+def _load_doctor_orch_subs():
+    """Import the wake-subscription feature module (t_639b2834).
+
+    The verdict lives with the feature: ``doctor_orch_subs.py`` owns which
+    subscription counts (a wake mode on a platform whose ``chat_id`` names a
+    session), which does not (a chat channel, a plain ``notify`` sub, an
+    unattributed row, a paneless owner, the root profile), and the wording that
+    names the profile, the subscription id, the target session, the expected
+    pane session and the repair. It resolves the pane through
+    ``hscc-roles/orch_subscribe.py`` rather than restating the lease rule.
+
+    Returns None when the module is not deployed next to bootstrap; the row then
+    reports itself unverifiable rather than vanishing from the list.
+    """
+    try:
+        import doctor_orch_subs
+        return doctor_orch_subs
+    except Exception:  # noqa: BLE001 - any import failure means "not deployed"
+        return None
+
+
+def _refused_orch_wake_subs_check() -> dict:
+    """In-suite stand-in for the wake-subscription check when no seam was given.
+
+    Its real inputs are the operator's live board DBs and live session
+    registries — reading them inside a suite would let the live fleet decide the
+    suite's assertions. Same fence shape as ``_refused_main_only_check``: an
+    ERROR naming the seams, never a silent pass and never a real read. The
+    wording is delegated to the feature module when it is importable, so doctor
+    and the check cannot state two different rules for the same refusal.
+    """
+    mod = _load_doctor_orch_subs()
+    refused_hook = getattr(mod, "refused", None)
+    if callable(refused_hook):
+        verdict = refused_hook()
+        if isinstance(verdict, dict):
+            return verdict
+    return {"name": _ORCH_WAKE_SUBS_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "wake-subscription check refused inside a pytest process "
+                      "— inject _orch_wake_subs_check",
+            "fix": "Call doctor_orch_subs.doctor_check(boards=..., "
+                   "subscriptions=..., registry=...) with fake sub rows and "
+                   "fake leases, or pass "
+                   "_orch_wake_subs_check=lambda: {...}; a suite must never "
+                   "open a live board or a live active-session registry."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -1867,7 +2248,10 @@ def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
 # loader/refusal/fallback_name. `row_kwargs` names the per-row context each
 # row function wants: "hscc_dir" (the sandboxed ~/.hscc root, the
 # doctor_notifier_mask convention) or "hermes_home" (the deployed plugin tree,
-# what the budget-hook row reads).
+# what the budget-hook row reads). A row whose subject has a root the CALLER may
+# not choose declares `row_kwargs=()` — the cron-watcher row does, because the
+# ledger it reads is written by processes that never see HSCC_DIR (t_adb66608,
+# note on that entry).
 # ---------------------------------------------------------------------------
 FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # orch-waker W3 (t_2b34b5c7): is the daemon-resident orchestrator waker
@@ -1878,7 +2262,17 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # running, this stream never stamped".
     doctor_rows.FeatureCheckRow(
         key="orch_waker", seam_kwarg="_orch_waker_check",
-        row_fn="_orch_waker_check_row"),
+        row_fn="_orch_waker_check_row",
+        # NO row_kwargs — deliberately not even the default "hscc_dir"
+        # (t_be690204). Everything this row reads is written by a writer that
+        # resolves from HOME (waker config, stream stamp through
+        # state.STATE_DIR, daemon.pid), and none of them sees HSCC_DIR, so a row
+        # handed the ambient root reads a directory nothing can write to and
+        # calls a live waker "not running" — RED once a pid file sits there.
+        # Declaring no context makes the writer/reader split un-wireable rather
+        # than merely unwired today (the shape t_adb66608 proved for the cron
+        # row).
+        row_kwargs=()),
     # GAP-B-4 (audit B): the dep_pr / escalate Hermes-cron watchers run OUTSIDE
     # the daemon, so no stream notices when they stop firing — the dep-watcher
     # once failed 17 consecutive daily runs unnoticed (t_3aadd2c0). Each pass
@@ -1888,7 +2282,16 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # (fatal=False always).
     doctor_rows.FeatureCheckRow(
         key="cron_watchers", seam_kwarg="_cron_watchers_check",
-        row_fn="_cron_watchers_check_row"),
+        row_fn="_cron_watchers_check_row",
+        # NO row_kwargs — deliberately not even the default "hscc_dir"
+        # (t_adb66608). The watcher ledger has one root, the canonical state
+        # writer's (state.STATE_DIR), and the writers of that ledger (Hermes
+        # cron jobs, the installers) never see HSCC_DIR; a row handed the
+        # ambient root therefore reads a directory nothing can write to and
+        # calls live watchers "not configured" (audit t_572b4856 §10.1).
+        # Declaring no context is what makes the writer/reader split
+        # un-wireable instead of merely unwired today.
+        row_kwargs=()),
     # GAP-F-5 (audit F): is the running daemon loop the process the service
     # manager OWNS? The t_61457fbd incident class (an orphan `hscc start` /
     # TCC-blind bootstrap loop with PPID 1) keeps stream state fresh, so every
@@ -1910,7 +2313,42 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     # stream never stamped).
     doctor_rows.FeatureCheckRow(
         key="kanban_enforce", seam_kwarg="_kanban_enforce_check",
-        row_fn="_kanban_enforce_check_row"),
+        row_fn="_kanban_enforce_check_row",
+        # NO row_kwargs — same reason as the orch-waker row above
+        # (t_be690204): the paused-policy document and the kanban_enforce stamp
+        # are written by HOME-bound writers (kanban_pause.STATE_PATH,
+        # state.STATE_DIR) that never see HSCC_DIR, so a root taken from the
+        # environment is a root no pause can ever reach.
+        row_kwargs=()),
+    # M3 (t_7b55db57): does the machine-wide kanban current board still point
+    # at the main orchestrator's board? Bootstrap creates it and switches to it
+    # so board-less cards land there, never on a project board; this row flags
+    # any later drift (a manual switch, a board migration) with the one-line
+    # `hermes kanban boards switch <name>` fix. WARN-only: a wrong current
+    # board is work to steer, not a reason to abort an install.
+    doctor_rows.FeatureCheckRow(
+        key="main_board", seam_kwarg="_main_board_check",
+        loader="_load_main_board",
+        refusal="_refused_main_board_check",
+        fallback_name="_MAIN_BOARD_CHECK_NAME",
+        missing_detail="hscc-bootstrap/main_board.py not importable — the "
+                       "kanban current board cannot be verified",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
+    # M5: are the daemon-owned wake-ups enabled and delivering? The row is the
+    # doctor half of "skip and log when the pane is missing": it reads the
+    # persisted last-result stamp, so a missing main-orchestrator pane says so
+    # with the `hscc main start` fix even between two scheduled fires. WARN-only
+    # (fatal=False) — wake-up drift is work to steer, never a bootstrap stop.
+    doctor_rows.FeatureCheckRow(
+        key="main_wakeups", seam_kwarg="_main_wakeups_check",
+        loader="_load_main_wakeups",
+        refusal="_refused_main_wakeups_check",
+        fallback_name="_MAIN_WAKEUPS_CHECK_NAME",
+        missing_detail="hscc_daemon/main_wakeups.py not importable — the "
+                       "main orchestrator's wake-ups cannot be verified",
+        missing_fix="Deploy the hscc_daemon plugin next to hscc-bootstrap "
+                    "(re-run bootstrap)."),
     # t_6c4f38f2 (ships 2.15.0): the worker SOUL promises a `[budget]` note and
     # budget_watch.doctor_check verifies the two ctx.register_hook calls that
     # make it fire — but until that row existed nothing in doctor ever CALLED
@@ -1923,6 +2361,123 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
     doctor_rows.FeatureCheckRow(
         key="budget_hook", seam_kwarg="_budget_hook_check",
         row_fn="_budget_hook_check_row", row_kwargs=("hermes_home",)),
+    # 2.17.3 (t_ba1fec3e): is a node parked ON PURPOSE, and can the record that
+    # says so still be read? Every repair path skips a parked node and the fleet
+    # views read it `paused` (#560 overlay, #569 API, t_480cee2d cluster views),
+    # but doctor — the one surface an operator runs to ask "why is this machine
+    # not serving" — said nothing. A pause is an operator DECISION, so the row is
+    # INFO (ok=True: host, reason, since, until) and never WARN, never FAIL: a
+    # doctor that calls `hscc node pause` a fault trains the operator to ignore
+    # it, and a FATAL here would hard-stop bootstrap over a parked worker. The
+    # one loud posture is a file the reader cannot trust (node_pauses.load
+    # answers "no pauses" for a corrupt overlay, which is safe for a repair path
+    # and dangerous for a report) — WARN, fatal=False.
+    # NO row_kwargs, same reason as cron_watchers / kanban_enforce above
+    # (t_adb66608, t_be690204): node_pauses has no HSCC_DIR override — its
+    # default root is HOME's ~/.hscc, resolved at import, and that IS the root
+    # `hscc node pause` writes. A root handed in from the environment would be a
+    # directory no pause can ever reach, read back as "nothing is parked". The
+    # row takes a root only from an explicit ``directory=`` caller.
+    doctor_rows.FeatureCheckRow(
+        key="node_pauses", seam_kwarg="_node_pauses_check", row_kwargs=(),
+        loader="_load_doctor_node_pauses",
+        refusal="_refused_node_pauses_check",
+        fallback_name="_NODE_PAUSES_CHECK_NAME",
+        missing_detail="hscc-bootstrap/doctor_node_pauses.py not importable — "
+                       "parked nodes cannot be told apart from broken ones",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
+    # t_005e87fd (split out of t_110adc1a): is the daemon actually ENDING an
+    # expired pause? `hscc node pause --until 2h` is a promise about the future,
+    # and the `node_pause_expiry` stream (60 s, PERIODIC_INTERVALS) is what keeps
+    # it — `hscc verify` already covers the stream automatically, but verify says
+    # "did the stream run", never "did the operator's schedule get honoured". The
+    # stream goes RED for exactly the two states that mean it did not: `kept` (a
+    # due pause whose restart failed) and `skipped` (a due pause another pause
+    # still holds part of its span). This row is the kanban_enforce half for it
+    # (t_51931733): parked/past-due counts + last-pass freshness + the stamped
+    # RED named out of the stamp, with fatal RED reserved for the orch-waker
+    # class (the daemon runs and this stream has never stamped — the wiring
+    # itself), warn for stale / red-tick / predates-build / daemon-down.
+    # NO row_kwargs, same reason as kanban_enforce and node_pauses above
+    # (t_adb66608, t_be690204): both artefacts this row reads are written by
+    # HOME-bound writers with no HSCC_DIR override — the stamp through
+    # ``state.STATE_DIR`` and the overlay through ``node_pauses``' own default
+    # root — so a root lifted from the environment is a directory no pause can
+    # reach, and the row would call a live stream "never stamped" (a FATAL, once
+    # a pid file happened to sit there). The feature module keeps a ``root=``
+    # caller seam for tests, threaded through all three reads at once.
+    doctor_rows.FeatureCheckRow(
+        key="node_pause_expiry", seam_kwarg="_node_pause_expiry_check",
+        row_kwargs=(),
+        loader="_load_node_pause_exec",
+        refusal="_refused_node_pause_expiry_check",
+        fallback_name="_NODE_PAUSE_EXPIRY_CHECK_NAME",
+        missing_detail="hscc_daemon/node_pause_exec.py not importable — an "
+                       "expired node pause cannot be told apart from a pause "
+                       "the daemon is honouring",
+        missing_fix="Deploy the hscc_daemon plugin next to hscc-bootstrap "
+                    "(re-run bootstrap)."),
+    # t_caf98114 (main-only audit, PR #666): is the cluster CONTROL surface on a
+    # home that is not the main orchestrator? Two findings count — a non-main
+    # profile whose ``plugins.enabled`` names a cluster TOOL plugin
+    # (``hscc-commands``, ``sparkrun-hermes``), and a non-main profile whose
+    # skills tree carries an hscc-owned cluster skill. Hook presence never
+    # counts (binding ruling R2/D-C): ``hscc-cluster`` must stay enabled in every
+    # home or its six hooks die with it, and tools+hooks register in one call.
+    # WARN on every verdict, never fatal: the row's red is the fleet's CURRENT
+    # posture (the audit measured 26/52 profiles naming the cluster toolsets and
+    # bootstrap has never written a per-profile ``plugins.enabled``), and doctor
+    # is bootstrap's Stage-1 gate — a fatal here would hard-stop an install over
+    # drift the operator is mid-way through fixing. The identity is resolved,
+    # never spelled (R2/D-A), through ``main_orch.main_name()``, whose own
+    # ``hscc_dir`` seam this row is handed.
+    doctor_rows.FeatureCheckRow(
+        key="main_only_surface", seam_kwarg="_main_only_surface_check",
+        # BOTH contexts, each with a real consumer: hermes_home locates the
+        # profile trees (their writers — the installers — honour a named
+        # --home/HERMES_HOME, so a handed root is a root a writer can reach,
+        # unlike the HOME-only daemon-state rows above: t_be690204), and
+        # hscc_dir is main_orch's documented relocation seam for
+        # main-orchestrator.json, which decides WHICH home is <main>.
+        row_kwargs=("hermes_home", "hscc_dir"),
+        loader="_load_doctor_main_only",
+        refusal="_refused_main_only_check",
+        fallback_name="_MAIN_ONLY_SURFACE_CHECK_NAME",
+        missing_detail="hscc-bootstrap/doctor_main_only.py not importable — "
+                       "which homes may hold the cluster control surface "
+                       "cannot be verified",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
+    # t_639b2834 (regression alarm for the 2026-11-23 duplicate-orchestrator
+    # incident): does any kanban ``notify+wake`` subscription owned by a
+    # pane-backed profile point at a session that is NOT that profile's live
+    # pane session? 307 of them did exactly that and drove a second copy of the
+    # orchestrator for two weeks. The subscribe-side gate (t_31c8b258) prevents
+    # new ones; this row catches the posture re-forming, which the gate cannot
+    # do on its own — a pane can appear after a profile was provisioned.
+    # WARN, never fatal: the row's red is the fleet's CURRENT posture (an
+    # operator-owned subscription is a decision to remove, not a broken build)
+    # and doctor is bootstrap's Stage-1 gate.
+    #
+    # ``hermes_home`` ONLY, no ``hscc_dir``: the row resolves a pane in each
+    # profile's ``runtime/active_sessions.json``, which lives under the Hermes
+    # home the doctor was handed (the same read ``orch_subscribe`` and the
+    # budget-hook row do through this one context). It takes no ``hscc_dir``
+    # because nothing here reads ``~/.hscc`` — and it must not gain a root for
+    # the BOARDS, which are Hermes' and come from Hermes' own enumeration
+    # (``autodown.board_db_paths``), never from a caller-chosen path.
+    doctor_rows.FeatureCheckRow(
+        key="orch_wake_subs", seam_kwarg="_orch_wake_subs_check",
+        row_kwargs=("hermes_home",),
+        loader="_load_doctor_orch_subs",
+        refusal="_refused_orch_wake_subs_check",
+        fallback_name="_ORCH_WAKE_SUBS_CHECK_NAME",
+        missing_detail="hscc-bootstrap/doctor_orch_subs.py not importable — "
+                       "whether any notify+wake subscription points off its "
+                       "owner's live pane session cannot be verified",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
 ]
 
 #: The seam keywords the registry owns. run_doctor() validates its

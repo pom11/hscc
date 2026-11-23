@@ -9,6 +9,27 @@ Repro commands:
   python3 scripts/api_route_sweep.py             # single-pass reachability + elapsed
   python3 scripts/perf_measure.py --passes 5     # NEW: 5-pass median/p95 latency table
 
+Both tools share ONE set of probe rules, and that set lives in
+`hscc_daemon/api_route_sweep.py` — read its tables (`NOT_SWEPT`,
+`NOT_SWEPT_STATUS`, `HEAVY_ROUTES`, `PROBE_TIMEOUT`, `NEEDS_PARAM`,
+`MUTATION_SUFFIXES`) rather than re-deriving them here. Three of them change
+what the second command fires, so the latency table in section 1 is not what a
+modern run prints. The rules are PR #485 (`80146fb4`, the sweep) and PR #490
+(`918caded`, which merges #485 and makes `perf_measure.py` import them instead
+of keeping a second copy); both were still OPEN when this note was written
+(2026-11-20), so `main`'s copy of the script still does the old thing:
+
+  * `/v1/verify` is NEVER fired. Its handler IS `hscc_daemon.verify.run_all()` —
+    the fleet smoke test, doing real chat round-trips against the GPU units — so
+    it now gets a `skip` row with no timings instead of five live smoke tests
+    per run.
+  * `/v1/health` gets a `curl -m 120` of its own (`HEAVY_ROUTES`) instead of the
+    blanket `-m 30` (`PROBE_TIMEOUT`), because its cold start runs one inline
+    verify — measured 64.4 s — which the 30 s cap cut off mid-request, ranking a
+    route that was answering as if it were fast.
+  * The POST-only `/stop` `/up` `/down` family (`MUTATION_SUFFIXES`) is excluded
+    up front, not fired at and dropped after a 405.
+
 ---
 
 ## 1. Slowest endpoints (measured read-only, median of 5 passes, live API)
@@ -16,6 +37,40 @@ Repro commands:
 Command: `python3 scripts/perf_measure.py --passes 5`
 Address derived dynamically (never hardcoded) from `hscc api status`.
 Host masked as `***.*.*.*` (script prints no IP; repo has an AddressGuard).
+
+### Where these numbers come from — read this before quoting them
+
+This table is a verbatim paste of ONE run of the command above, taken at the
+revision that introduced both this file and the script: `d26a7fb0` (2026-09-02,
+branch `t_14a2958b`), which is still the ONLY revision of
+`scripts/perf_measure.py` on `main` — nothing touched the script until PR #490.
+That revision kept its own copy of the sweep's route discovery and probe loop:
+`client_routes()` returned every literal `/v1/...` path in
+`ios-app/Sources/HSCC/HSCCClient.swift` with no exclusions, and `measure()`
+looped a plain `curl -s -m 30` once per pass.
+
+So the "measured read-only" in the heading above was NOT true of the run that
+produced this table. While it was timing, that run also:
+
+  * fired `/v1/verify` 5 times — five fleet smoke tests doing real chat
+    round-trips on the operator's GPU units, each cut off at 30 s as a
+    *measurement* only, the verify behind it running on to completion;
+  * fired the POST-only `/stop` `/up` `/down` routes and dropped them on the
+    resulting 405;
+  * timed `/v1/logs` without the `?source=daemon&limit=1` the app always sends,
+    so its row was the latency of a 400 rejection, not of a read;
+  * cut `/v1/health`'s cold start off at 30 s.
+
+None of the six routes ranked here is one of those — they are read paths, so the
+ranking is not invalidated. What is NOT safe is reading the table as a
+measurement a modern run reproduces byte for byte: a current `--passes 5` fires
+no verify at all, so it never loads the daemon or the GPU units the way this run
+did while it was taking the timings. (That those five concurrent verifies made
+the read paths slower is an inference, not a measured correction — the numbers
+were never retaken without them.) Re-measure with the current script before
+quoting any row as today's latency. The audit's conclusion does not depend on
+the precision: `/v1/cluster/monitor`'s ~3 s is a subprocess-over-SSH cost
+(section 1 root cause), an order of magnitude above everything else.
 
 status   median    p95    max    route
 --------------------------------------------------------------------------------
@@ -168,6 +223,9 @@ the cheapest, highest-leverage fix.
 
 ## Verification / evidence notes
 - perf_measure.py derives the address at runtime (api_base()), never hardcodes IP.
-- All endpoint timings are measured against the LIVE API (read-only GETs).
+- All endpoint timings were measured against the LIVE API. They were NOT
+  read-only GETs: the run quoted in section 1 fired `/v1/verify` five times as
+  well, which is what the provenance note there is for. Corrected 2026-11-20
+  (t_0a9bdc40); the script PR #490 produces never fires it.
 - NO iOS runtime on this host: UI findings are source-reasoned, not executed.
   Backend endpoint timings are executed proof.

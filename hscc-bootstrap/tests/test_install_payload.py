@@ -518,6 +518,134 @@ def test_seeded_missing_profile_IS_created(tmp_path):
                 if p["profile"] == "worker")["created"] is False
 
 
+def test_main_profile_always_selected_even_when_allowlist_omits_it(tmp_path):
+    """t_b312580e: an explicit roster can narrow every OTHER home, but never
+    <main>. QA F1 measured a fresh install whose <main> registered zero hscc
+    plugins because the seed list did not contain the main profile name."""
+    repo, root, plugins = _seeded_tree(
+        tmp_path, with_plugins=("backend-engineer",),
+        without_plugins=("general", "worker"))
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A",
+        target_profiles=["backend-engineer"],
+        hscc_dir=str(tmp_path / "hscc-none"))
+
+    assert {p["profile"] for p in res["profiles"]} == {
+        "backend-engineer", "general"}
+    main = next(p for p in res["profiles"] if p["profile"] == "general")
+    assert main["created"] is True
+    assert (root / "profiles" / "general" / "plugins" / "hscc-cluster"
+            / "__init__.py").is_file()
+
+
+def test_config_allowlist_without_main_still_reaches_main(tmp_path):
+    """The config door agrees with the argument door: a target_profiles.json
+    that names other profiles only must not starve the main orchestrator."""
+    repo, root, plugins = _seeded_tree(
+        tmp_path, with_plugins=("backend-engineer", "general"),
+        without_plugins=("worker",))
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    (hscc / "target_profiles.json").write_text(
+        '{"target_profiles": ["backend-engineer"]}', encoding="utf-8")
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A", hscc_dir=str(hscc))
+
+    assert {p["profile"] for p in res["profiles"]} == {
+        "backend-engineer", "general"}
+    assert (root / "profiles" / "general" / "plugins" / "hscc-cluster"
+            / "__init__.py").is_file()
+    assert not (root / "profiles" / "worker" / "plugins").exists()
+
+
+def test_legacy_empty_allowlist_still_includes_main(tmp_path):
+    """Even the legacy [] spelling (only homes that already carry plugins/)
+    cannot turn <main> into a payload-less home."""
+    repo, root, plugins = _seeded_tree(
+        tmp_path, with_plugins=("backend-engineer",),
+        without_plugins=("general",))
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A", target_profiles=[],
+        hscc_dir=str(tmp_path / "hscc-none"))
+
+    assert {p["profile"] for p in res["profiles"]} == {
+        "backend-engineer", "general"}
+    assert (root / "profiles" / "general" / "plugins" / "hscc-cluster"
+            / "__init__.py").is_file()
+
+
+def test_main_profile_name_is_resolved_through_main_orch_state(tmp_path):
+    """The "always main" name is the stored one, not a local 'general'."""
+    repo, root, plugins = _seeded_tree(
+        tmp_path, with_plugins=("backend-engineer",),
+        without_plugins=("captain",))
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    (hscc / "main-orchestrator.json").write_text(
+        '{"name": "captain"}', encoding="utf-8")
+
+    assert install_payload.main_profile_name(str(hscc)) == "captain"
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster"], ts="A",
+        target_profiles=["backend-engineer"], hscc_dir=str(hscc))
+
+    assert {p["profile"] for p in res["profiles"]} == {
+        "backend-engineer", "captain"}
+    assert (root / "profiles" / "captain" / "plugins" / "hscc-cluster"
+            / "__init__.py").is_file()
+
+
+def test_fresh_install_main_payload_after_profile_creation(tmp_path):
+    """The bootstrap order in one test: the first payload pass runs before any
+    profile exists (generate/orch-all need the installed hscc-roles), then the
+    targeted pass reaches the newly created main home with all three plugins.
+
+    This is the card's fresh-install acceptance: no target_profiles.json, a
+    temp HERMES_HOME/HSCC_DIR, and <main> ends up with the full cluster payload.
+    """
+    repo = _make_repo(tmp_path)
+    for name in ("hscc-commands", "sparkrun-hermes"):
+        (repo / name).mkdir()
+        (repo / name / "__init__.py").write_text("x=1\n")
+    payload = ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]
+    root = tmp_path / "hermes"
+    plugins = root / "plugins"
+
+    first = install_payload.install_payload_profiles(
+        repo, plugins, payload, ts="A",
+        hscc_dir=str(tmp_path / "hscc-none"))
+    assert first["profiles"] == []  # no profile existed yet
+
+    # hscc-roles generate/orch-all create the main profile afterwards.
+    (root / "profiles" / "general").mkdir(parents=True)
+
+    main = install_payload.install_main_payload(
+        repo, plugins, payload, ts="B", backup=False,
+        hscc_dir=str(tmp_path / "hscc-none"))
+    assert main["profile"] == "general"
+    assert main["skipped"] is False and main["created"] is True
+    for name in payload:
+        assert (root / "profiles" / "general" / "plugins" / name
+                / "__init__.py").is_file(), name
+
+
+def test_main_payload_is_a_noop_when_the_profile_does_not_exist(tmp_path):
+    """The targeted pass never fabricates a profile — hscc-roles owns that."""
+    repo = _make_repo(tmp_path)
+    root = tmp_path / "hermes"
+    plugins = root / "plugins"
+
+    res = install_payload.install_main_payload(
+        repo, plugins, ["hscc-cluster"], ts="A",
+        hscc_dir=str(tmp_path / "hscc-none"))
+
+    assert res["skipped"] is True and res["profile"] == "general"
+    assert not (root / "profiles").exists()
+
+
 def test_target_profiles_star_means_ALL_homes(tmp_path):
     """'*' in config must still mean all (option 1, card-mandated): every
     profile home under profiles/ is written, plugins/ created where absent —

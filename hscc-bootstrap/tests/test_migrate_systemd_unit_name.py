@@ -32,6 +32,7 @@ addresses are the documented 10.0.0.x placeholders.
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -449,10 +450,100 @@ def test_cli_dry_run_reports_and_writes_nothing(monkeypatch, capsys):
 def test_cli_json_shape_and_failure_exit_code(monkeypatch, capsys):
     monkeypatch.setattr(m, "_default_ssh",
                         lambda h, cmd, to=120: fault(m.RC_NO_BUS, "NO_BUS", "no bus"))
-    assert m.main(["--json", "--hosts", NODE]) == 1
+    assert m.main(["--apply", "--json", "--hosts", NODE]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False and payload["failed"] == [NODE]
+    assert payload["dry_run"] is False
     assert payload["unit_name"] == NEW and payload["legacy_unit_name"] == OLD
+
+
+def test_cli_defaults_to_dry_run_even_with_hosts(monkeypatch, capsys):
+    res = Responder({"probe": ok(LEGACY_LIVE)})
+    monkeypatch.setattr(m, "_default_ssh", lambda h, cmd, to=120: res(cmd, to))
+
+    assert m.main(["--json", "--hosts", NODE]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True and payload["nodes"][0]["outcome"] == m.DRY_RUN
+    assert res.modes == ["probe"], "the default must never write on a node"
+
+
+def test_cli_apply_is_the_only_live_path(monkeypatch, capsys):
+    res = Responder({"probe": [ok(LEGACY_LIVE), ok(CANONICAL)],
+                     "enable-new": ok(ENABLED_NEW), "retire-old": ok(CANONICAL)})
+    monkeypatch.setattr(m, "_default_ssh", lambda h, cmd, to=120: res(cmd, to))
+
+    assert m.main(["--apply", "--json", "--hosts", NODE]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is False and payload["migrated"] == [NODE]
+    assert res.modes == ["probe", "enable-new", "retire-old", "probe"]
+
+
+def test_cli_help_exits_0_and_never_contacts_a_node(monkeypatch, capsys):
+    monkeypatch.setattr(m, "_hosts_from_detect",
+                        lambda: pytest.fail("--help discovered hosts"))
+    monkeypatch.setattr(m, "_default_ssh",
+                        lambda *a, **k: pytest.fail("--help contacted a node"))
+    for flag in ("--help", "-h"):
+        with pytest.raises(SystemExit) as exc:
+            m.main([flag])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "usage:" in out and "--apply" in out
+
+
+@pytest.mark.parametrize("argv", [
+    ["--definitely-not-a-flag"],
+    ["--app"],                      # argparse prefix abbreviation must stay off
+    ["--apply", "--dry-run"],       # contradictory modes
+    ["--hosts"],                    # flag without its value
+])
+def test_cli_unknown_or_bad_args_exit_2_and_never_contact_a_node(
+        monkeypatch, capsys, argv):
+    monkeypatch.setattr(m, "_hosts_from_detect",
+                        lambda: pytest.fail("bad args discovered hosts"))
+    monkeypatch.setattr(m, "_default_ssh",
+                        lambda *a, **k: pytest.fail("bad args contacted a node"))
+    with pytest.raises(SystemExit) as exc:
+        m.main(argv)
+    assert exc.value.code == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_cli_no_args_prints_usage_and_never_contacts_a_node(monkeypatch, capsys):
+    monkeypatch.setattr(m, "_hosts_from_detect",
+                        lambda: pytest.fail("no args discovered hosts"))
+    monkeypatch.setattr(m, "_default_ssh",
+                        lambda *a, **k: pytest.fail("no args contacted a node"))
+    assert m.main([]) == 2
+    assert "usage:" in capsys.readouterr().out
+
+
+def test_cli_help_unknown_and_no_args_never_invoke_ssh_or_sparkrun(tmp_path):
+    """The real process, with fake fleet tools first on PATH.
+
+    The fake tools write a marker if ANYTHING invokes them, so this is not a
+    monkeypatched promise: argparse must decide before the module reaches the
+    fleet. A previous turn ran ``--help`` and migrated every node.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "fleet-tool-called"
+    for tool in ("ssh", "sparkrun"):
+        p = bin_dir / tool
+        p.write_text(f"#!/bin/sh\necho {tool} >> {marker}\nexit 99\n")
+        p.chmod(0o755)
+    env = os.environ.copy()
+    env.update({"PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+                "HERMES_HOME": str(tmp_path / "hermes"),
+                "HSCC_HOME": str(tmp_path / "hscc")})
+
+    cases = [(["--help"], 0), (["--definitely-not-a-flag"], 2), ([], 2)]
+    for args, rc in cases:
+        res = subprocess.run([sys.executable, m.__file__, *args], env=env,
+                             capture_output=True, text=True, timeout=60)
+        assert res.returncode == rc, (args, res.returncode, res.stdout, res.stderr)
+    assert not marker.exists(), (
+        f"--help/unknown/no-args invoked a fleet tool: {marker.read_text()}")
 
 
 def test_production_transport_is_the_sparkrun_bridge(monkeypatch):
@@ -663,9 +754,17 @@ class FakeNode:
         self.calls = self.root / "systemctl_calls"
         self.calls.write_text("")
         self.env = os.environ.copy()
+        # no_systemctl means this node has NO systemctl. Inheriting the
+        # runner's PATH finds Ubuntu's real /usr/bin/systemctl, which then
+        # answers a bus fault (NO_BUS) instead of the missing-binary verdict
+        # (NO_SYSTEMD) this fixture models. A PATH holding only the transport
+        # tools (see below) makes `command -v systemctl` fail without hiding
+        # base64/bash, which the remote-command wrapper itself needs.
+        path = (str(self.bin) if no_systemctl
+                else f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}")
         self.env.update({
             "HOME": str(self.home),
-            "PATH": f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}",
+            "PATH": path,
             "XDG_CONFIG_HOME": str(self.home / ".config"),
             "XDG_RUNTIME_DIR": str(self.root / "run"),
             "DBUS_SESSION_BUS_ADDRESS": "unix:path=/dev/null",
@@ -680,6 +779,15 @@ class FakeNode:
             p = self.bin / "systemctl"
             p.write_text(STUB_SYSTEMCTL)
             p.chmod(0o755)
+        else:
+            # The transport is `printf … | base64 -d | bash -s`. Keep those two
+            # reachable while the PATH still hides systemctl (which is the
+            # whole point: Ubuntu has a real /usr/bin/systemctl that would
+            # answer a bus fault instead of the missing-binary verdict).
+            for tool in ("base64", "bash"):
+                src = shutil.which(tool)
+                if src:
+                    (self.bin / tool).symlink_to(src)
         if legacy_file:
             (self.unit_dir / OLD).write_text(legacy_body)
         self._set(OLD, active="active", mainpid="4112")
@@ -695,7 +803,10 @@ class FakeNode:
             (self.state / f"{unit}.mainpid").write_text(str(kw["mainpid"]))
 
     def ssh_cmd(self, command, timeout=120):
-        res = subprocess.run(["bash", "-c", command], env=self.env,
+        # Absolute bash: the no_systemctl fixture empties PATH, and an argv[0]
+        # would otherwise be resolved through that env (FileNotFoundError on
+        # the very shell the node-side script needs).
+        res = subprocess.run(["/bin/bash", "-c", command], env=self.env,
                              capture_output=True, text=True, timeout=timeout)
         return {"ok": res.returncode == 0, "stdout": res.stdout,
                 "stderr": res.stderr, "code": res.returncode}

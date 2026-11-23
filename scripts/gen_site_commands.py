@@ -15,6 +15,39 @@ So the list is not hand-maintained:
     truth for wording, and this script never invents an explanation. If the CLI
     grows a command nobody has written a line for, ``--write`` refuses and says
     which one; you write the line in ``site/COPY.md``, then regenerate.
+  * the **argument vocabulary of every published signature** comes from the CLI
+    (``align()`` -> ``argument_vocabulary()``). This one is NOT the copy card's
+    to own, and it is the reason this script checks anything at all about the
+    copy card's ``hscc ...`` span.
+
+Wording vs signature is a deliberate split, not an oversight (t_88d896f3):
+
+  * Prose is the copy card's. A page that reworded the card would be a page
+    nobody wrote, so ``align()`` compares no wording, and
+    ``test_generator_refuses_to_invent_copy_for_an_unknown_command`` pins that
+    the card also cannot be answered with a made-up sentence. The same holds
+    for how a signature is *presented*: ``hscc notify "<title>" "<body>"`` may
+    quote what the CLI renders as ``notify <title> <body>``, and
+    ``hscc template apply <name> --confirm`` may drop the options the CLI lists
+    as ``[--confirm] [--force-recreate]`` — measured: 17 of 40 bullets would
+    fail an equality rule, so presentation stays the card's.
+  * What it *advertises* is the CLI's. Every option and placeholder the page
+    prints must be one that the CLI publishes for that same entry; inventing
+    ``--frobnicate`` is drift, not presentation. Before this rule the only
+    cross-check was ``key_matches()`` over ``command_key()``, which stops at the
+    first non-bare-lowercase-word token and therefore throws the whole argument
+    shape away — so ``notify <message>`` and ``notify --frobnicate XYZ`` both
+    keyed to ``notify`` and a page advertising an argument the CLI rejects
+    published green.
+
+Known limitation, stated rather than papered over: an entry the CLI publishes
+as a placeholder group (``api <cmd>``, ``kanban <cmd>``) cannot be checked
+verb-by-verb from ``--help`` alone, because the verbs live in that group's own
+help. ``scripts/hscc_cli_help_audit.py`` enumerates every verb from the
+dispatch tables and is the gate for those. The same goes for a concrete
+subcommand the copy card names after a bare verb (``hscc api start``): it is
+command path, not an argument, so ``command_key()`` carries it and the group's
+own help is what has to agree.
 
 The two are keyed off the ``<!-- COMMANDS:BEGIN -->`` / ``<!-- COMMANDS:END -->``
 markers: the block in ``site/COPY.md`` (format contract, one bullet per
@@ -59,18 +92,38 @@ NON_GROUPS = (
 # no placeholders (`<name>`), no optionals (`[flags]`), no alternates (`a|b`).
 WORD = re.compile(r"^[a-z][a-z0-9-]*$")
 
+# An argument token, in every shape the CLI publishes one in: an optional
+# (`[--dry-run]`, `[flags]`), a placeholder (`<id>`), a quoted argument
+# (`"<msg>"`), a flag (`--check`), an alternation (`status|enable|disable`).
+ARG = re.compile(r"^(\[[^\]]*\]|<[^>]*>|\"[^\"]*\"|--\S+|"
+                 r"\w+(?:-\w+)*\|\w+(?:-\w+)*(?:\|\w+(?:-\w+)*)*)$")
+
+# Paired wrappers an argument token may wear, outermost first.
+WRAPPERS = (("[", "]"), ("<", ">"), ('"', '"'), ("'", "'"))
+
 
 def strip_ansi(text: str) -> str:
     return ANSI.sub("", text)
 
 
-def fetch_help(help_file: str | None) -> str:
+def fetch_help(help_file: str | None,
+               env: dict[str, str] | None = None) -> str:
+    """The `hscc --help` text — from ``--help-file``, or from the installed CLI.
+
+    ``env`` is the environment the installed CLI is spawned with; ``None``
+    (what the generator's own call site passes) inherits the caller's. The
+    seam exists because a harness may sandbox ``HOME`` for its own
+    hermeticity while the installed console script resolves its payload
+    *through* ``HOME`` — see the note above the oracle in
+    scripts/tests/test_site_landing.py. Passing the caller's environment
+    unchanged is still the default, so nothing about the generator changes.
+    """
     if help_file:
         return (Path(help_file)).read_text(encoding="utf-8")
     try:
         proc = subprocess.run(
             ["hscc", "--help"], capture_output=True, text=True, timeout=60,
-            check=False,
+            check=False, env=env,
         )
     except FileNotFoundError:
         raise SystemExit(
@@ -80,9 +133,16 @@ def fetch_help(help_file: str | None) -> str:
     except subprocess.TimeoutExpired:
         raise SystemExit("error: `hscc --help` timed out.")
     if proc.returncode != 0 and not proc.stdout.strip():
+        # The child's WHOLE stderr, on purpose. A Python traceback puts the
+        # decisive line LAST, and this handback used to cut at 200 chars — so
+        # the cut landed mid-path and the red read
+        # "`hscc --help` exited 1: Traceback ... File ".../venv/lib/python"
+        # with no module ever named. The cause behind the real red
+        # (`ModuleNotFoundError: No module named 'hscc_daemon'`, t_b2b238c5)
+        # sat past the cut, and every reader had to go find it by hand.
         raise SystemExit(
-            f"error: `hscc --help` exited {proc.returncode}: "
-            f"{proc.stderr.strip()[:200]}"
+            f"error: `hscc --help` exited {proc.returncode}:\n"
+            f"{proc.stderr.strip()}"
         )
     return strip_ansi(proc.stdout)
 
@@ -106,6 +166,76 @@ def command_key(signature: str) -> str:
             break
         words.append(tok)
     return " ".join(words)
+
+
+def command_tokens(signature: str) -> list[str]:
+    """The tokens of a signature that are COMMAND, not prose.
+
+    `check [stream]       Run one check cycle now` -> ``['check', '[stream]']``.
+
+    A help entry's signature carries its description glued to the same line
+    (``parse_help`` keeps the whole entry), so the description has to be
+    separated without a column constant — the layout is the CLI's business and
+    changes. The rule is ``command_key``'s own, extended: bare lowercase words
+    extend the command path only until the first argument token, and from there
+    only argument-shaped tokens keep extending it. A description's first word
+    is neither, so it stops the scan.
+
+    An entry that is too long for one column pair is rendered as the usage
+    alone, and the CLI writes a multi-verb alternation with spaced pipes
+    (`notify <title> <body> | list | ack <id>`), so a `|` and the word after
+    it are both command, not prose.
+    """
+    out: list[str] = []
+    args_seen = False
+    after_bar = False
+    for tok in signature.split():
+        if ARG.match(tok):
+            args_seen = True
+            after_bar = False
+            out.append(tok)
+        elif tok == "|":
+            args_seen = True
+            after_bar = True
+            out.append(tok)
+        elif WORD.match(tok) and (not args_seen or after_bar):
+            out.append(tok)
+            after_bar = False
+        else:
+            break
+    return out
+
+
+def arg_tokens(signature: str) -> list[str]:
+    """The argument part of a signature: `check [stream]` -> ``['[stream]']``."""
+    tokens = command_tokens(signature)
+    return tokens[len(command_key(signature).split()):]
+
+
+def canonical_arg(token: str) -> str:
+    """The argument a token names, stripped of how it was presented.
+
+    ``[--dry-run]``, ``--dry-run``, ``"<title>"``, ``<title>`` and ``title``
+    all name the same argument. Presentation is the copy card's (see the
+    module docstring); the argument itself is the CLI's.
+    """
+    t = token
+    while True:
+        for open_, close_ in WRAPPERS:
+            if len(t) > 2 and t.startswith(open_) and t.endswith(close_):
+                t = t[1:-1]
+                break
+        else:
+            return t.lower()
+
+
+def argument_vocabulary(signature: str) -> set[str]:
+    """What the CLI says this entry takes: ``{'--repo', 'path'}`` for
+    ``check --repo <path>``. An alternation is kept whole — `status|enable`
+    claims the set, and a COPY bullet naming one of them names a bare word
+    that rides the command path instead.
+    """
+    return {canonical_arg(t) for t in arg_tokens(signature)}
 
 
 def parse_help(help_text: str) -> list[dict]:
@@ -205,12 +335,26 @@ BACKTICK = re.compile(r"`([^`]+)`")
 
 
 def inline(text: str) -> str:
-    """Escape, then render a copy card's `code` span as an HTML <code>.
+    """Render a copy card's `code` span as an HTML <code>, escaping everything once.
 
     The copy stays character-for-character what site/COPY.md says; only the
     markup convention changes, so the page cannot reword the card by accident.
+
+    The escape happens per SEGMENT — each run of prose and each captured span
+    separately — and never twice. The first form of this function escaped the
+    whole line and then escaped the captured span again on top of it, so a
+    placeholder the card wrote as `<host>` reached the page as
+    `&amp;lt;host&amp;gt;` and the browser showed the literal text `&lt;host&gt;`
+    where its sibling bullet showed `<host>`. Nothing caught it: the page agreed
+    with the card, the card agreed with the CLI, and the only reader that could
+    tell the two apart was a human looking at the rendered page.
     """
-    return BACKTICK.sub(lambda m: f"<code>{esc(m.group(1))}</code>", esc(text))
+    # One capture group, so re.split hands back [prose, span, prose, span, ...].
+    parts = BACKTICK.split(text)
+    out: list[str] = []
+    for idx, part in enumerate(parts):
+        out.append(f"<code>{esc(part)}</code>" if idx % 2 else esc(part))
+    return "".join(out)
 
 
 def key_matches(help_sig_key: str, copy_sig_key: str) -> bool:
@@ -255,16 +399,35 @@ def align(help_groups: list[dict], copy_groups: list[dict]) -> tuple[list[dict],
         (hg, hsig), (cg, item) = cli_flat[idx], copy_flat[idx]
         hkey = command_key(hsig)
         ckey = command_key(item["sig"])
+        paired = True
         if hg != cg:
+            paired = False
             problems.append(
                 f"#{idx + 1}: `{item['sig']}` sits under {cg!r} but the CLI "
                 f"has it under {hg!r}"
             )
         elif not key_matches(hkey, ckey):
+            paired = False
             problems.append(
                 f"#{idx + 1}: the CLI's `{hsig}` (key `{hkey}`) is not the "
                 f"page's `hscc {item['sig']}` (key `{ckey}`)"
             )
+        if paired:
+            # The page may present an argument however the copy card likes
+            # (quoted, optional, dropped); it may not name one the CLI does
+            # not take. key_matches() throws the argument shape away, so this
+            # is the only check that does (t_88d896f3).
+            invented = sorted(argument_vocabulary(item["sig"])
+                              - argument_vocabulary(hsig))
+            if invented:
+                problems.append(
+                    f"#{idx + 1}: the page advertises "
+                    f"{' and '.join(repr(a) for a in invented)} "
+                    f"for `hscc {item['sig']}`, but `hscc --help` publishes "
+                    f"`{hsig}` — its arguments are "
+                    f"{sorted(argument_vocabulary(hsig)) or 'none'}. Write the "
+                    f"bullet the CLI actually has, or teach the CLI."
+                )
         if not item["prose"]:
             problems.append(f"#{idx + 1}: `hscc {item['sig']}` has no "
                             f"explanation in site/COPY.md")

@@ -255,6 +255,74 @@ def atomic_yaml_update(path: Path, update_fn, backup: bool = True):
 # running endpoints and self-supervises (no launchd plist or watchdog needed).
 # We drive it via the CLI instead of hand-rolling plists.
 
+#: Set by :func:`_archive_proxy_log_before_start` the first time it runs in a
+#: process. sparkrun keeps ONE gateway log for the whole state dir (its
+#: ``state_dir`` is the cache dir, not per-port), so a multi-family apply would
+#: otherwise file one byte-identical copy per family and spend several slots of
+#: the retention window that exists to hold *different* evidence.
+#: Test seam: :func:`_reset_proxy_log_archive_once`.
+_proxy_log_archived_this_run = False
+
+
+def _reset_proxy_log_archive_once() -> None:
+    """Undo the once-per-process guard. Test seam only — no runtime caller.
+
+    Same doctrine as :func:`_lan_curl_reset_notice`: a test that asserts "the
+    copy happens exactly once per apply" has to start from a known state.
+    """
+    global _proxy_log_archived_this_run
+    _proxy_log_archived_this_run = False
+
+
+def _archive_proxy_log_before_start(reason):
+    """Seam: copy the outgoing litellm log aside, THEN ask for a start.
+
+    sparkrun opens ``litellm.log`` in mode ``"w"`` on every gateway launch
+    (``sparkrun/proxy/_supervisor.py::_launch_background``) and its gateway
+    state dir is global, so this apply path truncates the SAME log the daemon's
+    repair path does — and it does it whenever sparkrun records no live
+    gateway, i.e. exactly when that file is the only record of why the proxy
+    went down. Copy first.
+
+    Wraps :func:`hscc_daemon.proxy_log_archive.archive_before_restart` — one
+    archiver, not two (t_9713c765). The peer-package import goes through the
+    sanctioned :func:`fleet._daemon_mod`, guarded the way ``_theme.theme()``
+    guards ``cli_theme``: a standalone hscc-cluster invocation with no
+    hscc_daemon importable warns and carries on.
+
+    It must NEVER fail an apply. A lost log is bad; a template that will not
+    apply because a file copy failed is worse — so every outcome (raise,
+    permission error, missing peer module) logs a WARN and returns, and the
+    start proceeds.
+    """
+    global _proxy_log_archived_this_run
+    if _proxy_log_archived_this_run:
+        return None
+    _proxy_log_archived_this_run = True
+    import sys
+    try:
+        try:
+            from . import fleet as _fleet
+        except ImportError:
+            import fleet as _fleet
+        res = _fleet._daemon_mod("proxy_log_archive").archive_before_restart()
+    except Exception as exc:  # pragma: no cover - defensive; apply never blocks
+        print(f"WARN: proxy log archive FAILED before {reason} "
+              f"({type(exc).__name__}: {exc}) — starting anyway; sparkrun will "
+              "truncate litellm.log", file=sys.stderr, flush=True)
+        return None
+    if res.get("action") == "archived":
+        pruned = res.get("pruned") or []
+        print(f"proxy log archived before {reason}: {res['archived']}"
+              + (f" (pruned {len(pruned)} older archive"
+                 f"{'s' if len(pruned) != 1 else ''})" if pruned else ""),
+              file=sys.stderr, flush=True)
+    elif res.get("error"):
+        print(f"WARN: proxy log archive FAILED before {reason} ({res['error']})"
+              " — starting anyway; sparkrun will truncate litellm.log",
+              file=sys.stderr, flush=True)
+    return res
+
 
 def install_proxy(family) -> dict:
     """Start the native sparkrun proxy for a family. Returns action summary.
@@ -270,6 +338,13 @@ def install_proxy(family) -> dict:
 
     proxy_dir = PROXY_DIR / family.name
     proxy_dir.mkdir(parents=True, exist_ok=True)
+
+    # Preservation seam (t_569fb349): copy sparkrun's gateway log aside BEFORE
+    # the start below, while the old proxy may still be serving. sparkrun
+    # truncates it on launch whenever it records no live gateway, and the
+    # refusal it answers instead (ProxyAlreadyRunning) proves nothing was
+    # truncated. Never blocks the start; see the wrapper's docstring.
+    _archive_proxy_log_before_start(f"proxy start ({family.name})")
 
     loaded = False
     load_error = ""

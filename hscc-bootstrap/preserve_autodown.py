@@ -15,6 +15,7 @@ serving fleet. It must therefore NEVER be clobbered by bootstrap.
 Best-effort: never raises. Creates ~/.hscc if missing. Returns what was done so
 bootstrap can report it (preserved vs seeded).
 """
+import argparse
 import json
 import os
 import sys
@@ -135,6 +136,10 @@ def ensure_autodown(autodown_path=None):
 
 
 if __name__ == "__main__":
+    argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Seed autodown.json only when absent; never re-enable it.",
+    ).parse_args()
     result = ensure_autodown()
     print(json.dumps(result, indent=2))
     if not result.get("ok", True):

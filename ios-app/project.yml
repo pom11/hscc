@@ -6,12 +6,11 @@
 #
 # See README.md for both build paths (xcodegen, or manual Xcode project).
 #
-# This spec drives the main app plus THREE app-extension targets:
-#   * HSCCWidgets              — Home Screen cluster widget (systemSmall + systemMedium).
-#   * HSCCLiveActivity         — the fleet-wake Live Activity (ActivityKit).
-#   * HSCCLiveActivityMonitor  — the HSCC Monitor Live Activity (ActivityKit).
-# All four targets share one App Group so the widget and Live Activities see the
-# operator's connection settings and the cluster state. The group is DERIVED
+# This spec drives the main app plus TWO app-extension targets:
+#   * HSCCWidgets              — the Home Screen widgets.
+#   * HSCCLiveActivityMonitor  — Cluster watch (A2), the only Live Activity.
+# All three targets share one App Group so the widgets and the Live Activity see
+# the operator's connection settings and the cluster state. The group is DERIVED
 # from the bundle-id prefix (`HSCC_BUNDLE_PREFIX`, default `com.hscc` for DEV
 # builds) in one place below; every target, entitlement and Info.plist reads
 # that derivation instead of naming a literal. The RELEASE path fixes the
@@ -21,11 +20,10 @@
 #
 #     HSCC_BUNDLE_PREFIX=dev.example ios-app/scripts/release_adhoc.sh 1.0.0
 #
-# Note on Live Activity targets: a widget extension body can only contain ONE
-# ActivityConfiguration, so each Live Activity attribute type gets its own
-# extension target (HSCCLiveActivity = wake, HSCCLiveActivityMonitor = monitor).
-# The session Live Activity that used to have its own target here was retired
-# together with the chat it mirrored (t_3b15b8c9, iOS pivot).
+# Note on Live Activity targets: the one remaining activity (Cluster watch) is
+# rendered by HSCCLiveActivityMonitor. The wake target and the other activity
+# types were removed by the 2026-11-20 widget-redesign picks; the session
+# activity left with the chat it mirrored (t_3b15b8c9, iOS pivot).
 #
 # Sources are listed explicitly (not via a folder glob) so a source added
 # without updating this file is easy to spot in review. The shared sources
@@ -60,8 +58,8 @@ settings:
     #     security find-identity -v -p codesigning
     # A free personal team works for sideloading.
     DEVELOPMENT_TEAM: ${HSCC_DEVELOPMENT_TEAM}
-    MARKETING_VERSION: "1.2.0"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "1.4.4"
+    CURRENT_PROJECT_VERSION: "9"
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"          # iPhone only (sideload onto owner's device)
     SWIFT_EMIT_LOC_STRINGS: YES
@@ -90,7 +88,6 @@ schemes:
       targets:
         HSCC: all
         HSCCWidgets: [run, archive]
-        HSCCLiveActivity: [run, archive]
         HSCCLiveActivityMonitor: [run, archive]
     run:
       config: Debug
@@ -121,9 +118,9 @@ targets:
       # publishes /ios/version.json; UpdateCheck.swift is the pure parse/order/
       # dismissal half and UpdateChecker.swift fetches it over its own short-
       # timeout URLSession (no token, never through the cluster). Neither file
-      # is listed in HSCCWidgets / HSCCLiveActivity / HSCCLiveActivityMonitor,
-      # and the extensions must never gain a check: scripts/update_check.sh
-      # proves the file lists stay that way.
+      # is listed in HSCCWidgets / HSCCLiveActivityMonitor, and the extensions
+      # must never gain a check: scripts/update_check.sh proves the file lists
+      # stay that way.
       - path: Sources/HSCC/UpdateCheck.swift
       - path: Sources/HSCC/UpdateChecker.swift
       # Two-screen root (t_9664a1c8, pivot slice S1): the drawer shell (AppShell),
@@ -149,13 +146,11 @@ targets:
       # in t_9d5a30c9 (CONSOLE_RETIREMENT §1.2 rule 2: the app keeps no actions,
       # §5 S2/S6): its only writer was ChatStore and its only gate was the
       # already-red offline_queue_check.sh, retired beside it.
-      # Notify-operator (t_0454eb56): pure differential engine + foreground
-      # coordinator + one-time auth delegate.
-      - path: Sources/HSCC/Notify/OperatorAlert.swift
-      - path: Sources/HSCC/Notify/ObservedState+LastSeenState.swift
-      - path: Sources/HSCC/Notify/NeedsOperatorNotifier.swift
-      - path: Sources/HSCC/Notify/NotificationCoordinator.swift
-      - path: Sources/HSCC/Notify/NotificationsAppDelegate.swift
+      # The app delegate exists only for the Live Activities' BGTaskScheduler
+      # registration and launch sweeps. The notification/APNs files that used
+      # to sit in Notify/ were removed by the 2026-11-19 operator decision:
+      # the apps carry no notifications, local or push.
+      - path: Sources/HSCC/LaunchAppDelegate.swift
       # The session Live Activity's whole input path is gone. StreamingTranscript
       # went first (t_bd6e7c0a), then SessionActivitySummary +
       # SessionActivityDriver with the activity itself (t_3b15b8c9), then the
@@ -175,26 +170,24 @@ targets:
       - path: Sources/HSCC/SettingsStore.swift
       - path: Sources/HSCC/WidgetSettingsStore.swift
       - path: Sources/HSCC/SetupQRCode.swift
-      - path: Sources/HSCC/LiveActivityManager.swift
-      - path: Sources/HSCC/MonitorActivityDriver.swift
-      # The running-cards activity's poll-and-push driver (t_71deac83): reads
-      # the kanban pair through WidgetDataClient and pushes the ContentState the
-      # monitor extension renders. The sibling of the file above, second
-      # BGAppRefreshTask identifier.
-      - path: Sources/HSCC/CardsRunningActivityDriver.swift
-      # The running-cards activity's launch sweep (t_f9cc34e0). The activity's
-      # rendering lives in the monitor extension target; this is the app half.
-      - path: Sources/HSCC/CardsRunningActivitySweep.swift
-      # The cluster-health activity's launch sweep (t_0120475a). Same split:
-      # the rendering lives in the monitor extension target, this is the app half.
+      # Cluster watch (A2) — the one surviving Live Activity. The sweep runs at
+      # launch; the driver is operator-started and owns the eight-hour budget,
+      # the Active/cadence settings and the one BGAppRefreshTask identifier.
       - path: Sources/HSCC/ClusterHealthActivitySweep.swift
-      # Its feeder (t_f2867fb3): the poll-and-push loop, the Active toggle and
-      # the cadence, and the BGAppRefreshTask that keeps it alive backgrounded.
       - path: Sources/HSCC/ClusterHealthActivityDriver.swift
-      # The per-board progress activity's feeder (t_451cbe25): operator-started
-      # from the project's Board screen, reading the same board-status routes
-      # and App Group snapshot the widget uses.
-      - path: Sources/HSCC/BoardProgressActivityDriver.swift
+      # CarPlay scene (card W5g, design C "Rows with gauges"). The scene
+      # delegate is named by the CPTemplateApplicationSceneSessionRoleApplication
+      # block in this target's `info:` section. CarPlayReading.swift is
+      # Foundation-only so scripts/carplay_check.sh compiles AND RUNS the copy,
+      # thresholds and stale/offline rules; CarPlayImages.swift is the only file
+      # that draws, and CarPlaySceneDelegate.swift owns the 30 s refresh.
+      - path: Sources/HSCC/CarPlay/CarPlayReading.swift
+      - path: Sources/HSCC/CarPlay/CarPlayImages.swift
+      - path: Sources/HSCC/CarPlay/CarPlaySceneDelegate.swift
+      # The running-cards projection the car screen's Running row and detail
+      # list read. Shared with the widget/Live Activity so the same
+      # `/v1/kanban/running` answer cannot produce two different longest cards.
+      - path: Sources/Shared/CardsRunningProjection.swift
       - path: Sources/HSCC/Views/QRScannerView.swift
       - path: Sources/HSCC/Views/Theme.swift
       # The dismissible "Update <version> available" banner (t_2a1e5913),
@@ -207,6 +200,7 @@ targets:
       # Surface names + row glyphs, shared with the macOS Settings window
       # (t_1143c19b) instead of a second copy of the same switches.
       - path: Sources/HSCC/Views/WidgetSurfaceLabels.swift
+      - path: Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
       - path: Sources/HSCC/Views/LoadState.swift
       # ClusterView.swift retired as a screen (t_65d791da, spec §5 + §8): its
@@ -267,27 +261,13 @@ targets:
       # Shared cross-target sources (compiled into all three bundles).
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
-      - path: Sources/Shared/MonitorActivity.swift
-      # Running-cards Live Activity attributes + its pure reading/orphan rules
-      # (t_f9cc34e0). Compiled into the app (the launch sweep acts on the rule)
-      # and into the monitor extension (which renders the activity).
-      - path: Sources/Shared/CardsRunningActivity.swift
-      # The running-cards projection + its last-known snapshot (t_71deac83),
-      # shared with the widget because the driver's `lastKnown:` and the widget
-      # timeline read and write ONE App Group key — one blob, one decoder.
-      - path: Sources/Shared/CardsRunningProjection.swift
-      # Cluster-health Live Activity attributes + its pure reading/orphan rules
-      # (t_0120475a). Same arrangement as the cards file above: the rules are
-      # sliced by live_activity_rehydration_check.sh and executed there, so the
-      # file is compiled into the app (sweep) and the monitor extension (views).
+      - path: Sources/Shared/WidgetSurfaceKind.generated.swift
+      # Cluster watch (A2) attributes + its pure reading/orphan rules. The
+      # rules are sliced by live_activity_rehydration_check.sh and executed
+      # there, so this is the file the sweep and the extension's views share.
       - path: Sources/Shared/ClusterHealthActivity.swift
-      # Per-board progress Live Activity attributes + reading rules
-      # (t_451cbe25). Compiled into the app (the driver pushes) and into the
-      # monitor extension (which renders it).
-      - path: Sources/Shared/BoardProgressActivity.swift
-      # The board-status projection/reading rules, shared by the widget and the
-      # progress activity's driver: one decoder for the same numbers, one App
-      # Group snapshot. Foundation-only, so the widget gate compiles it too.
+      # The board-status projection/reading rules, shared by the Boards widget
+      # and its gates: one decoder for the same numbers, one snapshot store.
       - path: Sources/HSCCWidgets/BoardStatusReading.swift
       # The monitor host tally BOTH the cluster widget and the cluster-health
       # activity project through (t_f2867fb3), so one surface cannot call a
@@ -298,11 +278,32 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # The chart projection for `GET /v1/cluster/history` (t_5ae8cfcf,
+      # re-pointed at the canonical route by t_0c99b017): keeps a not-reported
+      # metric a gap rather than a zero, and exposes each series' peak column
+      # next to its average. Foundation-only.
+      - path: Sources/Shared/ClusterHistoryTrend.swift
+      # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
+      # metric set a widget may request (the recorder's own column names) and
+      # the pixel-width reduction that keeps every column's min AND max, so a
+      # sparkline cannot draw a peak the data never had. Foundation-only, which
+      # is what lets scripts/cluster_history_chart_check.sh execute it on macOS.
+      - path: Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9): which columns and
+      # rows the two biggest monitor surfaces draw, and the six fields only they
+      # print. Foundation-only, so `model_decode_check.sh` can execute it.
+      - path: Sources/Shared/ClusterMonitorTables.swift
       - path: Sources/Shared/WidgetDataClient.swift
+      # The alert-feed wire types + projection ("Needs me", card R3). The client
+      # names AlertsLite, so every target that compiles the client compiles this.
+      - path: Sources/Shared/NeedsMeReading.swift
+      # The merge-queue widget's wire types, CLI-shaped cells and last-known
+      # snapshot (card MQ5). Named by `WidgetDataClient.mergeQueue()` above, so
+      # every target that compiles the client compiles this too.
+      - path: Sources/Shared/MergeQueueReading.swift
       # "Test connection" probes EVERY saved address (one row each) through
       # this shared implementation, so iOS and macOS report identically.
       - path: Sources/Shared/ConnectionAddressProbe.swift
-      - path: Sources/Shared/WakingActivity.swift
     entitlements:
       path: Sources/HSCC.entitlements
       properties:
@@ -310,10 +311,10 @@ targets:
           - $(HSCC_APP_GROUP)
         keychain-access-groups:
           - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
+        # No push entitlement: the app registers for neither remote nor local
+        # notifications (operator decision 2026-11-19).
     dependencies:
       - target: HSCCWidgets
-        embed: true
-      - target: HSCCLiveActivity
         embed: true
       - target: HSCCLiveActivityMonitor
         embed: true
@@ -344,6 +345,12 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCC.entitlements
+        # CarPlay (card W5g). Apple has NOT granted HSCC a CarPlay entitlement,
+        # so it must never reach a device/release signature. The simulator-only
+        # file is selected by the SDK condition; `xcodebuild archive` for
+        # `generic/platform=iOS` and the IPA keep the device value above,
+        # byte-identically. scripts/carplay_check.sh proves both halves.
+        "CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]": Sources/HSCC.simulator.entitlements
     info:
       path: Sources/Info.plist
       properties:
@@ -357,6 +364,18 @@ targets:
         # has no light variants. HSCCApp also pins preferredColorScheme(.dark);
         # this key covers launch chrome and any scene the system creates.
         UIUserInterfaceStyle: Dark
+        # CarPlay (card W5g): the scene role Apple's template apps register for.
+        # The delegate name is expanded from the app's module, so a custom
+        # HSCC_BUNDLE_PREFIX or a debug build never points at the wrong class.
+        # `UIApplicationSupportsMultipleScenes` stays true because the CarPlay
+        # screen is a second scene alongside the phone's SwiftUI window.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneClassName: CPTemplateApplicationScene
+                UISceneConfigurationName: HSCC CarPlay
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
         # Deep links (t_136762f3): the `hscc://` URL scheme lets a notification,
         # a Telegram message, or a Mac session open a specific project, card or
         # session directly instead of starting from the root. CFBundleURLTypes
@@ -378,23 +397,13 @@ targets:
         # ActivityKit refuses to start any Live Activity without this key —
         # Activity.request throws and areActivitiesEnabled reports false.
         NSSupportsLiveActivities: true
-        # Background refresh (t_03d318cd): the monitor Live Activity is fed by
-        # the app, and when backgrounded it uses BGAppRefreshTask to push data
-        # on a best-effort OS schedule. iOS only allows scheduling task
-        # identifiers listed under BGTaskSchedulerPermittedIdentifiers.
-        #
-        # Each Live Activity registers its OWN identifier rather than sharing
-        # the monitor's: the drivers have independent cadences and independent
-        # Active toggles, and one identifier would mean one surface's BGTask
-        # waking (and pushing for) the other.
-        #   monitor        — t_03d318cd
-        #   clusterhealth  — t_f2867fb3
-        #   cards          — t_71deac83
+        # Background refresh: Cluster watch is fed by the app, and when
+        # backgrounded it uses BGAppRefreshTask to push data on a best-effort
+        # OS schedule. iOS only allows scheduling task identifiers listed under
+        # BGTaskSchedulerPermittedIdentifiers. The removed activities' three
+        # identifiers went with their drivers.
         BGTaskSchedulerPermittedIdentifiers:
-          - com.hscc.ios.monitor.backgroundRefresh
           - com.hscc.ios.clusterhealth.backgroundRefresh
-          - com.hscc.ios.cards.backgroundRefresh
-          - com.hscc.ios.boardprogress.backgroundRefresh
         # The camera is used ONLY to scan the setup QR code from `hscc api
         # status`. Without this key iOS kills the app the instant the scanner
         # opens — which is the first thing an operator does.
@@ -421,41 +430,55 @@ targets:
     platform: iOS
     deploymentTarget: "26.0"
     sources:
-      - path: Sources/HSCCWidgets/HSCCWidgetsBundle.swift
-      - path: Sources/HSCCWidgets/ClusterWidget.swift
-      - path: Sources/HSCCWidgets/ClusterWidgetMetrics.swift
-      - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
+      - path: Sources/HSCCWidgets
       # The `systemMedium` CLI host table (t_2d1c12dc). Split in two on purpose:
       # the reading half is Foundation-only so `cluster_widget_check.sh` can
       # compile and RUN the column/cell/threshold rules against the fixture, and
       # the view half is the only file that names a Colour.
-      - path: Sources/HSCCWidgets/CLIMonitorTableReading.swift
-      - path: Sources/HSCCWidgets/CLIMonitorHostTableView.swift
-      - path: Sources/HSCCWidgets/MonitorWidget.swift
-      - path: Sources/HSCCWidgets/MonitorViews.swift
+      # The systemSmall grid (t_9e110d88): the tile's data half on Foundation
+      # only, so scripts/model_decode_check.sh compiles and RUNS the exact rows
+      # the small widget draws (the SwiftUI half is ClusterSmallGridView.swift).
+      # The host / serving tables and the XL detail block the large + extra-large
+      # monitor surfaces draw (t_9e64d9d9). Shared by the cluster and monitor
+      # widgets so the two tiles cannot drift apart.
       # Projects surface (small + medium + large), t_d739d163. Its configuration
       # intent and entity query live in the same file as the widget they configure.
-      - path: Sources/HSCCWidgets/ProjectsWidget.swift
       # Running cards with worker and age (`hscc cards monitor --live` on the
       # Home Screen), read through WidgetDataClient — see the file header.
-      - path: Sources/HSCCWidgets/CardsRunningWidget.swift
       # `hscc kanban monitor --live`'s running / ready / blocked, read-only
       # through WidgetDataClient — see the file header.
-      - path: Sources/HSCCWidgets/KanbanMonitorWidget.swift
       # todo/ready/running/blocked/done for ONE board (t_6d8731ab), read-only
       # through WidgetDataClient — see the file header.
-      - path: Sources/HSCCWidgets/BoardStatusWidget.swift
+      # The main orchestrator's alert feed ("Needs me", card R3): one read of
+      # GET /v1/alerts through WidgetDataClient, projected by NeedsMeReading.swift.
+      # The local merge queue (card MQ5): the per-project tables `hscc kanban
+      # monitor` draws, read-only through WidgetDataClient. Its cells are the
+      # CLI's own column strings, projected by MergeQueueReading.swift.
       # Rendering-mode adaptation (t_1143c19b): one shared palette swap for
       # WidgetKit's fullColor / accented / vibrant modes, used by the iOS
       # widgets and the macOS desktop extension alike.
-      - path: Sources/HSCCWidgets/WidgetRendering.swift
       # The widget's count rules on Foundation only, so
       # scripts/board_status_widget_check.sh can compile and execute them.
-      - path: Sources/HSCCWidgets/BoardStatusReading.swift
+      # The history graph widget (t_f4551339): Swift Charts over
+      # `GET /v1/cluster/history`. Four files on purpose — the projection rules
+      # live in `Sources/Shared/ClusterGraphReading.swift` (Foundation-only, so a
+      # macOS harness executes them), the one `WidgetFamily` dependency in
+      # `GraphWidgetMetrics.swift`, the entry and its last-known series in
+      # `GraphWidgetEntry.swift`, and the configuration intent, provider and
+      # `Widget` in `GraphWidget.swift`. Home-screen families only; the dispatch
+      # gives each declared size its own arm.
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
+      - path: Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: Sources/Shared/WidgetDataClient.swift
+      # The alert-feed projection and its last-known snapshot (card R3),
+      # Foundation-only so the decode gate executes the same order/filter/age
+      # rules the widget and the macOS dropdown draw.
+      - path: Sources/Shared/NeedsMeReading.swift
+      # The merge-queue widget's wire types + CLI cells + snapshot (MQ5),
+      # Foundation-only so the decode gate executes the same projection.
+      - path: Sources/Shared/MergeQueueReading.swift
       # `ClusterFleet`'s host tally IS this projection (t_f2867fb3) — the
       # cluster-health Live Activity runs the same call, so the widget and the
       # bubble cannot disagree about a fleet that is half down.
@@ -465,6 +488,28 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      - path: Sources/Shared/ClusterHistoryTrend.swift
+      # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
+      # requestable metric set and the min/max-preserving pixel reduction.
+      # Foundation-only, so the widget and the gate both execute the same file.
+      - path: Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9): which of the CLI's
+      # columns and how many of its rows the two biggest monitor surfaces draw,
+      # plus the six fields only they print (VRAM, GPU clock, net, uptime, fan,
+      # load). Foundation-only for the same reason as the file above — the view
+      # files import WidgetKit, and a layout rule no gate can run is a layout
+      # rule that drifts.
+      - path: Sources/Shared/ClusterMonitorTables.swift
+      # The Lock Screen's four numbers (hottest temp, GPU load, fleet watts,
+      # running/waiting), projected from that view-model and worded by one copy
+      # rule the three accessory families share (t_314a3811). Foundation-only
+      # for the same reason: `cluster_widget_check.sh` executes it.
+      - path: Sources/Shared/ClusterLockScreen.swift
+      # What each graph-widget size draws (t_f4551339): the density rules, the
+      # per-node panel, the served-resolution sentence and the threshold bands.
+      # Foundation-only for the same reason as the line above, and it is the
+      # half `scripts/cluster_graph_check.sh` compiles and RUNS.
+      - path: Sources/Shared/ClusterGraphReading.swift
       # The running-cards projection + last-known snapshot (t_71deac83): the
       # provider saves through it and the app's Live Activity driver reads the
       # same slot back, so it lives in Shared with one decoder.
@@ -510,98 +555,26 @@ targets:
     dependencies:
       - sdk: WidgetKit.framework
 
-  # Fleet-wake Live Activity (ActivityKit) — the app starts it via
-  # `LiveActivityManager`; this extension renders the ActivityConfiguration.
-  HSCCLiveActivity:
-    type: app-extension
-    platform: iOS
-    deploymentTarget: "26.0"
-    sources:
-      - path: Sources/HSCCLiveActivity/HSCCLiveActivity.swift
-      # Shared source files compiled into every target.
-      - path: Sources/Shared/SharedModels.swift
-      - path: Sources/Shared/SharedStore.swift
-      - path: Sources/Shared/WakingActivity.swift
-      # Theme tokens shared with the app (design-system, no raw hex here).
-      - path: Sources/HSCC/Views/Theme.swift
-    entitlements:
-      path: Sources/HSCCLiveActivity.entitlements
-      properties:
-        com.apple.security.application-groups:
-          - $(HSCC_APP_GROUP)
-        keychain-access-groups:
-          - $(AppIdentifierPrefix)$(HSCC_APP_GROUP)
-    info:
-      path: Sources/HSCCLiveActivity/Info.plist
-      properties:
-        # A display name so the Live Activity / Lock Screen surfaces a friendly
-        # label instead of the raw target identifier "HSCCLiveActivity".
-        CFBundleDisplayName: HSCC Live Activity
-        HSCCAppGroup: $(HSCC_APP_GROUP)
-        # Same dark-only contract as the app (see the app's info block).
-        UIUserInterfaceStyle: Dark
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.widgetkit-extension
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(HSCC_BUNDLE_PREFIX).ios.liveactivity
-        # Per-TARGET, not just project-level: XcodeGen emits the SDK default
-        # ("1,2") into each target's build settings, which silently overrode the
-        # project-level value and made every target iPad-capable. That is what
-        # triggers "All interface orientations must be supported unless the app
-        # requires full screen" — an iPad multitasking rule. This is an
-        # iPhone-only sideload, so declare it where it actually applies.
-        TARGETED_DEVICE_FAMILY: "1"
-        GENERATE_INFOPLIST_FILE: YES
-        CODE_SIGN_STYLE: Automatic
-        CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivity.entitlements
-        SKIP_INSTALL: YES
-    dependencies:
-      - sdk: WidgetKit.framework
-      - sdk: ActivityKit.framework
-
-  # Monitor Live Activity (ActivityKit) — the monitor-family Live Activities.
-  # Live Activities are PUSH-ONLY: the app (`MonitorActivityDriver`) polls
-  # GET /v1/cluster/monitor + GET /v1/daemon/host on the settings cadence and
-  # pushes updates; this extension renders the ActivityConfiguration for
-  # `MonitorActivityAttributes`.
-  #
-  # It also renders the running-cards activity (t_f9cc34e0,
-  # `CardsRunningLiveActivity`): one extension CAN host several Live Activity
-  # types, one `ActivityConfiguration` each, which is why this target's `@main`
-  # is `HSCCLiveActivityMonitorBundle` (a `WidgetBundle`). The wake activity
-  # predates that finding and stays its own target.
+  # Cluster watch (A2) — the ONLY Live Activity.
+  # Live Activities are PUSH-ONLY: the app (`ClusterHealthActivityDriver`) polls
+  # GET /v1/autodown/status, GET /v1/cluster/monitor and GET /v1/daemon/host on
+  # the settings cadence and pushes updates; this extension renders the
+  # ActivityConfiguration. The wake, monitor, running-cards and board-progress
+  # activities were removed by the 2026-11-20 widget-redesign picks.
   HSCCLiveActivityMonitor:
     type: app-extension
     platform: iOS
     deploymentTarget: "26.0"
     sources:
-      # The extension's @main: a WidgetBundle over the activities below.
+      # The extension's @main: a WidgetBundle with the one activity.
       - path: Sources/HSCCLiveActivityMonitor/HSCCLiveActivityMonitorBundle.swift
-      - path: Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
-      - path: Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift
-      # The cluster-health activity (t_0120475a): renders the state the app
-      # pushed, never fetches.
+      # Cluster watch: renders the state the app pushed, never fetches.
       - path: Sources/HSCCLiveActivityMonitor/ClusterHealthLiveActivity.swift
-      # The per-board progress activity (t_451cbe25): the four board counts the
-      # app pushes, rendered from the shared reading rules.
-      - path: Sources/HSCCLiveActivityMonitor/BoardProgressLiveActivity.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/SharedStore.swift
-      - path: Sources/Shared/MonitorActivity.swift
-      - path: Sources/Shared/CardsRunningActivity.swift
-      # The stored row type `RunningCardMetric(row:)` projects from. Foundation
-      # only, so the extension can compile the one mapping without touching the
-      # App Group store it also declares.
-      - path: Sources/Shared/CardsRunningProjection.swift
-      # The projection's failure vocabulary (`WidgetDataFailure`) is declared
-      # here; Foundation/Security only, and the extension still never fetches.
-      - path: Sources/Shared/WidgetDataClient.swift
+      - path: Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: Sources/Shared/ClusterHealthActivity.swift
-      - path: Sources/Shared/BoardProgressActivity.swift
       # Needed by the projection block inside the file above — the extension
       # renders the state the app pushed and never projects a payload itself,
       # but the attributes file now names this one. t_f2867fb3.
@@ -611,6 +584,14 @@ targets:
       # re-deriving units and rounding. Foundation-only, which is what lets
       # `model_decode_check.sh` execute the parity check on macOS.
       - path: Sources/Shared/ClusterMonitorViewModel.swift
+      # The graph widget's half of GET /v1/cluster/history (t_b6512c2e): the
+      # requestable metric set and the min/max-preserving pixel reduction, so a
+      # Live Activity trend line cannot draw a peak the recorder never stored.
+      - path: Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9): which columns and
+      # rows the two biggest monitor surfaces draw, and the six fields only they
+      # print. Foundation-only, so `model_decode_check.sh` can execute it.
+      - path: Sources/Shared/ClusterMonitorTables.swift
       # Theme tokens shared with the app (design-system, no raw hex here).
       - path: Sources/HSCC/Views/Theme.swift
     entitlements:
@@ -623,9 +604,9 @@ targets:
     info:
       path: Sources/HSCCLiveActivityMonitor/Info.plist
       properties:
-        # A display name so the monitor Live Activity / Lock Screen surfaces a
-        # friendly label instead of the raw target identifier "HSCCLiveActivityMonitor".
-        CFBundleDisplayName: HSCC Monitor
+        # A display name so the Live Activity / Lock Screen surfaces a friendly
+        # label instead of the raw target identifier "HSCCLiveActivityMonitor".
+        CFBundleDisplayName: HSCC Cluster watch
         HSCCAppGroup: $(HSCC_APP_GROUP)
         # Same dark-only contract as the app (see the app's info block).
         UIUserInterfaceStyle: Dark

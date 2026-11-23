@@ -106,6 +106,19 @@ verbatim from the engine, plus `speak`.
 Read-only. Backed by `cmd_monitor()` (`hscc-cluster/hscc.py:182`). One CPU/RAM/GPU
 snapshot across the fleet. Response carries the engine dict verbatim plus `speak`.
 
+Parked nodes are projected, not reported as failures. Every row of the host table
+(`json.hosts` / `json.nodes`, keyed by `host`) and of the serving table (`serving`,
+keyed by `node`) that belongs to a node the overlay holds gains `status: "paused"`,
+`paused_reason` and `paused_since`; the payload also states the parked set top-level
+as `paused_nodes`, because a parked host can be missing from the frame entirely
+(sparkrun does not list a machine whose workloads are stopped) and an absent row is
+a row nothing can tag. The read is span-aware — the other half of a paused
+tensor-parallel unit is tagged too — and it comes from `hscc_daemon/node_pauses` per
+request, not from the 20 s snapshot cache, so a resume shows up on the next poll.
+A parked row keeps its own `error`/`model` (they may still be true); what it
+guarantees is `status`, and a client that derives `down` from an error or a missing
+sample has to ask `status` first. Rows for unparked nodes are returned untouched.
+
 #### `GET /v1/cluster/jobs`
 
 Read-only. Backed by `cmd_jobs()` (`hscc-cluster/hscc.py:203`). Lists all sparkrun jobs.
@@ -127,6 +140,43 @@ Request body:
 `confirm` must be `true`, else 409. `container_id` is required (400 when missing). On
 success returns `{"message": "...", "success": true, "returncode": 0}`.
 
+#### `GET /v1/node-pauses` — read-only
+
+The durable node-pause overlay (`~/.hscc/node_pauses.json`), read through the
+same `hscc_daemon.node_pauses` store `hscc node paused --json` and the
+`node_paused` agent tool read (t_787930b5, audit D10/F9). Read-only by design:
+pause and resume stop/restart live models, so they stay the CLI + agent-tool
+verbs with the printed plan and the y/N gate — no mutation route exists here.
+
+The overlay is read per request at the server's own `hscc_dir`; an empty or
+missing file is `{"count": 0, "pauses": []}`. One row per pause record, sorted
+by `host`:
+
+```json
+{
+  "count": 1,
+  "pauses": [{
+    "host": "192.0.2.13",
+    "owner": "192.0.2.13",
+    "units": ["vllm-unit-a"],
+    "reason": "training run",
+    "since": "2026-11-23T10:00:00+00:00",
+    "until": "2026-11-23T12:00:00+00:00",
+    "span_nodes": ["192.0.2.13"],
+    "stopped": true
+  }],
+  "speak": "1 node paused."
+}
+```
+
+`owner` is the record's keyed host — the host `hscc node resume` takes. A node
+listed only in `span_nodes` is covered by that record, not an owner of its own.
+`units` is exactly the record's recorded unit ids (there is no model-name map in
+the overlay, and this read must work when the fleet does not). `until: null` is
+open-ended; `stopped` is whether the stop was confirmed. A reader failure is a
+degraded `{"error", "speak"}` (never a clean zero) and a corrupt/unreadable file
+fails open to zero pauses, warning on the daemon log, exactly like the CLI.
+
 ---
 
 ### Fleet / health
@@ -136,17 +186,45 @@ and the daemon state files (`~/.hscc/state/*.json`).
 
 #### `GET /v1/health`
 
-Read-only. Backed by `verify.run_all()` (`hscc_daemon/verify.py:262`) — the same 5-check
-smoke test as `hscc verify`.
+Read-only, and cheap to poll. It does **not** run `verify.run_all()` on the
+request thread: it serves the last cached verify snapshot the health cache keeps
+(TTL 120 s, stale-while-revalidate, one in-flight verify at a time). That
+snapshot is the result of the same fleet smoke test `hscc verify` runs
+(`hscc_daemon.verify.run_all`), produced by a background refresh, by
+`GET /v1/verify`, or — only when no snapshot exists anywhere — by the one inline
+verify the first poll had to start.
 
-Response:
+Response (`ok`, `checks`, `speak` are the original shape; the rest is additive):
 ```json
 {
   "ok": true,
   "checks": [{"name": "...", "ok": true, "detail": "..."}],
-  "speak": "All 5 checks passed. Cluster health is good."
+  "speak": "All checks passed.",
+  "age_seconds": 42,
+  "generated_at": 1795152000,
+  "stale": false,
+  "source": "cache",
+  "paused_nodes": []
 }
 ```
+`generated_at` is the epoch second the verdict was produced, `age_seconds` its
+age now, `stale` is true when that age exceeds the 120 s TTL, and `source` is
+`"cache"` for a stored verdict or `"inline"` for the single verify this request
+had to run. `paused_nodes` names the nodes the operator parked with `hscc node
+pause` — `{"node": "...", "status": "paused", "paused_reason": "...",
+"paused_since": "..."}` each — so a client can tell a parked machine from a
+broken one without touching the verdict: a pause is a choice, and this route
+reports it rather than forgiving anything. The same three field names appear on
+every paused row of `GET /v1/cluster/monitor`, and are a stable contract for the
+widgets. When no verdict exists and none could be produced the answer is
+`{"speak": "health check unavailable"}` with no `ok` or `checks` — that is "no
+health information", never a healthy fleet.
+
+A real verify is expensive — every check of the fleet smoke test, real GPU chat
+round-trips included — which is exactly why it is off this route's request path.
+`GET /v1/verify` is the explicit trigger: it always runs the check inline,
+answers with its own result, and records that verdict into the same snapshot, so
+`/v1/health` and `/v1/verify` cannot drift.
 
 #### `GET /v1/fleet/stats?days=7`
 
@@ -327,7 +405,8 @@ Endpoint-specific contracts:
 | `GET /v1/cluster/monitor` | "Fleet snapshot: `{json}`" is too raw. Use a compact aggregate from the JSON if present, else "fleet monitor unavailable". Keep to one clause. |
 | `GET /v1/cluster/jobs` | "`{count}` job(s) running." from the output, else "job list unavailable". |
 | `GET /v1/cluster/info` | "Cluster configuration loaded." / "cluster info unavailable". |
-| `GET /v1/health` | `ok` ? "All checks passed." : "`{N}` of `{total}` checks have problems." Name the failing checks in one clause if space allows. |
+| `GET /v1/node-pauses` | "`{count}` node(s) paused." / "No nodes paused." Degrade to "Node pause list failed: `{reason}`". |
+| `GET /v1/health` | `ok` ? "All checks passed." : "`{N}` of `{total}` checks have problems." Name the failing checks in one clause if space allows. When the served snapshot is stale, append how old it is — "Health from `{age}` ago." |
 | `GET /v1/fleet/stats` | "Last `{days}` days: `{key stat}`." e.g. "About 1.2k work items across the last 7 days." Keep to the most useful single number. |
 | `GET /v1/fleet/throughput` | `ok`/nodes: "`{nodes_ok}` of `{nodes_total}` nodes healthy." Refer to the dict's `fleet.nodes_ok`/`by_node`. |
 | `GET /v1/fleet/streams` | "Daemon streams: all ok." or enumerate the blocked/failed ones: "`{n}` stream(s) blocked: dgx, gateway." |

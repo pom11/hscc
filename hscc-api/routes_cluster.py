@@ -29,8 +29,11 @@ import importlib.util
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
+
+import health_cache
 
 # Resolve the repo root: hscc-api is a sibling of hscc-cluster and hscc_daemon.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +43,115 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # failure (t_8743f98c). Kept module-level so a handler can report it without
 # re-running the load.
 _LAST_ENGINE_ERROR = ""
+
+
+# ---------------------------------------------------------------------------
+# Cluster snapshot cache — one live sparkrun/SSH read per TTL, single-flight
+# ---------------------------------------------------------------------------
+#
+# `/v1/cluster/monitor` shells out to `sparkrun cluster monitor` and probes the
+# serving layer; `/v1/cluster/status` shells out to `sparkrun status`. Several
+# widgets plus the macOS menu bar refresh these independently, and before this
+# cache every request paid the whole subprocess/SSH cost (W17 in the widget
+# audit). The answer is a SNAPSHOT, so serving the same snapshot for a few
+# seconds is honest as long as the envelope says when it was taken.
+#
+# TTL is 20 s: short enough that a widget never shows a stale fleet for longer
+# than its own refresh cadence, long enough that a burst of widget reloads
+# coalesces. `taken_at` is the cache fill time, not the request time.
+
+CLUSTER_SNAPSHOT_TTL_S = 20.0
+
+
+def _cluster_cache_now() -> float:
+    """The cache's wall clock — a seam tests pin instead of sleeping."""
+    return time.time()
+
+
+def _taken_at_iso(ts: float) -> str:
+    """Second-resolution UTC stamp in the house ``...Z`` form."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+class _SnapshotFlight:
+    """One in-progress build that other requests may wait on."""
+
+    __slots__ = ("done", "value", "at", "exc")
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.value = None
+        self.at = 0.0
+        self.exc = None
+
+
+class _SnapshotCache:
+    """A tiny TTL cache with single-flight fills.
+
+    A cache hit returns the stored ``(value, taken_at)``. On a miss exactly one
+    caller builds while every other caller for the same key waits for that
+    build; they receive the same value and timestamp. A failed build is not
+    cached (the next request retries), but every waiter sees the same error.
+    """
+
+    def __init__(self, ttl: float):
+        self.ttl = float(ttl)
+        self._lock = threading.Lock()
+        self._entries = {}
+        self._flights = {}
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+            self._flights.clear()
+
+    def get_or_build(self, key, build, now=None):
+        now = _cluster_cache_now() if now is None else now
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is not None and now - hit[0] < self.ttl:
+                return hit[1], hit[0]
+            flight = self._flights.get(key)
+            if flight is None:
+                flight = _SnapshotFlight()
+                self._flights[key] = flight
+                leader = True
+            else:
+                leader = False
+
+        if not leader:
+            flight.done.wait()
+            if flight.exc is not None:
+                raise flight.exc
+            return flight.value, flight.at
+
+        try:
+            value = build()
+            at = _cluster_cache_now()
+            flight.value, flight.at = value, at
+            with self._lock:
+                self._entries[key] = (at, value)
+            return value, at
+        except BaseException as exc:
+            flight.exc = exc
+            raise
+        finally:
+            with self._lock:
+                self._flights.pop(key, None)
+            flight.done.set()
+
+
+_CLUSTER_SNAPSHOTS = _SnapshotCache(CLUSTER_SNAPSHOT_TTL_S)
+
+
+def _cluster_snapshot(key, build):
+    """Return ``(value, taken_at)`` from the cache, filling it once."""
+    return _CLUSTER_SNAPSHOTS.get_or_build(key, build)
+
+
+def _reset_cluster_snapshot_cache():
+    """Test seam: drop every cached snapshot and in-flight slot."""
+    _CLUSTER_SNAPSHOTS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +287,20 @@ def _backing_cluster_info():
     return eng.cmd_info()
 
 
-def _backing_serving_snapshot():
+#: tok/s is a counter delta between two scrapes, so the poller must outlive a
+#: request: a fresh poller per call had no previous sample and reported
+#: ``gen_tps: null`` on every row, forever (every widget read "— tok/s").
+_SERVING_POLLER = None
+_SERVING_LOCK = threading.Lock()
+_SERVING_LAST_AT: float | None = None
+#: A previous sample older than this would turn the rate into a long average
+#: (a widget polls every 30 min), so the call re-primes instead.
+SERVING_RATE_MAX_GAP_S = 60.0
+#: The gap between the priming scrape and the measured one.
+SERVING_RATE_WINDOW_S = 2.0
+
+
+def _backing_serving_snapshot(clock=time.monotonic, sleep=time.sleep):
     """The CLI monitor's serving section: one ``ServingPoller`` sample.
 
     ``cluster_render.render_monitor`` builds exactly this object for
@@ -183,18 +308,37 @@ def _backing_serving_snapshot():
     the rows alongside the sparkrun frame is what gives a widget the model
     served per node, running/waiting, KV, and token totals/rates — the parts of
     the CLI view that the raw sparkrun frame does not carry.
+
+    The poller is process-wide so consecutive calls rate against each other.
+    When the last scrape is missing or older than ``SERVING_RATE_MAX_GAP_S``,
+    one priming scrape runs ``SERVING_RATE_WINDOW_S`` before the real one, so
+    the rate is always a current one.
     """
+    global _SERVING_POLLER, _SERVING_LAST_AT
     _ensure_repo_root_on_path()
     from hscc_daemon import cluster_live
-    poller = cluster_live.ServingPoller()
-    try:
+    with _SERVING_LOCK:
+        if _SERVING_POLLER is None:
+            _SERVING_POLLER = cluster_live.ServingPoller()
+        poller = _SERVING_POLLER
+        if _SERVING_LAST_AT is None or clock() - _SERVING_LAST_AT > SERVING_RATE_MAX_GAP_S:
+            poller.poll()
+            sleep(SERVING_RATE_WINDOW_S)
         rows = poller.poll()
-    finally:
-        poller.close()
-    return {"rows": rows, "proxy_error": poller.proxy_error}
+        _SERVING_LAST_AT = clock()
+        return {"rows": rows, "proxy_error": poller.proxy_error}
 
 
 def _backing_verify():
+    """Run ONE real fleet verify right now (t_7babf634).
+
+    This is the seam the health cache and ``GET /v1/verify`` call when a
+    verdict must actually be produced — it is NOT a cheap call: it does real
+    chat round-trips to every serving GPU unit. ``handle_health`` no longer
+    calls it per request; it hands it to :func:`health_cache.get_snapshot`,
+    which decides (cache hit / stale revalidate / one inline run) whether a
+    verify is needed at all.
+    """
     from hscc_daemon import verify
     return verify.run_all()
 
@@ -278,6 +422,257 @@ def _failure_detail(data=None, exc=None) -> str:
 def _degraded(lead, data=None, exc=None):
     detail = _failure_detail(data, exc)
     return {"error": detail, "speak": f"{lead}: {detail}"}
+
+
+# ---------------------------------------------------------------------------
+# The node-pause overlay — a parked node reads PAUSED, never down
+# ---------------------------------------------------------------------------
+# WHY THE ROUTE PROJECTS THIS AND NOT THE BACKING. ``hscc node pause`` stops a
+# unit through sparkrun and records the intent in ``~/.hscc/node_pauses.json``
+# (hscc_daemon/node_pauses.py). Every read path downstream of that stop — the
+# sparkrun host table, the serving poller, the widget tally — then sees the
+# same thing a crash sees: no container, no answering engine. Without an
+# overlay read at the API edge a paused node is therefore reported as DOWN, and
+# the operator's deliberate act is rendered as a fault: the widget paints it
+# hot, the Needs-me badge fires, and the fleet looks broken while it is doing
+# exactly what they asked. The repair loops already skip parked nodes
+# (watchdog auto-heal, keepalive, ``cluster up``, autoscale); this is the same
+# overlay on the VISIBILITY side, so the fleet reads the same way everywhere.
+#
+# THE THREE FIELD NAMES ARE A CONTRACT, NOT A SUGGESTION. ``status``,
+# ``paused_reason`` and ``paused_since`` are what the iOS/macOS widgets read
+# (t_983f177e), so renaming or reshaping one is a breaking change for shipped
+# bundles, not a refactor. They are additive: a row that is not parked keeps
+# exactly the keys it had before this existed, which is why the parity gates on
+# the monitor payload still pass.
+#
+# WHY THE OVERLAY IS READ PER REQUEST, NOT CACHED. The sparkrun frame and the
+# serving rows behind them cost subprocesses, so they live in the 20 s snapshot
+# cache above. The overlay is one small local JSON file, and pausing or
+# resuming must be visible on the NEXT request rather than up to a TTL later —
+# so it is read at request time and merged onto a COPY of the cached rows.
+# Nothing here mutates a cached object: the cache holds the pre-overlay truth.
+
+#: The value ``status`` carries on a parked row. One constant so a route,
+#: a test and the widget contract can never drift into three spellings.
+PAUSE_STATUS = "paused"
+
+#: The keys a parked row gains. Stable contract — see the block above.
+PAUSE_ROW_KEYS = ("status", "paused_reason", "paused_since")
+
+
+def _backing_node_pauses(directory=None):
+    """The durable node-pause overlay as ``{host: entry}``.
+
+    The monkeypatch seam the route tests use, like every other ``_backing_*``
+    here. ``directory`` is threaded through to :func:`node_pauses.list_pauses`
+    because that module's documented test seam is an explicit root, never an
+    environment variable: a root passed in is one root both sides of the call
+    share, while a root read from the process env is a root no other process
+    (the CLI that wrote the overlay) can ever have had. Handlers pass
+    ``ctx.hscc_dir``, which in production resolves to HOME's ``~/.hscc`` — the
+    same root the CLI writes — and in a test is that test's own tmp dir.
+    """
+    from hscc_daemon import node_pauses
+    return node_pauses.list_pauses(directory)
+
+
+def _node_key(value):
+    """A comparable node identity, or ``None`` when this value names none.
+
+    Deliberately not clever: trim and case-fold, no address normalisation, no
+    hostname suffix stripping. The overlay is keyed by the host string the
+    operator passed to ``hscc node pause``, which is the same string sparkrun
+    uses in its rows. Guessing that ``node-3`` means ``192.0.2.13`` would
+    invent a paused node on a machine nobody parked, which is a worse lie than
+    a missing overlay tag on an aliased host.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed.casefold() if trimmed else None
+
+
+def _pause_row(reason, since):
+    """The three contract keys, always all three, in the documented order."""
+    return {"status": PAUSE_STATUS,
+            "paused_reason": reason if isinstance(reason, str) else "",
+            "paused_since": since if isinstance(since, str) else None}
+
+
+def _pause_overlay(directory=None):
+    """``{node: {status, paused_reason, paused_since}}`` for parked nodes.
+
+    Span-aware on purpose. A pause record is keyed by the host the operator
+    named, and a unit that spans several hosts is parked as a whole — the
+    machines named only in ``span_nodes`` are just as out of service as the
+    keyed one, and painting them down would fault the operator's own action
+    twice. That is ``node_pauses.covering``'s rule; this is its projection.
+
+    A host's OWN record wins over a span record that happens to name it
+    (``covering`` prefers the keyed entry, and the operator's own reason is the
+    truthful one to show).
+
+    Fails open to ``{}``: an unreadable overlay is already ``{"pauses": {}}``
+    inside :func:`node_pauses.load`, and the one thing left that could raise is
+    the import. A route must never turn a fleet read into an error because the
+    overlay could not be parsed — the overlay WARNs about itself.
+    """
+    try:
+        pauses = _backing_node_pauses(directory)
+    except Exception:  # noqa: BLE001 - a visibility tag is never worth a 500
+        return {}
+    overlay = {}
+    if not isinstance(pauses, dict):
+        return overlay
+    for host, entry in pauses.items():
+        if not isinstance(entry, dict):
+            continue
+        row = _pause_row(entry.get("reason"), entry.get("since"))
+        keyed = _node_key(host)
+        if keyed:
+            overlay[keyed] = dict(row)
+        for node in entry.get("span_nodes") or []:
+            spanned = _node_key(node)
+            if spanned:
+                overlay.setdefault(spanned, dict(row))
+    return overlay
+
+
+def _paused_nodes(overlay):
+    """The overlay as the payload's own ``paused_nodes`` list, sorted by node.
+
+    Why a list and not only the annotated rows: a parked host can be MISSING
+    from the monitor frame entirely — sparkrun does not list a machine whose
+    workloads are stopped, and an absent row is a row there is nothing to tag.
+    A client that only walked the rows would count such a node as gone, or
+    subtract nothing from its down tally. This is the authoritative "these
+    nodes are parked, by choice, since then" set, independent of what the
+    sample managed to reach.
+    """
+    return [dict({"node": node}, **overlay[node]) for node in sorted(overlay)]
+
+
+#: Every key one `/v1/node-pauses` row carries, in payload order. Additive
+#: only: a client may ignore one, but a rename is a breaking change.
+NODE_PAUSE_ROW_KEYS = ("host", "owner", "units", "reason", "since", "until",
+                       "span_nodes", "stopped")
+
+
+def _node_pause_record(host, entry):
+    """One overlay entry as the read route's row.
+
+    ``owner`` is the host the record is keyed to — the host ``hscc node
+    resume`` must be given. A node named only in another record's
+    ``span_nodes`` is covered by that record but is not itself an owner (the
+    CLI says so: resume the owner), which is why this route reports one row
+    per record rather than inventing a row for each spanned node; the span is
+    carried verbatim in ``span_nodes`` so a client can expand it.
+
+    ``units`` is the record's ``units`` key, exactly what ``hscc node paused
+    --json`` prints: the unit ids the pause recorded as stopped. The overlay
+    deliberately stores ids, not launch commands or model names — mapping them
+    back needs ``serving.json``, and this read must keep working when the
+    fleet does not.
+    """
+    units = entry.get("units")
+    span = entry.get("span_nodes")
+    reason = entry.get("reason")
+    return {
+        "host": host,
+        "owner": host,
+        "units": list(units) if isinstance(units, (list, tuple)) else [],
+        "reason": reason if isinstance(reason, str) else "",
+        "since": entry.get("since"),
+        "until": entry.get("until"),
+        "span_nodes": list(span) if isinstance(span, (list, tuple)) else [],
+        "stopped": bool(entry.get("stopped")),
+    }
+
+
+def _pause_overlay_for(ctx):
+    """The pause overlay for the root THIS request carries, or nothing at all.
+
+    Two failures this refuses, in both directions:
+
+    * A request whose context has no root must not fall back to the default
+      ``~/.hscc``. A route reading a root nobody named for it is the root-split
+      bug class this repo has already been bitten by — the reader ends up
+      pointed at a tree the writer (the CLI, another profile, a test's sealed
+      home) can never have written. No named root therefore means no tags, not
+      a guessed root.
+    * It must not raise. ``GET /v1/health`` is the connection probe the apps
+      poll every 15 s; a missing context turning that into a 500 would take the
+      app's "the API is alive" signal down with it.
+
+    Handlers pass the request context they already have (``ctx.hscc_dir``),
+    which is the root the server was started with and — in production — the
+    same ``~/.hscc`` the CLI writes the overlay into.
+    """
+    root = getattr(ctx, "hscc_dir", None)
+    if root is None:
+        return {}
+    return _pause_overlay(root)
+
+
+def _annotate_paused_rows(rows, overlay, keys=("host", "node", "name")):
+    """A copy of ``rows`` with the pause keys added to parked-node rows.
+
+    ``keys`` is the row's identity field, tried in order, because the two row
+    families this route carries name their machine differently: the sparkrun
+    host table uses ``host``, the serving rows use ``node``.
+
+    Rows the overlay does not hold come back as the SAME objects, so an
+    unpaused payload is byte-identical to the pre-overlay response — including
+    its key order and its ``error`` text. Rows it does hold come back as new
+    dicts, because the rows in hand belong to the shared snapshot cache and
+    writing into them there would leak one request's pause state into every
+    later request for the rest of the TTL.
+
+    A parked row keeps its ``error``: "could not sample this host" may still be
+    true, and a node the operator parked is not a reason to lose a real
+    diagnostic. What the row promises instead is that ``status`` says
+    ``"paused"`` — and a consumer that derives ``down`` from ``error`` or from
+    a missing sample MUST ask ``status`` first. That is the widget rule
+    (t_983f177e), and it is why ``paused`` and ``down`` can never collide.
+    """
+    if not overlay or not isinstance(rows, list):
+        return rows
+    out = []
+    for row in rows:
+        fields = None
+        if isinstance(row, dict):
+            for key in keys:
+                node = _node_key(row.get(key))
+                if node and node in overlay:
+                    fields = overlay[node]
+                    break
+        out.append({**row, **fields} if fields else row)
+    return out
+
+
+def _with_pause_overlay(payload, ctx):
+    """The monitor payload with parked nodes tagged, as a NEW payload dict.
+
+    Tags both row families the route carries — the sparkrun host table under
+    ``json.hosts``/``json.nodes`` and the serving rows under ``serving`` — and
+    states the parked set at the top level. The payload handed in (the cached
+    snapshot's) is never modified.
+    """
+    overlay = _pause_overlay_for(ctx)
+    out = dict(payload)
+    frame = payload.get("json")
+    if isinstance(frame, dict):
+        frame = dict(frame)
+        for key in ("hosts", "nodes"):
+            if key in frame:
+                frame[key] = _annotate_paused_rows(frame[key], overlay)
+        out["json"] = frame
+    if "serving" in payload:
+        out["serving"] = _annotate_paused_rows(payload["serving"], overlay,
+                                               keys=("node", "host", "name"))
+    out["paused_nodes"] = _paused_nodes(overlay)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -365,18 +760,48 @@ def _speak_cluster_info(data):
     return "Cluster configuration loaded."
 
 
-def _speak_health(data):
+def _speak_node_pauses(data):
+    """§B: a count sentence — never a host list, which a reader cannot scan."""
+    count = data.get("count", 0)
+    if not isinstance(count, int) or count <= 0:
+        return "No nodes paused."
+    return f"{count} node{'s' if count != 1 else ''} paused."
+
+
+def _humanize_age(seconds) -> str:
+    """A spoken age: ``45s`` / ``7m`` / ``3h12m`` / ``2d04h``."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if s < 0:
+        s = 0
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    return f"{s // 86400}d{(s % 86400) // 3600:02d}h"
+
+
+def _speak_health(data, age_seconds=None, stale=False):
     """§B: ok ? "All checks passed." : "{N} of {total} checks have problems."."""
     checks = data.get("checks", [])
     ok = data.get("ok")
     if ok:
-        return "All checks passed."
-    failed = [c for c in checks if not c.get("ok")]
-    total = len(checks)
-    names = ", ".join(str(c.get("name", "?")) for c in failed)
-    sentence = f"{len(failed)} of {total} checks have problems."
-    if names:
-        sentence += f" ({names})"
+        sentence = "All checks passed."
+    else:
+        failed = [c for c in checks if not c.get("ok")]
+        total = len(checks)
+        names = ", ".join(str(c.get("name", "?")) for c in failed)
+        sentence = f"{len(failed)} of {total} checks have problems."
+        if names:
+            sentence += f" ({names})"
+    if stale:
+        # t_7babf634: this verdict is a cached one older than the TTL. Say how
+        # old it is rather than reading like a check that just ran.
+        sentence += f" Health from {_humanize_age(age_seconds)} ago."
     return sentence
 
 
@@ -456,28 +881,89 @@ def _speak_autoscale(data):
 
 
 # ---------------------------------------------------------------------------
-# Handlers (read-only; 200 with degraded speak on a backing failure)
+# Handlers (read-only; 200 with degraded speak on a backing failure, except
+# /v1/cluster/monitor which answers 503 + success:false so the app cannot read
+# a failed sample as a serving fleet)
 # ---------------------------------------------------------------------------
 
-def handle_cluster_status(server, ctx, query, body):
+def _cluster_status_snapshot():
+    """The cached status read: the backing payload or a failure envelope."""
     try:
         data = _backing_cluster_status()
     except Exception as exc:
-        return 200, {
-            "workloads": [], "idle_hosts": [], "total_hosts": 0,
-            **_degraded("Cluster status failed", exc=exc),
-        }
+        return {"ok": False, "detail": _failure_detail(exc=exc)}
     if data is None or _is_error_dict(data):
+        return {"ok": False, "detail": _failure_detail(data)}
+    return {
+        "ok": True,
+        "payload": {
+            "workloads": data.get("workloads", []),
+            "idle_hosts": data.get("idle_hosts", []),
+            "total_hosts": data.get("total_hosts", 0),
+            "speak": _speak_cluster_status(data),
+        },
+    }
+
+
+def handle_cluster_status(server, ctx, query, body):
+    snapshot, taken_at = _cluster_snapshot("status", _cluster_status_snapshot)
+    taken = _taken_at_iso(taken_at)
+    if not snapshot["ok"]:
+        detail = snapshot["detail"]
         return 200, {
             "workloads": [], "idle_hosts": [], "total_hosts": 0,
-            **_degraded("Cluster status failed", data),
+            "error": detail,
+            "speak": f"Cluster status failed: {detail}",
+            "taken_at": taken,
         }
-    return 200, {
-        "workloads": data.get("workloads", []),
-        "idle_hosts": data.get("idle_hosts", []),
-        "total_hosts": data.get("total_hosts", 0),
-        "speak": _speak_cluster_status(data),
-    }
+    return 200, {**snapshot["payload"], "taken_at": taken}
+
+
+def _cluster_monitor_snapshot():
+    """The cached monitor read: sparkrun frame + the CLI's serving section."""
+    try:
+        data = _backing_cluster_monitor()
+    except Exception as exc:
+        return {"ok": False, "detail": _failure_detail(exc=exc)}
+    if data is None or _is_error_dict(data):
+        return {"ok": False, "detail": _failure_detail(data)}
+    payload = {**data, "speak": _speak_cluster_monitor(data)}
+    # Add the same serving rows `hscc cluster monitor` prints beside the host
+    # table (model per node, run/wait, KV, token totals and rates). Additive:
+    # older clients decode only `json`, new ones may read `serving`.
+    try:
+        serving = _backing_serving_snapshot()
+    except Exception as exc:
+        payload["serving"] = []
+        payload["serving_error"] = _failure_detail(exc=exc)
+    else:
+        payload["serving"] = serving.get("rows", [])
+        payload["serving_proxy_error"] = serving.get("proxy_error")
+    return {"ok": True, "payload": payload}
+
+
+def handle_cluster_monitor(server, ctx, query, body):
+    snapshot, taken_at = _cluster_snapshot("monitor", _cluster_monitor_snapshot)
+    taken = _taken_at_iso(taken_at)
+    if not snapshot["ok"]:
+        detail = snapshot["detail"]
+        # A degraded monitor is not a 200 success: HTTP 200 with no `json` was
+        # indistinguishable from a healthy empty fleet, and the app counted the
+        # daemon host as "serving". Non-2xx + success:false makes every client
+        # take its offline/degraded path instead.
+        return 503, {
+            "success": False,
+            "degraded": True,
+            "error": detail,
+            "speak": f"Fleet monitor failed: {detail}",
+            "taken_at": taken,
+        }
+    return 200, _with_pause_overlay({
+        **snapshot["payload"],
+        "success": True,
+        "degraded": False,
+        "taken_at": taken,
+    }, ctx)
 
 
 def handle_cluster_hosts(server, ctx, query, body):
@@ -493,28 +979,6 @@ def handle_cluster_hosts(server, ctx, query, body):
         "live_status": data.get("live_status", {}),
     }
     payload["speak"] = _speak_cluster_hosts(payload)
-    return 200, payload
-
-
-def handle_cluster_monitor(server, ctx, query, body):
-    try:
-        data = _backing_cluster_monitor()
-    except Exception as exc:
-        return 200, _degraded("Fleet monitor failed", exc=exc)
-    if data is None or _is_error_dict(data):
-        return 200, _degraded("Fleet monitor failed", data)
-    payload = {**data, "speak": _speak_cluster_monitor(data)}
-    # Add the same serving rows `hscc cluster monitor` prints beside the host
-    # table (model per node, run/wait, KV, token totals and rates). Additive:
-    # older clients decode only `json`, new ones may read `serving`.
-    try:
-        serving = _backing_serving_snapshot()
-    except Exception as exc:
-        payload["serving"] = []
-        payload["serving_error"] = _failure_detail(exc=exc)
-    else:
-        payload["serving"] = serving.get("rows", [])
-        payload["serving_proxy_error"] = serving.get("proxy_error")
     return 200, payload
 
 
@@ -538,17 +1002,99 @@ def handle_cluster_info(server, ctx, query, body):
     return 200, {**data, "speak": _speak_cluster_info(data)}
 
 
-def handle_health(server, ctx, query, body):
+def handle_node_pauses(server, ctx, query, body):
+    """GET /v1/node-pauses — the durable pause overlay, READ-ONLY (t_787930b5).
+
+    The read half of the pause trio. ``hscc node pause|resume`` and the
+    ``node_pause``/``node_resume`` agent tools stay the only mutation doors:
+    a pause stops live models, and the CLI/tool pair owns the printed plan and
+    the y/N confirmation a route cannot reproduce. This handler therefore has
+    no body, writes nothing, and never touches the fleet — it reads the same
+    ``hscc_daemon.node_pauses`` store the CLI and the agent tool read, rooted
+    at the server's own ``hscc_dir``.
+
+    Response per pause record: ``host`` and ``owner`` (the keyed host — the
+    one ``hscc node resume`` takes), ``units`` (the unit ids recorded as
+    stopped), ``reason``, ``since``, ``until`` (``None`` is open-ended),
+    ``span_nodes`` (verbatim; a spanned node is covered by the owner's record)
+    and ``stopped``. Rows are sorted by host so the payload is reproducible.
+
+    Fail-open on an empty overlay (no file is genuinely "nothing parked");
+    a reader that raises or hands back a non-object is reported as degraded
+    with its own reason rather than rendered as a clean zero — "0 pauses" on a
+    broken read is the lie this route must not tell.
+    """
+    root = getattr(ctx, "hscc_dir", None)
+    if root is None:
+        # Same rule as the monitor overlay: never guess the default ~/.hscc
+        # for a request that named no root — a reader pointed at a tree the
+        # writer cannot have written is the root-split bug class.
+        return 200, _degraded(
+            "Node pause list failed",
+            data={"error": "request context carries no hscc_dir; refusing to "
+                           "guess the default ~/.hscc"})
     try:
-        data = _backing_verify()
+        pauses = _backing_node_pauses(root)
+    except Exception as exc:  # noqa: BLE001 - report the real cause as degraded
+        return 200, _degraded("Node pause list failed", exc=exc)
+    if not isinstance(pauses, dict):
+        return 200, _degraded(
+            "Node pause list failed",
+            data={"error": f"overlay reader returned {type(pauses).__name__}, "
+                           f"not an object"})
+    rows = [_node_pause_record(host, pauses[host])
+            for host in sorted(h for h in pauses
+                               if isinstance(h, str)
+                               and isinstance(pauses[h], dict))]
+    payload = {"count": len(rows), "pauses": rows}
+    payload["speak"] = _speak_node_pauses(payload)
+    return 200, payload
+
+
+def handle_health(server, ctx, query, body):
+    """GET /v1/health — the LAST verify snapshot, never a verify run.
+
+    t_7babf634. This route used to call :func:`_backing_verify` — every check
+    of the fleet smoke test, real GPU chat round-trips included — on the
+    request thread, once per poll, with no cache and no dedupe. It now serves
+    the snapshot :mod:`health_cache` keeps: fresh → answered immediately with
+    the verify untouched; older than the TTL → answered immediately with the
+    stale verdict while ONE background refresh runs; nothing cached anywhere →
+    exactly one inline verify, which every concurrent caller waits for instead
+    of starting its own.
+
+    The payload stays a strict superset of what it was ({ok, checks, speak}) so
+    the iOS ``HealthResponse`` keeps decoding; ``age_seconds``, ``generated_at``,
+    ``stale`` and ``source`` are additive.
+
+    So is ``paused_nodes`` (t_824b617f): this route answers "is the fleet
+    healthy", and a node the operator parked on purpose is not a fault. The
+    overlay is read per request — the same read the monitor route makes, so the
+    two routes can never disagree about which nodes are parked — and it is the
+    only node-level information here, because the checks are named fleet checks
+    rather than per-machine rows. Clients that show a down count subtract this
+    list from it. The verdict itself (``ok``, ``checks``) is NOT edited here:
+    suppressing a parked unit inside the checks is the verify layer's business,
+    and quietly greying out a red check at the HTTP edge would launder a real
+    signal into a reassuring one.
+    """
+    try:
+        snap = health_cache.get_snapshot(verify=_backing_verify)
     except Exception:
         return 200, {"speak": "health check unavailable"}
-    if not isinstance(data, dict):
+    if snap is None:
         return 200, {"speak": "health check unavailable"}
+    data = snap["result"]
     return 200, {
         "ok": data.get("ok", False),
         "checks": data.get("checks", []),
-        "speak": _speak_health(data),
+        "speak": _speak_health(data, age_seconds=snap["age_seconds"],
+                               stale=snap["stale"]),
+        "age_seconds": snap["age_seconds"],
+        "generated_at": snap["generated_at"],
+        "stale": snap["stale"],
+        "source": snap["source"],
+        "paused_nodes": _paused_nodes(_pause_overlay_for(ctx)),
     }
 
 
@@ -662,6 +1208,24 @@ def _history_windows(mh) -> dict:
 _HISTORY_HOST_IDENTITY = ("tier", "ts", "host", "res", "n", "error")
 _HISTORY_ENGINE_IDENTITY = ("tier", "ts", "node", "port", "model", "res", "n",
                             "error")
+
+#: Every parameter the route accepts, in request-axis order. An unknown key is
+#: a 400 that names this whole set — `host=` deliberately is NOT in it:
+#: `host_rollup.host` and `engine_rollup.node` are two column names for one
+#: identity, so `node=` stays the single "which machine" filter for both series.
+_HISTORY_QUERY_KEYS = ("node", "metrics", "window", "tier", "since", "until")
+
+#: The two request axes, stated on the response as `axis` so a client never
+#: infers "which axis was asked" from which keys happen to be non-null.
+AXIS_WINDOW = "window"
+AXIS_TIER = "tier"
+
+#: Where the served rows came from, as a CODE. A client must branch on this, not
+#: on the English of `note` (the same reason `error.code` exists).
+SOURCE_RING = "recorder_ring"
+SOURCE_RING_ABSENT = "recorder_ring_absent"
+SOURCE_STORE = "sqlite_store"
+SOURCE_STORE_ABSENT = "sqlite_store_absent"
 
 
 def _metrics_history():
@@ -780,6 +1344,175 @@ def _parse_history_metrics(query, mh, tier: int):
     return names
 
 
+# --------------------------------------------------------------------------- #
+# The two request axes
+# --------------------------------------------------------------------------- #
+
+def _history_retention_s(mh, tier: int) -> int:
+    """How deep one tier actually goes, read from the module that owns it.
+
+    Hardcoding 900/86400/604800 here would let the response lie the day the
+    recorder's cadence changes, so the numbers come from ``metrics_history``.
+    """
+    if tier == 0:
+        return mh.TIER0_WINDOW_S
+    if tier == 1:
+        return mh.TIER1_WINDOW_S
+    return mh.TIER2_WINDOW_S
+
+
+def _history_bucket_s(mh, tier: int) -> int:
+    """The bucket width of one tier, again the recorder's own number."""
+    if tier == 0:
+        return mh.TIER0_INTERVAL_S
+    return mh.TIER1_BUCKET_S if tier == 1 else mh.TIER2_BUCKET_S
+
+
+def _parse_history_tier(query, mh) -> int:
+    """?tier= -> 0, 1 or 2. 400 on anything else.
+
+    Required on the tier axis rather than defaulted: "which resolution am I
+    looking at" is the one thing a chart may not guess, and a silent default is
+    how a 2 s widget starts rendering 5-minute averages.
+    """
+    from api_server import ApiError
+    raw = str(query.get("tier") or "").strip()
+    try:
+        tier = int(raw)
+    except (TypeError, ValueError):
+        tier = -1
+    if tier not in (0, 1, 2):
+        raise ApiError(
+            400, "bad_request",
+            f"tier must be 0, 1 or 2 (got {raw!r}): 0 is the 2 s ring (15 min), "
+            "1 the 1-minute roll-ups (24 h), 2 the 5-minute roll-ups (7 d)",
+            "tier must be 0, 1 or 2.",
+        )
+    return tier
+
+
+def _parse_history_epoch(query, name) -> int | None:
+    """?since= / ?until= -> an inclusive epoch-second bucket start, or None.
+
+    Ported from the retired ``/v1/metrics/history`` parser, including the
+    floor-not-round: the store's buckets are integer second offsets aligned to
+    the wall clock, so flooring keeps the "inclusive bucket start" meaning the
+    store documents, where rounding would silently admit a bucket the client
+    did not ask for.
+    """
+    from api_server import ApiError
+    raw = query.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        raise ApiError(
+            400, "bad_request",
+            f"{name} must be epoch seconds (got {raw!r})",
+            f"History {name} must be epoch seconds.",
+        )
+
+
+def _resolve_history_axis(query, mh) -> dict:
+    """Decide which axis this request is, and the span it will actually serve.
+
+    Two ways to pick a span, and they are not interchangeable:
+
+      * ``window=15m|1h|6h|24h|7d`` — a **preset anchored to `now`**. It implies
+        the tier, and its span is fixed.
+      * ``tier=0|1|2&since=&until=`` — a **raw tier with an explicit span**, for
+        "the hour around last night's slow run". It anchors to nothing.
+
+    Because the two anchors are different instants, exactly one axis may be
+    asked for at a time, and that is enforced here rather than resolved by
+    precedence — a client that gets `window=1h` served when it also sent
+    `since`/`until` would have no way to learn its span was ignored:
+
+      * `window` + `tier` together -> 400 naming both;
+      * `since`/`until` without `tier` -> 400 (a preset anchors to `now`, a raw
+        tier does not, so naming both anchors asks for two different spans);
+      * neither -> `window=1h`, which is #407's default and stays it, so the
+        callers shipped before this axis are unaffected.
+
+    The tier axis's span is clamped to that tier's own retention, and the clamp
+    is *stated*: the returned `since`/`until` are what was served, `window_s` is
+    the served span, and `clamp` says what moved and why. Both axes therefore
+    obey the same rule — the response always states the window it really served.
+
+    Returns ``{axis, window, tier, bucket_s, since, until, window_s, clamp}``.
+    """
+    from api_server import ApiError
+    asked_window = bool(str(query.get("window") or "").strip())
+    asked_tier = bool(str(query.get("tier") or "").strip())
+    asked_span = bool(str(query.get("since") or "").strip()) or \
+        bool(str(query.get("until") or "").strip())
+
+    if asked_window and asked_tier:
+        raise ApiError(
+            400, "bad_request",
+            "'window' and 'tier' pick a span two different ways and cannot be "
+            "asked together: 'window' is a preset anchored to now (15m, 1h, 6h, "
+            "24h, 7d), 'tier' is a raw tier with its own since/until. Send one "
+            "or the other.",
+            "Ask for either window or tier, not both.",
+        )
+    if asked_span and not asked_tier:
+        raise ApiError(
+            400, "bad_request",
+            "'since'/'until' need 'tier': a 'window' preset always runs back from "
+            "now, while an explicit since/until does not, so a request naming "
+            "both states two different spans and the route would have to guess "
+            "which one you meant.",
+            "since and until need tier.",
+        )
+
+    now = int(_history_now())
+    if not asked_tier:
+        window, tier, bucket_s, span_s = _parse_history_window(query, mh)
+        return {"axis": AXIS_WINDOW, "window": window, "tier": tier,
+                "bucket_s": bucket_s, "since": now - span_s, "until": now,
+                "window_s": span_s, "clamp": ""}
+
+    tier = _parse_history_tier(query, mh)
+    bucket_s = _history_bucket_s(mh, tier)
+    retention = _history_retention_s(mh, tier)
+    asked_since = _parse_history_epoch(query, "since")
+    asked_until = _parse_history_epoch(query, "until")
+
+    # `until` defaults to now (the same anchor the preset uses); `since` then
+    # defaults to the deepest bucket this tier can still hold.
+    until = now if asked_until is None else asked_until
+    since = (until - retention) if asked_since is None else asked_since
+
+    clamps = []
+    if until > now:
+        clamps.append(f"until={asked_until} is in the future; the newest bucket "
+                      f"that can exist is {now}")
+        until = now
+    floor = until - retention
+    if since < floor:
+        clamps.append(f"since={asked_since} is deeper than tier {tier} keeps "
+                      f"({retention} s); its oldest bucket is {floor}")
+        since = floor
+    if since < 0:
+        clamps.append(f"since={asked_since} is before the epoch; serving from 0")
+        since = 0
+    if since > until:
+        raise ApiError(
+            400, "bad_request",
+            f"since={since} is after until={until}: an inclusive span cannot run "
+            "backwards, and answering it empty would read as 'nothing happened' "
+            "rather than as a bad range",
+            "since must not be after until.",
+        )
+    return {"axis": AXIS_TIER, "window": f"{until - since}s", "tier": tier,
+            "bucket_s": bucket_s, "since": since, "until": until,
+            "window_s": until - since,
+            "clamp": ("; ".join(clamps) + f" — served {until - since} s of "
+                      f"tier {tier}") if clamps else ""}
+
+
 def _history_host_rows_from_points(points, node: str) -> list:
     """Tier-0 records -> per-node rows, key names unchanged.
 
@@ -848,21 +1581,36 @@ def _backing_history_rows(hscc_dir, tier, since, until, node):
     when the file already exists: the recorder owns that file, and a widget poll
     against a fresh install must not leave an empty database behind (an empty
     file looks like a data source; a missing one says what it means).
+
+    ``store_info`` also carries the store's own size facts — `bound_bytes`,
+    `tier1_rows`, `tier2_rows` — because they belong to the same object the block
+    already describes. They are read while the handle is open and only where the
+    store was really opened: `tier1_rows`/`tier2_rows` are `None` at tier 0, which
+    never touches the file, and a `0` from a branch that did not count would be
+    the same fabricated default `store.tier0_resident` used to carry.
     """
     mh = _metrics_history()
     store = mh.MetricsStore(hscc_dir=hscc_dir)
     exists = os.path.exists(store.path)
     info = {"path": store.path, "exists": exists,
-            "db_bytes": os.path.getsize(store.path) if exists else 0}
+            "db_bytes": os.path.getsize(store.path) if exists else 0,
+            "bound_bytes": mh.size_bound_bytes()}
     if not exists:
+        # Not a default: there is no store, so there is nothing to count. That is
+        # a measured absence, and it costs no file handle to know.
+        info["tier1_rows"] = info["tier2_rows"] = 0
         return [], [], info
     name = None if node == "all" else node
     try:
         host_rows = store.host_rows(tier, since=since, until=until, host=name)
         engine_rows = store.engine_rows(tier, since=since, until=until, node=name)
+        counts = store.stats()
     finally:
         store.close()
     info["error"] = store.error
+    info["tier1_rows"] = counts.get("tier1_rows")
+    info["tier2_rows"] = counts.get("tier2_rows")
+    info["bound_bytes"] = counts.get("bound_bytes", mh.size_bound_bytes())
     return host_rows, engine_rows, info
 
 
@@ -871,42 +1619,59 @@ def _speak_cluster_history(payload) -> str:
     if payload.get("error"):
         return f"Cluster history failed: {payload['error']}"
     if payload["tier"] == 0 and not payload["store"]["tier0_resident"]:
-        return ("The 15 m window is the daemon's in-memory ring and this server "
+        return ("The 2 s tier is the daemon's in-memory ring and this server "
                 "process does not own it. Ask for window=1h for 1-minute points.")
     counts = payload["counts"]
-    return (f"Last {payload['window']} at {payload['resolution']} resolution: "
-            f"{counts['hosts']} node point{'s' if counts['hosts'] != 1 else ''}, "
-            f"{counts['engines']} engine point{'s' if counts['engines'] != 1 else ''}.")
+    plural = lambda n, thing: f"{n} {thing}{'s' if n != 1 else ''}"
+    span = (f"Last {payload['window']}" if payload["axis"] == AXIS_WINDOW else
+            f"Tier {payload['tier']} over {payload['window_s']} s")
+    return (f"{span} at {payload['resolution']} resolution: "
+            f"{plural(counts['hosts'], 'node point')}, "
+            f"{plural(counts['engines'], 'engine point')}.")
 
 
 def handle_cluster_history(server, ctx, query, body):
-    """GET /v1/cluster/history?node=<host|all>&metrics=a,b&window=15m|1h|6h|24h|7d
+    """GET /v1/cluster/history?node=<host|all>&metrics=a,b
+                    &window=15m|1h|6h|24h|7d
+                    &tier=0|1|2&since=<epoch>&until=<epoch>
 
     The recorder's stored per-node and per-engine series, read-only: a request
-    here never triggers a sample, an ssh call or a sparkrun child. `window`
-    picks the tier (15m -> tier 0's 2 s ring; 1h/6h/24h -> tier 1's 1-minute
-    roll-ups; 7d -> tier 2's 5-minute roll-ups) and the response says which tier
-    and resolution it served, plus which peak columns it carries.
+    here never triggers a sample, an ssh call or a sparkrun child.
+
+    TWO REQUEST AXES, exactly one per request. `window` is a preset anchored to
+    `now` and implies its tier (15m -> tier 0's 2 s ring; 1h/6h/24h -> tier 1's
+    1-minute roll-ups; 7d -> tier 2's 5-minute roll-ups). `tier`+`since`/`until`
+    is a raw tier over an explicit span — "the hour around last night's slow
+    run" — and anchors to nothing. Asking for both is a 400 rather than a
+    precedence, because the two names denote two different spans; `since`/`until`
+    without `tier` is one too, since only the raw tier has no anchor of its own.
+    Neither key is `window=1h`, unchanged from #407. `since`/`until` are
+    INCLUSIVE epoch-second bucket starts and the span is clamped to the tier's own
+    retention — and the response always states the window it actually served, on
+    either axis: `since`/`until` are the served pair, `window_s` the served span,
+    `axis` which axis answered and `note` says when a clamp moved the span.
 
     Rows come back with the recorder's own field names and its ``None``s
     intact — ``None`` means "not reported", and coercing it to 0 would draw a
-    node that never answered as an idle one.
+    node that never answered as an idle one. `source` says where the rows came
+    from as a code, so a client branches on that and not on the English of
+    `note`.
     """
     from api_server import ApiError
     mh = _metrics_history()
-    for unsupported in sorted(set(query) - {"node", "metrics", "window"}):
+    for unsupported in sorted(set(query) - set(_HISTORY_QUERY_KEYS)):
         raise ApiError(
             400, "bad_request",
             f"'{unsupported}' is not supported by /v1/cluster/history: it "
-            "accepts 'node', 'metrics' and 'window' only",
+            f"accepts {', '.join(repr(k) for k in _HISTORY_QUERY_KEYS)} only",
             f"{unsupported} is not supported by the cluster history route.",
         )
-    window, tier, bucket_s, span_s = _parse_history_window(query, mh)
+    axis = _resolve_history_axis(query, mh)
+    window, tier, bucket_s = axis["window"], axis["tier"], axis["bucket_s"]
+    since, until, span_s = axis["since"], axis["until"], axis["window_s"]
     node = _parse_history_node(query)
     metrics = _parse_history_metrics(query, mh, tier)
 
-    until = int(_history_now())
-    since = until - span_s
     host_vocab, engine_vocab = _history_vocab(mh, tier)
     keep_host = keep_engine = None
     if metrics is not None:
@@ -921,6 +1686,15 @@ def handle_cluster_history(server, ctx, query, body):
     payload = {
         "window": window,
         "window_s": span_s,
+        # Which axis the CLIENT asked on, stated rather than left to be inferred
+        # from which of `since`/`until`/`window` happen to be non-null. On the
+        # tier axis `window` is a derived span label (`"<n>s"`), never a preset
+        # name the request did not use.
+        "axis": axis["axis"],
+        # Where the rows came from, as a code: a client must branch on this, not
+        # on the English of `note`. None only when the read itself failed, which
+        # `error` then states.
+        "source": None,
         "tier": tier,
         "resolution_s": bucket_s,
         "resolution": mh.RES_TIER0 if tier == 0 else f"{bucket_s}s",
@@ -936,12 +1710,24 @@ def handle_cluster_history(server, ctx, query, body):
         "engines_included": engines_included,
     }
 
-    tier0_resident = True
+    # `tier0_resident` is a MEASUREMENT, not a default. It answers exactly one
+    # question — "could THIS process read the 2 s ring?" — and that question only
+    # exists when tier 0 is the tier being served. So it starts as None
+    # ("nobody measured") and is written only by the tier-0 branch. It used to
+    # start as True, which let a `window=6h`/`7d` payload claim a resident ring in
+    # a process that hosts no recorder at all (measured on #413's fixtures: the
+    # tier-1 and tier-2 bytes said `true`, the `window=15m` bytes from the same
+    # generator in the same process said `false`). `note`/`speak` stay the honest
+    # signal for an empty tier-0 answer; this key only says what its name says,
+    # and only where it was actually asked.
+    tier0_resident = None
     error = None
     try:
         if tier == 0:
             points = _backing_history_tier0(node)
             tier0_resident = points is not None
+            payload["source"] = SOURCE_RING if points is not None \
+                else SOURCE_RING_ABSENT
             host_rows = _history_host_rows_from_points(points, node)
             engine_rows = _history_engine_rows_from_points(points, node)
             store_info = {"path": mh.db_path(ctx.hscc_dir),
@@ -949,13 +1735,23 @@ def handle_cluster_history(server, ctx, query, body):
                           "db_bytes": 0}
             store_info["db_bytes"] = (os.path.getsize(store_info["path"])
                                       if store_info["exists"] else 0)
+            # This branch never opens the store, so it cannot count its rows:
+            # `None` says "nobody measured", which is what #417 established for
+            # `tier0_resident` and is the reason there is no top-level `stats`.
+            # `bound_bytes` is the recorder's stated ceiling, knowable without
+            # the file.
+            store_info["bound_bytes"] = mh.size_bound_bytes()
+            store_info["tier1_rows"] = store_info["tier2_rows"] = None
         else:
             host_rows, engine_rows, store_info = _backing_history_rows(
                 ctx.hscc_dir, tier, since, until, node)
+            payload["source"] = SOURCE_STORE if store_info["exists"] \
+                else SOURCE_STORE_ABSENT
     except Exception as exc:
         host_rows, engine_rows = [], []
         store_info = {"path": mh.db_path(ctx.hscc_dir), "exists": False,
-                      "db_bytes": 0}
+                      "db_bytes": 0, "bound_bytes": mh.size_bound_bytes(),
+                      "tier1_rows": None, "tier2_rows": None}
         error = _failure_detail(exc=exc)
 
     if not hosts_included:
@@ -973,24 +1769,35 @@ def handle_cluster_history(server, ctx, query, body):
     payload["counts"] = {"hosts": len(host_rows), "engines": len(engine_rows)}
     if error:
         payload["error"] = error
-    payload["note"] = _history_note(tier, tier0_resident, store_info, error)
+    payload["note"] = _history_note(tier, tier0_resident, store_info, error,
+                                    axis["clamp"])
     payload["speak"] = _speak_cluster_history(payload)
     return 200, payload
 
 
-def _history_note(tier, tier0_resident, store_info, error) -> str:
-    """What the payload says about its own emptiness, so a gap explains itself."""
+def _history_note(tier, tier0_resident, store_info, error, clamp="") -> str:
+    """What the payload says about its own emptiness, so a gap explains itself.
+
+    The clamp statement rides in the same field: a request whose span the route
+    shortened has to say so where a client looks for "why is this answer not what
+    I asked for", and a silent shortening is indistinguishable from a fleet that
+    was quiet for the rest of the range.
+    """
+    parts = []
+    if clamp:
+        parts.append(clamp)
     if error:
-        return f"history read failed: {error}"
-    if tier == 0 and not tier0_resident:
-        return ("tier 0 is the sampler's in-memory ring and lives in the daemon "
-                "process; this server process cannot read it, so no 2 s points "
-                "are served here. Use window=1h for the durable 1-minute tier.")
-    if tier != 0 and not store_info.get("exists"):
-        return ("the recorder has not written its store yet "
-                f"({store_info['path']}); the durable tiers are empty until it "
-                "closes its first minute")
-    return ""
+        parts.append(f"history read failed: {error}")
+    elif tier == 0 and not tier0_resident:
+        parts.append("tier 0 is the sampler's in-memory ring and lives in the "
+                     "daemon process; this server process cannot read it, so no "
+                     "2 s points are served here. Use window=1h for the durable "
+                     "1-minute tier.")
+    elif tier != 0 and not store_info.get("exists"):
+        parts.append("the recorder has not written its store yet "
+                     f"({store_info['path']}); the durable tiers are empty until "
+                     "it closes its first minute")
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1015,6 +1822,10 @@ def load():
         ("GET", r"^/v1/cluster/history$", handle_cluster_history),
         ("GET", r"^/v1/cluster/jobs$", handle_cluster_jobs),
         ("GET", r"^/v1/cluster/info$", handle_cluster_info),
+        # The pause overlay's read half (t_787930b5). Mutations are NOT
+        # registered here: pause/resume stay CLI + agent-tool with their
+        # printed plan and y/N gate (audit D10).
+        ("GET", r"^/v1/node-pauses$", handle_node_pauses),
         ("GET", r"^/v1/health$", handle_health),
         ('GET', r'^/v1/fleet/stats$', handle_fleet_stats),
         ('GET', r'^/v1/fleet/throughput$', handle_fleet_throughput),

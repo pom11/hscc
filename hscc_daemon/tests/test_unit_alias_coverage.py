@@ -232,6 +232,13 @@ class TestCheckProxyWiring:
                                "error": ""})
         monkeypatch.setattr(health, "http_check",
                             lambda url, timeout=5: {"ok": True, "message": ""})
+        # t_f0b8051b added a through-proxy completion probe to check_proxy's
+        # healthy path — stub its no-evidence shape so this rig never dials the
+        # operator's live :4000 (the real probe is covered in test_health.py).
+        monkeypatch.setattr(health, "_proxy_completion_probe",
+                            lambda url=None, model=None, timeout=None:
+                            {"ok": True, "status": None, "skipped": True,
+                             "error": ""})
         # The unit-level verdict, injected through the seam.
         monkeypatch.setattr(health, "_unit_alias_check_fn",
                             lambda serving_data=None: dict(alias_result))

@@ -14,6 +14,7 @@ import pytest  # noqa: E402
 
 import api_launchd  # noqa: E402
 import hermes_python  # noqa: E402
+from hscc_daemon.tests.rich_layout import _says  # noqa: E402
 
 
 PLIST = "com.hscc.api.plist"
@@ -93,6 +94,19 @@ def test_plist_throttles_the_respawn_and_bounds_the_stop():
     daemon_plist = (Path(api_launchd.__file__).resolve().parent / "install.py").read_text()
     assert "<key>ThrottleInterval</key>\n    <integer>30</integer>" in daemon_plist
     assert "<key>ExitTimeOut</key>\n    <integer>10</integer>" in daemon_plist
+
+
+def test_plist_raises_the_nofile_soft_limit():
+    """EMFILE (t_c24521ef): the live unit ran with launchd's 256 soft limit.
+
+    The server now bounds idle/concurrent connections, but the unit it is
+    generated from must still leave room for the listener, state files and
+    clients. This is the TEMPLATE only — an already-installed plist is
+    operator-owned and is never edited by this module or its tests.
+    """
+    d = api_launchd.build_api_plist("/p", "/d")
+    assert d["SoftResourceLimits"]["NumberOfFiles"] == 4096
+    assert d["SoftResourceLimits"]["NumberOfFiles"] > 256
 
 
 def test_plist_is_plistlib_roundtrippable():
@@ -347,11 +361,12 @@ def test_plist_no_flags_is_byte_identical_to_the_pre_flag_unit(home):
     report 'changed' on the next install.
 
     RE-PINNED deliberately on t_d2245e7e. The baseline this pins against is
-    `0d95403c` (PR #210, the pre-ThrottleInterval unit); the only addition
-    below that baseline is `ThrottleInterval 30` + `ExitTimeOut 10`, the whole
-    point of that card. Everything else — argv tail, working dir, log paths,
-    EnvironmentVariables, key ORDER — is still pinned byte for byte, which is
-    what this test is for: an accidental reorder or a stray key still fails it.
+    `0d95403c` (PR #210, the pre-ThrottleInterval unit); the additions since
+    that baseline are `ThrottleInterval 30` + `ExitTimeOut 10` (t_d2245e7e)
+    and `SoftResourceLimits` (t_c24521ef). Everything else — argv tail, working
+    dir, log paths, EnvironmentVariables, key ORDER — is still pinned byte for
+    byte, which is what this test is for: an accidental reorder or a stray key
+    still fails it.
     """
     legacy = plistlib.dumps(
         {"Label": api_launchd.API_LABEL,
@@ -359,6 +374,7 @@ def test_plist_no_flags_is_byte_identical_to_the_pre_flag_unit(home):
          "WorkingDirectory": "/repo",
          "RunAtLoad": True, "KeepAlive": True,
          "ThrottleInterval": 30, "ExitTimeOut": 10,
+         "SoftResourceLimits": {"NumberOfFiles": 4096},
          "StandardOutPath": os.path.expanduser("~/.hscc/logs/api.log"),
          "StandardErrorPath": os.path.expanduser("~/.hscc/logs/api.err.log"),
          "EnvironmentVariables": {
@@ -457,7 +473,15 @@ def test_cli_install_service_writes_unit_in_private_home(home, tmp_path, capsys,
     rc = _cli(tmp_path, monkeypatch, ["install-service"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert str(tmp_path / "Library" / "LaunchAgents" / PLIST) in out
+    # The unit-file path is longer than the daemon's plain Console is wide (80 on a
+    # non-tty), so the view FOLDS it mid-token — the characters are all printed, just
+    # not contiguously. Measured (t_89804ce6, verbatim tee of the render, tmp root
+    # 190): `…/test_cli_install_service_write0/Library/L` ⏎ `aunchAgents/com.hscc.api
+    # .plist`; red from tmp root 161. `_says` asks what the row spells with layout
+    # whitespace removed, which is the only normaliser that recovers a fold. The two
+    # raw anchors below it are the proof the view rendered at all, and they are short
+    # enough that nothing can fold them.
+    assert _says(out, str(tmp_path / "Library" / "LaunchAgents" / PLIST))
     assert "NOT loaded yet" in out                      # the opt-in promise, on screen
     assert "launchctl bootstrap" in out                 # the manual step is spelled out
     assert os.path.exists(api_launchd.API_PLIST_PATH)

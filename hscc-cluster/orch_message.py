@@ -11,10 +11,12 @@ Everything the operator asked for is enforced in code here, not in prose:
 
 1. **Both ends must be orchestrators.** The sender is the *running* profile's
    identity (`HERMES_PROFILE`, falling back to the profile dir in `HERMES_HOME`)
-   — a caller cannot claim to be someone else. Sender and target must both be
-   `*-orch` profiles; worker profiles and `default` are refused, so this tool
-   can never be used to inject into a worker's pane or the operator's default
-   REPL.
+   — a caller cannot claim to be someone else. Each end must be either a
+   `*-orch` profile *or* the configured main orchestrator — the name
+   `hscc-roles/main_orch.py` resolves, i.e. the same source `hscc main status`
+   reads, so a renamed main is accepted without an edit here. Worker profiles
+   and `default` are refused, so this tool can never be used to inject into a
+   worker's pane or the operator's default REPL.
 2. **Queue-only — never an interrupt.** Delivery always goes through
    `repl_inject.inject(..., mode="auto")`, which resolves to `/queue` while the
    target is busy and a plain send when it is idle. `steer` (and the legacy
@@ -83,9 +85,25 @@ BODY_PREVIEW_CHARS = 200
 #: Rate window, seconds.
 RATE_WINDOW_SEC = 3600
 
-#: Orchestrator profiles are the ones ending in `-orch` (hscc-roles names them
-#: `<project>-orch` / `hscc-orch`). `default` and every worker profile fail it.
+#: The per-project orchestrator namespace. `default` and every worker profile
+#: fail it; the ONE main orchestrator does not carry the suffix (its name is the
+#: chosen slug itself), so it is accepted through a different door — see
+#: :func:`is_orch_profile`.
 ORCH_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*-orch$")
+
+#: Identities the main-orchestrator allowance can never legalize. `default` is
+#: the unprofiled session (:func:`running_profile` answers it when no profile is
+#: set) and rule 1 promises the operator's own REPL is never injectable — so a
+#: config that named it as the main orchestrator must not open it. (It is not a
+#: paranoia case: `main_orch.validate_name` accepts any lowercase slug, and
+#: `default` is one.)
+RESERVED_PROFILES = frozenset({"default"})
+
+#: The plugin dir holding the ONE main-orchestrator identity resolver
+#: (`hscc-roles/main_orch.py`) — the same module `hscc main status` reads via
+#: `hscc_daemon/main_cli.py::status()`. Declared once so the sibling lookup has
+#: one place to move to if the deployed layout ever changes.
+ROLES_DIRNAME = "hscc-roles"
 
 #: Kanban task ids, as scripts/changelog_fragments.py names them.
 REF_CARD_RE = re.compile(r"^t_[0-9a-f]{6,}$")
@@ -107,6 +125,7 @@ REASON_RATE = "rate_limited"
 REASON_NO_REPL = "repl_inject_missing"
 REASON_NO_PANE = "no_pane"
 REASON_AMBIGUOUS = "ambiguous_pane"
+REASON_AMBIGUOUS_SERVER = "ambiguous_server"
 REASON_TRANSPORT = "transport_error"
 REASON_AUDIT = "audit_unwritable"
 
@@ -115,6 +134,7 @@ REASON_AUDIT = "audit_unwritable"
 _INJECT_KIND_REASON = {
     "no_panes": REASON_NO_PANE,
     "ambiguous": REASON_AMBIGUOUS,
+    "ambiguous_server": REASON_AMBIGUOUS_SERVER,
     "tmux": REASON_TRANSPORT,
     "empty": REASON_EMPTY,
 }
@@ -127,8 +147,9 @@ ORCH_MESSAGE_SCHEMA = {
     "properties": {
         "to": {
             "type": "string",
-            "description": "Target orchestrator profile name — must end in "
-                           "'-orch' (worker profiles and 'default' are refused).",
+            "description": "Target orchestrator profile name — a '*-orch' "
+                           "profile or the configured main orchestrator "
+                           "(worker profiles and 'default' are refused).",
         },
         "message": {
             "type": "string",
@@ -236,13 +257,121 @@ def running_profile() -> str:
     return "default"
 
 
-def is_orch_profile(name: str) -> bool:
-    """True for an orchestrator profile name (ends in ``-orch``).
+def _load_main_orch():
+    """Import the sibling ``hscc-roles/main_orch.py``, or None when unavailable.
 
-    ``default`` and worker profiles (``backend-engineer``, ``*-engineer``, …)
-    are False, so neither end of the channel can be a worker.
+    The same sibling-dir approach as :func:`_load_repl_inject` and
+    ``hscc_daemon/main_wakeups.py::_load_main_orch``: the deployed plugin tree
+    keeps ``hscc-roles`` next to ``hscc-cluster``, so the resolver is *reached*
+    rather than re-implemented here. A ``sys.path`` entry added for the attempt
+    is removed again when the import fails. ``main_orch`` imports PyYAML at
+    module level, so a host without it lands here as an ``ImportError`` — and
+    the caller degrades to the ``-orch`` rule instead of inventing a name.
     """
-    return bool(name) and ORCH_PROFILE_RE.match(name) is not None
+    try:
+        import main_orch  # noqa: F401  (already importable)
+        return main_orch
+    except ImportError:
+        pass
+    roles_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ROLES_DIRNAME)
+    added = None
+    if os.path.isdir(roles_dir) and roles_dir not in sys.path:
+        sys.path.insert(0, roles_dir)
+        added = 0
+    try:
+        import main_orch  # noqa: F401
+        return main_orch
+    except ImportError:
+        return None
+    finally:
+        if added is not None and added < len(sys.path) and sys.path[added] == roles_dir:
+            sys.path.pop(added)
+
+
+def main_orchestrator_profile() -> str | None:
+    """The CONFIGURED main orchestrator's profile name, or None when unknowable.
+
+    Read from the one resolver that owns the answer —
+    ``main_orch.main_profile()``, which is what `hscc main status` prints — so
+    this module never spells the name: a bootstrap-chosen or later-renamed main
+    is accepted here the moment its state document says so, and an install that
+    never stored one follows the resolver's own default rather than a copy of it
+    kept here. Deliberately uncached: the read is one small JSON file, and the
+    answer has to track the config the instant it changes.
+    """
+    main_orch = _load_main_orch()
+    if main_orch is None:
+        return None
+    try:
+        name = main_orch.main_profile(hscc_dir())
+    except Exception:  # noqa: BLE001 — an unusable resolver is no resolver
+        return None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
+def cluster_tools_allowed(ctx) -> bool:
+    """May THIS home register the cluster tools? (R3/D-B gate, card t_e98c6ad4)
+
+    The one question the main-only ruling asks at plugin-load time, answered by
+    the resolver that owns it (:func:`main_orch.plugin_tools_allowed`) rather
+    than by a comparison invented here. R3 tightened D-B: the tool catalog
+    registers ONLY where the home resolves to ``<main>`` — the root/gateway home
+    keeps this plugin for its HOOKS (and ``hscc-commands`` for the operator's
+    wedge verbs), and every worker/project-orch home loads it for hooks only.
+
+    Fail-open whenever the answer cannot be established — no resolver on the
+    path, a ctx that is not a Hermes ``PluginContext``, or a resolver that
+    throws. Stripping the surface is the dangerous direction: it silences the
+    operator's wedge path and, because the gateway multiplexes per-profile
+    sessions from the root home, it can strip the orchestrator itself.
+    """
+    main_orch = _load_main_orch()
+    if main_orch is None:
+        return True
+    try:
+        return bool(main_orch.plugin_tools_allowed(ctx, hscc_dir=hscc_dir()))
+    except Exception:  # noqa: BLE001 — an unusable resolver must not strip tools
+        return True
+
+
+def is_orch_profile(name: str) -> bool:
+    """True for a profile the nudge channel accepts at either end.
+
+    Two doors. The per-project orchestrator namespace (``*-orch``) is the
+    shipped one. The other is the configured main orchestrator: it is the ONE
+    cluster-wide authority and its name is the chosen slug itself, with no
+    ``-orch`` suffix, so before t_9e3d868f it failed the regex and could not use
+    its own core tool — it had to shell out to `hscc orch inject`.
+
+    Worker profiles (``backend-engineer``, ``*-engineer``, …) fail both doors,
+    and a reserved identity such as ``default`` is refused even when a config
+    names it as the main orchestrator, so neither end of the channel can be a
+    worker or the operator's own REPL.
+    """
+    if not name or name in RESERVED_PROFILES:
+        return False
+    if ORCH_PROFILE_RE.match(name):
+        return True
+    main = main_orchestrator_profile()
+    return main is not None and name == main
+
+
+def _orch_rule_hint() -> str:
+    """The operator-readable 'who is allowed' clause for a rule-1 refusal.
+
+    Names the configured main when it is known, because a refusal that only
+    says "must end in '-orch'" sends an operator whose main orchestrator is
+    named something else looking in the wrong place.
+    """
+    main = main_orchestrator_profile()
+    if main and main not in RESERVED_PROFILES:
+        return (f"name must end in '-orch' or be the configured main "
+                f"orchestrator {main!r}")
+    return "name must end in '-orch'"
 
 
 # ── Body composition ────────────────────────────────────────────────────────
@@ -507,14 +636,15 @@ def orch_message(args, *, user_task=None, session_id=None, task_id=None,
         ref_card = ref_card.strip()
 
     # 2. Both ends must be orchestrators (rule 1); sender is the running profile.
+    #    `*-orch` or the configured main orchestrator — see is_orch_profile().
     if not is_orch_profile(sender):
         return outcome(False, REASON_SENDER_NOT_ORCH,
                        f"sender {sender!r} is not an orchestrator profile "
-                       f"(name must end in '-orch'); this tool is orch-to-orch only.")
+                       f"({_orch_rule_hint()}); this tool is orch-to-orch only.")
     if not is_orch_profile(to):
         return outcome(False, REASON_TARGET_NOT_ORCH,
                        f"target {to!r} is not an orchestrator profile "
-                       f"(name must end in '-orch'); workers and 'default' are "
+                       f"({_orch_rule_hint()}); workers and 'default' are "
                        f"never injectable through this tool.")
     if to == sender:
         return outcome(False, REASON_SELF,

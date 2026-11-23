@@ -41,13 +41,25 @@ that audit today.
 WHAT IT REFUSES TO TOUCH
 ------------------------
 Only the three release-pinned lines, inside the pre-``resource`` window. The
-formula's ``resource`` blocks pin **PyPI** sdists (PyYAML, rich, psutil and
-rich's transitives), not hscc, so they are not this release's facts and a bump
-that rewrote them would be shipping an untested dependency change under a
-version-bump commit message. After rewriting, the script asserts every changed
-line index is before the first ``resource "`` and that the count of ``sha256``
-lines did not move — so a future formula shape that would swallow a resource
-digest fails loudly instead.
+formula's existing ``resource`` blocks pin **PyPI** sdists (PyYAML, rich,
+psutil and the transitive closures), not hscc, so they are not this release's
+facts and a bump that rewrote them would be shipping an untested dependency
+change under a version-bump commit message. After rewriting, the script asserts
+every changed line index is before the first ``resource "`` — so a future
+formula shape that would swallow a resource digest fails loudly instead.
+
+WHAT IT ADDS
+------------
+One exception, in the other direction: a dependency that landed in
+``requirements.txt`` after the tap last refreshed its resource list is INERT
+for brew users until the formula states its sdist closure, because
+``venv.pip_install resources`` runs with ``--no-deps`` and never reads
+``requirements.txt``. The release tarball carries that file, so the bump reads
+it and adds the pinned closure for a known new dependency when the formula does
+not already carry it. There are no release-only closures today; the mechanism
+stays so a future dependency can be added without touching the bump flow.
+Existing resource blocks are never rewritten; a re-run sees them and adds
+nothing.
 
 THE TWO GATES BEFORE A COMMIT
 -----------------------------
@@ -126,6 +138,20 @@ TAG_RE = re.compile(r"^v(?P<version>[0-9]+\.[0-9]+\.[0-9]+)$")
 
 #: Guards a bump may not rewrite: the resources pin PyPI, not hscc.
 RESOURCE_RE = re.compile(r"^\s*resource\s+\"")
+
+#: sdist closures for dependencies added to ``requirements.txt`` after the tap's
+#: last manual resource refresh. Keyed by the requirement name the tarball
+#: declares; the value is the complete ``--no-deps`` closure. A release that
+#: does not declare the key adds nothing, so old tags still bump cleanly.
+RESOURCE_CLOSURES = {}
+
+_REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+_RESOURCE_NAME_RE = re.compile(r'^\s*resource\s+"([^"]+)"\s+do\s*$', re.MULTILINE)
+
+
+def _canonical(name: str) -> str:
+    """PEP 503 name normalisation, so ``ruamel_yaml``/``ruamel.yaml`` agree."""
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 class BumpError(Exception):
@@ -238,24 +264,116 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _tarball_member_text(path: Path, name: str) -> str | None:
+    """Read ``name`` at the tarball root (or one staged directory down)."""
+    try:
+        with tarfile.open(path, "r:gz") as tf:
+            for member in tf.getmembers():
+                parts = member.name.split("/")
+                if len(parts) in (1, 2) and parts[-1] == name and member.isfile():
+                    fh = tf.extractfile(member)
+                    if fh is None:
+                        continue
+                    return fh.read().decode("utf-8", "replace")
+    except (tarfile.TarError, OSError) as exc:
+        raise BumpError(f"{path.name} is not a readable gzip tarball: {exc}") from exc
+    return None
+
+
 def tarball_version(path: Path) -> str | None:
     """The ``VERSION`` file at the tarball root, or None if the archive has none.
 
     GitHub stages the archive under ``hscc-<version>/``, so the member is looked
     for one level down as well as at the root.
     """
-    try:
-        with tarfile.open(path, "r:gz") as tf:
-            for member in tf.getmembers():
-                parts = member.name.split("/")
-                if len(parts) in (1, 2) and parts[-1] == "VERSION" and member.isfile():
-                    fh = tf.extractfile(member)
-                    if fh is None:
-                        continue
-                    return fh.read().decode("utf-8", "replace").strip()
-    except (tarfile.TarError, OSError) as exc:
-        raise BumpError(f"{path.name} is not a readable gzip tarball: {exc}") from exc
-    return None
+    text = _tarball_member_text(path, "VERSION")
+    return text.strip() if text is not None else None
+
+
+def tarball_requirements(path: Path) -> str | None:
+    """The release's ``requirements.txt`` (the dependency SOT), if it carries one."""
+    return _tarball_member_text(path, "requirements.txt")
+
+
+def requirement_names(text: str) -> set:
+    """Package names declared by a requirements file (comments/extras stripped)."""
+    names = set()
+    for line in (text or "").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        match = _REQUIREMENT_NAME_RE.match(line)
+        if match:
+            names.add(_canonical(match.group(1)))
+    return names
+
+
+def formula_resource_names(text: str) -> set:
+    """The resource names a formula already declares (canonicalised)."""
+    return {_canonical(name) for name in _RESOURCE_NAME_RE.findall(text or "")}
+
+
+def extra_resources_for(requirements_text: str) -> list:
+    """Pinned resource entries a release's requirements need beyond the formula."""
+    declared = requirement_names(requirements_text)
+    entries = []
+    for requirement, closure in RESOURCE_CLOSURES.items():
+        if requirement in declared:
+            entries.extend(dict(entry) for entry in closure)
+    return entries
+
+
+def _render_resource(entry: dict) -> str:
+    # ``brew audit --strict`` compares a resource's name with the PyPI package
+    # name from its url, reading ``.`` and ``_`` as ``-``: the SOT spelling
+    # ``ruamel.yaml`` must be declared ``ruamel-yaml``. Emit that canonical
+    # spelling so a newly added closure cannot turn the tap's audit red.
+    name = _canonical(entry["name"])
+    return "\n".join((
+        f'  resource "{name}" do',
+        f'    url "{entry["url"]}"',
+        f'    sha256 "{entry["sha256"]}"',
+        "  end",
+    ))
+
+
+def _resource_insert_index(lines: list[str]) -> int:
+    """Where new resource blocks go: after the resource list, before install."""
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*allow_network_access!\b", line) or \
+                re.match(r"^\s*def install\b", line):
+            return i
+    if lines and lines[-1].strip() == "end":
+        return len(lines) - 1
+    return len(lines)
+
+
+def _insert_resources(lines: list[str], entries: list):
+    """Insert missing resource blocks; never rewrite one that is already there."""
+    present = formula_resource_names("\n".join(lines))
+    missing = []
+    for entry in entries or ():
+        name = _canonical(entry["name"])
+        if name in present:
+            continue
+        present.add(name)
+        missing.append(entry)
+    if not missing:
+        return lines, []
+    index = _resource_insert_index(lines)
+    chunk = []
+    for i, entry in enumerate(missing):
+        if i:
+            chunk.append("")
+        chunk.extend(_render_resource(entry).split("\n"))
+    insert = []
+    if index > 0 and lines[index - 1].strip():
+        insert.append("")
+    insert.extend(chunk)
+    if index < len(lines) and lines[index].strip():
+        insert.append("")
+    new_lines = lines[:index] + insert + lines[index:]
+    return new_lines, [(index + 1, "", "\n".join(insert))]
 
 
 def check_tarball(path: Path, version: str, *, verify_version: bool = True) -> str:
@@ -298,12 +416,15 @@ def _resource_start(lines: list[str]) -> int:
     return len(lines)
 
 
-def rewrite_formula(text: str, version: str, sha256: str, *, url: str | None = None):
+def rewrite_formula(text: str, version: str, sha256: str, *, url: str | None = None,
+                    extra_resources=None):
     """Return ``(new_text, changes)`` — changes is [(lineno, before, after), ...].
 
     Pure: no I/O, so the three pinned lines can be tested against a fabricated
     formula without a tap, a network, or ruby. Raises BumpError (tap untouched)
-    when the formula does not have the shape this flow assumes.
+    when the formula does not have the shape this flow assumes. ``extra_resources``
+    are resource entries the release needs but the formula lacks; they are added
+    after the existing resource list, never in place of any block.
     """
     url = url or tarball_url(version)
     if not re.fullmatch(r"[0-9a-f]{64}", sha256 or ""):
@@ -375,6 +496,11 @@ def rewrite_formula(text: str, version: str, sha256: str, *, url: str | None = N
     after_digests = sum(1 for l in lines if re.match(r'^\s*sha256\s+"', l))
     if before_digests != after_digests:
         raise BumpError("internal guard: the number of sha256 lines changed")
+
+    # New dependency blocks are ADDED, after the release-pinned edit and its
+    # guards: they are new lines, not a rewrite of any existing resource.
+    lines, added = _insert_resources(lines, extra_resources)
+    changes.extend(added)
 
     return "\n".join(lines), sorted(changes, key=lambda c: c[0])
 
@@ -575,14 +701,16 @@ def guard_tracked(tap: Path) -> None:
 
 # ── the flow ─────────────────────────────────────────────────────────────────
 
-def _plan(original: str, version: str, digest: str, url: str, tap: Path, phase: str):
+def _plan(original: str, version: str, digest: str, url: str, tap: Path, phase: str,
+          extra_resources=None):
     """Rewrite + verify + guard the PROPOSED text; return (new_text, changes).
 
     Called once before the tap is touched and again after the fast-forward, because
     the sync can bring someone else's formula edit in. ``phase`` only names the
     check in the error text so a rejection says which content was rejected.
     """
-    new_text, changes = rewrite_formula(original, version, digest, url=url)
+    new_text, changes = rewrite_formula(original, version, digest, url=url,
+                                        extra_resources=extra_resources)
     pinned = formula_version(new_text)
     if pinned != version:
         raise BumpError(f"internal guard: the rewrite pins version {pinned!r}, "
@@ -645,11 +773,13 @@ def bump(tag: str, *, tap_dir=None, dry_run=False, push=True,
             tar_path = fetch_tarball(url, Path(tmpdir) / f"v{version}.tar.gz",
                                      timeout=timeout)
         digest = check_tarball(tar_path, version, verify_version=verify_version)
+        extra = extra_resources_for(tarball_requirements(tar_path) or "")
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    new_text, changes = _plan(original, version, digest, url, tap, "pre")
+    new_text, changes = _plan(original, version, digest, url, tap, "pre",
+                              extra_resources=extra)
 
     if dry_run:
         # Read-only: no sync, no clean check, no write. A preview says what the
@@ -699,7 +829,8 @@ def bump(tag: str, *, tap_dir=None, dry_run=False, push=True,
     synced = formula.read_text(encoding="utf-8")
     if synced != original:
         original, current = synced, formula_version(synced)
-        new_text, changes = _plan(original, version, digest, url, tap, "post")
+        new_text, changes = _plan(original, version, digest, url, tap, "post",
+                                  extra_resources=extra)
 
     if not changes:
         # Nothing to write. If the checkout is ahead of origin, this is a bump whose

@@ -540,13 +540,15 @@ c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/L
              && m.nodes.allSatisfy { $0.sample?.cpuUsagePct != nil && $0.sample?.memUsedPct != nil }
              && m.nodes.allSatisfy { $0.sample?.gpuUtilPct != nil },
              "node metrics stopped parsing")
-    c.expect("v1_cluster_monitor.json", "displayLabel never leaks the node's LAN address (§7)",
+    c.expect("v1_cluster_monitor.json", "displayLabel is the node's last octet and never its address (§7)",
              m.nodes.allSatisfy { node in
-                 !node.displayLabel.contains(node.host)
-                 && (node.displayLabel == node.sample?.hostname
-                     || (node.displayLabel.hasPrefix(".")
-                         && node.displayLabel.dropFirst().allSatisfy { ch in ch.isNumber }))
-             }, "a surface could render a full address")
+                 // Computed here rather than through `lastOctet` so the leg does
+                 // not agree with itself: the octet is what the fixture's own
+                 // host string says its last component is.
+                 let own = node.host.split(separator: ".").last.map(String.init) ?? ""
+                 return !holdsDottedQuad(node.displayLabel) && node.displayLabel != node.host
+                     && !own.isEmpty && node.displayLabel == own
+             }, "a surface could render a full address, or a label stopped being the octet")
     c.expect("v1_cluster_monitor.json", "shortTail reduces an address to its last octet (§7)",
              m.nodes.allSatisfy { MonitorNode.shortTail($0.host)
                  == "." + ($0.host.split(separator: ".").last.map(String.init) ?? "") }
@@ -557,6 +559,19 @@ c.assertions("v1_cluster_monitor.json", "cluster monitor + daemon host (widget/L
     c.expect("v1_cluster_monitor_unavailable.json", "fleet-down degrade: no json key, no nodes",
              down.nodes.isEmpty && down.speak == "fleet monitor unavailable",
              "degrade shape changed")
+    let refused = try JSONDecoder().decode(MonitorResponse.self,
+                                           from: try c.load("v1_cluster_monitor_degraded.json"))
+    c.expect("v1_cluster_monitor_degraded.json",
+             "success:false + error is explicitly degraded, never a fleet",
+             refused.success == false && refused.isDegraded
+             && refused.error == "sparkrun status exited 1: ssh unreachable"
+             && refused.nodes.isEmpty,
+             "a degraded monitor body read as a live sample")
+    c.expect("v1_cluster_monitor_unavailable.json",
+             "an old-style body with no success/json is degraded too",
+             down.isDegraded, "a body with no monitor frame read as healthy")
+    c.expect("v1_cluster_monitor.json", "the live fixture is a non-degraded sample",
+             m.success == true && !m.isDegraded, "the up-state fixture was marked degraded")
 
     let h = try JSONDecoder().decode(MonitorDaemonHost.self, from: try c.load("v1_daemon_host.json"))
     c.expect("v1_daemon_host.json", "daemon host (live capture): cpu/mem/disk + uptime parse",
@@ -688,7 +703,10 @@ private enum StoredJSON: Decodable {
 /// `100.64.0.1` (the docs/tests placeholder) or the LAN address §7 forbids.
 private let dottedQuadRE = try! NSRegularExpression(pattern: #"\d{1,3}(?:\.\d{1,3}){3}"#)
 
-private func holdsDottedQuad(_ s: String) -> Bool {
+/// Internal (not `private`) so the snapshot assertions below share ONE
+/// validator; two regexes that are supposed to mean the same thing is how one
+/// of them stops matching.
+func holdsDottedQuad(_ s: String) -> Bool {
     dottedQuadRE.firstMatch(in: s, range: NSRange(location: 0, length: s.utf16.count)) != nil
 }
 
@@ -791,6 +809,145 @@ monitorParity(c, fixture: "v1_cluster_monitor_edge.json",
               golden: "v1_cluster_monitor_edge.cli.json",
               text: "v1_cluster_monitor_edge.cli.txt")
 monitorSampleDecodeShape(c)
+
+// ---- The systemSmall grid (t_9e110d88). The checks are in
+// cluster_small_grid.swift next to this file. They EXECUTE
+// Sources/HSCCWidgets/ClusterSmallGrid.swift — the tile the small widget draws —
+// against the fixtures above and, where a golden exists, the CLI's own cells.
+clusterSmallGridChecks(c)
+// ---- The large / extra-large table layout (t_9e64d9d9). The checks are in
+// monitor_tables.swift; only the calls are here. Parity above owns the CELLS;
+// these own the SELECTION (which columns a width draws), the CLIP, and the six
+// fields only the two biggest monitor surfaces print (VRAM, GPU clock, net,
+// uptime, fan, load) — none of which the CLI's host table has a column for, so
+// they are pinned by rule and by fixture rather than by a CLI golden.
+monitorRateRules(c)
+monitorDetailRules(c)
+monitorPlans(c)
+monitorTablesFromFixtures(c)
+// ---- The node label and the octet order (t_60c8a3e1, apps 1.4.4) ---------
+// The checks are in node_label.swift; only the calls are here. They EXECUTE
+// Sources/Shared/SharedModels.swift's `MonitorNode.nodeLabel` (the ONE label
+// rule: a node is named by the last octet of its IP, with a hostname fallback)
+// and `FleetNodeOrder` (lists ordered by that octet numerically, not by the
+// address string), which is what every widget, the desktop widgets, the menu bar
+// and CarPlay draw a node row by. Exact inputs are 192.0.2.x — the address
+// guard refuses anything else.
+nodeLabelRules(c)
+nodeOrderRules(c)
+
+// ---- Cluster history (t_b6512c2e) ---------------------------------------
+// The four `v1_cluster_history_*.json` fixtures are NOT hand-typed:
+// scripts/make_cluster_history_fixture.py fills a real store through the
+// recorder's own write path (`MetricsRecorder.tick`, which rolls tiers 1 and 2
+// with its own `rollup`) and then calls
+// `routes_cluster.handle_cluster_history`, so these are the handler's bytes.
+// scripts/cluster_history_metric_vocabulary.py re-checks every key in them
+// against `metrics_history.HOST_COLUMNS` / `ENGINE_KEYS`, and
+// scripts/cluster_history_chart_check.sh runs the behavioural half (the
+// pixel-width reduction that must not move a min or a max, and the tiers that
+// must never be mixed). What is asserted HERE is only the decode shape the
+// chart reads off the payload — including the two keys the model gained here
+// (`gpu_mem_used_mb`, `prompt_tps`), which the route has always sent.
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_6h.json",
+        "ClusterHistoryResponse (window=6h -> tier 1, 1-minute averages)")
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_7d.json",
+        "ClusterHistoryResponse (window=7d -> tier 2, 5-minute averages)")
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_6h_engine_only.json",
+        "ClusterHistoryResponse (a metrics= projection that excludes the host series)")
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_15m.json",
+        "ClusterHistoryResponse (window=15m, tier 0, ring not resident here)")
+c.check(ClusterHistoryResponse.self, "v1_cluster_history_tier_axis.json",
+        "ClusterHistoryResponse (tier axis: tier 1 over an explicit since/until)")
+
+c.assertions("v1_cluster_history_6h.json", "the history decode shape the chart reads") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_6h.json"))
+    var ok = payload.tier == 1 && payload.resolution_s == 60 && payload.resolution == "60s"
+    ok = ok && payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"]
+    // The store's columns are sqlite REAL, so a count of 2 arrives as 2.0; the
+    // model's Int? only holds because JSONDecoder converts an integral number
+    // losslessly. Pinned here so a stricter decoder strategy fails LOUDLY.
+    ok = ok && payload.engines.first?.run == 2 && payload.engines.first?.wait == 1
+    // nulls stay null: 192.0.2.11 never reported its GPU in the fixture's ticks
+    ok = ok && payload.hosts.contains { $0.host == "192.0.2.11" && $0.gpu_temp_c == nil
+        && $0.gpu_power_w == nil }
+    // the two keys this card added to the model, and the kv fraction as stored
+    ok = ok && payload.hosts.first?.gpu_mem_used_mb == 12000
+        && payload.engines.first?.prompt_tps == 200
+        && payload.engines.first?.kv == 0.125
+    let storeKeys = Mirror(reflecting: payload.store!).children.compactMap { $0.label }
+    ok = ok && !storeKeys.contains("path")
+    // The two keys t_b611b56e added to the model: which axis answered, and where
+    // the rows came from, as a code.
+    ok = ok && payload.axis == "window" && payload.source == "sqlite_store"
+    // `tier0_resident` is a measurement of the 2 s ring taken inside the route's
+    // tier-0 branch alone (hscc-api/routes_cluster.py, PR #417), so a tier-1
+    // answer is null: a tier the route never read cannot report residency. A
+    // `true` committed here would be a hand-edit rather than a regeneration.
+    ok = ok && payload.tier == 1 && payload.tier0Resident == nil
+    c.expect("v1_cluster_history_6h.json",
+             "tier + resolution stated, peaks named, nulls kept, VRAM MB and prompt tok/s decode, no server path, tier-1 ring unmeasured",
+             ok, "tier=\(payload.tier) res=\(payload.resolution) max=\(payload.max_fields ?? []) resident=\(String(describing: payload.tier0Resident))")
+}
+
+c.assertions("v1_cluster_history_7d.json", "the 7d tier is stated, not guessed") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_7d.json"))
+    c.expect("v1_cluster_history_7d.json",
+             "tier 2 at 300 s, with the same three peak columns available and no tier-0 residency claim",
+             payload.tier == 2 && payload.resolution_s == 300 && payload.resolution == "300s"
+                && payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"]
+                && !payload.hosts.isEmpty && !payload.engines.isEmpty
+                && payload.tier0Resident == nil,
+             "tier=\(payload.tier) res=\(payload.resolution) hosts=\(payload.hosts.count) resident=\(String(describing: payload.tier0Resident))")
+}
+
+c.assertions("v1_cluster_history_6h_engine_only.json", "an excluded series is reported as excluded") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_6h_engine_only.json"))
+    c.expect("v1_cluster_history_6h_engine_only.json",
+             "hosts_included=false with empty hosts, while the engine series still carries data, and no tier-0 residency claim",
+             payload.hosts_included == false && payload.hosts.isEmpty
+                && payload.engines_included == true && !payload.engines.isEmpty
+                && payload.engines.first?.kv == nil
+                && payload.tier == 1 && payload.tier0Resident == nil,
+             "hosts_included=\(String(describing: payload.hosts_included)) engines=\(payload.engines.count) resident=\(String(describing: payload.tier0Resident))")
+}
+
+c.assertions("v1_cluster_history_15m.json", "an empty tier 0 explains itself") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_15m.json"))
+    c.expect("v1_cluster_history_15m.json",
+             "tier 0, ring not resident, no peak columns, and a note that points at window=1h",
+             payload.tier == 0 && payload.resolution_s == 2 && payload.tier0Resident == false
+                && (payload.max_fields ?? []).isEmpty && payload.hosts.isEmpty
+                && (payload.note ?? "").contains("window=1h"),
+             "tier=\(payload.tier) resident=\(String(describing: payload.tier0Resident)) note=\(payload.note ?? "")")
+}
+
+c.assertions("v1_cluster_history_tier_axis.json",
+             "the tier axis is stated, and so is the span it served") {
+    let payload = try JSONDecoder().decode(
+        ClusterHistoryResponse.self, from: try c.load("v1_cluster_history_tier_axis.json"))
+    // The axis must be READ off the payload, not inferred: on this axis `window`
+    // is a derived span label, and a surface that parsed it as a preset would
+    // plot a 1-hour chart from a 10-minute answer. `since`/`until` are the pair
+    // the server actually served (it clamps to the tier's retention), so the
+    // chart draws those and not the ones it asked for.
+    let span = payload.window_s ?? -1
+    c.expect("v1_cluster_history_tier_axis.json",
+             "axis=tier, source stated as a code, window a derived span label, and since/until the served pair",
+             payload.axis == "tier" && payload.source == "sqlite_store"
+                && payload.tier == 1 && payload.resolution_s == 60
+                && payload.window == "\(span)s"
+                && !["15m", "1h", "6h", "24h", "7d"].contains(payload.window)
+                && payload.until == payload.since + span && span > 0
+                && !payload.hosts.isEmpty && !payload.engines.isEmpty,
+             "axis=\(String(describing: payload.axis)) source=\(String(describing: payload.source)) window=\(payload.window) since=\(payload.since) until=\(payload.until)")
+}
+// ---- Per-widget decode blocks (one file per widget).
+checkWidgetDecodeFixtures(c)
 
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes

@@ -434,15 +434,17 @@ def _operator_down_verdict(deliberately_down_fn=None):
     in memory: the record is on disk or it does not exist.
 
     WHICH WRITERS THIS TREATS AS A STAY-DOWN (decided here, never by string
-    match): ``post_boot.clear_expected_up(reason)`` has three sanctioned callers
-    — ``hscc-cluster/hscc.py`` (``"hscc cluster down"``, the operator),
-    ``hscc-commands`` (``"/cluster-down"``, the same instruction on another
-    surface) and ``autodown.py`` (``"autodown: intentional idle teardown"``,
-    the fleet went idle) — so the record means "someone deliberately cleared the
-    footprint", NOT "an operator typed the verb". ALL THREE are honoured, and
-    the ``reason`` TEXT is copied into the label and nowhere else: no substring
-    of it is ever tested, because that would make an operator-chosen string a
-    safety property. Pinned verbatim in
+    match): ``post_boot.clear_expected_up(reason)`` is called from two places —
+    ``hscc-cluster/hscc.py`` (the fleet-down engine) and ``autodown.py``
+    (``"autodown: intentional idle teardown"``, the fleet went idle) — but THREE
+    surfaces stamp it, because ``/cluster-down`` (``hscc-commands``) delegates to
+    the engine and passes its own ``"/cluster-down"`` reason since t_bf8577f9
+    (it used to call ``clear_expected_up`` itself). So the record means "someone
+    deliberately cleared the footprint", NOT "an operator typed the verb", and
+    the reason text names which surface did. ALL THREE are honoured, and the
+    ``reason`` TEXT is copied into the label and nowhere else: no substring of it
+    is ever tested, because that would make an operator-chosen string a safety
+    property. Pinned verbatim in
     tests/test_verify_stay_down.py::test_every_record_producer_wording_excuses.
 
     INDEPENDENT of the autodown window above (D2): a manual `cluster down`
@@ -1531,8 +1533,10 @@ def check_api_routes(script=None, python=None, timeout=None):
       * exit 2 → the sweep could not run at all (no API host/token) — the API
         is not up, which is a real failure for "is the app going to work?".
       * exit 3 → the sweep COULD NOT RUN (no client source to derive routes
-        from, no renderer). That is UNVERIFIED, never red: an unusable checker
-        must not read as a dead API.
+        from, no renderer) or COULD NOT FINISH (its own budget was spent before
+        every route was called — the report still arrives and names what is
+        missing). That is UNVERIFIED, never red: an unusable or truncated
+        checker must not read as a dead API.
 
     ``ok`` is also None (unverified) when the sweep exits 1 but produced no
     route report at all — i.e. it died before sweeping (an import or interpreter
@@ -1581,6 +1585,14 @@ def check_api_routes(script=None, python=None, timeout=None):
     # running verify successfully (and so can import this package), and
     # ``check_chat_roundtrip`` in this same file already uses it — same posture
     # for the same reason. HSCC_TEST_PY still wins so hermetic runs control it.
+    # The sweep bounds its OWN total wall clock (api_route_sweep.SWEEP_BUDGET =
+    # PARENT_BUDGET - STARTUP_RESERVE = 80 s of probes against the 120 s this
+    # call allows) and exits 3 with a named report when it runs out. No explicit
+    # timeout is passed here on purpose: the per-route caps sum to ~1110 s
+    # (33 × 30 s + /v1/health's 120 s), so sizing this one from them would just
+    # move the truncation, and a killed sweep throws the whole route report away.
+    # The sweep stopping itself keeps the report — and names the routes it never
+    # reached (t_f439c923).
     rc, out = _capture([py, script, "--json"], timeout=timeout)
     if rc == 0:
         return {"name": "api_routes", "ok": True,

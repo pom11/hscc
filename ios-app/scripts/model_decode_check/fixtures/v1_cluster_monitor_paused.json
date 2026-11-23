@@ -1,0 +1,212 @@
+{
+  "success": true,
+  "json": {
+    "timestamp": 1788468629.041858,
+    "hosts": [
+      {
+        "host": "192.0.2.11",
+        "error": "collect failed",
+        "sample": null,
+        "workloads": [
+          {
+            "workload_id": "workload-a",
+            "containers": [
+              {
+                "status": "Up 12 days"
+              }
+            ]
+          }
+        ],
+        "used_slots": 1,
+        "free_slots": 0,
+        "status": "paused",
+        "paused_reason": "training run",
+        "paused_since": "2026-11-21T10:00:00+00:00"
+      },
+      {
+        "host": "192.0.2.12",
+        "error": null,
+        "sample": {
+          "timestamp": "2026-09-03T20:50:27Z",
+          "hostname": "node-2",
+          "uptime_sec": "4185000",
+          "cpu_load_1m": "1.37",
+          "cpu_load_5m": "2.17",
+          "cpu_load_15m": "1.75",
+          "cpu_usage_pct": "7.4",
+          "cpu_freq_mhz": "3354",
+          "cpu_temp_c": "68.2",
+          "mem_total_mb": "124546",
+          "mem_used_mb": "119586",
+          "mem_available_mb": "4959",
+          "mem_used_pct": "96.0",
+          "swap_total_mb": "16383",
+          "swap_used_mb": "1806",
+          "gpu_name": "NVIDIA GB10",
+          "gpu_util_pct": "0",
+          "gpu_mem_used_mb": "",
+          "gpu_mem_total_mb": "",
+          "gpu_mem_used_pct": "",
+          "gpu_temp_c": "63",
+          "gpu_power_w": "28.00",
+          "gpu_power_limit_w": "",
+          "gpu_clock_mhz": "2392",
+          "gpu_mem_clock_mhz": "",
+          "sparkrun_jobs": "1",
+          "sparkrun_job_names": "job-a_node_1",
+          "gpu_encoder_pct": "",
+          "gpu_decoder_pct": "",
+          "gpu_fan_pct": "",
+          "mem_bufcache_mb": ""
+        },
+        "workloads": [
+          {
+            "workload_id": "workload-a",
+            "containers": [
+              {
+                "status": "Up 12 days"
+              }
+            ]
+          }
+        ],
+        "used_slots": 1,
+        "free_slots": 0,
+        "status": "paused",
+        "paused_reason": "",
+        "paused_since": null
+      },
+      {
+        "host": "192.0.2.13",
+        "error": "ssh timeout",
+        "sample": null,
+        "workloads": [
+          {
+            "workload_id": "workload-b",
+            "containers": [
+              {
+                "status": "Up 12 days"
+              }
+            ]
+          }
+        ],
+        "used_slots": 1,
+        "free_slots": 0
+      },
+      {
+        "host": "192.0.2.14",
+        "error": null,
+        "sample": {
+          "timestamp": "2026-09-03T20:50:27Z",
+          "hostname": "node-4",
+          "uptime_sec": "2721884",
+          "cpu_load_1m": "2.87",
+          "cpu_load_5m": "1.84",
+          "cpu_load_15m": "1.64",
+          "cpu_usage_pct": "17.9",
+          "cpu_freq_mhz": "3354",
+          "cpu_temp_c": "81.6",
+          "mem_total_mb": "124546",
+          "mem_used_mb": "110724",
+          "mem_available_mb": "13821",
+          "mem_used_pct": "88.9",
+          "swap_total_mb": "16383",
+          "swap_used_mb": "1717",
+          "gpu_name": "NVIDIA GB10",
+          "gpu_util_pct": "96",
+          "gpu_mem_used_mb": "",
+          "gpu_mem_total_mb": "",
+          "gpu_mem_used_pct": "",
+          "gpu_temp_c": "74",
+          "gpu_power_w": "69.42",
+          "gpu_power_limit_w": "",
+          "gpu_clock_mhz": "2450",
+          "gpu_mem_clock_mhz": "",
+          "sparkrun_jobs": "1",
+          "sparkrun_job_names": "job-b_node_1",
+          "gpu_encoder_pct": "",
+          "gpu_decoder_pct": "",
+          "gpu_fan_pct": "",
+          "mem_bufcache_mb": ""
+        },
+        "workloads": [
+          {
+            "workload_id": "workload-b",
+            "containers": [
+              {
+                "status": "Up 12 days"
+              }
+            ]
+          }
+        ],
+        "used_slots": 1,
+        "free_slots": 0
+      }
+    ]
+  },
+  "serving": [
+    {
+      "node": "192.0.2.12",
+      "port": "8001",
+      "model": "org/model-a",
+      "routes": [
+        "model-a"
+      ],
+      "running": 0,
+      "waiting": 0,
+      "kv": 0.19,
+      "gen_tps": 3.0,
+      "prompt_tps": 9.0,
+      "prompt_total": 900.0,
+      "gen_total": 190.0,
+      "error": null
+    },
+    {
+      "node": "192.0.2.13",
+      "port": "8002",
+      "model": "org/model-b",
+      "routes": [
+        "model-b"
+      ],
+      "running": 3,
+      "waiting": 0,
+      "kv": 0.37,
+      "gen_tps": 3.1,
+      "prompt_tps": 11.0,
+      "prompt_total": 1100.0,
+      "gen_total": 210.0,
+      "error": null
+    },
+    {
+      "node": "192.0.2.14",
+      "port": "8002",
+      "model": "org/model-b",
+      "routes": [
+        "model-b"
+      ],
+      "running": 2,
+      "waiting": 0,
+      "kv": 0.35,
+      "gen_tps": 3.1,
+      "prompt_tps": 12.0,
+      "prompt_total": 1200.0,
+      "gen_total": 220.0,
+      "error": null
+    }
+  ],
+  "serving_proxy_error": null,
+  "speak": "1 host is down; 3 nodes parked.",
+  "paused_nodes": [
+    {
+      "node": "192.0.2.11",
+      "status": "paused",
+      "paused_reason": "training run",
+      "paused_since": "2026-11-21T10:00:00+00:00"
+    },
+    {
+      "node": "192.0.2.99",
+      "status": "paused",
+      "paused_reason": "maintenance window",
+      "paused_since": "2026-11-21T10:00:00+00:00"
+    }
+  ]
+}

@@ -27,6 +27,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -34,11 +35,63 @@ from hscc_daemon import cli_theme as theme
 from hscc_daemon import daemon_ops
 from hscc_daemon import qr_code
 from hscc_daemon import verify
+# The daemon's own stdio detach (F6, `cli._detach_stdio`). Imported — NOT
+# re-implemented — so `hscc api start` and `hscc start` daemonise through one
+# code path: see the comment at the call site in `_handle_start`. No import
+# cycle: `cli.py` reaches `api_cli` only lazily, from inside its dispatch.
+from hscc_daemon.cli import _detach_stdio
 
 # The API server is a SEPARATE background process from the monitoring daemon,
 # so it gets its own PID + log files (distinct from daemon.pid / daemon.log).
 API_PID_FILE = os.path.expanduser("~/.hscc/api.pid")
 API_LOG_FILE = os.path.expanduser("~/.hscc/api.log")
+
+class _StopFlag:
+    """A "a stop was requested" flag that a signal handler may safely set.
+
+    Deliberately NOT a `threading.Event` (t_56552ecc). `Event.set()` and
+    `Event.is_set()` both take the event's internal lock, and a signal handler
+    runs on the thread it interrupted — while the serving loop is calling
+    `is_set()` on every pass. A stop landing in that window has the handler
+    waiting for a lock only that same thread can release, which is the same trap
+    `daemon_ops.log` demonstrably falls into (see `_sigterm_handler`): the stop
+    is lost, `_serve` never returns and `hscc api stop` has to SIGKILL, which
+    orphans the sidecar all over again. A plain attribute write/read holds
+    nothing, so the handler and the loop cannot deadlock each other.
+
+    Duck-typed against the `stop_event` argument `_MultiServer.serve_forever`
+    takes, which only ever asks `is_set()`.
+    """
+    __slots__ = ("_seen",)
+
+    def __init__(self):
+        self._seen = False
+
+    def set(self):
+        self._seen = True
+
+    def is_set(self):
+        return self._seen
+
+
+# It has to be module state rather than a local: the handlers are installed in
+# the forked child BEFORE the second fork (so the process that ends up serving
+# already has one), and `signal.signal` takes a module-level callable, which
+# cannot close over a `_serve` local that does not exist yet.
+_stop_requested = _StopFlag()
+
+#: The live `_MultiServer`, published by `_serve` once it has bound one, so the
+#: teardown in `_serve`'s `finally:` can close it. It is None for the whole of
+#: startup, which is exactly when `_stop_requested` is the only thing a stop can
+#: be.
+_served_server = None
+
+#: Which signal asked for the stop, for the closing lines in `_serve`'s
+#: `finally:`. A plain module write, because a signal handler may not take a lock
+#: or call anything (see `_sigterm_handler`) — so this cannot be a
+#: `threading.Event`, and it cannot be logged where it happens. None when the
+#: serving process ends for another reason.
+_last_signal = None
 
 VALID_SUBCOMMANDS = ("start", "stop", "status", "install-service", "uninstall-service")
 
@@ -374,9 +427,25 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
     marked stopped so it cannot claim a server that never bound, and the full
     divergence report (requested root + every divergent root + the env) goes to
     the API log at ERROR — nothing bound, nothing written.
+
+    THE STOP CONTRACT (t_56552ecc). Returning from this function is the only way
+    out of the serving process, because the ``finally:`` below owns the gateway
+    sidecar teardown. The SIGTERM/SIGINT handler therefore does not exit the
+    process, does not log, does not start a thread and does not call anything —
+    it sets ``_stop_requested`` and returns (see `_sigterm_handler` for why even
+    those were too much), and this loop honours the flag before serving and
+    inside the join loop. The three ``os._exit``
+    calls above stay: they are pre-bind failures, where nothing bound, no sidecar
+    started and there is no teardown to skip.
     """
     if isinstance(binds, str):
         binds = [binds]
+    # A handler only runs if the signal is not BLOCKED. The mask is inherited
+    # from whoever spawned this process, so clear it here even when the caller
+    # installed the handlers itself (the test harness and any embedder do) —
+    # `_install_stop_handlers` already does this on the `hscc api start` path,
+    # and this keeps a direct `_serve` equally stoppable (t_7c2eb604).
+    _unblock_stop_signals()
     # Legacy call shape: _serve(api, bind_override, port_override)
     if (isinstance(tailscale, int) and not isinstance(tailscale, bool)
             and port_override is None):
@@ -449,14 +518,45 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
             f"HSCC API: gateway sidecar startup skipped ({exc})",
             log_file=API_LOG_FILE, pid_file=API_PID_FILE,
         )
+    # Publish the bound server BEFORE the loops start: the helper thread the
+    # handler starts can only ask something to shut down if it can find it, and
+    # `_MultiServer.shutdown()` is a no-op until `_started` is set — so a stop
+    # landing anywhere above this line (config resolution, the binds, the sidecar
+    # start) can only be the stop FLAG, which is why `_serve` re-checks it below
+    # before serving.
+    global _served_server
+    _served_server = server
+
     try:
-        server.serve_forever()
+        if _stop_requested.is_set():
+            # A stop was requested while the listeners were still coming up —
+            # the same window t_6eff6258 closed on the launchd entry path, and
+            # the reason the handlers are installed in the child before the
+            # second fork rather than here. Nothing is served; fall through to
+            # the same finally: so the sidecar this process may have started is
+            # torn down and the exit is the clean one, instead of an accept
+            # loop nobody asked for and a `stop` that has to escalate.
+            daemon_ops.log(
+                "HSCC API: stop requested during startup, not serving",
+                log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+            )
+        else:
+            # `stop_event` is the sliver the pre-serve check cannot cover: a
+            # stop landing after this line is passed but before the accept
+            # loops are joinable, where `shutdown()` would still be a no-op.
+            server.serve_forever(stop_event=_stop_requested)
     except Exception as exc:
         daemon_ops.log(
             f"HSCC API crashed: {exc}", "ERROR",
             log_file=API_LOG_FILE, pid_file=API_PID_FILE,
         )
     finally:
+        # This block is the ONLY way out of `_serve`, and that is the point
+        # (t_56552ecc): the stop path used to leave via `os._exit(0)` in the
+        # signal handler, which skips every `finally:` and orphaned the
+        # supervised serve. Tests in tests/test_api_cli_stop_sidecar.py pin
+        # both halves — no hard exit in the handler, teardown stays in here.
+        _served_server = None
         # Tear down the sidecar (drivers release their turn leases, then the
         # serve process is terminated). Best-effort, never blocks shutdown.
         try:
@@ -470,6 +570,23 @@ def _serve(api, binds=None, tailscale=False, port_override=None):
         except Exception:
             pass
         daemon_ops.write_stopped(API_PID_FILE)
+        # The line the handler used to log inline. A handler may not log (its
+        # first statement used to be `daemon_ops.log`, which holds
+        # `daemon_ops._handlers_lock` — see `_sigterm_handler`), so the run says
+        # it here instead, in the one place that always executes on a signalled
+        # stop: an operator grepping ~/.hscc/api.log for "Received signal" gets
+        # the same witness the old handler wrote, before the closing line.
+        if _last_signal is not None:
+            daemon_ops.log(
+                f"Received signal {_last_signal}, shutting down...",
+                log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+            )
+        # Same closing line as `serve_main`'s teardown (t_6eff6258): an operator
+        # grepping ~/.hscc/api.log for a stop that worked has one string to
+        # look for on both entry paths, and `hscc api stop`'s own report is a
+        # message about the pid it signalled, not about the server finishing.
+        daemon_ops.log("HSCC API stopped",
+                       log_file=API_LOG_FILE, pid_file=API_PID_FILE)
 
 
 def _bridge_default_serve_port(server) -> int:
@@ -495,13 +612,96 @@ def _bridge_default_serve_port(server) -> int:
 
 
 def _sigterm_handler(signum, frame):
-    """Graceful shutdown on SIGTERM/SIGINT: remove PID file, exit."""
-    daemon_ops.log(
-        f"Received signal {signum}, shutting down...",
-        log_file=API_LOG_FILE, pid_file=API_PID_FILE,
-    )
-    daemon_ops.write_stopped(API_PID_FILE)
-    os._exit(0)
+    """Cooperative shutdown on SIGTERM/SIGINT: one attribute write, nothing else.
+
+    A signal handler runs ON THE THREAD it interrupts, so its body may not take a
+    lock or call anything: whatever it asks for may already be held by the very
+    thread it stopped, and then the handler never returns — which loses the stop
+    entirely (no flag set, no return from `_serve`, no sidecar teardown, and
+    `hscc api stop` escalates to SIGKILL, which skips that teardown too and
+    orphans the supervised ``hermes serve`` holding this process's token). Every
+    shape this card tried for the body fell into that trap, each one measured:
+
+      * `daemon_ops.log(...)` — the original first statement. It runs
+        `daemon_ops._get_logger`, which holds `daemon_ops._handlers_lock`, a
+        plain non-reentrant `threading.Lock`, while resolving the rotating
+        handler. A stop landing during one of the several lines the API writes
+        while it comes up deadlocks the handler against its own thread; the case
+        named `..._inside_a_log_write_still_stops` reaches that state on purpose.
+      * `threading.Thread(...).start()` — the shape this fix used for one commit,
+        to get the log line off the handler. Starting a thread takes `threading`'s
+        bookkeeping locks and then waits for the new thread to report itself
+        started, so the handler is no longer bounded by the work it delegated: it
+        can block on the thread it just created, on the interrupted thread's own
+        behalf. It also makes a stop depend on a second thread being creatable.
+      * `threading.Event.set()` / `is_set()` — both take the event's internal
+        lock, and the serving loop asks `is_set()` on every pass, which is why the
+        flag is a `_StopFlag` and not an `Event`.
+
+    What is left is the only thing that is safe here: record which signal arrived
+    and set the flag — a plain attribute write on a `__slots__` object, which
+    holds nothing. `_serve` reads the flag before it serves and
+    `_MultiServer.serve_forever` re-checks it on every `poll_interval` pass, so
+    the stop lands through the one `finally:` that owns the sidecar teardown and
+    the PID-file bookkeeping — both of which were already in there.
+
+    `server.shutdown()` is deliberately not called from here (nor from a helper):
+    `BaseServer.shutdown()` waits for the serving loop to return, and on this path
+    the serving loop IS the interrupted thread. The flag makes the loop come back
+    on its own; a call that waits, in a stop path, is how a stop becomes a hang.
+
+    `os._exit(0)` — what this handler did before the card — was the FIRST door
+    that skipped the teardown (`os._exit` does not run ``finally:`` blocks; see
+    also `api_server.serve_main` / t_6eff6258). The locks were the second and
+    third, and they predate both.
+
+    tests/test_api_cli_stop_sidecar.py pins this body to making no calls at all,
+    so none of the three doors can be reopened by accident.
+    """
+    global _last_signal
+    _last_signal = signum
+    _stop_requested.set()
+
+
+def _unblock_stop_signals():
+    """Clear an inherited BLOCK on SIGTERM/SIGINT.
+
+    `signal.signal()` sets a signal's DISPOSITION; it does not clear the calling
+    thread's signal MASK, and a mask survives fork/exec (`subprocess` restores
+    ignored dispositions, never the mask). A serving process spawned by one that
+    runs with SIGINT blocked therefore installs its handler, receives the
+    signal, and never dispatches it: the kernel keeps it pending, `_stop_requested`
+    is never set, `_serve` serves on, and the sidecar teardown in its `finally:`
+    only happens via the SIGKILL escalation, which skips it.
+
+    Measured (t_7c2eb604): one leg run failed BOTH SIGINT arms of the two stop
+    cases and neither SIGTERM arm; a child spawned with SIGINT blocked
+    reproduces that signature deterministically (`_last_signal` stays None).
+    Clearing the mask is what makes the stop independent of how the API was
+    launched.
+
+    `pthread_sigmask` is POSIX-only; where it is absent there is no inherited
+    pthread mask to clear.
+    """
+    try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK,
+                               {signal.SIGTERM, signal.SIGINT})
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _install_stop_handlers():
+    """Install the cooperative stop handlers AND clear any inherited block.
+
+    Called in the forked child before the second fork (see ``_handle_start``),
+    so the process that ends up serving inherits both the handlers and an
+    unmasked SIGTERM/SIGINT. A stop that was already pending when the child
+    starts is therefore dispatched as soon as this runs, and the flag survives
+    the second fork.
+    """
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    signal.signal(signal.SIGINT, _sigterm_handler)
+    _unblock_stop_signals()
 
 
 def _warn_payload_drift(repo_root=None, plugins_dir=None, theme_name=None):
@@ -770,7 +970,8 @@ def _handle_start(argv, theme_name=None):
     )
 
     # Fork into the background using the same double-fork pattern as the daemon
-    # (cli.cmd_start): fork, setsid, re-fork, write PID, run the serve loop.
+    # (cli.cmd_start): fork, setsid, re-fork, detach stdio, write PID, run the
+    # serve loop.
     pid = os.fork()
     if pid > 0:
         # Parent: record the child PID immediately (grandchild re-saves its own).
@@ -783,14 +984,40 @@ def _handle_start(argv, theme_name=None):
 
     # Child — become a daemon, no controlling terminal.
     os.setsid()
-    signal.signal(signal.SIGTERM, _sigterm_handler)
-    signal.signal(signal.SIGINT, _sigterm_handler)
+    _install_stop_handlers()
     os.chdir(os.path.expanduser("~"))
     pid2 = os.fork()
     if pid2 > 0:
         os._exit(0)
 
-    # Grandchild — write the real PID and run the serve loop.
+    # Grandchild. Detach the standard streams BEFORE anything else runs — the
+    # same call `cli.cmd_start` makes at the same point of its own double-fork,
+    # which is the parity the comment above has always claimed. `setsid()`
+    # detaches the SESSION, not the descriptors, so without this the daemon
+    # keeps the caller's fd 0/1/2 and two things follow:
+    #
+    #   1. a caller that waits for its own stdout to close — `subprocess.run
+    #      (capture_output=True)`, `hscc api start | cat`, an editor's shell
+    #      integration — blocks until the API exits, even though `hscc api
+    #      start` printed its panel and returned long ago. The grandchild holds
+    #      the write end, so the pipe never reaches EOF;
+    #   2. the server writes into a terminal that may already be gone (EPIPE on
+    #      a dead controlling-terminal fd) despite the session detach.
+    #
+    # DEVNULL, not API_LOG_FILE. The api's operational output already reaches
+    # ~/.hscc/api.log through `daemon_ops.log(..., log_file=API_LOG_FILE)`, and
+    # the per-request stderr line is deliberately silenced at the source
+    # (`api_server.ApiHandler.log_message` — "we manage our own log"), so the
+    # streams held here carried nothing the log does not already own. Routing
+    # them at the log file instead would be a SECOND writer to a path whose
+    # size cap lives in `daemon_ops`: `_GzipRotatingFileHandler.rotate` copies
+    # the file and `os.remove`s it, so a raw fd dup2'd onto api.log keeps
+    # writing into a deleted inode the first time the log rolls — output that
+    # silently vanishes instead of output that goes to a device. A device keeps
+    # fd 0/1/2 valid, inert, and rotation-proof.
+    _detach_stdio()
+
+    # Write the real PID and run the serve loop.
     daemon_ops.save_pid(API_PID_FILE)
     _serve(api, binds, tailscale, port_override)
     os._exit(0)

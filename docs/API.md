@@ -162,12 +162,29 @@ endpoints (confirm-gated, see below).
 | Method | Path | Description | Mutates |
 |---|---|---|---|
 | GET | `/v1/ping` | The **API's own** liveness — confirms the API process is up. Returns `{ok, service, version, speak}`. This is NOT the fleet health check. | read |
-| GET | `/v1/health` | **Fleet** health — runs `verify.run_all()` across the whole stack. Returns `{ok, checks: [...], speak}`. `ok` is true only when every check passes; `checks` is an array of per-check `{name, ok, ...}`. | read |
+| GET | `/v1/health` | **Fleet** health — the last cached verify snapshot: cheap, and safe to poll. Returns `{ok, checks: [...], speak, age_seconds, generated_at, stale, source, paused_nodes}`. `ok` is true only when every check in that snapshot passed; `checks` is an array of per-check `{name, ok, ...}`; `generated_at` is the epoch second the verdict was produced and `age_seconds` its age now; `stale` is true when that verdict is older than the 120 s cache TTL; `source` is `"cache"` or `"inline"`. `paused_nodes` lists the nodes parked by `hscc node pause` as `{node, status: "paused", paused_reason, paused_since}` — a parked machine is a choice, not a fault, and this route names it without softening the verdict. | read |
+| GET | `/v1/verify` | **Run the fleet check now** — inline: every check of the fleet smoke test, real GPU chat round-trips included. Returns `{ok, checks: [...], speak}`. Never serves the cache, and its verdict also refreshes the snapshot `/v1/health` answers with. | read |
 
-> **`/v1/ping` vs `/v1/health`:** `/v1/ping` answers "is the API server
-> itself alive?"; `/v1/health` answers "is the fleet healthy?". The API's own
-> liveness lives at `/v1/ping` specifically to avoid colliding with the fleet
-> health check at `/v1/health`.
+> **`/v1/ping` vs `/v1/health` vs `/v1/verify`:** `/v1/ping` answers neither
+> fleet question — it only confirms the API process is up, which is why the
+> API's own liveness lives there: to avoid colliding with the fleet health
+> check at `/v1/health`. `/v1/health` is **the last cached verify snapshot**
+> (cheap, pollable — served by the health cache, and it never runs a verify on
+> the request thread). `/v1/verify` is **run the fleet check now**.
+>
+> **Poll `/v1/health`; call `/v1/verify` only when you specifically want a
+> fresh verdict.** A `/v1/health` poll never runs a verify except when no
+> snapshot exists anywhere (the first poll of a fresh process, with no snapshot
+> file to read): then exactly one verify runs inline and every concurrent poll
+> waits for that same verdict instead of starting its own. A snapshot younger
+> than the 120 s TTL is answered as-is; an older one is answered immediately
+> with `stale: true` while one background refresh runs, so a poll never waits
+> on a verify. `/v1/verify` is the expensive route — the whole fleet smoke
+> test, real GPU chat round-trips included — so keep it off any timer.
+>
+> When there is no verdict and none could be produced, `/v1/health` answers
+> `{"speak": "health check unavailable"}` with no `ok` or `checks`: that means
+> "no health information", never "the fleet is fine".
 
 ### Cluster (read)
 
@@ -175,7 +192,7 @@ endpoints (confirm-gated, see below).
 |---|---|---|---|
 | GET | `/v1/cluster/status` | Running workloads + idle hosts. Returns `{workloads, idle_hosts, total_hosts, speak}`. | read |
 | GET | `/v1/cluster/hosts` | Registered hosts + saved clusters + live status. Returns `{hosts, saved_clusters, live_status, speak}`. | read |
-| GET | `/v1/cluster/monitor` | Fleet monitor snapshot (aggregate metrics). | read |
+| GET | `/v1/cluster/monitor` | Fleet monitor snapshot (aggregate metrics). Nodes the pause overlay holds are projected as parked rather than broken: their host and serving rows carry `{status: "paused", paused_reason, paused_since}`, and the parked set is also stated top-level as `paused_nodes`. | read |
 | GET | `/v1/cluster/jobs` | Spark job list. | read |
 | GET | `/v1/cluster/info` | Cluster configuration summary. | read |
 
@@ -241,14 +258,15 @@ like every other mutating endpoint.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `project` | string \| null | no | Project name; absent/`null` → the catch-all **`general`** orchestrator. Unknown project → `400 unknown_project`. |
+| `project` | string \| null | no | Project name; absent/`null` → the ONE **main orchestrator** (named at bootstrap, default `general`). Unknown project → `400 unknown_project`. |
 | `prompt` | string | yes | What to ask the orchestrator. Missing/empty → `400 bad_request`. |
 | `confirm` | bool | yes | Must be `true`, else `409 confirm_required`. |
 
 Project → orchestrator resolution follows the C1 convention
 (`hscc-roles/orchestrators.py`): a named project resolves to profile
-**`<project>-orch`** / named session **`<project>`**; `general` →
-**`general-orch`** / **`general`**.
+**`<project>-orch`** / named session **`<project>`**; absent/null resolves to
+the ONE **main orchestrator** named at bootstrap (`hscc-roles/main_orch.py`,
+default **`general`**) — its stored name is the profile, session and board.
 
 **Transport:** the API invokes Hermes directly —
 
@@ -347,7 +365,7 @@ on a bad orchestrator call:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `unknown_project` | `project` is neither a registry project nor `general` |
+| 400 | `unknown_project` | `project` is neither a registry project nor the main orchestrator's name |
 | 502 | `orchestrator_error` | the hermes invocation failed (empty reply / bad exit) |
 | 503 | `orchestrator_unavailable` | the orchestrator profile/session is not reachable (e.g. the named session hasn't been created yet) |
 | 504 | `orchestrator_timeout` | the orchestrator did not reply within the configured timeout (default 600 s) — the reported `elapsed` equals the seconds it actually ran |
@@ -365,7 +383,7 @@ Every error response shares one shape:
 | Status | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | malformed/missing field, non-object body, body > 1 MiB |
-| 400 | `unknown_project` | orchestrator chat `project` is neither a registry project nor `general` |
+| 400 | `unknown_project` | orchestrator chat `project` is neither a registry project nor the main orchestrator's name |
 | 401 | `unauthorized` | missing or invalid bearer token |
 | 404 | `not_found` | unknown route, unknown card, card not reviewable |
 | 405 | `method_not_allowed` | valid path, wrong HTTP method |

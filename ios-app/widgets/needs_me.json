@@ -1,0 +1,30 @@
+{
+  "order": 7,
+  "bundle_order": 7,
+  "kind": "widget",
+  "surface_case": "widgetNeedsMe",
+  "surface_raw": "widget.needsMe",
+  "display_name": "Needs Me",
+  "icon": "bell.badge",
+  "widget_type": "NeedsMeWidget",
+  "sources": [
+    "Sources/HSCCWidgets/NeedsMeWidget.swift"
+  ],
+  "coverage_ios": [
+    "declared-and-renders (`SmallNeedsMe`)",
+    "declared-and-renders (`MediumNeedsMe`)",
+    "declared-and-renders (`LargeNeedsMe`)",
+    "declared-and-renders (`Text(entry.inlineLine)` — `N need you` / `nothing needs you`)",
+    "declared-and-renders (`NeedsMeCircular` — L2 count gauge, green check at zero)",
+    "declared-and-renders (`NeedsMeRectangular` — `N need you` + top item)"
+  ],
+  "coverage_macos": [
+    "declared-and-renders (`SmallNeedsMe`)",
+    "declared-and-renders (`MediumNeedsMe`)",
+    "declared-and-renders (`LargeNeedsMe`)",
+    "absent"
+  ],
+  "coverage_source": "`ios-app/Sources/HSCCWidgets/NeedsMeWidget.swift`",
+  "decode_hook": "checkNeedsMeWidget",
+  "id": "needs_me"
+}

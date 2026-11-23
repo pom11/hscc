@@ -240,30 +240,37 @@ enum AppGroup {
 // The rules, in one place so they cannot drift:
 //   * Start with the address that last answered (App Group), then the primary,
 //     then the remaining fallbacks in their saved order.
-//   * Fail over ONLY when the transport failed (timeout, cannot connect, DNS,
-//     TLS/connection lost). An HTTP answer — even 401/403/404/5xx — proves the
-//     daemon is reachable, so it is returned immediately and never retried.
-//   * All addresses down produces ONE failure (the last transport error), not
-//     one error per address.
-//   * In a multi-address cluster every attempt gets a short ceiling, so a dead
-//     first address cannot consume a widget's whole time budget.
+//   * Fail over when the transport failed (timeout, cannot connect, DNS,
+//     TLS/connection lost) AND when an address answered a route it cannot serve
+//     (404) or a server error (5xx). Pinning a broken/older address after a 404
+//     or 500 is how a healthy fallback never got tried (audit W20). Auth
+//     answers (401/403) still stop the loop: the token is the same everywhere.
+//   * All addresses down produces ONE failure (the last transport error), or
+//     the last unusable HTTP answer when every address answered but none was
+//     usable.
+//   * In a multi-address cluster every transport attempt gets a short ceiling,
+//     so a dead first address cannot consume a widget's whole time budget.
 enum HostFailover {
     /// Per-attempt ceiling when there is more than one address to try.
     static let perAttemptTimeout: TimeInterval = 4
 
     /// One address's result. `.answered` means the daemon answered over HTTP
-    /// (any status) or produced a non-connectivity outcome that must be shown
-    /// as-is; `.transport` means try the next address.
+    /// with a usable response and may be remembered. `.answeredUnusable` means
+    /// it answered but the answer cannot serve this read (404/5xx): try the
+    /// next address and never pin this one. `.transport` means try the next.
     enum Attempt<Value> {
         case answered(Value)
+        case answeredUnusable(Value)
         case transport(Error?)
     }
 
     /// The loop's aggregate: one value + the host that produced it, or one
-    /// failure after every address was tried.
+    /// failure after every address was tried. `lastValue` carries the last
+    /// unusable HTTP answer so a single-address cluster keeps its precise
+    /// 404/5xx instead of collapsing into "unreachable".
     enum Outcome<Value> {
         case success(Value, host: String)
-        case failed(lastError: Error?)
+        case failed(lastError: Error?, lastValue: Value?)
     }
 
     /// Primary → fallbacks, blanks removed, duplicates folded case-insensitively.
@@ -324,24 +331,27 @@ enum HostFailover {
         return min(base, perAttemptTimeout)
     }
 
-    /// Try the ordered hosts until one ANSWERS. Transport failures continue;
-    /// anything the attempt classifies as `.answered` stops the loop. Records
-    /// the working host in the App Group before returning it.
+    /// Try the ordered hosts until one ANSWERS USABLY. Transport failures and
+    /// unusable HTTP answers continue; a usable answer stops the loop and is
+    /// the only outcome that records a working host.
     static func run<Value>(
         hosts: [String],
         attempt: (String) async -> Attempt<Value>
     ) async -> Outcome<Value> {
         var lastError: Error?
+        var lastValue: Value?
         for host in orderedHosts(hosts) {
             switch await attempt(host) {
             case .answered(let value):
                 remember(host)
                 return .success(value, host: host)
+            case .answeredUnusable(let value):
+                lastValue = value
             case .transport(let error):
                 lastError = error
             }
         }
-        return .failed(lastError: lastError)
+        return .failed(lastError: lastError, lastValue: lastValue)
     }
 }
 
@@ -360,108 +370,19 @@ enum HostFailover {
 // defaults to on (backward compatible — the Cluster widget predates this and
 // must keep rendering exactly as it does today until the operator edits it).
 
-/// The surfaces the operator controls. The raw values are the registry
-/// keys stored in the App Group — stable identifiers, not display names.
+/// The surfaces the operator controls. The raw values are the registry keys
+/// stored in the App Group — stable identifiers, not display names.
 ///
-/// Not transcribed on purpose anywhere: `widget_settings_check.sh` iterates
-/// `allCases` rather than asserting a literal count, so adding a surface here
-/// cannot redden a healthy gate (it once did — `defaults.surfaces.count == 4`).
-enum WidgetSurfaceKind: String, CaseIterable, Codable {
-    /// The existing Home Screen cluster widget (state / topology / models /
-    /// board work).
-    case widgetCluster = "widget.cluster"
-    /// The new monitor widget (sibling card t_6d545375).
-    case widgetMonitor = "widget.monitor"
-    /// The board status widget — five counts for the ONE board the operator
-    /// picked in the widget's own configuration sheet (t_6d8731ab shipped the
-    /// widget; t_09cd8abf gave it this registry entry so Settings can pause it
-    /// and set its cadence like every other surface).
-    case widgetBoardStatus = "widget.boardStatus"
-    /// The "Running cards" widget (t_fa7926fb): the cards being worked right
-    /// now, with the worker running each and how long it has been going.
-    ///
-    /// Until this case existed the widget hard-coded a quarter-hour on its own
-    /// provider and could not be paused at all — the operator's only lever was
-    /// pulling the widget off the Home Screen. A raw value is permanent (it is
-    /// the key written into the installed App Group blob the moment the
-    /// operator touches the row), so it is chosen once, here:
-    /// `widget.cardsRunning` names the surface the widget calls itself
-    /// (`configurationDisplayName("Running Cards")`, kind
-    /// `CardsRunningWidget`), not one dataset inside it.
-    case widgetCardsRunning = "widget.cardsRunning"
-    /// The "Kanban Monitor" widget (t_fa7926fb): the
-    /// `hscc kanban monitor --live` panel — running / ready / blocked plus the
-    /// merged row list.
-    ///
-    /// Same reason and same shape as above. Its header claimed it "uses the
-    /// widget default cadence (5 min) and is never 'paused'", which was true
-    /// only because no registry entry existed that could say otherwise.
-    case widgetKanbanMonitor = "widget.kanbanMonitor"
-    /// The "Projects" widget (t_5f246177): the cluster's projects and the board
-    /// each one lives on.
-    ///
-    /// The last widget in `HSCCWidgets` outside this registry, and its provider
-    /// said so out loud: "`WidgetSurfaceKind` has no `widgetProjects` case yet,
-    /// so this surface is not in the shared cadence/Active registry", with a
-    /// private `refreshMinutes = 5` and no way for the operator to pause it —
-    /// the same dead end the three widgets above were in.
-    ///
-    /// The raw value is permanent the moment an installed device writes it, so
-    /// it is named here once: after the surface the widget calls itself
-    /// (`configurationDisplayName("Projects")`, kind `ProjectsWidget`), not after
-    /// one dataset inside it. It is deliberately NOT a reuse of `widget.cluster`
-    /// or `widget.monitor` — switching off the cluster widget must never blank
-    /// the project list, which is the reason #341 refused to let the monitor
-    /// panel borrow `.widgetMonitor`'s entry either.
-    case widgetProjects = "widget.projects"
-    /// The existing fleet-wake Live Activity.
-    case liveActivityWake = "liveActivity.wake"
-    /// The new monitor Live Activity (sibling card t_03d318cd).
-    case liveActivityMonitor = "liveActivity.monitor"
-    /// The cluster-health Live Activity (t_f2867fb3): "is the fleet up", the
-    /// Dynamic Island form of the cluster widget's state + nodes-up line.
-    ///
-    /// This case is what makes the surface controllable: the activity's launch
-    /// sweep is deliberately a PURE rule (`ClusterHealthOrphanRule`) with no
-    /// settings read, so it stays executable by
-    /// `live_activity_rehydration_check.sh`. The Active toggle and the cadence
-    /// belong to the DRIVER (`ClusterHealthActivityDriver`), which is the only
-    /// consumer of this entry — the sweep still consults nothing.
-    case liveActivityClusterHealth = "liveActivity.clusterHealth"
-    /// The running-cards Live Activity — the Island / Lock Screen form of
-    /// `hscc cards monitor --live` (t_f9cc34e0 renders it, t_71deac83 feeds it).
-    ///
-    /// Same division as the case above: the launch sweep
-    /// (`CardsRunningActivitySweep` + `CardsRunningOrphanRule`) stays a pure
-    /// rule the rehydration gate can execute, and the Active toggle plus the
-    /// cadence belong to `CardsRunningActivityDriver`, the only consumer of
-    /// this entry. It gets its OWN entry rather than borrowing
-    /// `.liveActivityMonitor`'s: the two surfaces are pushed by different
-    /// drivers off different routes, and one shared toggle would let switching
-    /// off the cluster monitor silently stop the cards bubble too.
-    case liveActivityCards = "liveActivity.cards"
-    /// The per-board kanban-progress Live Activity — the Island / Lock Screen
-    /// form of the Board Status widget's four counts (t_451cbe25).
-    ///
-    /// The driver described this surface as OPERATOR-STARTED and therefore not
-    /// a registry surface; that reasoning stops where the card that owns the
-    /// settings screen begins. It is still a Live Activity an operator can see,
-    /// and a surface with no entry cannot be paused, paced or listed — the same
-    /// dead end the widgets above were in before their cases existed. So it
-    /// gets one, and `BoardProgressActivityDriver` is its only consumer: the
-    /// Active toggle suppresses the start button's effect and ends a bubble
-    /// already up, 0 means no scheduled refresh, and the cadence replaces the
-    /// driver's former hard-coded 5 minutes. The board it watches still comes
-    /// from the Board screen's own start action, never from this blob.
-    ///
-    /// The raw value is permanent the moment an installed device writes it, so
-    /// it is named once: after the surface's own attributes type
-    /// (`BoardProgressActivityAttributes`, rendered by
-    /// `BoardProgressLiveActivity`). Deliberately NOT a reuse of
-    /// `.liveActivityCards` — that bubble is fleet-wide, this one is one board.
-    case liveActivityBoardProgress = "liveActivity.boardProgress"
-}
-
+/// The case list is GENERATED from `ios-app/widgets/*.json` by
+/// `ios-app/scripts/widget_registry.py` into
+/// `Sources/Shared/WidgetSurfaceKind.generated.swift`. Add or rename a surface
+/// there, run `--write`, and this file is not edited: two widget cards adding
+/// different surfaces therefore cannot conflict on the registry list.
+///
+/// The per-surface behaviour switches below (`isLiveActivity`,
+/// `supportsScope`, `availableSections`) stay hand-written on purpose: they are
+/// decisions, not registration, and a new case must make them compile-fail
+/// until somebody judges it.
 /// One surface's settings: enabled, refresh cadence, and which content
 /// sections it renders. Plain Codable struct (AppleScript-agnostic).
 struct WidgetSurfaceSettings: Codable, Equatable {
@@ -538,11 +459,13 @@ struct AppGroupWidgetSettings: Codable, Equatable {
     /// The settings for one surface, defaulting to ON when the store is absent
     /// or the surface has no entry yet (backward compatible — a surface that
     /// predates this store must keep working unchanged). Widgets default to a
-    /// 5-minute cadence; Live Activities (push-fed) default to 15 minutes.
+    /// 30-minute cadence: WidgetKit's reload budget (~40–70/day) cannot deliver
+    /// the old 5/15-minute presets, as the 2026-11-19 widget audit measured.
+    /// Live Activities (push-fed) default to 15 minutes.
     func setting(for kind: WidgetSurfaceKind) -> WidgetSurfaceSettings {
         guard let s = surfaces[kind] else {
             return WidgetSurfaceSettings(isActive: true,
-                                         refreshMinutes: kind.isLiveActivity ? 15 : 5,
+                                         refreshMinutes: kind.isLiveActivity ? 15 : 30,
                                          showSections: Set(kind.availableSections))
         }
         // Bound the set to the surface's known sections so a stale/foreign
@@ -594,61 +517,62 @@ struct AppGroupWidgetSettings: Codable, Equatable {
         surfaces[kind]?.scope ?? scope
     }
 
-    /// The full defaults (all on, 5/15-min cadence, all sections), used to
+    /// The full defaults (all on, 30/15-min cadence, all sections), used to
     /// seed a brand-new store before the operator edits anything.
     static func defaults() -> AppGroupWidgetSettings {
         AppGroupWidgetSettings(surfaces: Dictionary(
             uniqueKeysWithValues: WidgetSurfaceKind.allCases.map { ($0, WidgetSurfaceSettings(
                 isActive: true,
-                refreshMinutes: $0.isLiveActivity ? 15 : 5,
+                refreshMinutes: $0.isLiveActivity ? 15 : 30,
                 showSections: Set($0.availableSections))) }
         ))
     }
 }
 
+/// The three things a stored scope can name. Kept separate from the raw
+/// `WidgetScope` fields so a surface can declare which pickers it honours.
+enum WidgetScopeLevel: String, CaseIterable, Sendable {
+    case board
+    case project
+    case node
+}
+
 extension WidgetSurfaceKind {
     /// True for the push-fed Live Activity surfaces (15-min default cadence).
-    /// Widgets are self-fetching (5-min default).
+    /// Widgets are self-fetching (30-min default).
     var isLiveActivity: Bool {
         switch self {
-        case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
-             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects:
+        case .widgetCluster, .widgetCardsRunning, .widgetKanbanMonitor,
+             .widgetNeedsMe, .widgetMergeQueue:
             return false
-        case .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
-             .liveActivityCards, .liveActivityBoardProgress: return true
+        case .liveActivityClusterHealth: return true
+        }
+    }
+
+    /// The scope levels this surface can honestly honour.
+    ///
+    /// Only the Boards widget reads a scope: it narrows `/v1/mobile/summary`
+    /// with `?boards=<slug>` (and filters the running-title read client-side).
+    /// Its project and node choices were removed with the dead controls the
+    /// 2026-11-19 audit found (W4) — the route has no project or node filter,
+    /// so offering those pickers would write a value nothing reads.
+    ///
+    /// Every other surviving surface renders the whole fleet: Cluster's monitor
+    /// route has no node parameter on the widget path, `/v1/kanban/running`
+    /// ignores `?board=` (WIDGET_DATA_CONTRACT §4.3), Needs Me is the global
+    /// alert feed, and Merge Queue is read fleet-wide by design. Those surfaces
+    /// therefore get no scope section at all rather than a control that lies.
+    var scopeLevels: Set<WidgetScopeLevel> {
+        switch self {
+        case .widgetKanbanMonitor: return [.board]
+        case .widgetCluster, .widgetCardsRunning, .widgetNeedsMe,
+             .widgetMergeQueue, .liveActivityClusterHealth:
+            return []
         }
     }
 
     /// Whether this surface can render a `WidgetScope` at all.
-    ///
-    /// Not every dataset can be scoped, and a scope picker that the network
-    /// ignores is a control that lies: the operator picks a board, the row
-    /// says "board radio", and the surface keeps showing the whole fleet.
-    /// `/v1/kanban/running` and `/v1/kanban/blocked` were measured to IGNORE
-    /// `?board=` (WIDGET_DATA_CONTRACT §4.3), so the running-cards surfaces are
-    /// fleet-wide whatever the store holds — and the app-side driver for this
-    /// surface therefore does not consult `scope(for:)` at all.
-    ///
-    /// Every other surface keeps `true` because that is what ships today: each
-    /// was measured by its own card against a route that honours a scope. A new
-    /// surface that turns out not to honour one opts out HERE, and the config
-    /// screen then hides the pickers rather than writing a value nothing reads.
-    var supportsScope: Bool {
-        switch self {
-        case .liveActivityCards: return false
-        // Every other surface keeps true: main grew this switch since this
-        // branch was cut (widgetCardsRunning, widgetKanbanMonitor,
-        // widgetProjects all landed from main), and a new case has to be
-        // judged here deliberately rather than by an exhaustive-switch build
-        // error. Each of the three is fetched through a route its own card
-        // measured against a scope, so they keep what ships today.
-        case .widgetCluster, .widgetMonitor, .widgetBoardStatus,
-             .widgetCardsRunning, .widgetKanbanMonitor, .widgetProjects,
-             .liveActivityWake, .liveActivityMonitor, .liveActivityClusterHealth,
-             .liveActivityBoardProgress:
-            return true
-        }
-    }
+    var supportsScope: Bool { !scopeLevels.isEmpty }
 
     /// The content sections this surface can render — the vocabulary the
     /// settings UI offers and the sibling cards' rendering consumes.
@@ -663,42 +587,44 @@ extension WidgetSurfaceKind {
     ///   - "timing"    — wake timing / elapsed (Live Activities)
     ///
     /// A surface with ONE dataset and no optional part declares the empty set:
-    /// the board status widget draws five counts for one board and nothing
-    /// else, so every candidate section here would be a toggle that either
-    /// empties the widget or does nothing — and a toggle that does nothing is
-    /// a lie in the settings UI (`WidgetSurfaceEditor` hides its whole
-    /// "Show Content" group for exactly this case).
+    /// the Boards widget draws one stacked bar per board and nothing optional,
+    /// so every candidate section here would be a toggle that either empties
+    /// the widget or does nothing — and a toggle that does nothing is a lie in
+    /// the settings UI (`WidgetSurfaceEditor` hides its whole "Show Content"
+    /// group for exactly this case).
     var availableSections: Set<String> {
         switch self {
-        case .widgetCluster:    return ["state", "topology", "models", "board", "nodes"]
-        case .widgetMonitor:    return ["state", "nodes", "host"]
-        // One dataset, nothing optional — see the rule above. The board tile is
-        // five counts for one board; the running-cards widget is the row list
-        // plus the running/blocked counts its header and footer are built from;
-        // the monitor panel is running/ready/blocked plus that same merged list.
-        // A toggle for any part of those would either empty the surface or do
-        // nothing, and every entry here renders a Toggle — so an invented id is
-        // a dead control the operator can touch.
-        case .widgetBoardStatus: return []
+        // C1 always draws the state headline, the node table and the model
+        // footer; the only optional block is the per-node table itself. The
+        // old "state"/"topology"/"models"/"board" toggles were dead controls
+        // (audit W11) and are gone rather than left to lie.
+        case .widgetCluster:    return ["nodes"]
+        // One dataset, nothing optional — see the rule above. The running-cards
+        // widget is the row list plus the running/blocked counts its header and
+        // footer are built from; Boards is one bar per board plus the same
+        // running/blocked totals. A toggle for any part would either empty the
+        // surface or do nothing, and every entry here renders a Toggle — so an
+        // invented id is a dead control the operator can touch.
         case .widgetCardsRunning, .widgetKanbanMonitor: return []
-        // The projects surface is the same ruling, and the card asked explicitly
-        // whether its per-project rows make a section genuine. They do not:
-        //   * it draws ONE dataset (`GET /v1/projects` → `{name, board}` rows)
-        //     and BOTH keys carry the fact — this file's own header says the
-        //     surface exists to show which projects exist "and which board each
-        //     one lives on", so a "board" toggle that emptied the board column
-        //     would remove the reason the surface exists, not trim a garnish;
-        //   * per-project scoping is already a control the operator has and can
-        //     see: `ProjectFilterIntent`'s Project picker in the widget's own
-        //     configuration sheet. A second copy of that choice in this store
-        //     would be a Toggle the sheet never reads.
-        // So: nothing here is optional, and `WidgetSurfaceEditor` hides its whole
-        // "Show Content" group for exactly this case (ConfigView's
-        // `if !sectionRows(kind).isEmpty`) — an invented id would ship as a dead
-        // control the operator can touch and nothing obeys.
-        case .widgetProjects: return []
-        case .liveActivityWake: return ["state", "topology", "timing"]
-        case .liveActivityMonitor: return ["state", "nodes", "host"]
+        // The "Needs me" tile is one list (unacknowledged alerts) with no
+        // optional part: level, title, body first line and age are the row.
+        // A section toggle here would either empty the surface or do nothing.
+        case .widgetNeedsMe: return []
+        // The graph widget is the same ruling, and the question is sharper here
+        // because a chart has obvious-looking parts: a "legend" or "bands" toggle
+        // would each remove something the widget's own card calls a requirement
+        // (a legend on the small-multiples sizes, threshold bands for
+        // temperatures), and a "min/max" toggle on the small size would empty the
+        // caption that is half of what that size is for. The metric SET and the
+        // window are already controls the operator can see, in the widget's own
+        // configuration sheet — a second copy of either in this store would be a
+        // Toggle the sheet never reads. So: nothing here is optional, and
+        // `WidgetSurfaceEditor` hides its whole "Show Content" group for exactly
+        // this case.
+        // The merge queue is one list (FIFO rows) with no optional part: the
+        // position, PR, card, branch, state, age and last result ARE the row.
+        // A section toggle would either empty the surface or do nothing.
+        case .widgetMergeQueue: return []
         // Only the tally is optional here. The serving state is this
         // activity's HEADLINE — every region of the Island and the Lock
         // Screen row draws from it — and there is no honest rendering of a
@@ -708,15 +634,6 @@ extension WidgetSurfaceKind {
         // sweep ENDS a bubble for, and an operator switching sections off
         // must never be what deletes their surface.
         case .liveActivityClusterHealth: return ["nodes"]
-        // Rows (board · card · worker · run time) and the two counts are ONE
-        // projection from ONE pair of routes: the blocked read is what tells an
-        // idle fleet apart from a jammed one (§5.4), so it is part of the
-        // dataset, not a section an operator can switch off.
-        case .liveActivityCards: return []
-        // Four counts from ONE board projection, nothing optional: the board
-        // heading and the pushed age are part of the same row, so a section
-        // toggle here would either empty the bubble or do nothing.
-        case .liveActivityBoardProgress: return []
         }
     }
 }

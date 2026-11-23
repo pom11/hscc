@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "plugins",
+      "ok": true,
+      "detail": "all core commands found"
+    }
+  ],
+  "speak": "All checks passed. Health from 4m ago.",
+  "generated_at": 1795149400,
+  "stale": true,
+  "source": "cache"
+}

@@ -856,7 +856,22 @@ class TestLoadKanbanDb:
         """
         require_real_hermes()
         agent = self._write_fake_hermes_cli(tmp_path)
-        monkeypatch.setattr(ad, "_HERMES_AGENT_PATH", str(tmp_path / "missing"))
+        # The resolver reads the ENVIRONMENT first and the module constant only
+        # as its default (autodown.py:874-875), so patching the constant while a
+        # `HERMES_AGENT_PATH` is exported leaves the deliberate "tree missing"
+        # half resolving the real tree instead of failing. That is exactly how
+        # this case reddened under the roster-wide HOME seal: the runner
+        # DECLARES the machine's agent tree before sealing (PR #606, the shape
+        # t_2b2a6c3b chose for SPARKRUN_SRC in #604), and a fixture that wants
+        # the default branch has to remove the override first. The sibling case
+        # above (`test_resolves_from_hermes_agent_path`, :791) already deletes
+        # it — this one only patched the constant, and only the seal could show
+        # the difference (t_ce473bf0).
+        monkeypatch.delenv("HERMES_AGENT_PATH", raising=False)
+        missing = tmp_path / "missing"
+        monkeypatch.setattr(ad, "_HERMES_AGENT_PATH", str(missing))
+        assert not missing.is_dir(), (
+            "the failure half means nothing unless that tree is really absent")
         assert ad._load_kanban_db_or_default() is None
         monkeypatch.setattr(ad, "_HERMES_AGENT_PATH", str(agent))
         assert ad._load_kanban_db_or_default() is not None
@@ -1126,6 +1141,14 @@ class TestIntentionalWindow:
 
 import datetime as _dt
 
+#: fixture-clock: 2026-08-23T12:00Z — the instant the cycle()/wake-seam cases
+#: are judged by. The idle cases hand it over explicitly (``now=NOW``); the
+#: wake-seam cases that call ``cycle()`` with no clock compare one fixture stamp
+#: against ANOTHER fixture stamp (activity after ``down_since``), so the claim is
+#: relative and the wall clock decides nothing in them — which is exactly what
+#: test_single_clock_rule.py now proves instead of asserting: shift the wall
+#: clock ±400 days and no verdict in this file may move. Single-clock rule, card
+#: t_ed416771: a case runs on the clock that wrote its data.
 NOW = _dt.datetime(2026, 8, 23, 12, 0, 0, tzinfo=_dt.timezone.utc)
 
 

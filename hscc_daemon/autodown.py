@@ -1080,7 +1080,7 @@ def _agents_idle(agents_file=None):
     return True
 
 
-def _default_keepalive_ok():
+def _default_keepalive_ok(pauses_directory=None):
     """True iff every present keepalive unit's HEAD node answers healthy (§1f/§6.4).
 
     A keepalive unit may span multiple nodes (tensor-parallel across two GPUs);
@@ -1103,6 +1103,41 @@ def _default_keepalive_ok():
     probe a unit's head ⇒ False (abort teardown) AND log why — we never tear
     down on an unverifiable keepalive signal. With no keepalive units present,
     there is nothing to protect ⇒ True.
+
+    A PARKED unit is not an unhealthy one (t_eec97ea8, reading (b))
+    ---------------------------------------------------------------
+    A keepalive unit whose span the node-pause overlay holds is EXEMPT from this
+    gate — it contributes no ``False``. §6.4's rationale is "do not tear the
+    fleet down MID-PROBLEM while a WORKER IS MID-FLIGHT relying on it"; neither
+    half of that premise holds for a park. The operator stopped the unit, so
+    nothing is relying on it, and its absence is a stated intention rather than
+    a fault — the same affirmative-operator-statement argument the watchdog
+    seam runs ("no strike, no page", #565) and the wake seam runs
+    (``_partition_wake_plan``, t_af9901e2). Without the exemption the overlay
+    would be honoured by every start path in the daemon and would still, alone,
+    disable the fleet's only automatic power-down for the whole duration of a
+    park — a training run on one GPU silently keeps the entire fleet powered.
+
+    Three things this does NOT relax:
+      * every UNVERIFIABLE signal still fails closed — unparseable serving, an
+        unresolvable unit set, failed tp-peer resolution, or an unhealthy or
+        raising probe on a unit that is NOT parked all ⇒ False, exactly as
+        before the seam existed;
+      * an unreadable overlay exempts NOTHING (``_parked_nodes`` returns the
+        empty set on a failed read), so a broken overlay leaves the pre-seam
+        conservative behaviour standing — the opposite polarity to the wake
+        seam's fail-open, which is deliberate: for a start, failing open risks
+        one bad start; for an interlock, failing open would permit a teardown on
+        an unverified signal;
+      * the exemption is per unit and keyed on the unit's FULL SPAN
+        (``nodes`` ∩ the overlay, never the single ``node`` key) for the reason
+        ``node_pauses``' "WHAT A SKIP SEAM MUST ASK" gives: a TP span with one
+        parked member is down as a whole, so probing its head would abort
+        teardown forever — which is the very bug this seam closes.
+
+    ``pauses_directory`` is the overlay's explicit-root seam, threaded in from
+    ``cycle()`` / ``teardown()``; ``None`` resolves HOME's ``~/.hscc``, the
+    record the CLI writes.
     """
     try:
         from . import serving
@@ -1119,6 +1154,11 @@ def _default_keepalive_ok():
         return False
     if not units:
         return True  # no keepalive units to be unhealthy
+    # Read the overlay ONCE for the whole pass: two reads could disagree across
+    # a pause the CLI wrote in between, and an interlock built from two
+    # different overlays is worse than one built from a stale one.
+    parked = _parked_nodes(pauses_directory, context=KEEPALIVE_INTERLOCK_CONTEXT)
+    exempted = []
     try:
         # Non-primary members of multi-node/tp spans serve through their head
         # and expose no endpoint of their own — reusing check_workers' exact
@@ -1130,6 +1170,13 @@ def _default_keepalive_ok():
         return False
     for u in units:
         node = u["node"]
+        span = [n for n in (u.get("nodes") or []) if n] or [node]
+        if parked and set(span) & parked:
+            # Parked by the operator ⇒ not unhealthy (see the note above). The
+            # whole span goes, so this holds whether the entry is the head or a
+            # TP peer, and the probe below is never issued for it.
+            exempted.append(u.get("id") or f"{node}:{u['port']}")
+            continue
         if node in tp_peers:
             # TP peer serves through the unit's head — no standalone endpoint,
             # so it cannot independently be down. Do not probe it.
@@ -1144,6 +1191,13 @@ def _default_keepalive_ok():
             log(f"Autodown keepalive: probe of {u['id']} "
                 f"({node}:{u['port']}) failed: {e} — aborting teardown", "WARN")
             return False
+    if exempted:
+        # INFO, not WARN: a park lasts hours or days and this runs every tick,
+        # so a per-tick WARN would train the operator to ignore WARNs. The file
+        # write is unconditional, so the exemption is never invisible.
+        log(f"Autodown keepalive: {len(set(exempted))} keepalive unit(s) parked "
+            f"by the pause overlay — not counted unhealthy: "
+            f"{', '.join(sorted(set(exempted)))}", "INFO")
     return True
 
 
@@ -1536,7 +1590,7 @@ def read_interlock_snapshot(state_file=None):
 
 
 def _is_idle(cfg, kanban_db=None, agents_file=None, now=None,
-             keepalive_ok=None, prci_checker=None):
+             keepalive_ok=None, prci_checker=None, pauses_directory=None):
     """Evaluate the FULL idle conjunction (§1/§6) — all must hold.
 
     ``True`` only when every interlock positively clears. Any single false, or
@@ -1545,6 +1599,11 @@ def _is_idle(cfg, kanban_db=None, agents_file=None, now=None,
     ``agents_file`` for §1b, ``now`` for the clock, ``keepalive_ok`` for §6.4,
     ``prci_checker`` for the §1a PR/CI interlock) so cycle() is unit-testable
     without the daemon or the real ~/.hscc / ~/.hermes.
+
+    ``pauses_directory`` reaches the §6.4 interlock's own default: it is the
+    overlay's explicit-root seam, read there and nowhere else in the
+    conjunction. An injected ``keepalive_ok`` is the caller's whole gate and
+    stays zero-argument — the seam it replaces does not get to demand one.
     """
     # 6.1 Kanban work (§1a) — _has_active_work True ⇒ active ⇒ not idle.
     if _has_active_work(kanban_db):
@@ -1562,8 +1621,11 @@ def _is_idle(cfg, kanban_db=None, agents_file=None, now=None,
         return False
     # 6.4 Keepalive health INTERLOCK (§1f) — keepalive units are teardown
     #     targets now (C4 reversed) but a sick one aborts: do not tear the whole
-    #     fleet down mid-problem while a worker relies on it.
-    kh = keepalive_ok or _default_keepalive_ok
+    #     fleet down mid-problem while a worker relies on it. A unit the pause
+    #     overlay holds is not sick — it is parked (t_eec97ea8); see
+    #     _default_keepalive_ok for why, and for what stays fail-closed.
+    kh = keepalive_ok or (
+        lambda: _default_keepalive_ok(pauses_directory=pauses_directory))
     try:
         if not kh():
             return False
@@ -1962,7 +2024,7 @@ def _reconcile_stale_intentional_block():
 
 
 def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
-          probes=None, prci_checker=None):
+          probes=None, prci_checker=None, pauses_directory=None):
     """Idle autodown decision function (Phase 3, §1/§6; Phase 6 probes §1d).
 
     Called each daemon tick by ``daemon_ops.run_autodown_loop``
@@ -1970,6 +2032,13 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
     (kanban DB, agents.json path, clock) is injectable, and with no args it
     reads the real config from disk and uses the real clock — no running daemon
     required.
+
+    ``pauses_directory=`` is the node-pause overlay's explicit-root seam,
+    threaded to the §6.4 keepalive interlock (the only place in this decision
+    that reads it). ``None`` — the production posture, and what the daemon loop
+    passes — resolves HOME's ``~/.hscc``, the record ``hscc node pause`` writes.
+    A test points it at a temp overlay so the operator's real pause is never
+    read.
 
     Decision order:
     1. Disabled ⇒ do nothing (§7 C5, fail-closed).
@@ -2114,7 +2183,8 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
         log(f"Autodown stale-block reconcile error: {e}", "ERROR")
     if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
                     now=now, keepalive_ok=keepalive_ok,
-                    prci_checker=prci_checker):
+                    prci_checker=prci_checker,
+                    pauses_directory=pauses_directory):
         # Not idle — no teardown.
         return
     # All interlocks clear ⇒ teardown (Phase 4, called lazily).
@@ -2359,7 +2429,8 @@ def _rollback_block(original_block):
 
 def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
              agents_file=None, now=None, keepalive_ok=None,
-             http_check_fn=None, lock_now=None, prci_checker=None):
+             http_check_fn=None, lock_now=None, prci_checker=None,
+             pauses_directory=None):
     """Execute the idle teardown sequence (§3/§5), under the autodown lock.
 
     Entry point wraps the real sequence in the autodown O_EXCL lockfile so
@@ -2404,6 +2475,15 @@ def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
     runner, health probe, kanban/agents/clock/keepalive inputs) so tests run
     with fakes and ZERO real commands — this never touches the live cluster.
 
+    ``pauses_directory=`` must be threaded to step 1 below, not just to
+    ``cycle()``: step 1 re-runs the whole idle conjunction, and the §6.4
+    interlock has to read the SAME overlay the timer read. Without it a parked
+    keepalive unit would clear ``cycle()`` and then abort here — after the
+    timer already decided — which is a worse half-fix than never having had the
+    seam at all. Note this is the interlock's root only: the STOP path skips
+    nothing (a parked unit is stopped like any other; see the NODE-PAUSE SKIP
+    SEAM note above ``_parked_nodes``).
+
     ``cancel_requested`` in autodown.json is re-checked BEFORE each stop; if
     set, we stop cleanly, roll the block back, and report ``cancelled`` (§6).
 
@@ -2422,14 +2502,16 @@ def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
                                 agents_file=agents_file, now=now,
                                 keepalive_ok=keepalive_ok,
                                 http_check_fn=http_check_fn,
-                                prci_checker=prci_checker)
+                                prci_checker=prci_checker,
+                                pauses_directory=pauses_directory)
     finally:
         _release_lock()
 
 
 def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
                      agents_file=None, now=None, keepalive_ok=None,
-                     http_check_fn=None, prci_checker=None):
+                     http_check_fn=None, prci_checker=None,
+                     pauses_directory=None):
     """The teardown sequence itself, run while holding the autodown lock.
 
     Split out of ``teardown()`` so the O_EXCL lock acquisition + release live
@@ -2463,9 +2545,15 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
     # Re-run the FULL idle conjunction. If anything changed since the timer
     # decided (a card arrived, an agent went busy, the window reset, a
     # keepalive unit went sick, a PR/CI went live), ABORT — no stops issued.
+    # ``pauses_directory`` goes to the §6.4 interlock so this re-check reads the
+    # SAME pause overlay ``cycle()`` read (a unit the operator parked is not a
+    # sick unit — see ``teardown``'s note). It reaches the INTERLOCK only:
+    # nothing here or below consults the overlay to skip a stop, and a parked
+    # unit is stopped by the fleet-down exactly like any other.
     if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
                     now=now, keepalive_ok=keepalive_ok,
-                    prci_checker=prci_checker):
+                    prci_checker=prci_checker,
+                    pauses_directory=pauses_directory):
         msg = "Autodown teardown ABORTED: idle predicate no longer holds " \
               "(work/activity arrived)".strip()
         log(msg, "ERROR")
@@ -2713,6 +2801,118 @@ def _build_wake_plan(serving):
     return fleet_up_plan(serving)
 
 
+# ---------------------------------------------------------------------------
+# NODE-PAUSE SKIP SEAM (feature 2.17.3, t_af9901e2)
+# ---------------------------------------------------------------------------
+#
+# WHY A WAKE MUST ASK THE OVERLAY
+# -------------------------------
+# ``node_pauses`` is the operator's one durable way to park a node "without
+# touching any config", and a wake is the path that would silently undo it: the
+# wake command is ``sparkrun run … --ensure``, whose whole point is to make the
+# declared workload exist again. So a pause that the wake does not honour is not
+# a paused node, it is a node the operator parked and the daemon walked back into
+# service — the exact failure ``node_pauses``' module docstring exists to remove
+# ("the watchdog then heals the paused unit back to life on top of whatever the
+# node is now running"). Every ensure/relaunch action in this module therefore
+# has to consult the overlay before it issues a start.
+#
+# ``paused_nodes()`` / ``covering()``, NEVER ``paused()``
+# ------------------------------------------------------
+# A pause record is keyed by the host it was issued against and lists the rest of
+# the unit's span in ``span_nodes``. A tensor-parallel unit across .244+.246 stops
+# as ONE thing, so a seam that asked ``paused()`` for each plan node would happily
+# re-issue the orchestrator on its TP peer. ``paused_nodes()`` is the documented
+# one-call form for a seam about to loop over the fleet (keyed hosts ∪ their span
+# nodes), which is exactly this shape — and it is resolved ONCE per wake pass,
+# both because that is the loop the function is written for and because a wake
+# must not see the overlay change halfway through its own plan.
+#
+# WHY THE TEARDOWN STOP IS *NOT* SKIPPED
+# -------------------------------------
+# Only starts skip. Stopping a paused unit is harmless (it is already down) and
+# refusing it would leave a unit RUNNING on a node the operator parked — the
+# mirror-image of the bug this seam closes. A park that wants to survive a
+# teardown does not need autodown to hold its stop back; it needs the record, and
+# the record already exists by then.
+#
+# FAIL-OPEN ON AN UNREADABLE OVERLAY, LOUDLY
+# -----------------------------------------
+# ``node_pauses.load()`` cannot raise by construction (missing file ⇒ no pauses;
+# corrupt file ⇒ no pauses + WARN), so anything escaping the read here is a bug
+# in the overlay module, not a pause signal. Failing CLOSED on it — skipping every
+# unit — would mean a broken overlay file permanently disables the fleet's only
+# automatic wake path, an outage strictly worse than the one bad start it might
+# prevent. So an exception is logged as an ERROR naming the risk, and the plan
+# proceeds exactly as it did before this seam existed.
+#: What a failed overlay read costs each seam, for the ERROR line it logs.
+#: Two seams read the overlay and they fail in OPPOSITE directions on purpose
+#: (see the notes above each caller), so one message would lie about the risk.
+_PARKED_READ_RISK = {
+    "wake": "proceeding with the FULL wake plan; a parked node may be "
+            "relaunched. Check ~/.hscc/node_pauses.json",
+    # t_eec97ea8: for the §6.4 interlock the conservative action is the other
+    # way round — exempt NOTHING, i.e. keep behaving exactly as before the
+    # seam existed, rather than permitting a teardown on an unverified signal.
+    "keepalive interlock": "exempting NOTHING from the keepalive interlock; a "
+                           "parked keepalive unit will still abort teardown. "
+                           "Check ~/.hscc/node_pauses.json",
+}
+
+#: The ``context`` the §6.4 teardown interlock names when it reads the overlay.
+KEEPALIVE_INTERLOCK_CONTEXT = "keepalive interlock"
+
+
+def _parked_nodes(pauses_directory=None, context="wake"):
+    """Every node the pause overlay currently holds; ``set()`` when none.
+
+    ``pauses_directory`` is ``node_pauses``' explicit-root seam (same convention
+    as ``cron_watchers``): a root threaded in as a parameter, never read out of
+    an environment variable, so a test points it at a temp overlay and the
+    operator's real ``~/.hscc/node_pauses.json`` is never read or written. With
+    no root named it resolves HOME's ``~/.hscc`` — the record the CLI writes and
+    the daemon reads.
+
+    ``context`` names the calling seam in the unreadable-overlay ERROR, so the
+    line states the risk that seam actually runs (``_PARKED_READ_RISK``). Both
+    contexts return the empty set on a failed read — that is fail-OPEN for the
+    wake (the full plan proceeds) and fail-CLOSED for the interlock (nothing is
+    exempted, so the conservative pre-seam behaviour stands).
+    """
+    from . import node_pauses
+    try:
+        return set(node_pauses.paused_nodes(pauses_directory))
+    except Exception as e:  # noqa: BLE001 - see FAIL-OPEN note above
+        log(f"Autodown {context}: node-pause overlay unreadable "
+            f"({type(e).__name__}: {e}) — "
+            f"{_PARKED_READ_RISK.get(context, _PARKED_READ_RISK['wake'])}",
+            "ERROR")
+        return set()
+
+
+def _partition_wake_plan(plan, pauses_directory=None):
+    """Split a wake plan into ``(startable, parked)`` by the pause overlay.
+
+    ``parked`` is ``[(entry, [blocked_nodes…]), …]`` in plan order, so a caller
+    can report WHICH node of the unit is parked, not just that it was skipped.
+    A unit whose span contains even ONE parked node is parked as a whole: the
+    span is one workload and cannot come up around its own missing member
+    (``sparkrun run --ensure`` on a two-host span with one host held is a
+    half-started unit, not a partial success).
+    """
+    held = _parked_nodes(pauses_directory)
+    if not held:
+        return list(plan or []), []
+    startable, parked = [], []
+    for entry in (plan or []):
+        blocked = [n for n in (entry.get("nodes") or []) if n in held]
+        if blocked:
+            parked.append((entry, blocked))
+        else:
+            startable.append(entry)
+    return startable, parked
+
+
 def _all_units_ready(plan, http_check_fn):
     """True iff EVERY unit in ``plan`` answers healthy on its port (§4.4).
 
@@ -2861,7 +3061,7 @@ def _record_wake_success():
 
 def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
            clock=None, sleep_fn=None, wake_grace_minutes=None, now=None,
-           notify=True, lock_now=None):
+           notify=True, lock_now=None, pauses_directory=None):
     """Bring the serving layer back up (§4/§4.5/§5), under the autodown lock.
 
     Entry point wraps the real sequence in the autodown O_EXCL lockfile so
@@ -2899,6 +3099,21 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
           (``check_workers`` / ``check_proxy`` / the trigger notify gate)
           through the door step 1a's block clear just opened. Cannot arm a
           relaunch: post_boot gate 2 needs NON-EMPTY ``units``. Fail-soft.
+      1c. EVERY unit parked ⇒ ``all-paused``, a wake that changes NOTHING
+          (t_af9901e2). The ``node_pauses`` overlay holds every node the plan
+          needs, so there is no unit this wake may start. NOT the empty-plan
+          failure (§1a) — ``serving.json`` is fine and the plan is full, it just
+          has no startable member, so reporting ``no-units`` ("we cannot tell what
+          to start") would blame a file that is not broken; and NOT ``up``,
+          because claiming up with zero units started is precisely the §8 / audit
+          F7 false success. It restores the ``state`` step 1 overwrote and writes
+          nothing else — no ``wake_source``/``wake_at``, no ``post_boot`` marker,
+          no block clear — because each of those records either ARMS a launch
+          (the post-boot footprint) or STANDS SUPERVISION DOWN (the stay-down the
+          block and marker carry), and a wake that started nothing has earned no
+          claim on either. The pre-wake posture — down, blocked, watchdog holding
+          — is the posture a fully parked fleet wants, and clearing the stay-down
+          there is what would let another repair path walk the parked nodes back.
       2. Record ``wake_source`` + ``wake_at``.
       2a. Re-arm the post-boot ``expected_up`` marker (t_576964d5, moved up by
           t_278b35b2) — BEFORE any start is issued, so a wake that later times
@@ -2912,6 +3127,13 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
          AND keepalive AND non-keepalive workers) comes back UP. Keepalive
          units are NO LONGER exempt on the way up: fleet-up restores the whole
          layer.
+         ONE exemption, and it is the operator's: a unit whose span contains a
+         node the ``node_pauses`` overlay holds is SKIPPED (t_af9901e2) — a
+         parked node is not resurrected by ``--ensure``, and the readiness wait
+         below never waits for it. See the NODE-PAUSE SKIP SEAM note above
+         ``_parked_nodes`` for why the whole span goes and why only starts skip.
+         A wake that starts nothing because EVERY unit is parked reports
+         ``all-paused`` and changes no state at all (see step 1c).
       4. Wait for readiness — poll each unit's port until healthy or timeout
          (§4.4, ``VLLM_LOAD_GRACE_MINUTES`` window; injectable probe + clock).
       5. Clear the watchdog block ONLY after serving is confirmed up (§4.5):
@@ -2941,11 +3163,14 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
 
     Returns a result dict with ``result`` in
     (``up`` | ``busy`` | ``already-waking`` | ``start-failed`` | ``not-ready`` |
-    ``no-units``) plus ``started`` (the units issued start) and ``ready`` (the
-    units confirmed healthy).
+    ``no-units`` | ``all-paused``) plus ``started`` (the units issued start),
+    ``ready`` (the units confirmed healthy) and ``paused`` (the unit ids SKIPPED
+    because a node of their span is held by ``node_pauses``).
 
     All external side-effects are injectable, so running this NEVER touches the
-    live cluster.
+    live cluster. ``pauses_directory=`` is the ``node_pauses`` explicit-root seam
+    (a temp overlay dir in tests, HOME's ``~/.hscc`` in production) — like every
+    other parameter here it exists so the wake can be exercised without a fleet.
     """
     if not _acquire_lock(now=lock_now):
         log("Autodown autoup: autodown.lock held by another teardown/autoup "
@@ -2956,14 +3181,14 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
                               http_check_fn=http_check_fn, clock=clock,
                               sleep_fn=sleep_fn,
                               wake_grace_minutes=wake_grace_minutes, now=now,
-                              notify=notify)
+                              notify=notify, pauses_directory=pauses_directory)
     finally:
         _release_lock()
 
 
 def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
                    clock=None, sleep_fn=None, wake_grace_minutes=None, now=None,
-                   notify=True):
+                   notify=True, pauses_directory=None):
     """The wake sequence itself, run while holding the autodown lock.
 
     Split out of ``autoup()`` so the O_EXCL lock acquisition + release live in
@@ -2985,22 +3210,35 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     # starts would be pointless. Check UNDER the lock so it is atomic with a
     # concurrent teardown (which also holds the lock to write its "down").
     cfg = load_config()
+    # The state step 1 overwrites and step 1c may have to put back (§1c).
+    prior_state = cfg.get("state")
     if cfg.get("state") == "up":
         log("Autodown autoup: state is already \"up\" — returning busy "
             "(no starts issued)")
-        return {"result": "busy", "started": [], "ready": []}
+        return {"result": "busy", "started": [], "ready": [], "paused": []}
 
     # -- 1. Mark waking — idempotent guard --------------------------------
     if cfg.get("state") == "waking":
         # Another wake is already in flight. No-op: never start two parallel
         # wakes from one trigger set.
         log("Autodown autoup: already waking — no-op (wake in flight)")
-        return {"result": "already-waking", "started": [], "ready": []}
+        return {"result": "already-waking", "started": [], "ready": [],
+                "paused": []}
     cfg["state"] = "waking"
     save_config(cfg)
 
     # Build the wake plan — the FULL fleet (all units incl. keepalive).
-    plan = _build_wake_plan(serving)
+    plan_all = _build_wake_plan(serving)
+    # -- 1-PAUSE. Node-pause skip seam (t_af9901e2) -----------------------
+    # ``plan`` is what this wake may START; ``parked`` is what the operator has
+    # promised to a park. Everything downstream — the post-boot footprint, the
+    # start loop, the readiness wait, the reported wake set — runs on ``plan``,
+    # so a parked unit is absent from every record that could later resurrect it.
+    # ``plan_all`` survives only for the §1a emptiness test: an all-parked fleet
+    # is not a corrupt serving.json.
+    plan, parked = _partition_wake_plan(plan_all,
+                                        pauses_directory=pauses_directory)
+    paused_ids = [entry["unit_id"] for entry, _nodes in parked]
 
     # -- 1a. EMPTY plan ⇒ failure, not success (§8 / audit F7 / residual) --
     # An empty wake plan means we could not determine what to start
@@ -3014,7 +3252,7 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     # NOT ``"down"``, which cycle()'s self-heal would immediately re-latch
     # and re-suppress the watchdog (undoing this fix). "error" means "the
     # layer is not up; autodown has released it to the watchdog".
-    if not plan:
+    if not plan_all:
         # -- 1b. End the stay-down BEFORE releasing the watchdog (t_9c437f03) --
         # INTENTIONAL: an empty-plan wake CLEARS the durable ``deliberate_down``
         # stay-down, through the same sanctioned popper step 2a uses
@@ -3067,7 +3305,27 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
         _record_wake_failure(msg, state="error")
         _notify(msg, "HSCC Autodown Wake Failed", priority="critical")
         log(msg, "ERROR")
-        return {"result": "no-units", "started": [], "ready": []}
+        return {"result": "no-units", "started": [], "ready": [],
+                "paused": paused_ids}
+
+    # -- 1c. EVERY unit parked ⇒ a wake that changes NOTHING (§1c) --------
+    # (t_af9901e2) The plan was FULL and ``node_pauses`` holds a node of every
+    # unit in it, so this wake may start nothing. It is a no-op in the strict
+    # sense: the ``state`` step 1 stamped is put back and no other record moves.
+    # Not ``no-units`` (that means "serving.json will not tell us what to start"
+    # and clears the stay-down + releases the watchdog — neither is true here),
+    # not ``up`` (zero units started). The pre-wake posture is what a fully
+    # parked fleet wants: down, block latched, watchdog holding.
+    if plan_all and not plan:
+        cfg["state"] = prior_state
+        save_config(cfg)
+        names = ", ".join(f"{entry['unit_id']}[{','.join(nodes)}]"
+                          for entry, nodes in parked)
+        log(f"Autodown autoup: every unit is parked by node_pauses — NO starts "
+            f"issued, state restored to {prior_state!r}; skipped: {names}",
+            "WARN")
+        return {"result": "all-paused", "started": [], "ready": [],
+                "paused": paused_ids}
 
     # -- 2. Record the wake trigger (§4.2) ---------------------------------
     cfg["wake_source"] = cfg.get("wake_source") or "cycle"
@@ -3135,6 +3393,14 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     from .launch_guard import declared_footprint as lg_declared_footprint
     guard_status = _health._launch_guard_status_fn()
     guard_declared = lg_declared_footprint(serving)
+    # Parked units are announced BEFORE anything starts, so a reader of the
+    # daemon log sees the skip on its own line instead of buried between starts
+    # (and can tell "skipped, as parked" from "started, then refused").
+    for entry, blocked in parked:
+        log(f"Autodown autoup: SKIPPING {entry['kind']} unit "
+            f"{entry['unit_id']} — node_pauses holds "
+            f"{', '.join(blocked)} (a parked node is not resurrected by "
+            f"--ensure)")
     for entry in plan:
         refused_host = None
         for host in entry["nodes"]:
@@ -3150,13 +3416,14 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
                     f"launch guard refused start on {refused_host}: a vLLM "
                     "outside the declared span is already there (or host "
                     "status unavailable) — see daemon log")},
-                notify=notify)
+                notify=notify, paused=paused_ids)
         res = run_cmd(entry["cmd"], timeout=start_timeout)
         started.append({"kind": entry["kind"], "nodes": entry["nodes"],
                         "port": entry["port"], "cmd": entry["cmd"],
                         "ok": bool(res.get("ok"))})
         if not res.get("ok"):
-            return _handle_start_failure(entry, res, notify=notify)
+            return _handle_start_failure(entry, res, notify=notify,
+                                         paused=paused_ids)
         log(f"Autodown autoup: started {entry['kind']} unit {entry['unit_id']}")
 
     # -- 4. Wait for readiness (§4.4) ---------------------------------------
@@ -3168,7 +3435,8 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     if not ok:
         msg = ("autodown: wake READINESS TIMEOUT after "
                f"{_wake_ready_grace_minutes()}m — units not all healthy")
-        return _handle_wake_timeout(plan, ready, msg, notify=notify)
+        return _handle_wake_timeout(plan, ready, msg, notify=notify,
+                                    paused=paused_ids)
 
     # -- 5. Clear the watchdog block ONLY after serving confirmed up (§4.5) -
     # Order is critical: clearing before units are ready would let the very
@@ -3189,7 +3457,8 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
         _notify("HSCC serving layer is back UP (idle autodown wake complete)",
                 "HSCC Autodown — Serving Up", priority="normal")
     return {"result": "up", "started": started,
-            "ready": [e["unit_id"] for e in plan]}
+            "ready": [e["unit_id"] for e in plan],
+            "paused": paused_ids}
 
 
 def _util_run_cmd():
@@ -3198,7 +3467,7 @@ def _util_run_cmd():
     return run_cmd
 
 
-def _handle_start_failure(entry, res, notify=True):
+def _handle_start_failure(entry, res, notify=True, paused=None):
     """Wake-fails path when a ``sparkrun run`` returns non-ok (§8).
 
     Do NOT leave ``state:\"waking\"`` forever with the block latched. Clear the
@@ -3220,10 +3489,10 @@ def _handle_start_failure(entry, res, notify=True):
                 f"{entry['unit_id']} — serving layer NOT up, watchdog resuming",
                 "HSCC Autodown Wake Failed", priority="critical")
     return {"result": "start-failed", "failed_at": entry["unit_id"],
-            "started": [], "ready": []}
+            "started": [], "ready": [], "paused": list(paused or [])}
 
 
-def _handle_wake_timeout(plan, ready, msg, notify=True):
+def _handle_wake_timeout(plan, ready, msg, notify=True, paused=None):
     """Wake-fails path when readiness times out (§8).
 
     Same principle: do NOT leave ``state:\"waking\"`` forever with the block
@@ -3241,7 +3510,8 @@ def _handle_wake_timeout(plan, ready, msg, notify=True):
         _notify("HSCC autodown: wake READINESS TIMEOUT — serving NOT confirmed "
                 "up; watchdog resuming to heal",
                 "HSCC Autodown Wake Timeout", priority="critical")
-    return {"result": "not-ready", "ready": ready, "plan": plan}
+    return {"result": "not-ready", "ready": ready, "plan": plan,
+            "paused": list(paused or [])}
 
 
 # ---------------------------------------------------------------------------

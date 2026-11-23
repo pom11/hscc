@@ -61,7 +61,8 @@ def _collect_from(state, board=None):
         entries.append({"name": slug, "counts": counts,
                         "done_24h": counts.get("done", 0)})
     errors = [f"board {b!r} unreadable" for b in state["unreadable"]]
-    return {"boards": entries, "running": [], "ready": [], "errors": errors}
+    return {"boards": entries, "running": [], "ready": [], "errors": errors,
+            "caps": state.get("caps", (None, None))}
 
 
 @pytest.fixture
@@ -74,6 +75,7 @@ def fleet(monkeypatch):
         "boom": False,
         "unreadable": set(),
         "calls": calls,
+        "caps": (6, 2),
     }
 
     def collect(board=None):
@@ -353,3 +355,16 @@ def test_speak_present_and_generated_at_is_utc_z(running, token, fleet):
     status, payload, _ = _get(running, token, "/v1/mobile/summary")
     assert isinstance(payload["speak"], str) and payload["speak"]
     assert payload["generated_at"].endswith("Z")
+
+
+def test_worker_slot_cap_comes_from_the_server_config(running, token, fleet):
+    status, payload, _ = _get(running, token, "/v1/mobile/summary")
+    assert status == 200
+    assert payload["max_in_progress"] == 6
+
+
+def test_worker_slot_cap_is_absent_when_config_is_unset(running, token, fleet):
+    fleet["caps"] = (None, None)
+    status, payload, _ = _get(running, token, "/v1/mobile/summary")
+    assert status == 200
+    assert "max_in_progress" not in payload

@@ -49,6 +49,18 @@ from orchestrators import (                      # noqa: E402
     UnknownProjectError,
     resolve_orchestrator,
 )
+import orch_subscribe                            # noqa: E402
+
+
+def _apply_orch_subscription_policy(profile):
+    """A pane chat is starting: a pane-backed orch must not keep Hermes'
+    gateway auto-subscribe gate on (t_31c8b258). Best-effort — opening the
+    chat must never fail because the policy could not be applied."""
+    try:
+        return orch_subscribe.apply_subscription_policy(
+            profile, pane_backed=True)
+    except Exception:  # noqa: BLE001 — policy is advisory, the chat is not
+        return {"action": "error", "changed": False, "profile": profile}
 
 
 def _not_implemented() -> int:
@@ -150,7 +162,16 @@ def cmd_list(args: argparse.Namespace) -> int:
     # to plain text on a non-tty stdout — the --json path above stays untouched.
     t = table("projects")
     t.add_column("NAME")
-    t.add_column("REPO", no_wrap=True)
+    # REPO is a machine path, so it is the one column that can be longer than the
+    # console. It must NOT be `no_wrap=True`: a no-wrap column's minimum width is
+    # its full content, so on a deep repo path Rich cannot shrink REPO and shrinks
+    # the four flexible columns to zero instead, then clips REPO with an ellipsis
+    # anyway — the operator loses NAME/BOARD/TOPIC/HEALTH *and* the path tail
+    # (measured at t_89804ce6: `project list` on a 190-char tmp root rendered as
+    # `││ /private/…/… ││││`). `overflow="fold"` keeps every character: the path
+    # continues on the next line, the label columns keep their content. No console
+    # width is involved — `_theme.make_console` still pins 200 for a non-tty.
+    t.add_column("REPO", overflow="fold")
     t.add_column("BOARD")
     t.add_column("TOPIC")
     t.add_column("HEALTH")
@@ -511,6 +532,36 @@ def _print_history_note(discovery: dict) -> None:
     )
 
 
+def _runtime_unreadable_exit(name: str, discovery: dict) -> int:
+    """Report an ALREADY-KNOWN environment fault; return the exit code (3).
+
+    The honest shape for "the Hermes runtime could not be read", owned by ONE
+    function because three sites must say the same thing in the same words:
+    ``cmd_chat`` (before the call that raises it), ``_cmd_chat_resume`` (before
+    an unreadable history gets rendered as a typo'd id) and
+    :func:`_seed_empty_orchestrator` (the fail-closed backstop). Exit 3 matches
+    ``project sessions`` and ``project digest``: an unreadable runtime is never
+    an empty history, and never an operator-facing traceback.
+
+    Callers reach this on a verdict discovery already returned — the point is
+    that the verdict is ACTED ON before the next Hermes call, because
+    :func:`project_lifecycle.ensure_session` deliberately re-raises
+    :class:`project_lifecycle.HermesRuntimeUnavailable` (a RuntimeError, not a
+    ``LifecycleError``) and no ``except LifecycleError`` can catch that
+    (t_4ac8c669).
+    """
+    print(
+        f"project chat: cannot read session history: {discovery['runtime_error']}",
+        file=sys.stderr,
+    )
+    print(
+        "    - retry under the Hermes venv, e.g. "
+        "~/.hermes/hermes-agent/venv/bin/hscc project chat " + name,
+        file=sys.stderr,
+    )
+    return 3
+
+
 def _seed_empty_orchestrator(
     name: str, session: str, profile: str, args, discovery: dict, ensured: dict | None,
 ) -> int:
@@ -527,7 +578,9 @@ def _seed_empty_orchestrator(
     ``runtime_error`` — never as "empty session" and never as an uninformed
     seed. When the runtime is unreadable we return 3 (matching ``sessions`` /
     ``digest``) and do NOT seed, because seeding would claim to know a history
-    we could not read.
+    we could not read. ``cmd_chat`` short-circuits on that verdict before it
+    even calls ``ensure_session`` (the site where the fault raises), so the
+    check here is a backstop, not the primary defence.
 
     The digest is a SYNTHESIS, and it lands in the project's OWN orchestrator
     thread only — the Telegram sessions stay untouched on the DEFAULT profile.
@@ -540,17 +593,13 @@ def _seed_empty_orchestrator(
     # An unreadable runtime is NOT an empty session — report it and stop rather
     # than seeding an uninformed digest. Discovery already probed the runtime
     # (skip its own probe; it may be unreadable, so reuse discovery's verdict).
+    # `cmd_chat` acts on this verdict BEFORE it calls ensure_session (which is
+    # where the fault would otherwise surface as a traceback), so for today's
+    # caller this is the fail-closed backstop — kept, and worded by the SAME
+    # helper, so a future caller that reaches the seed directly cannot invent
+    # its own shape (t_4ac8c669).
     if discovery.get("runtime_error"):
-        print(
-            f"project chat: cannot read session history: {discovery['runtime_error']}",
-            file=sys.stderr,
-        )
-        print(
-            "    - retry under the Hermes venv, e.g. "
-            "~/.hermes/hermes-agent/venv/bin/hscc project chat " + name,
-            file=sys.stderr,
-        )
-        return 3
+        return _runtime_unreadable_exit(name, discovery)
 
     just_created = bool(ensured and ensured.get("status") == "created")
     orch_row = discovery.get("orchestrator")
@@ -701,6 +750,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     profile = resolved["profile"]
     session = resolved["session"]
+    _apply_orch_subscription_policy(profile)
 
     resume_id = getattr(args, "resume_id", None)
     if resume_id:
@@ -713,6 +763,17 @@ def cmd_chat(args: argparse.Namespace) -> int:
         name, path=args.registry,
         _session_db=args.session_db, _default_db=args.default_db,
     )
+
+    # The honesty verdict is ALREADY in hand, and the very next call is the one
+    # that raises this fault: `ensure_session` re-raises
+    # `HermesRuntimeUnavailable` when no interpreter can host the Hermes
+    # runtime (project_lifecycle.py:963-968 — deliberately, "an environment
+    # fault, never a step-shaped lie"), and that type is a RuntimeError, NOT a
+    # LifecycleError, so the `except LifecycleError` below cannot catch it.
+    # Short-circuit here or `project chat` hands the operator a traceback where
+    # `project sessions` gives an honest line (t_4ac8c669).
+    if discovery.get("runtime_error"):
+        return _runtime_unreadable_exit(name, discovery)
 
     # A brand-new project has no session yet; CREATE it on first use so the
     # subsequent `--continue <session>` resolves. Idempotent, never clobbers.
@@ -777,6 +838,14 @@ def _cmd_chat_resume(name: str, resume_id: str, args, resolved: dict) -> int:
         name, path=args.registry,
         _session_db=args.session_db, _default_db=args.default_db,
     )
+    # An unreadable runtime is NOT evidence the operator typo'd the id.
+    # `_resume_argv` can only answer "not one of this project's sessions" from
+    # the rows it managed to read, and on an env fault there are none — so this
+    # branch used to exit 2 telling the operator to fix a typo that is not a
+    # typo (the same could-not-look-as-data-fact shape, one branch earlier than
+    # cmd_chat's; t_4ac8c669).
+    if discovery.get("runtime_error"):
+        return _runtime_unreadable_exit(name, discovery)
     target = _resume_argv(resume_id, discovery)
     if target is None:
         valid = (
@@ -797,6 +866,7 @@ def _cmd_chat_resume(name: str, resume_id: str, args, resolved: dict) -> int:
         return 2
 
     profile, argv = target
+    _apply_orch_subscription_policy(profile)
     make_console().print(panel(
         "project chat",
         f"[accent]project {esc(name)} -> profile {esc(profile)}, resuming session "

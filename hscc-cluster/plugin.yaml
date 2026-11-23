@@ -17,10 +17,18 @@ provides_tools:
   - pick_node
   - discovery_status
   - nas_status
+  - node_paused
+  - autodown_status
+  - merge_queue_status
+  - doctor
+  - heal_status
+  - main_status
   # _OPS_TOOLS
   - provision_model
   - stop_model
   - model_health
+  - node_pause
+  - node_resume
   # _DEBUG_TOOLS
   - vllm_logs
   - node_diagnostics

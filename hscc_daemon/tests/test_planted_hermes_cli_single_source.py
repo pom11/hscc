@@ -45,6 +45,7 @@ Scope decisions (stated, not hidden):
     is a second rule for deciding it.
 """
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -191,3 +192,323 @@ def test_importing_the_owner_cannot_disturb_the_running_suite():
                           capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "INERT-IMPORT" in proc.stdout, proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# 6 — every case that reaches the REAL hermes_cli carries a seam (t_7c5f5051)
+# --------------------------------------------------------------------------- #
+
+#: The test dir this rule polices. Test POSTURE is the subject (a case that
+#: reaches the real package FAILS, not skips, on a thin interpreter); the
+#: package's own production imports are deliberately out of scope, exactly as
+#: in ``hscc-api``'s twin rule.
+TEST_LEG = "hscc_daemon/tests"
+
+#: The real CLI package — ASSEMBLED, because this file sweeps for it.
+REAL_CLI = _frag("hermes", "_cli")
+
+#: This guard, and the leg's two owner modules, are not judged by the rule.
+SELF = TEST_LEG + "/" + Path(__file__).name
+EXCLUDED = (OWNER, TEST_LEG + "/" + _frag("real_", "hermes") + ".py", SELF)
+
+#: Context managers this leg uses to SIMULATE a ``hermes_cli`` that is absent
+#: or planted. An import inside one is not a reach for the real package: it is
+#: either an assertion of absence (``pytest.raises(ModuleNotFoundError)``) or a
+#: resolution into a plant (``_HermesCliGate`` / ``_Gate`` /
+#: ``hermes_import.agent_tree_on_path``). Measured: every one of these windows
+#: is what makes the leg's four plant/negative-control cases interpretable.
+WINDOW_MARKERS = (_frag("rais", "es"), _frag("_Hermes", "CliGate"),
+                  _frag("_", "Gate"), _frag("agent_tree_on_", "path"))
+
+
+def _swept_test_files():
+    out = subprocess.run(["git", "ls-files", "-z", "--", TEST_LEG],
+                         cwd=str(REPO), capture_output=True, text=True,
+                         check=True).stdout
+    files = [f for f in sorted(out.split("\0")) if f.endswith(".py")]
+    files = [f for f in files if f not in EXCLUDED]
+    assert files, f"nothing tracked under {TEST_LEG} — the sweep sweeps nothing"
+    return files
+
+
+def _is_cli(mod):
+    return mod == REAL_CLI or mod.startswith(REAL_CLI + ".")
+
+
+def _cli_imports(tree):
+    """``(node, module)`` for every import rooted at the real CLI package."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and _is_cli(node.module or ""):
+            yield node, node.module
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_cli(alias.name):
+                    yield node, alias.name
+
+
+def _parents(tree):
+    par = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            par[child] = node
+    return par
+
+
+def _scope_of(node, par, tree):
+    """The innermost function an import sits in (``(None, tree)`` at module level).
+
+    Per-CASE, not per-file, and that is the whole point of this rule being
+    separate from ``hscc-api``'s: measured on the tree that carried the bug,
+    ``hscc-api``'s per-file seam predicate CREDITS
+    ``test_dispatcher_wedge.py`` — the same ``sys.modules`` write that shadows
+    the submodule satisfies it — while the case three lines above it fails on a
+    thin interpreter. A file-level seam hides exactly the bug it is for.
+    """
+    cur = node
+    while cur in par:
+        nxt = par[cur]
+        if isinstance(nxt, ast.FunctionDef):
+            return nxt, nxt
+        cur = nxt
+    return None, tree
+
+
+def _callee_name(func):
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+def _cli_literal(node):
+    """A string literal in *node* that IS the CLI package or one of its parts."""
+    return any(isinstance(c, ast.Constant) and isinstance(c.value, str)
+               and _is_cli(c.value) for c in ast.walk(node))
+
+
+def _calls_skip(node):
+    return any(isinstance(n, ast.Call) and _callee_name(n.func) == "skip"
+               for n in ast.walk(node))
+
+
+def _simulated(node, par, scope_node):
+    """Whether the import sits inside a declared simulation window.
+
+    Stops at the scope boundary so an unrelated window in a sibling case cannot
+    excuse this one.
+    """
+    cur = par.get(node)
+    while cur is not None and cur is not scope_node:
+        if isinstance(cur, ast.With):
+            ctx = " ".join(ast.unparse(item.context_expr) for item in cur.items)
+            if any(marker in ctx for marker in WINDOW_MARKERS):
+                return True
+        if isinstance(cur, ast.Try) and any(_calls_skip(h) for h in cur.handlers):
+            return True
+        cur = par.get(cur)
+    return False
+
+
+def _seam_route(scope):
+    """Which sanctioned route lets this case reach the package, or ``None``.
+
+    TWO routes, each one measured as actually used in this leg (the referent
+    pins in the rule below go red if a route loses its user):
+
+      * ``pytest.importorskip("<cli…>")`` — the leg's dominant capability skip
+        (five sites in ``test_dispatcher_wedge.py`` alone);
+      * the package name handled as a VALUE (a path component, a cache key),
+        which is how this leg builds or evicts a plant — a bare
+        ``from hermes_cli import x`` contains no such literal, so this route
+        cannot excuse the offender shape.
+
+    Two routes are deliberately NOT credited, and both were measured rather than
+    assumed:
+
+      * the ``hscc-api`` owner route (``real_hermes``). Nothing in this leg
+        gates a CLI reach through it today, and a credit route with no referent
+        is un-firable coverage. When a case does start gating that way the rule
+        names it and the route gets added deliberately.
+      * a synthetic ``sys.modules`` install. A first cut of this predicate
+        credited it and — measured — that alone hid the real bug: the offender's
+        own ``setitem`` shadowing ``hermes_cli.kanban_db_dispatch`` earned it
+        credit while the case failed on a thin interpreter. Even narrowed to the
+        top-level key with a non-``None`` value the route has no user here
+        (t_7c5f5051's own fix deleted the import instead of faking the package),
+        so it is not sanctioned. A case that wants it must add it with a
+        referent, not inherit it from a sibling leg.
+    """
+    for node in ast.walk(scope):
+        if (isinstance(node, ast.Call)
+                and _callee_name(node.func) == "importorskip"
+                and node.args and _cli_literal(node.args[0])):
+            return "importorskip"
+        if isinstance(node, (ast.BinOp, ast.Compare)) and _cli_literal(node):
+            return "plant-value"
+    return None
+
+
+def _seamed(scope):
+    return _seam_route(scope) is not None
+
+
+def _reaches(tree):
+    """``(scope_key, scope_node, modules)`` for every LIVE reach in a file."""
+    par = _parents(tree)
+    groups = {}
+    for node, mod in _cli_imports(tree):
+        scope_obj, scope_node = _scope_of(node, par, tree)
+        key = id(scope_obj) if scope_obj is not None else "<module>"
+        g = groups.setdefault(key, {"scope": scope_node, "live": set(),
+                                    "simulated": set()})
+        (g["simulated"] if _simulated(node, par, scope_node) else g["live"]).add(mod)
+    return [(k, g["scope"], g["live"], g["simulated"]) for k, g in groups.items()]
+
+
+def test_every_case_that_reaches_real_hermes_cli_carries_a_seam():
+    """A case that imports the real ``hermes_cli`` must say how it can.
+
+    The bug this rule exists for, measured at ``829fc32c``:
+    ``test_dispatcher_wedge.py::TestReviewDispatchCapabilityProbe::
+    test_unimportable_gate_reads_as_unknown`` opened with a bare
+    ``import hermes_cli``. Four sibling cases in that same file open with
+    ``pytest.importorskip("hermes_cli.kanban_db_dispatch")``; this one did not,
+    so on the thin ``p313`` sibling it raised ``ModuleNotFoundError`` and the
+    case FAILED rather than skipped — the #504 shape, in a leg that had no rule
+    against it. Worse, the full leg reported green: an earlier file leaves the
+    real agent tree on ``sys.path`` (the leak t_2be3b04e is about), so the
+    import resolved in-process. The two answers are distinguishable in the
+    leg's own skip reasons — ``No module named 'utils'`` in-leg versus ``No
+    module named 'hermes_cli'`` file-alone.
+
+    So this rule is static (an ordering accident cannot hide from an AST) and
+    per-case (a sibling case's seam cannot credit this one).
+
+    The antecedent is NOT empty by construction and the assertion below is what
+    keeps it honest: every seam route and every window exclusion is pinned to a
+    live referent, the same discipline ``hscc-api``'s twin carries.
+    """
+    offenders, routes, windows = [], set(), set()
+    for rel in _swept_test_files():
+        tree = ast.parse((REPO / rel).read_text())
+        for key, scope, live, simulated in _reaches(tree):
+            if simulated:
+                windows.add(rel)
+            if not live:
+                continue
+            route = _seam_route(scope)
+            if route:
+                routes.add(route)
+                continue
+            offenders.append(f"{rel}::{key} imports {sorted(live)}")
+    assert not offenders, (
+        "these cases import the real hermes CLI with no seam — on an "
+        "interpreter with no hermes they FAIL instead of skipping, and in a "
+        "shared process they may pass only because an earlier file leaked the "
+        "agent tree onto sys.path:\n" + "\n".join(sorted(offenders)) +
+        f"\n— importorskip the package, install a fake under a literal "
+        f"sys.modules key, or build/evict a plant by name (see _seamed)")
+
+    # Referent pins: each route this rule credits, and the window it excludes,
+    # must still have a user in the tree. A rule that claims a route nothing
+    # uses reads as coverage and is worse than none.
+    assert routes >= {"importorskip", "plant-value"}, (
+        f"seam route(s) {sorted({'importorskip', 'plant-value'} - routes)} "
+        "have no referent left in this leg — either the idiom has been dropped "
+        "(then the route and its paragraph in _seam_route both go) or the sweep "
+        "has stopped seeing it")
+    assert windows, (
+        "no case in this leg imports the CLI inside a simulation window any "
+        "more — the exclusion half of the rule is now un-firable")
+
+
+def test_the_cli_rule_fires_on_the_shape_it_polices():
+    """Anti-vacuity, on source strings rather than on hope.
+
+    Every branch is exercised, in both directions: the exact shape this card
+    removed must be an OFFENDER, every credit route must credit it, and prose
+    that merely mentions the package must NOT.
+    """
+    cli = REAL_CLI
+
+    def live(source):
+        tree = ast.parse(source)
+        return [(mods, _seamed(scope))
+                for _, scope, mods, sim in _reaches(tree)
+                if mods and not sim]
+
+    # The removed bug, verbatim in shape: the predicate catches it and the seam
+    # predicate refuses to credit it.
+    got = live(f"def test_x():\n    import {cli}\n"
+               "    assert x\n")
+    assert got == [({cli}, False)], got
+
+    # An ImportFrom reports the module it imports FROM (`hermes_cli`), an Import
+    # the dotted name it names — the same convention hscc-api's predicate uses.
+    # Either way the reach is the same package, which is the question.
+    got = live(f"def test_x():\n    from {cli} import kanban_db as kb\n")
+    assert got == [({cli}, False)], got
+
+    # Each credit route, on that same shape.
+    assert live(f"def test_x():\n"
+                f"    pytest.importorskip('{cli}.kanban_db_dispatch')\n"
+                f"    from {cli} import kanban_db_dispatch\n")[0][1] is True
+    assert live(f"def test_x(tmp_path):\n"
+                f"    cli = tmp_path / '{cli}'\n"
+                f"    import {cli}\n")[0][1] is True
+
+    # A ``sys.modules`` write is NOT a seam in this leg — measured, not
+    # assumed. The write that made the real bug invisible to a first cut of this
+    # predicate shadows a SUBMODULE (with ``None``, or with a stub) to simulate
+    # the submodule being unimportable, which presupposes the real package
+    # resolves; and even a genuine fake of the TOP-LEVEL key has no referent
+    # here, because t_7c5f5051's fix deleted the import instead of faking the
+    # package. An un-referenced credit route only ever makes the rule more
+    # permissive, so none of these credit a bare reach.
+    assert live(f"def test_x(hermes_cli, monkeypatch):\n"
+                f"    monkeypatch.delattr(hermes_cli, 'kanban_db_dispatch', raising=False)\n"
+                f"    monkeypatch.setitem(sys.modules, '{cli}.kanban_db_dispatch', None)\n"
+                f"    import {cli}\n")[0][1] is False
+    assert live(f"def test_x(hermes_cli, monkeypatch):\n"
+                f"    monkeypatch.setitem(sys.modules, '{cli}.kanban_db_dispatch', stub)\n"
+                f"    import {cli}\n")[0][1] is False
+    assert live(f"def test_x(monkeypatch):\n"
+                f"    monkeypatch.setitem(sys.modules, '{cli}', pkg)\n"
+                f"    from {cli} import kanban_db\n")[0][1] is False
+    assert live(f"def test_x(monkeypatch):\n"
+                f"    sys.modules['{cli}'] = pkg\n"
+                f"    from {cli} import kanban_db\n")[0][1] is False
+
+    # Prose alone is NOT a seam: an assert message that names the package must
+    # not excuse a bare import (this is what keeps the plant-value route from
+    # widening into "any mention of hermes_cli").
+    assert live(f"def test_x():\n"
+                f"    import {cli}\n"
+                f"    assert x, 'the {cli}.kanban_db_dispatch gate moved'\n")[0][1] is False
+
+    # A variable key earns no credit either way: the plant route needs the name
+    # as a literal VALUE in a BinOp/Compare, not a computed one.
+    assert live(f"def test_x(name):\n"
+                f"    cli = tmp_path / name\n"
+                f"    import {cli}\n")[0][1] is False
+
+    # The windows: neither is a live reach.
+    assert live(f"def test_x():\n"
+                f"    with pytest.raises(ModuleNotFoundError):\n"
+                f"        import {cli}.config\n") == []
+    assert live(f"def test_x(agent):\n"
+                f"    with _HermesCliGate(agent):\n"
+                f"        import {cli}.config\n") == []
+    assert live(f"def test_x():\n"
+                f"    try:\n"
+                f"        from {cli} import kanban_db_dispatch as kbd\n"
+                f"    except Exception:\n"
+                f"        pytest.skip('not here')\n") == []
+
+    # A window in a SIBLING case must not excuse this one.
+    assert live(f"def test_a(agent):\n"
+                f"    with _HermesCliGate(agent):\n"
+                f"        import {cli}.config\n"
+                f"def test_b():\n"
+                f"    import {cli}\n") == [({cli}, False)]

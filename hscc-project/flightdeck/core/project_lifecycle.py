@@ -346,7 +346,117 @@ def _orch_profile_name(name: str) -> str:
     return f"{name}-orch"
 
 
-def ensure_profile(name: str, _run=None) -> str:
+# --------------------------------------------------------------------------- #
+# Step 6a-seed — the new orchestrator home's plugins.enabled tier (R5, t_d1f2faa7)
+# --------------------------------------------------------------------------- #
+# WHY THIS EXISTS. ``hermes profile create`` leaves the new home with ``.env``,
+# ``SOUL.md`` and ``skills/`` and NO ``config.yaml`` (measured against a sandboxed
+# HOME/HERMES_HOME; ``finish_profile_layout`` → ``_migrate_profile_config_if_outdated``
+# returns when there is nothing to migrate). Hermes then creates that config on the
+# profile's FIRST run stamped with the current ``_config_version``, so
+# ``_migrate_to_21`` never runs for it again and its ``plugins`` key is never filled:
+# a per-project orchestrator home whose hooks never load. Where the version IS old
+# (cloned/legacy), that migration fills ``plugins.enabled`` with every
+# manifest-bearing dir under the home's own ``plugins/`` — measured at 10 names in a
+# live ``<name>-orch`` home, i.e. the whole cluster surface in a home that must hold
+# hooks only. R5 is explicit that a sweep at install time does not cover this: NEW
+# profiles must be seeded the same way.
+#
+# WHY A SUBPROCESS. flightdeck runs in the isolated brew-keg venv (its own docstring
+# and docs/audits/t_9a9aeab1_brew_venv_hermes_runtime.md: ``import hermes_cli`` →
+# ModuleNotFoundError) and has no import path to ``hscc-bootstrap`` — so it calls the
+# bootstrap writer the way it calls every other external effect: one subprocess
+# through the injectable ``_run`` seam. ``--plugins-tier-only`` is that writer's
+# narrow entry point; the plain ``enable_plugins.py --home`` wire (toolsets, kanban
+# routing, delegation, hooks) is deliberately NOT used here, because provisioning a
+# per-project orchestrator with the main install's wiring is beyond this step.
+#
+# WHY NEVER FATAL. The step's contract is ``created`` | ``skipped`` and
+# ``LifecycleError`` means "the profile could not be created". A missing or failing
+# seeder must never turn into that, so every path here degrades to a reported status
+# token — the same best-effort shape as ``hscc-roles/generator._seed_plugin_tier``.
+#
+# D-A: this module spells no profile name and no plugin name. Which tier a home gets
+# is ``hscc-roles/main_orch.py``'s answer, reached through the bootstrap writer.
+
+_PLUGINS_TIER_FLAG = "--plugins-tier-only"
+_PLUGINS_TIER_SCRIPT = os.path.join("hscc-bootstrap", "enable_plugins.py")
+
+
+def _hermes_root_home(env=None) -> str:
+    """The Hermes ROOT home, whether or not we are running under a profile.
+
+    Hermes exports ``HERMES_HOME=<root>/profiles/<name>`` for a profile-scoped run,
+    and a dispatched worker carries exactly that, so the ROOT is the grandparent
+    whenever the path sits under ``profiles/`` — the same ladder rung
+    ``hscc-roles/main_orch.hermes_root`` walks. Without that step an unseeded tier
+    would be written into the caller's own home instead of the new profile's.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("HERMES_HOME") or "").strip() or os.path.expanduser("~/.hermes")
+    home = os.path.abspath(os.path.expanduser(raw))
+    if os.path.basename(os.path.dirname(home)) == "profiles":
+        return os.path.dirname(os.path.dirname(home))
+    return home
+
+
+def _orch_profile_home(profile: str, env=None) -> str:
+    """The home dir Hermes uses for ``profile`` (``<root>/profiles/<profile>``)."""
+    return os.path.join(_hermes_root_home(env), "profiles", profile)
+
+
+def _bootstrap_enable_plugins_script(env=None) -> Optional[str]:
+    """Locate ``enable_plugins.py``, or None when this tree has no bootstrap writer.
+
+    Three candidates, first hit wins: an explicit ``HSCC_BOOTSTRAP_DIR`` (operator /
+    test override, the same knob style as ``HSCC_HERMES_PYTHON`` above), the installed
+    plugin payload next to the Hermes home, and the repo sibling of this file — so the
+    same code answers in a brew keg, an installed tree and a checkout.
+    """
+    env = os.environ if env is None else env
+    candidates = []
+    override = (env.get("HSCC_BOOTSTRAP_DIR") or "").strip()
+    if override:
+        candidates.append(os.path.join(os.path.expanduser(override),
+                                       "enable_plugins.py"))
+    candidates.append(os.path.join(_hermes_root_home(env), "plugins",
+                                   _PLUGINS_TIER_SCRIPT))
+    # <repo>/hscc-project/flightdeck/core/<this file> → <repo>/hscc-bootstrap/...
+    candidates.append(str(Path(__file__).resolve().parents[3]
+                          / "hscc-bootstrap" / "enable_plugins.py"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _seed_plugin_tier(profile: str, _run=None) -> str:
+    """Ask bootstrap to tier ONE home's plugins.enabled. Never raises.
+
+    Returns a status token for the step report: ``seeded`` when the writer ran,
+    ``already-tiered`` when the home needed nothing, ``skipped:<why>`` when the
+    writer could not be located, ``failed:<why>`` for anything else. The profile is
+    created either way — that is the contract this function exists to protect.
+    """
+    try:
+        script = _bootstrap_enable_plugins_script()
+        if script is None:
+            return "skipped:no-bootstrap-writer"
+        home = _orch_profile_home(profile)
+        python = sys.executable or "python3"
+        proc = _run_cmd([python, script, _PLUGINS_TIER_FLAG, "--home", home],
+                        os.getcwd(), _run)
+        rc = getattr(proc, "returncode", None)
+        if rc != 0:
+            err = (getattr(proc, "stderr", "") or "").strip()
+            return f"failed:rc={rc}" + (f" {err[:160]}" if err else "")
+        out = (getattr(proc, "stdout", "") or "").strip()
+        return "already-tiered" if "already tiered" in out else "seeded"
+    except Exception as exc:                     # noqa: BLE001 - never fatal, by design
+        return f"failed:{type(exc).__name__}"
+
+
+def ensure_profile(name: str, _run=None, tier_report=None) -> str:
     """Step 6a — ensure the ``<name>-orch`` orchestrator profile exists.
 
     The chat transport is ``hermes -p <name>-orch ...``. Before this step,
@@ -360,6 +470,12 @@ def ensure_profile(name: str, _run=None) -> str:
     is a no-op ``skipped``, NEVER an error. Returns ``created`` | ``skipped``.
     Raises :class:`LifecycleError` only when the create command itself fails
     for a reason other than the profile existing.
+
+    Seeding the new home's ``plugins.enabled`` tier is part of this step (R5) and
+    is deliberately run on BOTH paths: a re-run after a failed first attempt must
+    be able to repair a home whose tier was never written. ``tier_report`` is an
+    optional dict that receives ``{"status": <token>}`` so the caller can show
+    what happened — the return value stays ``created`` | ``skipped``.
     """
     profile = _orch_profile_name(name)
     # Existence probe. A nonzero probe (unreadable environment) is NOT an
@@ -369,6 +485,7 @@ def ensure_profile(name: str, _run=None) -> str:
         listed.returncode == 0 and profile in (listed.stdout or "").split()
     )
     if exists:
+        _report_tier(tier_report, _seed_plugin_tier(profile, _run))
         return "skipped"
     created = _run_cmd(["hermes", "profile", "create", profile], os.getcwd(), _run)
     if created.returncode != 0:
@@ -376,7 +493,18 @@ def ensure_profile(name: str, _run=None) -> str:
             f"hermes profile create {profile} failed: "
             f"{(created.stderr or '').strip() or '(no error output)'}"
         )
+    _report_tier(tier_report, _seed_plugin_tier(profile, _run))
     return "created"
+
+
+def _report_tier(tier_report, status: str) -> None:
+    """Hand the seeding outcome to an interested caller. Never raises."""
+    if tier_report is None:
+        return
+    try:
+        tier_report["status"] = status
+    except Exception:                            # noqa: BLE001 - reporting only
+        pass
 
 
 class HermesRuntimeUnavailable(RuntimeError):
@@ -1193,11 +1321,17 @@ def create_project(
         results.append({"id": "roadmap", "status": "skipped"})
 
     # --- Step 5a: orchestrator profile (<name>-orch) ---
+    tier: dict = {}
     try:
-        prof = ensure_profile(name, _run=_run)
+        prof = ensure_profile(name, _run=_run, tier_report=tier)
+        detail = f"profile {name}-orch {prof}"
+        # R5: an unseeded home is not silent. The tier write is best-effort, so its
+        # outcome is reported rather than allowed to fail the step.
+        if tier.get("status"):
+            detail += f", plugins.enabled {tier['status']}"
         results.append(
             {"id": "profile", "status": "ok" if prof == "created" else "skipped",
-             "detail": f"profile {name}-orch {prof}"}
+             "detail": detail}
         )
     except LifecycleError as exc:
         failed = True

@@ -72,6 +72,7 @@ environment as the `hscc` CLI. Entry point: `hscc_daemon.hscc.main`
 | `~/.hscc/recover.json` | Engine-wedge recovery cooldowns / attempt counts / `gave_up` |
 | `~/.hscc/watchdog-block.json` | Pipeline watchdog block (failures, backoff, `intentional == "autodown"`) |
 | `~/.hscc/autodown.json` + `autodown.lock` | Autodown config/state + its O_EXCL exclusivity lock |
+| `~/.hscc/alerts.json` + `alerts.lock` | Operator alert feed (last 500) + mutation lock |
 
 Health checks are configured by the daemon code + environment variables
 (e.g. `HSCC_WORKER_AUTOHEAL_DEBOUNCE`,
@@ -89,8 +90,9 @@ not by a per-handler JSON config — there is no `~/.hscc/daemon/config.json`.
 | `hscc check --repo <path>` | Address-guard posture for that checkout (armed / unarmed / armed-but-absent) |
 | `hscc watch [stream]` | Live-tail check results |
 | `hscc triggers` | Show trigger-engine rules + recent firings |
-| `hscc notify <msg>` | Send a manual macOS notification |
-| `hscc heal-status` | List per-node heal-breaker strikes (read-only) |
+| `hscc notify <title> <body>` | Post an alert to the HSCC alert feed (`POST /v1/alerts`; `--level`, `--key`) |
+| `hscc notify list` / `ack <id>` | Read the feed newest first (`--since`, `--limit`, `--json`) / mark one alert seen |
+| `hscc heal-status` | List per-node heal-breaker strikes (read-only). The breaker, not the `/heal` slash command — that restarts unhealthy workers |
 | `hscc heal-clear <node>` | Clear one node's strikes after investigating (MUTATES the ledger) |
 | `hscc install` / `hscc uninstall` | Install / remove the launchd (macOS) or systemd (Linux) service |
 | `hscc plist` | Print the launchd plist (no install) |
@@ -102,8 +104,10 @@ One auto-start service per host, one name per platform: launchd label
 `hscc_daemon.service` is retired — `hscc install`/`uninstall` and
 `systemd-setup.sh` purge it so a host cannot end up with two enabled units for
 one daemon. Nodes installed before that change keep it until the operator runs
-`hscc-bootstrap/migrate_systemd_unit_name.py`; readers (`restart_daemon.sh`,
-`hscc-cluster/bootstrap.sh`) probe both names until then.
+`hscc-bootstrap/migrate_systemd_unit_name.py --apply` (without `--apply` the
+script only probes and prints the per-node plan; `--help` touches nothing);
+readers (`restart_daemon.sh`, `hscc-cluster/bootstrap.sh`) probe both names
+until then.
 
 Also read-only verbs: `verify`, `stats [days]`, `throughput`, `autoscale`,
 `escalate`, and the groups `cluster`, `template`, `profiles`, `project`, `api`,

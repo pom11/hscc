@@ -84,6 +84,22 @@ real_sources=(
   Sources/Shared/WidgetDataClient.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
+  # The history trend projection compiles here too: its whole job is two
+  # rules — a not-reported metric stays a gap, and a peak rides beside its
+  # average — and a rule nobody compiles is a rule nobody keeps. It reads only
+  # the canonical `GET /v1/cluster/history` answer (t_0c99b017), and its field
+  # type IS the canonical metric vocabulary, so that file compiles here as
+  # well: one vocabulary, executed by the gate that draws a series from it.
+  Sources/Shared/ClusterHistorySeries.swift
+  Sources/Shared/ClusterHistoryTrend.swift
+  # The alert-feed projection (card R3): the widget and macOS dropdown share
+  # this file, and the harness drives its order/filter/first-line rules through
+  # the real client.
+  Sources/Shared/NeedsMeReading.swift
+  # The merge-queue projection (card MQ5): `mergeQueue()` returns
+  # `MergeQueueLite`, declared here, so the client is not buildable without it.
+  Sources/Shared/MergeQueueReading.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift

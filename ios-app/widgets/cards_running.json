@@ -1,0 +1,29 @@
+{
+  "order": 4,
+  "bundle_order": 3,
+  "kind": "widget",
+  "surface_case": "widgetCardsRunning",
+  "surface_raw": "widget.cardsRunning",
+  "display_name": "Running",
+  "icon": "rectangle.stack.badge.play",
+  "widget_type": "CardsRunningWidget",
+  "sources": [
+    "Sources/HSCCWidgets/CardsRunningWidget.swift"
+  ],
+  "coverage_ios": [
+    "declared-and-renders (`CardsRunningSmallView`)",
+    "declared-and-renders (`CardsRunningMediumView`)",
+    "declared-and-renders (`CardsRunningLargeView`)",
+    "declared-and-renders (`Text(entry.inlineLine)` — `32m · title`)",
+    "declared-and-renders (`CardsRunningCircularView` — elapsed clock)",
+    "declared-and-renders (`CardsRunningRectangularView` — `32m · title` + heartbeat)"
+  ],
+  "coverage_macos": [
+    "declared-and-renders (`CardsRunningSmallView`)",
+    "declared-and-renders (`CardsRunningMediumView`)",
+    "declared-and-renders (`CardsRunningLargeView`)",
+    "declared-and-renders (`CardsRunningLargeView` \u2014 XL reuses the large renderer)"
+  ],
+  "coverage_source": "`ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift`",
+  "id": "cards_running"
+}

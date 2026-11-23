@@ -181,6 +181,46 @@ def test_hello_then_live_stream(running, token, fakes, clean_store):
     asyncio.run(go())
 
 
+def test_websocket_outlives_the_http_idle_timeout(running, token, fakes,
+                                                 clean_store, monkeypatch):
+    """A protocol switch is not a keep-alive request.
+
+    The new handler idle timeout must never cut a live WS session: after a wait
+    longer than the HTTP timeout, the stream still carries a live event.
+    """
+    monkeypatch.setattr(api_server.ApiHandler, "timeout", 0.2)
+
+    async def go():
+        async with _connect(running, token) as ws:
+            hello = await _recv(ws)
+            assert hello["type"] == "hello"
+
+            await asyncio.sleep(0.5)   # > the handler's HTTP idle timeout
+
+            store = get_store("hscc")
+            store.append("message",
+                         MessagePayload(role="assistant", delta="still here"))
+            frame = await asyncio.wait_for(_recv(ws), 2)
+            assert frame["payload"]["delta"] == "still here"
+    asyncio.run(go())
+
+
+def test_client_ping_gets_pong(running, token, fakes, clean_store):
+    """A client keepalive ping must be answered with a pong.
+
+    ``websockets`` completes the pong waiter only when the server echoes the
+    payload. The server used to drop ping frames while reassembling data, so
+    this timed out even though the connection stayed open.
+    """
+    async def go():
+        async with _connect(running, token) as ws:
+            assert (await _recv(ws))["type"] == "hello"
+            pong_waiter = await ws.ping(b"are-you-there")
+            latency = await asyncio.wait_for(pong_waiter, 2)
+            assert latency >= 0
+    asyncio.run(go())
+
+
 def test_replay_existing_history_on_connect(running, token, fakes,
                                             clean_store):
     """Connect with after=s: replay stored (s, boundary], then live."""

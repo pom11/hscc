@@ -74,7 +74,7 @@ file-by-file disposition of the remaining console files is
     the former `SettingsView` moved byte-for-byte, plus `ConnectionBanner`
     (moved from the deleted `ContentView.swift`), the App-Group / token-save
     diagnostics, and the app-lifecycle seeding `AppShell` used to own: client
-    seeding for the notifier / deep-link router / reply watcher,
+    seeding for the deep-link router,
     `ConnectionMonitor.reset()` on a cluster switch, the cold-start Live
     Activity sweeps, and the `onOpenURL` + Handoff intake with its honest
     "Couldn't open that link" alert. `shared_store_check.sh` asserts THIS file
@@ -127,7 +127,7 @@ file-by-file disposition of the remaining console files is
     - `Views/ConfigView.swift` — the root screen (above): saved clusters
       (enter/persist host, port, token), **Scan QR** (QR from
       `hscc api status`, see `SetupQRCode.swift`), **Test connection**
-      (`GET /v1/ping`), the notification toggles, and the per-surface
+      (`GET /v1/ping`), and the per-surface
       Widgets & Live Activities editor (`WidgetSurfaceEditor`). Reads and
       writes only the App-Group stores and the Keychain.
     - `Views/NodesServingView.swift` — the machines + what runs on them:
@@ -183,10 +183,10 @@ file-by-file disposition of the remaining console files is
     key and no poll loop yet — the driver that feeds that surface is its own
     slice, so the sweep is this activity's only app-side hook.
   - `DeepLink.swift` — the `hscc://` scheme: open a project / card / session
-    directly; the single entry point for notifications and Handoff.
-  - `Notify/` — the "operator needed" local-notification engine
-    (`NeedsOperatorNotifier` computes alerts purely;
-    `NotificationCoordinator` delivers them).
+    directly; the single entry point for deep links and Handoff.
+  - `LaunchAppDelegate.swift` — the Live Activities' `BGTaskScheduler`
+    registration and one-time launch sweeps. The app carries no notifications
+    and no APNs device registration (operator decision 2026-11-19).
   - `Intents/` — Siri App Intents:
     - `ClusterStatusIntent` — speak the cluster-status `speak` one-liner.
       (The project ask/status, review-queue and approvals intents retired with
@@ -202,11 +202,11 @@ file-by-file disposition of the remaining console files is
   shared Keychain access, `APIConfig`, the last-known `SnapshotStore`, and
   the two `ActivityKit` attribute types (`WakingActivity`,
   `MonitorActivity`).
-- `Sources/HSCCWidgets/` — the widget extension: the cluster Home Screen
-  widget (`systemSmall` + medium — last-known state + compact topology;
-  **`Unreachable` is a first-class state** — "Can't reach the cluster" with
-  the last-known state and its age, never a blank or stale-looking-live
-  widget) and the **HSCC Monitor** widget (per-node monitor data).
+- `Sources/HSCCWidgets/` — the widget extension: the Cluster Home Screen
+  widget (C1 Health line — state, throughput and hottest node at small,
+  per-node util/temp at medium, the 2 h throughput chart and node table at
+  large; stale/offline data is dimmed and labelled, never shown as fresh) and
+  the board/running/needs-me/merge-queue surfaces.
 - `Sources/HSCCLiveActivity/` + `Sources/HSCCLiveActivityMonitor/` — the two
   Live Activity extensions: fleet-wake progress, and the **monitor target**,
   which carries THREE Live Activities — the cluster/daemon-host monitor, the
@@ -244,7 +244,8 @@ file-by-file disposition of the remaining console files is
     same commit's run printed 98). The check count is higher than the file
     count because some fixtures decode against more than one model and the
     widget blocks assert derived values too. The widget / Live Activity
-    payloads (the five datasets of `docs/WIDGET_DATA_CONTRACT.md` §3) decode
+    payloads (`docs/WIDGET_DATA_CONTRACT.md` §3 plus the card-R3 alert feed)
+    decode
     here too — which is why the two mirror harnesses that used to re-declare
     them (`shared_model_check.swift`, `widget_kanban_decode_check.swift`) were
     deleted by t_595a5fee: a mirror that drifts is the exact failure this
@@ -255,7 +256,11 @@ file-by-file disposition of the remaining console files is
     availability, plus a compiled harness exercises the real `SharedStore`
     availability logic (nil provider → unavailable; real store → available).
   - `widget_data_client_check.sh` — drives the **real** `WidgetDataClient.swift`
-    (plus `SharedModels.swift` + `SharedStore.swift`) through a stubbed
+    (plus `SharedModels.swift` + `SharedStore.swift`, and the canonical history
+    vocabulary `ClusterHistorySeries.swift` with the trend projection
+    `ClusterHistoryTrend.swift` compiled alongside them, so a chart series is
+    executed against the ONE metric vocabulary it reads and not a lookalike)
+    through a stubbed
     `URLProtocol` and asserts the four promises the extension surfaces rest on:
     the read allowlist is exactly the audited routes and a mutating path is
     refused **before** a request is built; the per-request deadline is on the
@@ -286,6 +291,39 @@ file-by-file disposition of the remaining console files is
     families pay for the board row. Structural greps pin the layout file: the
     two-read budget, no `cluster/status` read, the accessory dispatch, and that
     an accessory body never reads the board row's fields. No network, no device.
+  - `cluster_history_chart_check.sh` — compiles the history chart layer
+    (`ClusterHistorySeries.swift`) together with the real wire types it decodes
+    (`SharedModels.swift`) into a macOS CLI and executes the two rules a history
+    widget cannot be trusted to re-derive. The reduction half: a series of 600
+    samples drawn into 40 pixel columns still holds the series' true min and max
+    (the spike's own reading is among the drawn points; a same-size stride thin
+    provably loses it, so the assertion cannot pass vacuously), the last reading
+    survives so the "now" value is real, an empty column is counted as a gap and
+    never filled with a number, and `null` is never rewritten to `0`. The
+    vocabulary half: the raw values of `ClusterHistoryMetric` must equal the
+    recorder's own `HOST_KEYS` + `HOST_COLUMNS` + `ENGINE_KEYS` from
+    `hscc_daemon/metrics_history.py` minus the columns that are not chartable
+    (deltas, counters, `sparkrun_jobs`), so a rename in the recorder reddens this
+    gate instead of emptying a chart. The same leg re-checks every key in the
+    committed `v1_cluster_history_*.json` fixtures against those tuples. Refusing
+    a mixed-tier merge is asserted too — folding a 2 s sample and a 5-minute
+    average into one column is the same lie as dropping a peak. No network, no
+    device.
+  - `history_route_guard_check.sh` — the canonical-route trip-wire
+    (`DECISION-t_447cc7fc`): the Swift widget layer must read metrics history
+    through ONE path, `/v1/cluster/history`. Strips comments and scans every
+    `.swift` under `ios-app/Sources` **and** `macos-app/Sources` on three legs —
+    no `metrics/history` in code (so the ruling can be documented in prose
+    without tripping it, while any spelling of the path in code is caught),
+    every literal naming a history route must be one of a set the script names
+    exactly (`/v1/daemon/history` allowed BY NAME because it is the
+    automated-action timeline, a different dataset, and not by pattern), and the
+    canonical constant must still exist, still be used, and still be the only
+    history path in `WidgetDataPath.all` — so the guard cannot be walked past by
+    deleting the canonical read instead of the stale one. Pure text: no SDK, no
+    compile, no network. `HISTORY_ROUTE_GUARD_NEGATIVE_TEST=1` plants a
+    `metrics/history` read, a second `…/history` path, and a client with its
+    canonical constant removed, and the run fails unless each plant goes red.
   - `check_theme.sh` — the raw-colour guard (every colour must be a Theme
     semantic; see `Views/Theme.swift`).
   - `merge_base_check.sh` — the stale-base guard: a branch whose merge-base with
@@ -408,7 +446,20 @@ The script auto-detects the team from your signing certificate (override with
 level (all targets inherit), also refuses to generate while a source file is
 missing from `project.yml` (`check_sources.sh`), then verifies with
 `xcodebuild -showBuildSettings` that the team actually landed on HSCC,
-HSCCWidgets and HSCCLiveActivity.
+HSCCWidgets, HSCCLiveActivity and HSCCLiveActivityMonitor.
+
+Bare `xcodegen generate` does none of that. `project.yml` reads
+`${HSCC_DEVELOPMENT_TEAM}` at the project level, so with the variable unset
+XcodeGen writes that literal string as the team on all four targets — an invalid
+id that errors only much later, in Xcode. `generate.sh` is the only path that
+resolves it, and the per-target `HSCC -> <TEAMID>` lines it prints are the proof
+it did. The desktop side deliberately does NOT auto-detect:
+`macos-app/scripts/generate.sh` refuses outright unless
+`HSCC_DEVELOPMENT_TEAM` is exported.
+
+Either invocation works — `scripts/generate.sh` from `ios-app/`, or
+`bash ios-app/scripts/generate.sh` from the repo root; the script locates itself
+rather than trusting the cwd.
 
 A free personal Apple ID team works for sideloading onto your own device —
 **but a free team cannot provision App Groups**, so the Home Screen widget,
@@ -459,6 +510,7 @@ scripts/merge_base_check.sh     # branch base not too far behind origin/main —
 scripts/build_check.sh          # full per-target compile
 scripts/model_decode_check.sh   # real models vs the committed live fixtures
 scripts/probes_check.sh         # every *_probe.sh — the gates' own negative proofs
+scripts/plist_drift_check.sh    # tracked Info.plists == what project.yml generates
 ```
 
 `merge_base_check.sh` gates the **branch**, not the app: it needs no Xcode and no
@@ -482,6 +534,21 @@ that ran nothing; and a probe keeps the `*_probe.sh` leaf rather than the `*_che
 gate convention — the runner refuses if `build_check.sh` ever starts naming a probe and
 flags a `*_check.sh` file that carries a probe's marker-file signature, so neither
 decision survives only as a comment.
+
+`plist_drift_check.sh` gates the **tracked files a generator owns** (t_4e22c58c).
+Every target's `info:` block in `project.yml` names a committed
+`Sources/**/Info.plist` and rewrites it wholesale, and `scripts/release_adhoc.sh`
+runs that generate at release time without ever committing the result — so the
+plists in the tree can disagree with the spec, and with every archive you shipped,
+in silence. The gate copies `ios-app/` into a scratch directory, deletes the copied
+plists so `project.yml` has to write them back, regenerates them there with
+`xcodegen`, and compares each against the tracked copy — nothing is ever generated
+into the real tree. Drift prints a `diff -u` per plist plus the one-line
+`scripts/generate.sh` fix. The set it audits is derived from `git ls-files` and
+printed by the run, so a new target's plist is compared the day it lands; keep any
+tally out of this file and read the run instead. It needs `xcodegen`
+(`brew install xcodegen`) and fails closed when that is missing, because an
+announced skip is exactly how this drift survived four releases.
 
 ## Sideloading onto your own device
 

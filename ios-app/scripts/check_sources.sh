@@ -19,7 +19,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 python3 - <<'PY'
 import re, os, sys
 spec = open('project.yml').read()
-listed = set(re.findall(r'- path: (Sources/[^\s]+\.swift)', spec))
+# A `sources:` entry may name a file, or a directory (the widget directory is
+# listed as one so adding a widget file does not edit this spec at all).
+listed = set()
+for entry in re.findall(r'- path: ([^\s]+)', spec):
+    if entry.endswith('.swift'):
+        listed.add(entry)
+    elif os.path.isdir(entry):
+        for r, _, fs in os.walk(entry):
+            listed.update(os.path.join(r, f) for f in fs if f.endswith('.swift'))
 ondisk = {os.path.join(r, f)
           for r, _, fs in os.walk('Sources')
           for f in fs if f.endswith('.swift')}

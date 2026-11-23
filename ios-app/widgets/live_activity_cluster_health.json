@@ -1,0 +1,9 @@
+{
+  "order": 12,
+  "kind": "live_activity",
+  "surface_case": "liveActivityClusterHealth",
+  "surface_raw": "liveActivity.clusterHealth",
+  "display_name": "Cluster watch",
+  "icon": "heart.text.square",
+  "id": "live_activity_cluster_health"
+}

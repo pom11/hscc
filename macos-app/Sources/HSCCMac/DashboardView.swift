@@ -2,9 +2,12 @@ import AppKit
 import SwiftUI
 
 /// The dropdown behind the menu bar H. It is a read-only dashboard: cluster
-/// health, the cards being worked, board totals and the project list, all from
-/// the shared client's existing GET routes. Actions are limited to refresh,
-/// opening Settings and quitting.
+/// health, `hscc cluster monitor`'s host and serving tables, `hscc cluster
+/// status`'s workloads and slots, the cards being worked, board totals and the
+/// project list — all from the shared client's existing GET routes, and every
+/// CLI-shaped string drawn out of the shared view-model rather than formatted
+/// here (`DashboardFleetSection.swift`, `DashboardFleetReading.swift`). Actions
+/// are limited to refresh, opening Settings and quitting.
 struct DashboardView: View {
     @ObservedObject var dashboard: DashboardMonitor
     @EnvironmentObject private var settings: SettingsStore
@@ -37,7 +40,12 @@ struct DashboardView: View {
             if !dashboard.snapshot.configured {
                 setupInvite
             } else {
+                needsMeSection
+                mergeQueueSection
                 clusterSection
+                clusterMonitorSection
+                clusterStatusSection
+                graphsSection
                 runningSection
                 boardSection
                 projectsSection
@@ -115,6 +123,134 @@ struct DashboardView: View {
         }
     }
 
+    // MARK: - Needs you (alert feed, card R3)
+
+    /// The main orchestrator's unacknowledged alerts. Hidden when the feed is
+    /// empty — there is no "nothing needs you" row in a menu an operator opens
+    /// to look at work. A failed read is not empty: it says why, in the shared
+    /// client's address-free words.
+    @ViewBuilder
+    private var needsMeSection: some View {
+        if let failure = dashboard.snapshot.needsMeFailure {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                sectionTitle("Needs you")
+                Label("Alert feed unavailable: \(failure)",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if let feed = dashboard.snapshot.needsMe, !feed.items.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                HStack {
+                    sectionTitle("Needs you")
+                    Spacer()
+                    Text("\(feed.count)")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundColor(Theme.Semantic.accent)
+                }
+                ForEach(feed.items.prefix(3)) { item in
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+                        Circle()
+                            .fill(item.level.isUrgent
+                                  ? Theme.Semantic.accent : Theme.Semantic.onSurfaceMuted)
+                            .frame(width: 6, height: 6)
+                            .padding(.top, 4)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.title)
+                                .font(.caption.weight(.medium))
+                                .foregroundColor(Theme.Semantic.onSurface)
+                                .lineLimit(1)
+                            if !item.bodyFirstLine.isEmpty {
+                                Text(item.bodyFirstLine)
+                                    .font(.caption2)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        Text(item.ageLabel())
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(item.level.isUrgent
+                                             ? Theme.Semantic.accent : Theme.Semantic.onSurfaceMuted)
+                    }
+                }
+                if feed.count > 3 {
+                    Text("+\(feed.count - 3) more")
+                        .font(.caption2)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+        }
+    }
+
+    // MARK: - Merge queue (card MQ5)
+
+    /// The local queue's rows, in the CLI's order. Hidden when the queue is
+    /// empty — there is no "nothing queued" row in a menu an operator opens to
+    /// look at work. A failed read is not empty: it says why.
+    @ViewBuilder
+    private var mergeQueueSection: some View {
+        if let failure = dashboard.snapshot.mergeQueueFailure {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                sectionTitle("Merge queue")
+                Label("Merge queue unavailable: \(failure)",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if let feed = dashboard.snapshot.mergeQueue, !feed.rows.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+                HStack {
+                    sectionTitle("Merge queue")
+                    Spacer()
+                    Text("\(feed.queued) queued")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundColor(feed.queued > 0
+                                         ? Theme.Semantic.accent : Theme.Semantic.onSurfaceMuted)
+                }
+                ForEach(feed.rows.prefix(4)) { row in
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(row.project) · \(row.prLabel)")
+                                .font(.caption.weight(.medium).monospacedDigit())
+                                .foregroundColor(Theme.Semantic.onSurface)
+                                .lineLimit(1)
+                            Text("\(row.cells[2]) · \(row.cells[3]) · \(row.cells[6])")
+                                .font(.caption2)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text(row.state)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundColor(mergeStateColor(row.state))
+                            Text(row.ageLabel)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                    }
+                }
+                if feed.rows.count > 4 {
+                    Text("+\(feed.rows.count - 4) more")
+                        .font(.caption2)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+        }
+    }
+
+    private func mergeStateColor(_ state: String) -> Color {
+        switch state {
+        case "merged": return Theme.Semantic.ok
+        case "resolve", "failed": return Theme.Semantic.bad
+        case "rebasing", "gating", "merging": return Theme.Semantic.warn
+        default: return Theme.Semantic.onSurfaceMuted
+        }
+    }
+
     // MARK: - Cluster health
 
     private var clusterSection: some View {
@@ -141,9 +277,13 @@ struct DashboardView: View {
     }
 
     private var nodesText: String {
-        guard let up = dashboard.snapshot.nodesUp,
-              let total = dashboard.snapshot.nodesTotal else { return "nodes —" }
-        return "\(up)/\(total) nodes up"
+        // `answered/judged`, parked machines excluded from both sides — the same
+        // `FleetVerdict.tallyText` the menu bar title and the C1 tile print. A
+        // parked machine is not a machine that failed, so it belongs in neither
+        // half of this fraction.
+        let verdict = dashboard.snapshot.fleetVerdict
+        guard verdict.answered != nil, verdict.judged != nil else { return "nodes —" }
+        return "\(verdict.tallyText) nodes up"
     }
 
     private var modelsText: String {
@@ -296,7 +436,13 @@ struct DashboardView: View {
 
     // MARK: - Small pieces
 
-    private func sectionTitle(_ title: String) -> some View {
+    /// The section header style, shared by the sections in this file, the two
+    /// CLI-surface sections in `DashboardFleetSection.swift` AND the graphs
+    /// section in `DashboardGraphsView.swift`. It is internal on purpose:
+    /// `private` in Swift is file-scoped, so a second file extending this view
+    /// could not reuse it, and a second copy of the header style would be a
+    /// second design system.
+    func sectionTitle(_ title: String) -> some View {
         Text(title.uppercased())
             .font(.caption2.weight(.semibold))
             .foregroundColor(Theme.Semantic.onSurfaceMuted)

@@ -84,6 +84,15 @@ class TestAcquire:
         _plant(singleton, -1, start="junk")  # no pid= token
         with open(singleton.DAEMON_LOCK, "w") as f:
             f.write("garbage without identity")
+        # Stamp the mtime from the SAME clock the adjudicator reads. A plain write
+        # leaves it at the FILESYSTEM's now, which no clock harness can move: under
+        # `wallclock_shift` or an absolute freeze `time.time()` and the mtime then
+        # disagree by the whole shift and "fresh" reads as 173 years stale — a red for
+        # a reason that cannot happen on one host, where both come from one clock
+        # (t_0389093a; the aged-out case below already stamps explicitly, which is why
+        # it never reddened).
+        now = time.time()
+        os.utime(singleton.DAEMON_LOCK, (now, now))
         assert singleton.acquire_daemon_lock() is False  # fresh ⇒ respect
 
     def test_unparseable_holder_aged_out_is_broken(self, singleton):

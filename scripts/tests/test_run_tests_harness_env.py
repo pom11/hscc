@@ -12,7 +12,7 @@ board got the operator's live board — measured in a dispatched worker shell to
 ``<kanban-home>/kanban/boards/<live-board>/workspaces`` even with
 ``HERMES_KANBAN_HOME`` pinned at a tmp root.
 
-Four claims, each pinned separately so a regression names itself:
+Five claims, each pinned separately so a regression names itself:
 
   1. the scrub list contains the marker and every pin hermes consults (a text
      check on the shipped file, so editing the invocation cannot quietly drop one);
@@ -24,7 +24,11 @@ Four claims, each pinned separately so a regression names itself:
      why: it would flip worker-mode branches to their non-worker side);
   4. NON-VACUITY, per pin: with a fake worker env armed, hermes' own resolver
      answers with the pinned board for an explicit ``board=`` (the leak), and
-     with the scrub applied it answers under the fixture root (the fix).
+     with the scrub applied it answers under the fixture root (the fix);
+  5. the registry pin (``HSCC_REGISTRY``) is in the list and a leg child does not
+     see it, with a control arm that proves the child would have seen it without
+     the scrub. It is here rather than in a leg conftest because no leg re-pins
+     it and a conftest cannot reach the leg's children (PR #593).
 
 Hermetic: every path is a tmp dir; the only board ever created is created by
 hermes' own ``create_board`` inside a tmp ``HERMES_KANBAN_HOME``, and no live
@@ -244,3 +248,60 @@ def test_the_slug_pin_decides_which_board_a_boardless_call_opens(monkeypatch):
     monkeypatch.delenv(SLUG_PIN)
     assert kb.get_current_board() == kb.DEFAULT_BOARD
     assert str(kb.kanban_db_path()) == default_db
+
+
+# ── claim 5: the registry pin is scrubbed, and only the runner reaches children ─
+REGISTRY_PIN = "HSCC_REGISTRY"
+
+
+def _child_env_no_scrub(extra):
+    """`_child_env` minus the `-u` arguments: same block, same armed env, no scrub.
+
+    The non-vacuity half of claim 5 — without it the assertion below also passes
+    on a runner that scrubs nothing at all.
+    """
+    script = Path(tempfile.mkdtemp(prefix="harness-env-")) / "leg.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -u\n" + _shipped_block() +
+        '\nenv /usr/bin/env\n',
+        encoding="utf-8",
+    )
+    env = {"PATH": os.environ["PATH"]}
+    env.update(extra)
+    out = subprocess.run(
+        ["bash", str(script)], env=env, capture_output=True, text=True, check=True,
+    ).stdout
+    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+
+def test_the_registry_pin_is_scrubbed_in_the_parent_and_in_the_child():
+    """``HSCC_REGISTRY`` is a location pin like the five above, and needs the
+    runner-level scrub for a reason the five do not have.
+
+    Every leg conftest re-pins the five above, so a leg cannot read a live board
+    even if the runner forgot. Nothing re-pins the registry: it is read AT CALL
+    TIME by ``orchestrators._registry_path`` and ``main_orch._registry_projects``,
+    so a provisioning export outranks the documented default in any process —
+    including one that imported before the export, which is also why
+    ``monkeypatch.setenv`` cannot fix it (PR #593's whole mechanism). And a leg
+    conftest cannot reach the leg's own CHILD processes. So the assertion is
+    two-part: the shipped list contains it, and a child of the shipped block does
+    not see it even with the parent armed.
+    """
+    assert REGISTRY_PIN in _shipped_unsets(), (
+        "the suite scrub lost the registry pin, so a provisioning export reaches "
+        "every leg and every leg child again (PR #593's mechanism)"
+    )
+    child = _child_env({REGISTRY_PIN: "/live/registry.yaml"})
+    assert REGISTRY_PIN not in child, (
+        "the child still sees the registry pin: the scrub is no longer applied to "
+        "the leg invocation, the only place it can also cover children"
+    )
+
+
+def test_an_armed_registry_pin_reaches_a_child_without_the_scrub():
+    """The absence above is the scrub's doing, not the arm failing to arm."""
+    child = _child_env_no_scrub({REGISTRY_PIN: "/live/registry.yaml"})
+    assert child.get(REGISTRY_PIN) == "/live/registry.yaml", (
+        "the control arm did not carry the pin, so claim 5 proves nothing"
+    )

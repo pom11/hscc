@@ -1,0 +1,176 @@
+<title>HSCC CarPlay Screen</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: review column; each design = a car-display frame (800x480 pt CarPlay canvas incl. the system sidebar) + spec list + pick. Car screens are dark-only by design; page chrome follows the viewer theme. */
+:root{
+  --bg:#f2f3f1; --panel:#ffffff; --ink:#15181b; --muted:#5d6670; --line:#d9ddd8;
+  --accent:#2f5d8a; --accent-ink:#fff; --pick:#e8eef5; --warnbg:#fbf1e3; --warnink:#6e430b;
+  --display:"Archivo",system-ui,sans-serif; --body:system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+  /* car screen (fixed, CarPlay dark) */
+  --c-bg:#000; --c-surf:#1c1c1e; --c-surf2:#2c2c2e; --c-ink:#fff; --c-mut:#8e8e93; --c-blue:#0a84ff; --c-green:#30d158; --c-orange:#ff9f0a; --c-red:#ff453a; --c-track:#3a3a3c;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121417;--panel:#1b1e22;--ink:#e9ebe8;--muted:#9aa3ab;--line:#2c3137;--accent:#86b3de;--accent-ink:#0f1820;--pick:#1d2834;--warnbg:#2b2216;--warnink:#f3c27a;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#121417;--panel:#1b1e22;--ink:#e9ebe8;--muted:#9aa3ab;--line:#2c3137;--accent:#86b3de;--accent-ink:#0f1820;--pick:#1d2834;--warnbg:#2b2216;--warnink:#f3c27a;color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);line-height:1.5;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0 120px}
+.wrap{max-width:1100px;margin:0 auto;display:grid;gap:48px}
+header{padding-block:40px 0;display:grid;gap:12px}
+h1{font-family:var(--display);font-stretch:112%;font-weight:780;font-size:clamp(30px,5vw,48px);line-height:1.05;margin:0;text-wrap:balance}
+h2{font-family:var(--display);font-stretch:108%;font-weight:740;font-size:26px;margin:0;text-wrap:balance}
+.eyebrow{font-family:var(--display);font-weight:650;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+p{margin:0;max-width:72ch}
+.lede{color:var(--muted);font-size:16px}
+.tag{font-family:var(--mono);font-size:12px;color:var(--muted)}
+code{font-family:var(--mono);font-size:.88em}
+.callout{background:var(--warnbg);color:var(--warnink);border-radius:12px;padding:16px 18px;display:grid;gap:8px;font-size:14px}
+.callout b{font-weight:700}
+.callout ul{margin:0;padding-left:18px;display:grid;gap:4px}
+.design{display:grid;gap:14px}
+.dh{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:end;gap:12px}
+.dh .t{display:grid;gap:4px;min-width:0}
+.pickbtn{border:1px solid var(--accent);background:transparent;color:var(--accent);font:650 14px var(--body);padding:9px 18px;border-radius:999px;cursor:pointer}
+.pickbtn[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.pickbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.design[data-on="true"] .frame{box-shadow:0 0 0 3px var(--accent)}
+.scroller{overflow-x:auto;padding:4px}
+.frame{width:800px;height:480px;border-radius:18px;background:var(--c-bg);color:var(--c-ink);display:flex;overflow:hidden;font-family:-apple-system,"SF Pro Display",system-ui,sans-serif;font-variant-numeric:tabular-nums;border:10px solid #0b0b0c;box-sizing:content-box}
+.spec{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.spec div{background:var(--panel);padding:10px 14px;display:grid;gap:2px;font-size:13px;min-width:0}
+.spec span{font:650 11px var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.verdict{display:inline-flex;gap:6px;align-items:center;font:650 12px var(--body);padding:3px 10px;border-radius:999px;background:var(--panel);border:1px solid var(--line)}
+
+/* CarPlay chrome */
+.side{width:84px;flex:0 0 84px;background:#111;display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:14px;border-right:1px solid #222}
+.side .clock{font-size:17px;font-weight:600}
+.side .sig{font-size:10px;color:var(--c-mut);margin-top:-10px}
+.app{width:52px;height:52px;border-radius:12px;display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff}
+.side .dash{margin-top:auto;width:36px;height:36px;border-radius:9px;border:2px solid #555;display:grid;grid-template-columns:1fr 1fr;gap:3px;padding:5px;box-sizing:border-box}
+.side .dash i{background:#777;border-radius:2px}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.nav{height:52px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid #222;flex:0 0 auto}
+.nav b{font-size:19px;font-weight:600}
+.nav .btn{color:var(--c-blue);font-size:16px;font-weight:500}
+.body{flex:1;min-height:0;padding:14px 20px;display:flex;flex-direction:column}
+.cmut{color:var(--c-mut)} .cg{color:var(--c-green)} .co{color:var(--c-orange)} .cr{color:var(--c-red)} .cb{color:var(--c-blue)}
+.btnrow{display:flex;gap:12px;margin-top:auto}
+.cbtn{flex:1;height:48px;border-radius:12px;background:var(--c-surf2);display:grid;place-items:center;font-size:17px;font-weight:600;color:var(--c-blue)}
+.cbtn.pri{background:var(--c-blue);color:#fff}
+.tabs{height:56px;border-top:1px solid #222;display:flex;flex:0 0 auto}
+.tabs div{flex:1;display:grid;place-items:center;align-content:center;font-size:11px;color:var(--c-mut);gap:2px}
+.tabs div.on{color:var(--c-blue)}
+.tabs i{font-style:normal;font-size:18px}
+.la{border-radius:18px;background:var(--c-surf);padding:14px 16px}
+
+/* picks bar */
+.pbar{position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--line);padding:10px max(16px,env(safe-area-inset-right,0px)) calc(10px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));z-index:5}
+.pbar .in{max-width:1100px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between}
+.pbar button{border:0;background:var(--ink);color:var(--bg);font:650 13px var(--body);padding:9px 16px;border-radius:999px;cursor:pointer}
+textarea{width:100%;box-sizing:border-box;min-height:70px;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px;font:14px var(--body)}
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="tag">hscc · iPhone app · CarPlay scene · sample data from the 20 Nov 06:34 snapshot</span>
+    <h1>The cluster on the car screen</h1>
+    <p class="lede">You open HSCC on the car display and see everything on one screen: cluster health, boards, running work, what needs you, and the merge queue. Below are six designs drawn on a real CarPlay canvas (800×480 pt with the system sidebar), each with what it shows, how it updates and what Apple allows.</p>
+  </header>
+
+  <div class="callout">
+    <b>What Apple allows in CarPlay</b>
+    <ul>
+      <li>CarPlay apps are built from Apple’s templates (information, list, grid, tab bar). Free-form drawing, like the widgets, is only allowed for navigation apps. Every design here uses real templates; numbers and gauges become rendered images inside template rows, which the templates allow.</li>
+      <li>A CarPlay app needs an Apple-granted CarPlay entitlement in a category (audio, communication, navigation, EV charging, parking, food ordering, fueling, driving task). A cluster monitor fits none of them, so expect Apple to refuse it. It still runs in Xcode’s CarPlay Simulator for development.</li>
+      <li>Design F needs no entitlement: since iOS 26, Live Activities appear on the CarPlay screen. It reuses the Cluster watch Live Activity you already picked.</li>
+      <li>While the car is connected the app is running, so a CarPlay screen can update every 30 seconds. The widget refresh budget does not apply.</li>
+    </ul>
+  </div>
+
+  <div id="designs" class="wrap" style="gap:56px"></div>
+
+  <section class="design">
+    <div class="dh"><div class="t"><span class="eyebrow">Last step</span><h2>Anything to change</h2></div></div>
+    <textarea id="note" placeholder="e.g. A, but put the four node gauges from C in the top row"></textarea>
+  </section>
+</div>
+
+<div class="pbar"><div class="in"><span id="sum">No design picked yet.</span><button id="copy" type="button">Copy pick</button></div></div>
+
+<script>
+const NODES=[{s:'S1',t:61,u:34,tok:41,role:'orch'},{s:'S2',t:68,u:81,tok:88},{s:'S3',t:72,u:92,tok:102},{s:'S4',t:58,u:12,tok:0}];
+const TOK=NODES.reduce((a,b)=>a+b.tok,0),HOT=Math.max(...NODES.map(x=>x.t));
+const BOARDS=[{b:'hscc',r:2,td:2,bl:7,d:60},{b:'flows',r:0,td:0,bl:17,d:17},{b:'display',r:0,td:0,bl:10,d:12},{b:'gateclerk',r:0,td:0,bl:2,d:0}];
+const RUNN=2,LONG='32m',LONGT='/v1/health serves a cached verify snapshot',NEEDN=2,NEED1='Approve the 2.17 release notes before the tag.',MQ='#485',MQS='gates',MQW=2,ASOF='06:34';
+const tc=t=>t>=75?'var(--c-red)':t>=70?'var(--c-orange)':'var(--c-green)';
+const arc=(v,max,size,sw,col,label,sub)=>{const r=size/2-sw/2-1,c=Math.PI*r*1.5,f=c*Math.min(v/max,1);
+ return `<div style="position:relative;width:${size}px;height:${size}px"><svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="transform:rotate(135deg);display:block" aria-hidden="true"><circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="var(--c-track)" stroke-width="${sw}" stroke-dasharray="${c} 999" stroke-linecap="round"/><circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-dasharray="${f} 999" stroke-linecap="round"/></svg><div style="position:absolute;inset:0;display:grid;place-items:center;text-align:center"><div><div style="font-size:${Math.round(size/3.4)}px;font-weight:700;line-height:1">${label}</div>${sub?`<div style="font-size:${Math.max(10,Math.round(size/8))}px;color:var(--c-mut);margin-top:2px">${sub}</div>`:''}</div></div></div>`};
+const side=`<div class="side"><div class="clock">07:02</div><div class="sig">5G</div><div class="app" style="background:#2f5d8a">HSCC</div><div class="app" style="background:#30d158;font-size:18px">♪</div><div class="app" style="background:#0a84ff;font-size:18px">➤</div><div class="dash"><i></i><i></i><i></i><i></i></div></div>`;
+const frame=(title,right,inner,tabs)=>`<div class="frame">${side}<div class="main"><div class="nav"><b>${title}</b><span class="btn">${right||''}</span></div><div class="body">${inner}</div>${tabs||''}</div></div>`;
+const stackBar=(b,max,h)=>{const t=b.r+b.td+b.bl;return `<div style="display:flex;height:${h}px;border-radius:4px;overflow:hidden;background:var(--c-track);width:${Math.max(6,t/max*100)}%">${b.r?`<span style="flex:${b.r};background:var(--c-blue)"></span>`:''}${b.td?`<span style="flex:${b.td};background:#8e8e93"></span>`:''}${b.bl?`<span style="flex:${b.bl};background:var(--c-orange)"></span>`:''}</div>`};
+
+const DESIGNS=[
+{id:'A',name:'One sheet',tpl:'CPInformationTemplate, two-column layout, 3 action buttons',verdict:'Closest to “everything on one screen”',
+ shows:'10 label/value lines: cluster state, tok/s, hottest node, running, longest, blocked, needs you, top alert, merge queue head, as of',
+ actions:'Refresh · Alerts (opens a list) · Read aloud (Siri reads the summary)',update:'every 30 s while connected; values change in place',why:'Easiest to read at a glance and the smallest amount of code; text only, no gauges.',
+ draw:()=>frame('HSCC','',`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 28px;font-size:17px">
+  ${[['Cluster',`<span class="cg">All 4 up</span>`],['Throughput',`${TOK} tok/s`],['Hottest',`<span class="co">S3 · ${HOT}°</span>`],['Running',`${RUNN} cards`],['Longest',`${LONG}`],['Blocked',`<span class="co">36 cards</span>`],['Needs you',`<span class="cr">${NEEDN} open</span>`],['Top alert',`<span style="font-size:15px">${NEED1}</span>`],['Merge queue',`${MQ} ${MQS} · ${MQW} waiting`],['As of',`${ASOF}`]].map(([k,v])=>`<div style="display:grid;gap:1px"><span class="cmut" style="font-size:13px">${k}</span><span style="font-weight:600">${v}</span></div>`).join('')}</div>
+  <div class="btnrow"><div class="cbtn">Refresh</div><div class="cbtn pri">Alerts (${NEEDN})</div><div class="cbtn">Read aloud</div></div>`)},
+{id:'B',name:'Gauge grid',tpl:'CPGridTemplate, 8 buttons with rendered images',verdict:'Most glanceable',
+ shows:'8 tiles: 4 node temperature gauges, throughput, running/slots, needs you, merge queue; each tile title is the value in words',
+ actions:'tapping a tile opens its detail list (node, cards, alerts, queue)',update:'every 30 s; tile images re-rendered',why:'Big shapes you can read in a second; colors carry state.',
+ draw:()=>frame('HSCC',ASOF,`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px 10px;flex:1;align-content:center;justify-items:center">
+  ${NODES.map(x=>`<div style="display:grid;justify-items:center;gap:6px">${arc(x.t,90,110,9,tc(x.t),x.t+'°',x.u+'%')}<span style="font-size:15px;font-weight:600">${x.s}${x.role?' ◆':''}</span></div>`).join('')}
+  <div style="display:grid;justify-items:center;gap:6px">${arc(TOK,320,110,9,'var(--c-blue)',TOK,'tok/s')}<span style="font-size:15px;font-weight:600">Throughput</span></div>
+  <div style="display:grid;justify-items:center;gap:6px">${arc(RUNN,6,110,9,'var(--c-blue)',RUNN+'/6','slots')}<span style="font-size:15px;font-weight:600">Running · ${LONG}</span></div>
+  <div style="display:grid;justify-items:center;gap:6px">${arc(1,1,110,9,'var(--c-red)',NEEDN,'open')}<span style="font-size:15px;font-weight:600" class="cr">Needs you</span></div>
+  <div style="display:grid;justify-items:center;gap:6px">${arc(1,4,110,9,'var(--c-blue)',MQ,MQS)}<span style="font-size:15px;font-weight:600">Merge queue</span></div></div>`)},
+{id:'C',name:'Rows with gauges',tpl:'CPListTemplate: one image row + 4 detail rows, no scrolling',verdict:'Balanced: shapes plus words',
+ shows:'top row: four node gauges as one image row; then Boards (stacked bar image + “2 running · 36 blocked”), Running (longest card), Needs you (top alert), Merge queue (stage track image)',
+ actions:'each row opens its detail list',update:'every 30 s; rows updated in place',why:'Each area gets one line with a picture and a sentence; close to the widgets you picked (C1, B3, R3, N3, M1).',
+ draw:()=>frame('HSCC',ASOF,`<div style="display:flex;gap:18px;justify-content:space-between;padding-bottom:12px;border-bottom:1px solid #222">${NODES.map(x=>`<div style="display:flex;align-items:center;gap:10px">${arc(x.t,90,66,6,tc(x.t),x.t+'°')}<div><div style="font-weight:600;font-size:16px">${x.s}</div><div class="cmut" style="font-size:13px">${x.u}% · ${x.tok||'idle'}</div></div></div>`).join('')}</div>
+  ${[['Boards',`<div style="display:grid;gap:4px;width:180px">${BOARDS.slice(0,3).map(b=>stackBar(b,19,7)).join('')}</div>`,`${RUNN} running · <span class="co">36 blocked</span> · 89 done today`],
+     ['Running',`<div style="font-size:26px;font-weight:700;width:180px">${LONG}</div>`,`${LONGT}`],
+     ['Needs you',`<div style="font-size:26px;font-weight:700;width:180px" class="cr">${NEEDN}</div>`,`${NEED1}`],
+     ['Merge queue',`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;width:180px">${[1,2,0,0].map(v=>`<span style="height:8px;border-radius:4px;background:${v===1?'var(--c-green)':v===2?'var(--c-blue)':'var(--c-track)'}"></span>`).join('')}</div>`,`${MQ} in ${MQS} · ${MQW} waiting`]]
+   .map(([k,img,txt])=>`<div style="display:grid;grid-template-columns:120px 190px 1fr 14px;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid #222"><span style="font-size:17px;font-weight:600">${k}</span>${img}<span style="font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${txt}</span><span class="cmut">›</span></div>`).join('')}`)},
+{id:'D',name:'Status first',tpl:'CPInformationTemplate, leading layout, 2 buttons',verdict:'Calmest; only shouts when needed',
+ shows:'one headline that answers “do I need to do anything?”, then 4 short lines; turns red with the alert text when something needs you (both states shown in the text)',
+ actions:'Alerts · Refresh',update:'every 30 s; headline color changes with state',why:'Made for driving: one sentence, then the facts. Pairs with the Needs Me “calm when clear” pick.',
+ draw:()=>frame('HSCC','',`<div style="display:grid;gap:4px"><span class="cr" style="font-size:15px;font-weight:600">Needs you · ${NEEDN}</span><span style="font-size:30px;font-weight:700;line-height:1.15">${NEED1}</span><span class="cmut" style="font-size:15px">2 h ago · flows · and 1 more</span></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 24px;margin-top:22px;font-size:18px">
+   <div><span class="cg">●</span> Cluster all up · ${TOK} tok/s</div><div><span class="co">●</span> Hottest S3 · ${HOT}°</div>
+   <div><span class="cb">●</span> ${RUNN} running · longest ${LONG}</div><div><span class="cb">●</span> Merge ${MQ} ${MQS}</div></div>
+  <div class="btnrow"><div class="cbtn pri">Alerts (${NEEDN})</div><div class="cbtn">Refresh</div></div>`)},
+{id:'E',name:'Tabs',tpl:'CPTabBarTemplate: Overview (information) · Nodes (list) · Alerts (list)',verdict:'Most detail; not strictly one screen',
+ shows:'Overview tab = design A’s sheet; Nodes tab = one row per node with gauge image, model, util, power; Alerts tab = open alerts',
+ actions:'switch tabs; rows open details',update:'every 30 s per visible tab',why:'Room for everything without crowding, at the cost of a tap.',
+ draw:()=>frame('Nodes',ASOF,`<div style="display:grid;gap:0">${NODES.map(x=>`<div style="display:grid;grid-template-columns:62px 1fr 110px 90px 14px;align-items:center;gap:14px;padding:9px 0;border-bottom:1px solid #222">${arc(x.t,90,56,5,tc(x.t),x.t+'°')}<div><div style="font-size:17px;font-weight:600">spark-${x.s.slice(1)}${x.role?' · orchestrator':''}</div><div class="cmut" style="font-size:14px">qwen3.8-flash-next</div></div><div style="font-size:16px">${x.u}% util</div><div style="font-size:16px">${x.tok||'idle'}${x.tok?' t/s':''}</div><span class="cmut">›</span></div>`).join('')}</div>`,
+  `<div class="tabs"><div><i>◉</i>Overview</div><div class="on"><i>▦</i>Nodes</div><div><i>!</i>Alerts (${NEEDN})</div></div>`)},
+{id:'F',name:'Live Activity',tpl:'no CarPlay app: the Cluster watch Live Activity (A2) shown by iOS 26 on the CarPlay screen',verdict:'Works without an Apple entitlement',
+ shows:'node temps, util, tok/s, daemon and autodown state; whatever the Live Activity carries',
+ actions:'none on the car screen; start it from the phone before driving',update:'when the app pushes an update; iOS limits frequency',why:'The only route that runs in your car without Apple approval. It does not open an app screen.',
+ draw:()=>`<div class="frame">${side}<div class="main" style="background:linear-gradient(160deg,#1b2a36,#0d1116)"><div style="flex:1;display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:20px;align-content:start">
+   <div class="la" style="grid-column:span 2;display:grid;gap:10px"><div style="display:flex;justify-content:space-between;font-size:13px;color:var(--c-mut);font-weight:600"><span>HSCC · CLUSTER · qwen3.8-flash-next</span><span>${ASOF}</span></div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">${NODES.map(x=>`<div><div style="font-size:34px;font-weight:700;color:${x.t>=70?'var(--c-orange)':'#fff'}">${x.t}°</div><div class="cmut" style="font-size:14px">${x.s} · ${x.u}%</div></div>`).join('')}</div>
+    <div style="font-size:15px">${TOK} tok/s · daemon OK · autodown off</div></div>
+   <div class="la" style="opacity:.55;display:grid;gap:4px"><span class="cmut" style="font-size:13px">Now Playing</span><span style="font-size:17px;font-weight:600">Podcast</span></div>
+   <div class="la" style="opacity:.55;display:grid;gap:4px"><span class="cmut" style="font-size:13px">Maps</span><span style="font-size:17px;font-weight:600">12 min to destination</span></div></div></div></div>`},
+];
+
+const st={pick:null,note:''};
+try{Object.assign(st,JSON.parse(localStorage.getItem('hscc-carplay-pick')||'{}'))}catch(e){}
+const save=()=>{try{localStorage.setItem('hscc-carplay-pick',JSON.stringify(st))}catch(e){}};
+function render(){
+ document.getElementById('designs').innerHTML=DESIGNS.map(d=>{const on=st.pick===d.id;return `<section class="design" data-on="${on}" aria-labelledby="d-${d.id}">
+  <div class="dh"><div class="t"><span class="eyebrow">Design ${d.id}</span><h2 id="d-${d.id}">${d.name}</h2><span class="verdict">${d.verdict}</span></div>
+   <button class="pickbtn" type="button" data-p="${d.id}" aria-pressed="${on}">${on?'Picked':'Pick '+d.id}</button></div>
+  <div class="scroller">${d.draw()}</div>
+  <div class="spec"><div><span>Template</span>${d.tpl}</div><div><span>Shows</span>${d.shows}</div><div><span>Actions</span>${d.actions}</div><div><span>Updates</span>${d.update}</div><div><span>Why</span>${d.why}</div></div></section>`}).join('');
+ document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{st.pick=st.pick===b.dataset.p?null:b.dataset.p;save();render()});
+ const d=DESIGNS.find(x=>x.id===st.pick);document.getElementById('sum').textContent=d?`Picked: ${d.id} · ${d.name}`:'No design picked yet.';
+}
+const note=document.getElementById('note');note.value=st.note||'';note.addEventListener('input',()=>{st.note=note.value;save()});
+document.getElementById('copy').onclick=e=>{const d=DESIGNS.find(x=>x.id===st.pick);const t=`CarPlay pick — ${d?d.id+' '+d.name:'none'}${st.note?'; notes: '+st.note:''}`;const btn=e.currentTarget;
+ navigator.clipboard.writeText(t).then(()=>{btn.textContent='Copied'},()=>{note.value=t;note.select();btn.textContent='Copy from the box'});setTimeout(()=>btn.textContent='Copy pick',1800)};
+render();
+</script>

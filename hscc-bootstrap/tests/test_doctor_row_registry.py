@@ -39,10 +39,13 @@ import doctor_rows
 
 CHECK_NAMES = [
     "orch-waker (orchestrator waker)",
-    "cron watchers (dep_pr/escalate)",
+    "cron watchers (dep_pr/escalate/alone_sweep)",
     "daemon supervision (service manager owns the pid)",
     "kanban enforce (paused-board hold)",
+    "kanban current board (main orchestrator)",
+    "main wakeups (daemon-owned schedule)",
     "worker budget hook ([budget] note)",
+    "node pauses (operator overlay)",
 ]
 
 FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["192.0.2.1"]}])
@@ -63,6 +66,11 @@ def _home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HSCC_DIR", str(tmp_path / ".hscc"))
+    # sparkrun is a FATAL preflight check. A CI/dev box that has not installed
+    # it must not sink this unrelated row's verdict; the probe itself is
+    # covered by test_doctor.TestSparkrunCheck.
+    monkeypatch.setattr(doctor, "_sparkrun_ok",
+                        lambda: doctor.Check("sparkrun", True, detail="stubbed"))
     return home
 
 
@@ -78,10 +86,14 @@ def _doctor(tmp_path, monkeypatch, **kw):
 
 # ── the registry is self-consistent ────────────────────────────────────────
 
-def test_registry_exists_and_covers_the_five_feature_rows():
+def test_registry_exists_and_covers_the_feature_rows():
     keys = [r.key for r in doctor.FEATURE_CHECK_ROWS]
     assert keys == ["orch_waker", "cron_watchers", "supervision",
-                    "kanban_enforce", "budget_hook"], "registry order is row order"
+                    "kanban_enforce", "main_board", "main_wakeups",
+                    "budget_hook", "node_pauses",
+                    "node_pause_expiry", "main_only_surface",
+                    "orch_wake_subs"], \
+        "registry order is row order"
 
 
 def test_every_registry_entry_is_well_formed():
@@ -106,14 +118,24 @@ def test_every_registry_entry_is_well_formed():
 
 
 def test_registry_seam_names_match_the_run_doctor_signature():
-    """The four pre-registry seams are explicit keywords AND registry entries;
-    if the two ever disagree, run_doctor() rejects a seam its own signature
-    advertises (that is the mutation this pins)."""
+    """The pre-registry seams are explicit keywords AND registry entries; if the
+    two ever disagree, run_doctor() rejects a seam its own signature advertises
+    (that is the mutation this pins). Rows added through the registry
+    (``_main_board_check``) arrive via ``**feature_rows`` instead."""
     import inspect
     params = inspect.signature(doctor.run_doctor).parameters
     declared = {p for p in params if p.startswith("_")
                 and p.endswith("_check")}
-    assert declared == set(doctor._FEATURE_SEAM_NAMES)
+    registered = set(doctor._FEATURE_SEAM_NAMES)
+    assert declared <= registered
+    assert registered - declared == {"_main_board_check",
+                                     "_main_wakeups_check",
+                                     "_node_pauses_check",
+                                     "_node_pause_expiry_check",
+                                     "_main_only_surface_check",
+                                     "_orch_wake_subs_check"}
+    assert "_main_board_check" not in declared, \
+        "a new row must not add a keyword to run_doctor()'s signature"
 
 
 # ── the anti-hotspot property ──────────────────────────────────────────────
@@ -339,12 +361,14 @@ def test_feature_rows_keep_their_relative_order(tmp_path, monkeypatch):
 def test_row_fn_path_resolves_the_hook_per_call(tmp_path, monkeypatch):
     """The compatibility path must look the row function up on the module each
     call: test_doctor_kanban_enforce.py swaps doctor._kanban_enforce_check_row
-    to pin the hscc_dir forwarding at the call site, and a registry that
-    captured function objects at import time would make that patch a no-op."""
+    to pin what reaches the row at the call site, and a registry that captured
+    function objects at import time would make that patch a no-op."""
     seen = {}
 
-    def builder(injected=None, hscc_dir=None):
-        seen["hscc_dir"] = hscc_dir
+    def builder(injected=None, **ctx):
+        # ``**ctx``: record what the wiring actually handed this row, not the
+        # builder's own parameter defaults.
+        seen.update(ctx)
         seen["injected"] = injected
         return doctor.Check("kanban enforce (paused-board hold)", True,
                             detail="swapped row", fix="", fatal=False)
@@ -354,10 +378,39 @@ def test_row_fn_path_resolves_the_hook_per_call(tmp_path, monkeypatch):
                     "fatal": False, "detail": "seam", "fix": ""}
     res = _doctor(tmp_path, monkeypatch, _kanban_enforce_check=seam)
     assert seen["injected"] is seam
-    assert seen["hscc_dir"] == str(tmp_path / ".hscc")
+    # t_be690204: this row declares row_kwargs=(), so the per-call resolution
+    # must deliver the seam WITHOUT a root (it used to assert the opposite).
+    assert "hscc_dir" not in seen
     row = {c["name"]: c for c in res["checks"]}[
         "kanban enforce (paused-board hold)"]
     assert row["detail"] == "swapped row"
+
+
+def test_the_daemon_state_rows_declare_no_root_context():
+    """The wiring half of t_be690204, stated as a registry fact.
+
+    Every writer of what these rows read resolves from HOME — the waker's
+    config, the ``orch_waker``/``kanban_enforce``/``node_pause_expiry`` stream
+    stamps through ``state.STATE_DIR``, the paused-policy document through
+    ``kanban_pause.STATE_PATH``, the node-pause overlay and the expiry stamp's
+    root through their own modules' HOME-derived constants — and none of
+    them reads ``HSCC_DIR``. A root taken from that variable is therefore not a
+    relocation of this state; it is a read of a directory nothing writes to, and
+    the row reported absence as a fact about a live host (a pid file at that root
+    even made it a fatal RED).
+
+    ``row_kwargs=()`` is the difference between "unwired" and "un-wireable":
+    ``render_rows`` filters the context by declaration, so run_doctor cannot hand
+    these rows a root even by accident. t_adb66608 did exactly this for the
+    cron-watcher ledger row; the call-site half lives in
+    test_doctor_orch_waker.py / test_doctor_kanban_enforce.py.
+    """
+    by_key = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}
+    for key in ("orch_waker", "kanban_enforce", "node_pauses",
+                "node_pause_expiry"):
+        assert by_key[key].row_kwargs == (), (
+            f"the {key} row must declare no per-row context: a handed root "
+            "splits the reader from writers that resolve from HOME (t_be690204)")
 
 
 def test_budget_row_gets_hermes_home_and_no_hscc_dir(tmp_path, monkeypatch):
@@ -401,3 +454,25 @@ def test_rows_receive_only_the_context_they_declare():
     doctor_rows.render_rows(_Hooks(), [spec], {}, hscc_dir="/sandbox/.hscc",
                             hermes_home="/sandbox/.hermes")
     assert calls == ["/sandbox/.hscc"]
+
+
+def test_main_only_row_declares_both_roots_and_says_why():
+    """The exception that proves the t_be690204 rule, pinned as a registry fact.
+
+    The daemon-state rows above must declare NO context because their writers
+    resolve from HOME alone, so a root lifted from ``HSCC_DIR`` is a directory
+    nothing writes to. This row's two roots each have a writer that honours them:
+    ``hermes_home`` is the tree the installers write when bootstrap is pointed at
+    a named ``--home``/``HERMES_HOME`` (the ``budget_hook`` precedent), and
+    ``hscc_dir`` is ``hscc-roles/main_orch``'s OWN documented relocation seam for
+    ``main-orchestrator.json`` — the document that decides which profile home is
+    ``<main>``. Dropping either keyword does not merely change a signature: drop
+    ``hermes_home`` and the row reads the operator's live ``~/.hermes`` from a
+    sandboxed Stage-1 run; drop ``hscc_dir`` and a sandboxed bootstrap asks about
+    the OPERATOR's identity instead of the one it is about to store.
+    """
+    by_key = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}
+    spec = by_key["main_only_surface"]
+    assert spec.row_kwargs == ("hermes_home", "hscc_dir")
+    assert spec.row_fn == "", "the generic builder; no run_doctor() edit"
+    assert spec.key not in ("orch_waker", "cron_watchers"), "sanity"

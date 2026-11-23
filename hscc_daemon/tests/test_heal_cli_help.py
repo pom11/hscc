@@ -42,6 +42,8 @@ Safety: the real-CLI class runs mutating argv ONLY inside the sandbox HOME
 solely in the seeded sandbox file.
 """
 
+import ast
+import inspect
 import json
 import os
 import subprocess
@@ -263,6 +265,88 @@ class TestCommandHelpEntries:
     def test_help_text_says_help_clears_nothing(self):
         # The whole point of B4: the help itself must state the contract.
         assert "clears nothing" in unified.COMMAND_HELP["heal-clear"]
+
+
+# ---------------------------------------------------------------------------
+# F7 — "heal" names TWO operations, and the help must not let them blur
+# (docs/audits/2026-11-23-agent-surface.md:110 + :314; finding F7 at :422)
+#
+#   * `hscc heal-status` / `heal-clear`  -> read + clear the daemon's per-node
+#     heal-BREAKER strike ledger (hscc_daemon/cli.py::cmd_heal, backed by
+#     heal_breaker.py). They never restart anything.
+#   * `/heal` (the slash command)        -> probe worker SERVING and restart the
+#     unhealthy units (hscc-commands/__init__.py::cmd_heal, via
+#     cmdlib.restart_one). It never reads or clears a strike.
+#
+# The wording rule is only worth keeping while that split is real, so the
+# premise is pinned first: if either code path ever absorbs the other's, the
+# premise test fails and this class is deleted on purpose — not silently
+# satisfied by rewording.
+# ---------------------------------------------------------------------------
+
+PLUGIN_SRC = REPO / "hscc-commands" / "__init__.py"
+
+
+def _slash_description(name):
+    """The ``description=`` of ``ctx.register_command(name="<name>", ...)``.
+
+    Read from the plugin source with `ast` rather than by importing it: the
+    package name holds a hyphen (which is why routes_commands loads it through
+    importlib), and a wording gate must run in any interpreter that can read
+    the repo — one that needs the plugin's own runtime deps would be skipped
+    rather than run. It is the same registration the ``GET /v1/commands``
+    palette serves, so this is the wording an operator actually reads.
+    """
+    tree = ast.parse(PLUGIN_SRC.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "register_command"):
+            kw = {k.arg: k.value for k in node.keywords}
+            name_node = kw.get("name")
+            if isinstance(name_node, ast.Constant) and name_node.value == name:
+                return ast.literal_eval(kw["description"])
+    raise AssertionError(f"no register_command(name={name!r}) in {PLUGIN_SRC}")
+
+
+class TestHealNameCoversTwoOperations:
+    """The two "heal" texts must not claim the same operation."""
+
+    def test_the_two_code_paths_really_differ(self):
+        # The premise. Pin it before the wording depends on it.
+        assert "restart_one" in PLUGIN_SRC.read_text(encoding="utf-8"), (
+            "/heal no longer restarts units — the F7 split is gone; "
+            "delete this class instead of rewording around it")
+        cli_src = inspect.getsource(hscc_cli.cmd_heal).lower()
+        assert "restart" not in cli_src, (
+            "hscc heal-clear/heal-status now touches a unit: it is no longer "
+            "a ledger-only verb, so the two heal texts may have merged")
+
+    @pytest.mark.parametrize("verb", ["heal-clear", "heal-status"])
+    def test_cli_help_names_the_slash_command(self, verb):
+        entry = unified.COMMAND_HELP.get(verb) or ""
+        assert "/heal" in entry, (
+            f"COMMAND_HELP[{verb!r}] must name the /heal slash command — an "
+            "operator who reads only this help will run the wrong verb")
+
+    def test_slash_description_names_the_cli_verb(self):
+        desc = _slash_description("heal")
+        assert "heal-status" in desc, (
+            "/heal's own description must name `hscc heal-status`; the "
+            "palette text is where an operator meets the name first")
+
+    @pytest.mark.parametrize("verb", ["heal-clear", "heal-status"])
+    def test_cli_help_does_not_claim_the_slashes_effect(self, verb):
+        # What the CLI says about ITSELF is everything before it names /heal:
+        # that clause may speak of strikes, never of restarting a worker.
+        own = unified.COMMAND_HELP[verb].split("/heal")[0].lower()
+        assert "restart" not in own and "worker" not in own, (
+            f"COMMAND_HELP[{verb!r}] describes itself in /heal's terms: {own!r}")
+
+    def test_slash_description_does_not_claim_the_cli_effect(self):
+        own = _slash_description("heal").split("hscc heal-status")[0].lower()
+        assert "strike" not in own and "ledger" not in own, (
+            f"/heal describes itself in the breaker's terms: {own!r}")
 
 
 # ---------------------------------------------------------------------------

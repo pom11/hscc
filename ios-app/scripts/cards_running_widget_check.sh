@@ -4,14 +4,12 @@
 #
 # `CardsRunningWidget.swift` imports WidgetKit, so build_check.sh only ever
 # COMPILES it; nothing in scripts/ could run a family body. The numbers those
-# bodies draw therefore live in Foundation-only code:
+# bodies draw live in Foundation-only code:
 #
 #   * Sources/Shared/CardsRunningProjection.swift — the row projection, the
-#     running/blocked counts and `CardsRunningCopy` (the numeric vocabulary);
-#   * two GATE-SLICE blocks in Sources/Shared/CardsRunningActivity.swift — the
-#     `RunningCardMetric(row:)` mapping and the Live Activity reading rules.
+#     running/blocked counts and `CardsRunningCopy` (the numeric vocabulary).
 #
-# This gate compiles those REAL sources (nothing is transcribed) and drives them
+# This gate compiles that REAL source (nothing is transcribed) and drives it
 # from two fixtures:
 #
 #   * v1_kanban_running_cards.json — a scrubbed capture of a live
@@ -23,9 +21,8 @@
 # WHAT IT PROVES, by requirement: every number/row a family shows maps 1:1 to a
 # fixture field; the count is the number of running cards (`hscc cards monitor
 # --short`); each family (iOS small/medium/large + inline/circular/rectangular,
-# macOS small/medium/large/XL, Live Activity lock screen + compact/expanded/
-# minimal) draws those same values; and a blind or stale read never becomes a
-# zero or a fresh-looking cache.
+# macOS small/medium/large/XL) draws those same values; and a blind or stale
+# read never becomes a zero or a fresh-looking cache.
 #
 # WHAT IT DOES NOT PROVE: no pixels are rendered, so layout, fonts and colour are
 # out; WordWidgetKit's own scheduling is not driven. `widget_view_dispatch_check`
@@ -40,17 +37,16 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null) || {
   echo "error: no macOS SDK (is Xcode installed?)" >&2; exit 1; }
 
+. scripts/swift_source_groups.sh
+
 WIDGET=Sources/HSCCWidgets/CardsRunningWidget.swift
-ACTIVITY=Sources/Shared/CardsRunningActivity.swift
 PROJECTION=Sources/Shared/CardsRunningProjection.swift
-LIVE_ACTIVITY=Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift
-DRIVER=Sources/HSCC/CardsRunningActivityDriver.swift
 HARNESS=scripts/cards_running_widget_check/main.swift
 FIXTURES=scripts/model_decode_check/fixtures
 LIVE_FIXTURE=$FIXTURES/v1_kanban_running_cards.json
 CONTRACT_FIXTURE=$FIXTURES/v1_kanban_running_contract.json
 
-for f in "$WIDGET" "$ACTIVITY" "$PROJECTION" "$LIVE_ACTIVITY" "$DRIVER" "$HARNESS"; do
+for f in "$WIDGET" "$PROJECTION" "$HARNESS"; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
 done
 for f in "$LIVE_FIXTURE" "$CONTRACT_FIXTURE" "$FIXTURES/kanban_blocked.json"; do
@@ -89,38 +85,18 @@ expect "inline draws the entry's inline line" "1" \
 expect "XL reuses the large renderer" "1" \
   "$(grep -c 'case .systemExtraLarge:' "$WIDGET")"
 
-# The Live Activity: all four surfaces + all three Dynamic Island regions.
-for token in 'ActivityConfiguration(for: CardsRunningActivityAttributes.self)' \
-             'dynamicIsland' 'compactLeading: {' 'compactTrailing: {' 'minimal: {' \
-             'DynamicIslandExpandedRegion(.leading)' \
-             'DynamicIslandExpandedRegion(.center)' \
-             'DynamicIslandExpandedRegion(.trailing)' \
-             'DynamicIslandExpandedRegion(.bottom)'; do
-  expect "Live Activity has $token" "1" "$(grep -cF "$token" "$LIVE_ACTIVITY")"
-done
-
-# The one row mapping: the driver must use the sliced initializer, not a
-# hand-written field copy that the gate cannot see.
-expect "the driver maps rows through RunningCardMetric(row:)" "1" \
-  "$(grep -c 'RunningCardMetric.init(row:)' "$DRIVER")"
-report "the driver does not rebuild a metric field by field" \
-  "$(grep -n 'RunningCardMetric(board:' "$DRIVER")"
-expect "the row-metric block declares the mapping" "1" \
-  "$(grep -c 'init(row: CardsRunningRow)' "$ACTIVITY")"
-
-# Freshness: both surfaces must draw a self-updating relative age, and neither
-# may keep the old frozen "read just now" copy.
-expect "the widget footer draws a relative updated age" "1" \
-  "$(grep -c 'Text(entry.updatedAt, style: .relative)' "$WIDGET")"
-expect "the Lock Screen draws a relative updated age" "1" \
-  "$(grep -c 'Text(state.updatedAt, style: .relative)' "$LIVE_ACTIVITY")"
-report "no surface hard-codes a fresh 'read just now' claim" \
-  "$(grep -n 'read just now' "$WIDGET" "$LIVE_ACTIVITY")"
+# Freshness: the Native widget draws the DATA's own clock through the shared
+# AsOfStamp (the 2026-11-20 redesign replaced the render-relative age on the
+# widget). It may not keep the old frozen "read just now" copy.
+expect "the widget draws the data's own clock (AsOfStamp)" "1" \
+  "$([ "$(grep -c 'AsOfStamp(date: entry.dataAt)' "$WIDGET")" -ge 1 ] && echo 1)"
+report "the widget does not hard-code a fresh 'read just now' claim" \
+  "$(grep -n 'read just now' "$WIDGET")"
 
 # §8.3 / WIDGET_ROUTES: the card list comes from /v1/kanban/running + blocked;
 # /v1/cards is not an extension route.
 report "the cards surface never names /v1/cards in code" \
-  "$(grep -n '/v1/cards' "$WIDGET" "$ACTIVITY" "$PROJECTION" "$DRIVER" \
+  "$(grep -n '/v1/cards' "$WIDGET" "$PROJECTION" \
       | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
 expect "the projection reads kanban/running" "1" \
   "$(grep -c 'client.kanbanRunning()' "$PROJECTION")"
@@ -129,49 +105,29 @@ expect "the projection reads kanban/running" "1" \
 report "fixtures carry no private address/path/token" \
   "$(grep -nE '100\.(6[4-9]|[7-9][0-9]|1[0-2][0-9])\.|192\.168\.|10\.[0-9]+\.[0-9]+\.|/Users/|/home/[a-z]|\.hscc|Bearer ' "$LIVE_FIXTURE" "$CONTRACT_FIXTURE" || true)"
 
-# project.yml is the only place the gates see a file. The projection is now
-# compiled into the Live Activity extension because the sliced metric names it.
-ext_block=$(python3 - <<'PY'
+# project.yml is the only place the gates see a file. The projection is owned
+# by the widget target (and the desktop target by path); it must be listed
+# there or this gate would run a file the app never builds.
+widget_block=$(python3 - <<'PY'
 import re
 spec = open('project.yml').read().split('\ntargets:\n', 1)[1]
-blk = spec.split('\n  HSCCLiveActivityMonitor:', 1)[1]
+blk = spec.split('\n  HSCCWidgets:', 1)[1]
 blk = re.split(r'\n  [A-Za-z]\w*:\n', blk, maxsplit=1)[0]
-print(blk.count('Sources/Shared/CardsRunningActivity.swift')
-      + blk.count('Sources/Shared/CardsRunningProjection.swift'))
+print(1 if '- path: Sources/HSCCWidgets' in blk else 0)
 PY
 )
-expect "HSCCLiveActivityMonitor compiles the activity + row projection" "2" "$ext_block"
+expect "HSCCWidgets computes its source directory" "1" "$widget_block"
 
 # Anti-mirror: the harness declares none of the subject's types.
 report "the harness re-declares no subject type" \
   "$(grep -nE '^(struct|enum|class|extension|typealias) +(CardsRunning|RunningCard|KanbanRunning|WidgetData|SharedStore)' "$HARNESS")"
 
 echo ""
-echo "executing the real projection + sliced activity rules against the fixtures..."
-
-slice() {  # slice <file> <marker> — print the bracketed block, markers excluded
-  awk -v b="// GATE-SLICE-BEGIN: $2" -v e="// GATE-SLICE-END: $2" \
-      '$0==b{s=1;next} $0==e{s=0} s' "$1"
-}
-
-printf 'import Foundation\n' > "$TMP/SlicedRules.swift"
-for name in cards-row-metric cards-reading-rules; do
-  grep -q "^// GATE-SLICE-BEGIN: ${name}$" "$ACTIVITY" || {
-    echo "FAIL: $ACTIVITY has no 'GATE-SLICE-BEGIN: ${name}' marker." >&2
-    echo "      The rules moved — re-point this gate at them." >&2
-    exit 1
-  }
-  slice "$ACTIVITY" "$name" > "$TMP/one.swift"
-  [ -s "$TMP/one.swift" ] || { echo "FAIL: empty slice for '$name'" >&2; exit 1; }
-  cat "$TMP/one.swift" >> "$TMP/SlicedRules.swift"
-done
+echo "executing the real projection against the fixtures..."
 
 if ! xcrun --sdk "$SDK" swiftc -o "$TMP/check" \
-     Sources/Shared/SharedModels.swift \
-     Sources/Shared/SharedStore.swift \
-     Sources/Shared/WidgetDataClient.swift \
+     "${SWIFT_GROUP_WIDGET_CLIENT[@]}" \
      Sources/Shared/CardsRunningProjection.swift \
-     "$TMP/SlicedRules.swift" \
      scripts/model_decode_check/ThemeStub.swift \
      "$HARNESS" 2>"$TMP/compile.err"; then
   echo "FAIL: the real sources + harness did not compile" >&2
@@ -186,5 +142,5 @@ if [ "$rc" -ne 0 ]; then
   echo "CARDS RUNNING WIDGET CHECK FAILED — a family can draw a value its fixture did not send"
   exit 1
 fi
-echo "CARDS RUNNING WIDGET CHECK PASSED — every family, both platforms and the Live Activity draw the live fixture's own fields"
+echo "CARDS RUNNING WIDGET CHECK PASSED — every family, both platforms draw the live fixture's own fields"
 exit 0

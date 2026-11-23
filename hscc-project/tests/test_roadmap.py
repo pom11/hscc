@@ -6,6 +6,8 @@ exception, never silence. A malformed file must not crash: parse what you can
 and report the rest in ``unparsed``.
 """
 
+from rich_layout import _says
+
 from flightdeck.core import roadmap
 from flightdeck.core.roadmap import Roadmap, parse_roadmap
 
@@ -576,9 +578,15 @@ def test_adopt_apply_backs_up_existing_and_reports_path(tmp_path, capsys):
     assert bak.exists(), "existing roadmap must be backed up before overwriting"
     # the backup holds the PRE-adoption roadmap
     assert bak.read_text() == EXISTING
-    # and the command says where the backup went
-    assert "backed up existing roadmap to" in out
-    assert str(bak) in out
+    # and the command says where the backup went. The backup path is machine-length, so
+    # at a deep tmp root Rich FOLDS it mid-token inside the row (red from tmp-root
+    # length 174 across the 48..210 window, t_f2382c78) and may also wrap between the
+    # phrase and the path. Assert the pair as ONE whitespace-stripped phrase: the same
+    # information the row prints — that phrase, then that exact path — without pinning
+    # where Rich chose to break it. "backed up" stays raw as the anchor that the row was
+    # rendered at all (a reflowed assert must never be the only evidence).
+    assert "backed up" in out
+    assert _says(out, f"backed up existing roadmap to {bak}")
 
 
 def test_adopt_dry_run_writes_and_removes_nothing(tmp_path, capsys):

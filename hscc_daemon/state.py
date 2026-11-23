@@ -77,12 +77,23 @@ def ensure_state_dir():
     os.makedirs(STATE_DIR, exist_ok=True)
 
 
-def write_state(stream_name, data):
+def write_state(stream_name, data, directory=None):
     """Write check result to ~/.hscc/state/<stream>.json.
+
+    ``directory`` is the stamp-root seam (t_e9b0f048): when given, the entry
+    lands at ``<directory>/<stream_name>.json`` (created on demand) instead of
+    under ``STATE_DIR``. It exists so the ONE writer can be pointed at the same
+    root a caller reads — ``cron_watchers`` threads its ``_dirs()`` through both
+    sides, so a relocated ``HSCC_DIR`` is a root a watcher can stamp as well as
+    read. Every daemon caller leaves it ``None`` and gets ``STATE_DIR``, exactly
+    as before; a caller must NOT pre-compute that default itself, which is why
+    the parameter exists rather than a path.
 
     When a persist_disabled() block is active (ad-hoc CLI check), the entry is
     returned but no file is written — the on-disk state stays exactly as the
     daemon left it, so `hscc status` keeps reporting what the daemon observes.
+    That rule is uniform across both roots: the seam is not a way around the
+    suppression.
     """
     entry = {
         "timestamp": now_iso(),
@@ -96,8 +107,13 @@ def write_state(stream_name, data):
         # flip what `hscc status` reports for the daemon.
         ctx._overlay[stream_name] = entry
         return entry
-    ensure_state_dir()
-    filepath = os.path.join(STATE_DIR, f"{stream_name}.json")
+    if directory:
+        stamp_dir = os.path.expanduser(directory)
+        os.makedirs(stamp_dir, exist_ok=True)
+    else:
+        stamp_dir = STATE_DIR
+        ensure_state_dir()
+    filepath = os.path.join(stamp_dir, f"{stream_name}.json")
     # Unique tmp per writer: a fixed name races when the same stream check
     # overlaps (two writers, one renames first, the other's tmp vanishes).
     tmp = f"{filepath}.{os.getpid()}.{threading.get_ident()}.tmp"

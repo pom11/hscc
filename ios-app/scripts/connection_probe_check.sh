@@ -42,6 +42,7 @@ real_models=(
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
   Sources/Shared/ConnectionAddressProbe.swift
   Sources/HSCC/APIError.swift
 )
@@ -51,9 +52,32 @@ fixture_dir="scripts/connection_probe_check/fixtures"
 # types must exist — the same one-file shim model_decode_check uses.
 theme_stub="scripts/model_decode_check/ThemeStub.swift"
 
-for f in "$real_monitor" "$harness" "$theme_stub" "$fixture_dir/v1_health.json"; do
+for f in "$real_monitor" "$harness" "$theme_stub" \
+         "$fixture_dir/v1_health.json" \
+         "$fixture_dir/v1_health_stale.json" \
+         "$fixture_dir/v1_health_stale_no_age.json" \
+         "$fixture_dir/v1_health_fresh_cache.json" \
+         "$fixture_dir/v1_health_inline.json"; do
   if [ ! -f "$f" ]; then echo "error: $f missing — did it get moved?" >&2; exit 1; fi
 done
+# THE CHEAP-ROUTE CONTRACT (t_67c5b0f2). /v1/health is polled every 15 s and is
+# affordable ONLY because PR #486 made it answer from a cached snapshot.
+# /v1/verify still runs the whole fleet smoke test inline — real GPU chat
+# round-trips to every serving unit — so a Fleet screen that reached for it to
+# get a "fresher" verdict would put the cost this card's parent just removed
+# back on every poll, and would be asking the wrong question (the honest answer
+# to an old verdict is "this is old", not "spend a minute to make it new").
+# Pure text, so it costs nothing and runs on every PR.
+fleet_view="Sources/HSCC/Views/FleetView.swift"
+if [ ! -f "$fleet_view" ]; then
+  echo "error: $fleet_view missing — did it get moved?" >&2; exit 1
+fi
+if grep -n -e '/v1/verify' -e 'client\.verify(' -e 'EndpointPath\.verify' "$fleet_view" >"$TMP/verify.hit"; then
+  echo "error: $fleet_view reaches for /v1/verify — the fleet health surface must" >&2
+  echo "       stay on the cached /v1/health and say how old the verdict is." >&2
+  sed 's/^/    /' "$TMP/verify.hit" >&2
+  exit 1
+fi
 # The harness must drive the REAL monitor/probe; if these markers vanish it is
 # testing a copy, which is the false-green these harnesses exist to prevent.
 if ! grep -q "ConnectionProbe.runReachabilityProbe" "$harness" ||

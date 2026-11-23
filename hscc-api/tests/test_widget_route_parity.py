@@ -166,3 +166,85 @@ def test_autodown_status_api_matches_cli(running, token, monkeypatch,
     assert cli["state_recorded"] == api["state_recorded"] == "down"
     assert cli["down_since"] is None and api["down_since"] is None
     assert {k: v for k, v in api.items() if k != "speak"} == cli
+
+
+def test_alerts_api_matches_notify_list(running, token, monkeypatch):
+    """`GET /v1/alerts` is the feed `hscc notify list` presents, row for row.
+
+    The route answers ascending by id; the CLI reverses that page so an operator
+    reads newest first. The "Needs me" widget mirrors the same newest-first order
+    and keeps only rows whose ``acked`` is false. This test pins the shared half:
+    the route and the CLI must agree on the rows and their fields before any
+    client-side filter can be trusted.
+    """
+    from hscc_daemon import alerts, notify_cli
+
+    store = running.server.ctx.hscc_dir
+    monkeypatch.setenv("HSCC_HOME", store)
+    first = alerts.post_alert(title="Example one", body="Example body one",
+                              level="info", key="fixture/one", hscc_dir=store)
+    second = alerts.post_alert(title="Example two", body="Example body two",
+                               level="action", key="fixture/two",
+                               hscc_dir=store)
+    third = alerts.post_alert(title="Example three", body="Example body three",
+                              level="critical", key="fixture/three",
+                              hscc_dir=store)
+    alerts.ack_alert(second["alert"]["id"], hscc_dir=store)
+
+    status, api = _request(running, token, "/v1/alerts?limit=100")
+    assert status == 200
+    assert [a["id"] for a in api["alerts"]] == [
+        first["alert"]["id"], second["alert"]["id"], third["alert"]["id"],
+    ]
+
+    opts, error = notify_cli.parse_notify_args(["list", "--limit", "100"])
+    assert error is None
+    status, cli = notify_cli.list_alerts(
+        {"api": f"http://{running.host}:{running.port}",
+         "since": None, "limit": 100}, hscc_dir=store)
+    assert status == 200
+    # Newest first, exactly the order a "Needs me" tile reads.
+    assert [a["id"] for a in cli["alerts"]] == [
+        third["alert"]["id"], second["alert"]["id"], first["alert"]["id"],
+    ]
+    by_id = {a["id"]: a for a in api["alerts"]}
+    for row in cli["alerts"]:
+        assert row == by_id[row["id"]]
+    assert by_id[second["alert"]["id"]]["acked"] is True
+    assert by_id[first["alert"]["id"]]["acked"] is False
+
+
+def test_merge_queue_api_matches_the_monitor_view(running, token, monkeypatch):
+    """`GET /v1/merge-queue` is `merge_queue.view()` — the monitor's own rows.
+
+    The route and `hscc kanban monitor` both call this one function; this test
+    pins the shared half: FIFO positions, states, branches and last results are
+    identical (ages are second-resolution, so the comparison drops them).
+    """
+    from hscc_daemon import merge_queue as mq
+
+    monkeypatch.setattr(mq, "load_projects", lambda path=None: [])
+    state_path = mq.state_file()
+    doc = mq.add_to_queue("alpha", 7, card="t_a", branch="wt/t_a",
+                          path=state_path)
+    doc = mq.add_to_queue("alpha", 8, card="t_b", branch="wt/t_b",
+                          path=state_path)
+    ps = mq._project_state(doc, "alpha")
+    ps["queue"].pop()
+    ps["in_flight"] = {
+        "pr": 8, "card": "t_b", "branch": "wt/t_b", "stage": "gating",
+        "enqueued_at": "2026-11-19T00:00:00+00:00", "attempts": 0}
+    ps["last"] = {"pr": 9, "card": "t_c", "branch": "wt/t_c",
+                  "result": "conflict", "at": "2026-11-19T01:00:00+00:00",
+                  "conflicted": ["shared.txt"]}
+    mq.save_state(doc, state_path)
+
+    cli = mq.view(state_path=state_path)
+    status, api = _request(running, token, "/v1/merge-queue")
+    assert status == 200
+    for row in cli["rows"] + api["rows"]:
+        row.pop("age_s", None)
+    assert api["rows"] == cli["rows"]
+    assert [r["state"] for r in api["rows"]] == ["queued", "gating", "resolve"]
+    assert api["count"] == 3 and api["queued"] == 1
+    assert "1 queued" in api["speak"]

@@ -11,10 +11,12 @@ the real checkout's config.
 """
 
 import importlib.util
+import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -236,6 +238,57 @@ def test_bootstrap_wires_the_hooks_stage():
     # A silent stage is as bad as a missing one: the warn lines are the signal
     # that the commit-time guard is INACTIVE on this machine.
     assert "INACTIVE" in body or "not armed" in body
+
+
+def test_cli_treats_skipped_as_success(tmp_path):
+    """The rc contract bootstrap keys on: skipped is not an install failure."""
+    plain = tmp_path / "runtime-plugin-dir"
+    plain.mkdir()
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "hscc-bootstrap" / "install_hooks.py"),
+         str(plain)],
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["action"] == "skipped"
+
+
+def test_bootstrap_stage_reports_skipped_as_not_applicable(tmp_path):
+    """Drive the real bootstrap stage, not just the installer.
+
+    This is the live 2.16.0 defect: skipped exited 1, so bootstrap's `elif`
+    failed and the `else` printed "git hooks install failed — … INACTIVE" even
+    though a non-git path (brew's Cellar, the runtime plugin dir) has nothing
+    to arm. The stage must report the honest skipped reason instead.
+    """
+    src = (REPO / "hscc-bootstrap" / "bootstrap.sh").read_text(encoding="utf-8")
+    start = src.index('hdr "Install: git hooks')
+    stage = src[start:src.index('hdr "Install: skills', start)]
+    script = "\n".join([
+        "set -u",
+        "DRY_RUN=false",
+        'hdr()  { echo "## $*"; }',
+        'say()  { echo "$*"; }',
+        'ok()   { echo "OK: $*"; }',
+        'warn() { echo "WARN: $*"; }',
+        'plan() { echo "PLAN: $*"; }',
+        stage,
+    ])
+    plain = tmp_path / "Cellar" / "tree"
+    plain.mkdir(parents=True)
+    env = dict(os.environ)
+    env.update({
+        "PYBIN": sys.executable,
+        "BOOT_DIR": str(REPO / "hscc-bootstrap"),
+        "REPO_ROOT": str(plain),
+        "HERMES_HOME": str(tmp_path / "hermes"),
+        "HSCC_DIR": str(tmp_path / "hscc"),
+    })
+    p = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env=env, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "WARN: git hooks not armed: not a git checkout" in p.stdout, p.stdout
+    assert "install failed" not in p.stdout, p.stdout
+    assert "INACTIVE" not in p.stdout, p.stdout
 
 
 def test_committed_hook_is_mode_100755_in_git():

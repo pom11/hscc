@@ -65,7 +65,7 @@ def test_config_defaults_are_on_with_the_stopgap_tuning():
     assert ow.CONFIG_DEFAULTS == {"enabled": True, "debounce_s": 90,
                                   "min_gap_s": 300, "poll_s": 30,
                                   "orch_map": {}, "fail_threshold": 3,
-                                  "backoff_s": 900}
+                                  "backoff_s": 900, "skip_boards": []}
 
 
 def test_config_defaults_when_file_absent(tmp_path):
@@ -647,3 +647,181 @@ def test_daemon_pid_probe_is_read_only_and_never_raises(tmp_path):
     assert ow._daemon_pid_alive(str(p)) is False
     p.write_text(str(os.getpid()))   # this process is definitely alive
     assert ow._daemon_pid_alive(str(p)) is True
+
+
+# ── THE ROOT, CHOSEN ONCE: HOME's waker vs. a decoy HSCC_DIR (t_be690204) ───
+# t_adb66608 closed this class for the watcher ledger; the two daemon-state rows
+# (orch-waker, kanban-enforce) were still in the old shape. All three sides of
+# this subject resolved the root differently: the config through
+# ``orch_waker.DEFAULT_CONFIG_PATH`` (HOME), the stream stamp through
+# ``state.STATE_DIR`` (HOME), the pid through ``daemon_ops`` (HOME) — and the
+# bootstrap doctor through ``os.environ["HSCC_DIR"]``, which ``run_doctor``
+# handed down as ``hscc_dir``. Measured on the live host at 8eb96984: with the
+# env var pointed at an empty directory the row answered "the daemon is not
+# running — nothing ticks" about a daemon that had ticked 20 s ago, and
+# ``fatal=True`` (a bootstrap-stopping RED) as soon as one pid file sat there.
+#
+# The rule is t_adb66608's, adopted verbatim: the root is the writers', and
+# HSCC_DIR is not a relocation for it. Everything below runs with HOME (hence
+# ``<tmp_path>/hscc``, conftest's redirect base) and a decoy root as DIFFERENT
+# trees, so "the reader followed the variable" and "the reader followed the
+# writer" cannot both pass the same test.
+
+
+def _decoy_root(tmp_path):
+    """A real, existing ``~/.hscc``-SHAPED root that nothing writes to.
+
+    The ``state/`` subdir is what makes it the live-host scenario rather than a
+    missing path: the relocated read succeeds, the directory exists, and it is
+    empty forever — the writers never see ``HSCC_DIR``.
+    """
+    root = tmp_path / "elsewhere" / ".hscc"
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _canonical_root_dir(tmp_path):
+    """HOME's ``~/.hscc`` for this test — conftest's documented redirect base.
+
+    Spelled from the fixture rather than from ``ow._canonical_root()`` on
+    purpose: a test that derives its expectation from the function under test
+    cannot fail.
+    """
+    return tmp_path / "hscc"
+
+
+def _seed_canonical_stamp(root, *, age_s=5, **fields):
+    """One waker stream stamp at the canonical root, in the writer's own shape."""
+    state_dir = root / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "orch_waker.json").write_text(json.dumps(
+        {"ok": True, "last_tick": NOW - age_s, **fields}))
+    return state_dir / "orch_waker.json"
+
+
+def test_the_wakers_root_reads_no_environment(tmp_path, monkeypatch):
+    """``_canonical_root()`` resolves through the writers, full stop.
+
+    Mutation-proof: make ``_canonical_root()`` honour ``HSCC_DIR`` and the row
+    reads the empty decoy — which is the live-host failure this card closes.
+    """
+    decoy = _decoy_root(tmp_path)
+    monkeypatch.setenv("HSCC_DIR", str(decoy))
+    _seed_canonical_stamp(_canonical_root_dir(tmp_path))
+
+    assert ow._canonical_root() == str(_canonical_root_dir(tmp_path))
+    assert ow._canonical_root() != str(decoy)
+
+    res = ow.doctor_check(now=NOW)             # how run_doctor calls it now
+    assert res["ok"] is True and res["fatal"] is False
+    assert "last tick 5s ago" in res["detail"]
+    assert "WARN" not in res["detail"]
+
+
+def test_a_redirect_onto_a_root_that_never_held_the_waker_reports_reality(
+        tmp_path):
+    """THE divergence this card was opened for, as a test.
+
+    A stale stamp under HOME's root and a real-but-empty root asked for by name
+    — the live-host shape. Before: "the daemon is not running — nothing ticks",
+    which is a sentence about a daemon that had ticked. Now: the row describes
+    the stamp where it actually is (stale) and names BOTH roots.
+    """
+    decoy = _decoy_root(tmp_path)
+    canon = _canonical_root_dir(tmp_path)
+    _seed_canonical_stamp(canon, age_s=100_000)
+
+    res = ow.doctor_check(now=NOW, hscc_dir=str(decoy))
+    assert res["ok"] is False and res["fatal"] is False
+    assert "stale: last tick" in res["detail"]
+    assert "not running" not in res["detail"]
+    assert res["detail"].startswith("WARN:")
+    assert str(decoy) in res["detail"] and str(canon) in res["detail"]
+
+
+def test_a_pid_at_a_root_the_waker_never_wrote_can_never_fire_the_fatal(
+        tmp_path, monkeypatch):
+    """The latent RED, made measurable — and refused.
+
+    The decoy carries a live pid and no waker artefact; HOME carries a fresh
+    stamp. Pre-fix this pairing reads ``fatal=True`` ("ENABLED but never ticked
+    while the daemon runs"), which is a RED that stops a bootstrap, about a waker
+    that ticked 5 s ago. The pid file is not the waker's artefact, so it cannot
+    certify a root: the read moves HOME, and the decoy's pid is never even
+    signalled.
+    """
+    decoy = _decoy_root(tmp_path)
+    (decoy / "daemon.pid").write_text(str(os.getpid()))    # decoy claims a live daemon
+    _seed_canonical_stamp(_canonical_root_dir(tmp_path), age_s=5)
+    probed = []
+    monkeypatch.setattr(ow.os, "kill",
+                        lambda pid, sig: probed.append(pid) or None)
+
+    res = ow.doctor_check(now=NOW, hscc_dir=str(decoy))
+    assert res["fatal"] is False
+    assert res["ok"] is True and "last tick 5s ago" in res["detail"]
+    assert "WARN" in res["detail"] and str(decoy) in res["detail"]
+    assert probed == []
+
+
+def test_a_redirect_that_owns_its_own_waker_state_is_still_obeyed(tmp_path):
+    """The guard's negative control — why t_e9b0f048's seam survives it.
+
+    A caller that threaded the SAME root through both sides wrote its config and
+    its stamp there, so that root is obeyed exactly: the decoy's own fresh stamp
+    answers, HOME's dead stamp is NOT what this row reports, and there is no
+    mismatch WARN. Make the guard fire on any redirect and this fails.
+    """
+    decoy = _decoy_root(tmp_path)
+    ow.set_enabled(True, str(decoy / "orch_waker.json"))
+    (decoy / "state" / "orch_waker.json").write_text(json.dumps(
+        {"ok": True, "last_tick": NOW - 5}))
+    _seed_canonical_stamp(_canonical_root_dir(tmp_path), age_s=100_000)
+
+    res = ow.doctor_check(now=NOW, hscc_dir=str(decoy))
+    assert "WARN" not in res["detail"]
+    assert res["ok"] is True and "last tick 5s ago" in res["detail"]
+
+
+def test_an_empty_root_everywhere_is_still_an_honest_absence(tmp_path):
+    """The other half of the reservation: nothing anywhere, so "nothing ticks"
+    is the HONEST answer and stays clean (no WARN). A guard that always warned
+    would nag every host that has never run a waker — the same cry-wolf failure
+    in the other direction."""
+    decoy = _decoy_root(tmp_path)
+    res = ow.doctor_check(now=NOW, hscc_dir=str(decoy))
+    assert res["ok"] is False and res["fatal"] is False
+    assert "not running" in res["detail"]
+    assert "WARN" not in res["detail"]
+
+
+def test_a_redirect_to_the_canonical_root_is_not_a_mismatch(tmp_path):
+    """The cry-wolf guard on the production default.
+
+    ``bootstrap.sh`` defaults ``HSCC_DIR`` to ``$HOME/.hscc``, so a caller may
+    hand the doctor the SAME root it would have picked anyway. That must be a
+    plain clean read — one comparison, no extra stat, no WARN — or every doctor
+    run on the live host would carry a warning line about a healthy host.
+    """
+    _seed_canonical_stamp(_canonical_root_dir(tmp_path), age_s=7)
+    same = ow.doctor_check(now=NOW, hscc_dir=str(_canonical_root_dir(tmp_path)))
+    plain = ow.doctor_check(now=NOW)
+    assert "WARN" not in same["detail"] and same["ok"] is True
+    assert same["detail"] == plain["detail"]
+
+
+def test_disabled_stays_reserved_for_a_config_that_says_so(tmp_path):
+    """"disabled" must still mean "the operator turned it off", never "the
+    caller read the wrong root". HOME's config says off and the redirect is onto
+    an empty root: the verdict is still ``disabled`` (so the operator's choice
+    is reported, not lost) AND the WARN still names both roots."""
+    decoy = _decoy_root(tmp_path)
+    canon = _canonical_root_dir(tmp_path)
+    canon.mkdir(parents=True, exist_ok=True)
+    ow.set_enabled(False, str(canon / "orch_waker.json"))
+
+    res = ow.doctor_check(now=NOW, hscc_dir=str(decoy))
+    assert res["ok"] is True and res["fatal"] is False
+    assert "disabled (orch_waker.enabled=false)" in res["detail"]
+    assert res["detail"].startswith("WARN:") and str(decoy) in res["detail"]
+

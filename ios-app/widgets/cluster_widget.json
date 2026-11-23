@@ -1,0 +1,31 @@
+{
+  "order": 1,
+  "bundle_order": 1,
+  "kind": "widget",
+  "surface_case": "widgetCluster",
+  "surface_raw": "widget.cluster",
+  "display_name": "Cluster Widget",
+  "icon": "square.grid.2x2",
+  "widget_type": "ClusterWidget",
+  "sources": [
+    "Sources/HSCCWidgets/ClusterWidget.swift",
+    "Sources/HSCCWidgets/ClusterWidgetMetrics.swift",
+    "Sources/HSCCWidgets/ClusterWidgetViews.swift"
+  ],
+  "coverage_ios": [
+    "declared-and-renders (`SmallClusterWidget`)",
+    "declared-and-renders (`MediumClusterWidget`)",
+    "declared-and-renders (`LargeClusterWidget`)",
+    "declared-and-renders (`InlineClusterWidget` — `4/4 up · N tok/s`)",
+    "declared-and-renders (`CircularClusterWidget` — L2 hottest-temp gauge 0–90 °C)",
+    "declared-and-renders (`RectangularClusterWidget` — `CLUSTER · N TOK/S` + four node temps)"
+  ],
+  "coverage_macos": [
+    "declared-and-renders (`SmallClusterWidget`)",
+    "declared-and-renders (`MediumClusterWidget`)",
+    "declared-and-renders (`LargeClusterWidget`)",
+    "declared-and-renders (`ExtraLargeClusterWidget`)"
+  ],
+  "coverage_source": "`ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift`",
+  "id": "cluster_widget"
+}

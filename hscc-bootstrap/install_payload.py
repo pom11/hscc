@@ -22,7 +22,9 @@ The generalises the preserve precedent that previously covered only
 ``autodown.json`` (bootstrap.sh + preserve_autodown.py).
 """
 
+import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -408,6 +410,31 @@ def hscc_dir() -> str:
     return os.environ.get("HSCC_DIR") or os.path.expanduser("~/.hscc")
 
 
+def main_profile_name(hscc_dir=None) -> str:
+    """The main orchestrator's profile name, resolved through ``main_orch``.
+
+    This module must not grow a second copy of the identity rule (audit §6
+    D-A): ``hscc-roles/main_orch.py`` stays the one resolver, and its
+    ``main_profile()`` reads the stored name (``~/.hscc/main-orchestrator.json``
+    under ``HSCC_DIR``) with its own default. Loaded by path because
+    ``hscc-roles`` is a sibling of the bootstrap dir in BOTH layouts (the repo
+    and ``<plugins>/hscc-roles``), and because the first payload pass runs
+    before anything is guaranteed to be importable.
+
+    The literal fallback cannot be reached on a complete payload (the resolver
+    ships in DEFAULT_PAYLOAD); it only keeps a half-deployed tree from crashing
+    the copy stage, and mirrors ``main_orch.DEFAULT_NAME``.
+    """
+    path = Path(__file__).resolve().parent.parent / "hscc-roles" / "main_orch.py"
+    try:
+        spec = importlib.util.spec_from_file_location("_hscc_main_orch", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.main_profile(hscc_dir=hscc_dir)
+    except (ImportError, OSError, AttributeError, TypeError):
+        return "general"
+
+
 def target_profiles_config(hscc_dir=None):
     """Read ``target_profiles`` from ``<hscc_dir>/target_profiles.json``.
 
@@ -456,17 +483,24 @@ def target_profiles_config(hscc_dir=None):
     return {"target_profiles": tuple(sorted(set(raw))), "config_error": ""}
 
 
-def _selected_profile_plugin_dirs(plugins_dir, targets):
+def _selected_profile_plugin_dirs(plugins_dir, targets, *, always=()):
     """Plugin dirs of the profile homes *targets* selects, with creation flags.
 
     ``targets``: ``None`` (legacy: only homes that already have ``plugins/``),
     ``TARGET_ALL`` (every profile home; ``plugins/`` is created when absent),
     or an iterable of profile names (only those homes; ``plugins/`` created
-    when absent). Returns a list of ``{"profile", "plugins_dir", "created"}``
-    dicts sorted by profile name — ``created`` records whether this call is
-    the one that first materialised the home's ``plugins/`` dir, which is
-    exactly the "flipped from payload-less to payload" census the bootstrap
-    diff needs (t_16eb73ab acceptance criterion).
+    when absent).
+
+    ``always`` names are selected regardless of ``targets`` — the main
+    orchestrator's home always receives the payload (t_b312580e: the config
+    can narrow the roster but never starve ``<main>``). In the legacy ``None``
+    mode an ``always`` home is also created when absent, because "always" is
+    the whole point; every other unselected home keeps the legacy skip.
+    Returns a list of ``{"profile", "plugins_dir", "created"}`` dicts sorted
+    by profile name — ``created`` records whether this call is the one that
+    first materialised the home's ``plugins/`` dir, which is exactly the
+    "flipped from payload-less to payload" census the bootstrap diff needs
+    (t_16eb73ab acceptance criterion).
 
     A profile NAME that has no home dir on disk is never fabricated here:
     selection iterates the homes that exist (ghosts have no home to write to —
@@ -482,16 +516,18 @@ def _selected_profile_plugin_dirs(plugins_dir, targets):
     allow = None
     if targets is not None and not allow_all:
         allow = set(targets)
+    must = set(always)
     out = []
     try:
         for child in sorted(profiles_dir.iterdir()):
             if not child.is_dir() or child.name.startswith("."):
                 continue
-            if allow is not None and not allow_all and child.name not in allow:
+            if (allow is not None and not allow_all and child.name not in allow
+                    and child.name not in must):
                 continue
             pdir = child / "plugins"
             existed = pdir.is_dir()
-            if not existed and targets is None:
+            if not existed and targets is None and child.name not in must:
                 continue  # legacy gate: unlisted homes never materialise
             out.append({"profile": child.name,
                         "plugins_dir": pdir,
@@ -560,6 +596,12 @@ def install_payload_profiles(
     ``drift_detected`` on the returned primary summary is True when ANY
     destination (primary or profile) flagged drift, so a caller that only
     reads the primary summary still sees profile drift.
+
+    The main orchestrator's home is ALWAYS selected (t_b312580e): the config
+    can widen or narrow the roster, but a fresh install's ``<main>`` must get
+    the cluster payload even when ``target_profiles.json`` is absent, names
+    other profiles only, or is the legacy ``[]``. The name comes from
+    :func:`main_profile_name` (``main_orch``), never a local copy.
     """
     target_error = ""
     if target_profiles is _UNSET:
@@ -586,7 +628,9 @@ def install_payload_profiles(
     primary = install_payload(repo_root, plugins_dir, payload,
                               backup=backup, ts=ts, force=force)
     profile_results = []
-    for sel in _selected_profile_plugin_dirs(plugins_dir, targets):
+    main_profile = main_profile_name(hscc_dir)
+    for sel in _selected_profile_plugin_dirs(plugins_dir, targets,
+                                             always=(main_profile,)):
         p_dir = sel["plugins_dir"]
         try:
             summary = install_payload(repo_root, p_dir, payload,
@@ -603,6 +647,44 @@ def install_payload_profiles(
     if any(r.get("drift_detected") for r in profile_results):
         primary["drift_detected"] = True
     return primary
+
+
+def install_main_payload(
+    repo_root, plugins_dir, payload, *, backup=True, ts=None, force=False,
+    hscc_dir=None,
+):
+    """Install ``payload`` into the main orchestrator's profile home only.
+
+    ``bootstrap.sh`` has to copy the payload BEFORE role provisioning (every
+    later stage runs the installed ``hscc-roles/hscc.py``), so the first pass
+    cannot reach a main profile that ``generate``/``orch-all`` create after
+    it. This is the second, targeted pass the payload stage runs once the
+    profile exists (t_b312580e: a fresh install left ``<main>`` with zero hscc
+    plugins while only ``target_profiles.json = ["*"]`` saved the live fleet).
+
+    Returns the same summary shape as :func:`install_payload` with
+    ``profile`` set. A missing main profile home is a recorded no-op — this
+    function never fabricates a profile; creation belongs to hscc-roles.
+    """
+    main = main_profile_name(hscc_dir)
+    plugins_dir = Path(plugins_dir).expanduser().resolve()
+    if plugins_dir.name != "plugins":
+        return {"skipped": True, "profile": main, "plugins_dir": str(plugins_dir),
+                "reason": "not a root layout — cannot derive a profiles sibling",
+                "installed": [], "backed_up": [], "missing": [], "drifted": [],
+                "retired": [], "drift_detected": False}
+    pdir = plugins_dir.parent / "profiles" / main / "plugins"
+    if not pdir.parent.is_dir():
+        return {"skipped": True, "profile": main, "plugins_dir": str(pdir),
+                "reason": f"main profile home {pdir.parent} does not exist yet",
+                "installed": [], "backed_up": [], "missing": [], "drifted": [],
+                "retired": [], "drift_detected": False}
+    created = not pdir.is_dir()
+    summary = install_payload(repo_root, pdir, payload,
+                              backup=backup, ts=ts, force=force)
+    summary["profile"] = main
+    summary["created"] = created
+    return summary
 
 
 # Default payload: everything the runtime needs (scope B — full sibling layout
@@ -654,16 +736,30 @@ if __name__ == "__main__":
     import json
     import sys
 
+    ap = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Copy the repo payload into the deployed plugins directory.")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="overwrite without preserving deployed files first")
+    # Operator opt-in: overwrite drifted deployed files without the
+    # preserve-and-flag ceremony (mirrors bootstrap.sh --force).
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite drifted deployed files without the flag")
+    ap.add_argument("--main-only", action="store_true",
+                    help="install into the main orchestrator's profile home "
+                         "only (the post-provisioning pass; no-op when the "
+                         "profile does not exist yet)")
+    ns = ap.parse_args()
+
     boot_dir = Path(__file__).resolve().parent
     repo_root = os.environ.get("REPO_ROOT") or str(boot_dir.parent)
     plugins_dir = os.environ.get("PLUGINS") or os.path.expanduser("~/.hermes/plugins")
-    no_backup = "--no-backup" in sys.argv
-    # Operator opt-in: overwrite drifted deployed files without the
-    # preserve-and-flag ceremony (mirrors bootstrap.sh --force).
-    force = "--force" in sys.argv
-
-    result = install_payload_profiles(repo_root, plugins_dir, DEFAULT_PAYLOAD,
-                                      backup=not no_backup, force=force)
+    if ns.main_only:
+        result = install_main_payload(repo_root, plugins_dir, DEFAULT_PAYLOAD,
+                                      backup=not ns.no_backup, force=ns.force)
+    else:
+        result = install_payload_profiles(repo_root, plugins_dir, DEFAULT_PAYLOAD,
+                                          backup=not ns.no_backup, force=ns.force)
     print(json.dumps(result, indent=2))
     # Non-zero exit when drift was flagged and not forced: bootstrap turns this
     # into a loud operator warning without failing the install (the copy and

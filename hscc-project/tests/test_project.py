@@ -22,7 +22,7 @@ from contextlib import redirect_stdout
 import pytest
 
 from flightdeck.commands import project as project_cmd
-from flightdeck.core import project_lifecycle, registry
+from flightdeck.core import project_lifecycle, registry, session_discovery
 
 
 # --------------------------------------------------------------------------- #
@@ -1103,6 +1103,138 @@ def test_chat_session_already_exists_is_idempotent(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# project chat on an interpreter that cannot host the Hermes runtime
+# --------------------------------------------------------------------------- #
+# `list_project_sessions` has ALREADY answered by the time `cmd_chat` reaches
+# `ensure_session`: an environment fault is reported as `runtime_error`, never
+# as a traceback and never as empty history (t_5fe098f9 folded the two provider
+# opens). `cmd_chat` holds that verdict one call BEFORE the site that still
+# deliberately raises it — `project_lifecycle.ensure_session` re-raises
+# `HermesRuntimeUnavailable` when no interpreter can host the runtime
+# (project_lifecycle.py:963-968, "an environment fault, never a step-shaped
+# lie"). That type subclasses RuntimeError, NOT LifecycleError, so the
+# `except project_lifecycle.LifecycleError` wrapped around the ensure cannot
+# catch it, and the operator got a traceback where `project sessions` prints an
+# honest line. Hence the short-circuit below: it runs on the verdict already in
+# hand, never after the raise. The ensure side is deliberately LEFT UN-SEAMED
+# (`session_db` stays None) — a posture that seams it hides the whole class.
+# (t_4ac8c669)
+
+class _BoomOpener:
+    """The un-seamed real opener, reporting an environment fault.
+
+    Raises exactly what `project_lifecycle._open_profile_session_db` raises when
+    this interpreter cannot import the Hermes runtime and no delegate resolves —
+    the CI text of t_cc2f23ea's case (b). The OPENER is patched, never the
+    interpreter: the verdict must not be machine-state and the leg must never
+    spawn one (`scripts/hermetic_spawn_guard.py`, t_d9f2af76). Records the
+    profile it was asked for so a case can NAME the fault site.
+    """
+
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = []
+
+    def __call__(self, profile, read_only=False, create_db=False):
+        self.calls.append(profile)
+        raise self.exc
+
+
+def _unusable_hermes_runtime(monkeypatch, tmp_path):
+    """Make BOTH Hermes-runtime sites fault, hermetically, and seal the case.
+
+      * ``HOME`` -> ``tmp_path``: no read in the path (binding store included)
+        can answer from the operator's tree — the t_cc2f23ea seal.
+      * ``session_discovery._open_profile_sdb_ro`` -> raises, so discovery
+        folds the fault into ``runtime_error`` exactly as production does.
+      * ``project_lifecycle._in_process_runtime`` -> ``(None, None, reason)``
+        and ``resolve_hermes_python`` -> None, so ``ensure_session`` takes its
+        REAL delegation branch and the real ``_remote_runtime_op`` raises the
+        real ``HermesRuntimeUnavailable``. Nothing is spawned, nothing guessed.
+
+    Returns ``(boom, ensure_calls)``. ``ensure_calls`` records whether the
+    ensure path was ENTERED at all — that is what pins a short-circuit (its
+    side effect: the work it skips) rather than only its exit code.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    boom = _BoomOpener(project_lifecycle.HermesRuntimeUnavailable(
+        "cannot import the Hermes runtime (hermes_cli/hermes_state)"))
+    monkeypatch.setattr(session_discovery, "_open_profile_sdb_ro", boom,
+                        raising=False)
+    ensure_calls = []
+
+    def _no_in_process_runtime():
+        ensure_calls.append("ensure")
+        return (None, None,
+                "ModuleNotFoundError: No module named 'hermes_cli'")
+
+    monkeypatch.setattr(project_lifecycle, "_in_process_runtime",
+                        _no_in_process_runtime)
+    monkeypatch.setattr(project_lifecycle, "resolve_hermes_python",
+                        lambda: None)
+    return boom, ensure_calls
+
+
+def test_chat_runtime_unreadable_exits_three_before_ensuring(tmp_path, capsys,
+                                                             monkeypatch):
+    """`project chat` on an unusable runtime: honest line + exit 3, no traceback.
+
+    The card's repro, on the posture the sibling cases forbid: `session_db` is
+    LEFT None so the ensure reaches the runtime. Before the fix `cmd_chat`
+    reached `ensure_session` after discovery had already said `runtime_error`
+    and `HermesRuntimeUnavailable` escaped the command as a traceback.
+    """
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    boom, ensure_calls = _unusable_hermes_runtime(monkeypatch, tmp_path)
+    seam = CaptureExec()
+    args = _ns(registry=reg, exec_seam=seam, name="hscc")  # session_db: None
+
+    rc = project_cmd.cmd_chat(args)      # must RETURN, not raise
+    err = capsys.readouterr().err
+
+    assert rc == 3, f"an env fault exits 3 like sessions/digest, got {rc}"
+    assert "cannot read session history" in err
+    assert "cannot import the Hermes runtime" in err, "name the runtime at fault"
+    assert "retry under the Hermes venv" in err, "say what to do about it"
+    assert "project chat hscc" in err, \
+        "the retry hint must name THIS project (plain stderr print, never wrapped)"
+    assert boom.calls == ["hscc-orch"], "discovery is the site that saw the fault"
+    assert ensure_calls == [], \
+        "the short-circuit must run BEFORE ensure_session, not after it raises"
+    assert seam.calls == [], "never exec hermes on an unreadable runtime"
+
+
+def test_chat_resume_runtime_unreadable_is_not_reported_as_a_bad_id(
+        tmp_path, capsys, monkeypatch):
+    """`--resume <id>` under an unusable runtime: exit 3, not "your id is wrong".
+
+    `_cmd_chat_resume` had the same shape one branch earlier: it renders an
+    UNREADABLE history as "no session '<id>' belongs to project" + exit 2,
+    which dresses a could-not-look as a data fact about the operator's id. The
+    honest verdict is the environment fault.
+    """
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    boom, _ensure_calls = _unusable_hermes_runtime(monkeypatch, tmp_path)
+    seam = CaptureExec()
+    args = _ns(registry=reg, exec_seam=seam, name="hscc",
+               resume_id="20260921_abc")
+
+    rc = project_cmd.cmd_chat(args)
+    err = capsys.readouterr().err
+
+    assert rc == 3
+    assert "cannot read session history" in err
+    assert "belongs to project" not in err, \
+        "could-not-look must never render as 'that id is a typo'"
+    assert boom.calls == ["hscc-orch"]
+    assert seam.calls == []
+
+
+# --------------------------------------------------------------------------- #
 # No-ANSI regression — converted commands must degrade to plain on a non-tty
 # --------------------------------------------------------------------------- #
 # The RICH CLI card mandated a NO-ANSI regression per converted command: with
@@ -1279,7 +1411,67 @@ class TestNoAnsiProject:
         registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
                              path=reg)
         seam = CaptureExec()
+        # `session_db` is NOT decoration: with it None, cmd_chat opens the REAL
+        # hscc-orch state.db through Hermes' own SessionDB, and on an interpreter
+        # that cannot host the runtime (CI's thin venv has no hermes_cli and no
+        # resolvable $HOME/.hermes/hermes-agent/venv) that raises
+        # HermesRuntimeUnavailable out of cmd_chat — the banner never prints and
+        # the case reddens on an interpreter fact instead of an ANSI one (the CI
+        # red on t_cc2f23ea). It is also the only way this case stops opening the
+        # operator's live profile tree, which this file's module docstring
+        # forbids outright. Note the half-seam posture is what made it look
+        # irreproducible: `_ns` already defaults `default_db` to a fake, and
+        # session_discovery skips its runtime probe when ANY seam is injected —
+        # so the probe never ran and only the un-seamed orchestrator read hit the
+        # real runtime. Every sibling chat case here injects both.
         out = _no_ansi(lambda: project_cmd.cmd_chat(
-            _ns(registry=reg, exec_seam=seam, name="hscc")))
+            _ns(registry=reg, exec_seam=seam, name="hscc",
+                session_db=_db_session("hscc"))))
         assert "project hscc -> profile hscc-orch" in out
+
+
+def test_chat_applies_the_pane_subscription_policy(tmp_path, monkeypatch):
+    """t_31c8b258: the pane door marks the orchestrator pane-backed before it
+    opens, so Hermes' auto-subscribe gate is off for a chat that is about to
+    live in tmux. Policy failure is fail-soft: the chat still opens."""
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    calls = []
+
+    def fake_policy(profile, **kw):
+        calls.append((profile, kw))
+        return {"action": "written", "changed": True}
+
+    monkeypatch.setattr(project_cmd.orch_subscribe,
+                        "apply_subscription_policy", fake_policy)
+    seam = CaptureExec()
+    rc = project_cmd.cmd_chat(
+        _ns(registry=reg, session_db=_db_session("hscc"), exec_seam=seam,
+            name="hscc"))
+    assert rc == 0
+    assert calls == [("hscc-orch", {"pane_backed": True})]
+
+
+def test_chat_resume_applies_the_pane_subscription_policy(tmp_path, monkeypatch):
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    resolved = {"profile": "hscc-orch", "session": "hscc", "board": "hscc",
+                "project": "hscc", "repo": str(tmp_path / "hscc")}
+    calls = []
+    monkeypatch.setattr(project_cmd, "_resume_argv",
+                        lambda rid, discovery: ("hscc-orch", ["hermes"]))
+    monkeypatch.setattr(project_cmd.tmux_chat, "launch_interactive_chat",
+                        lambda *a, **k: 0)
+    monkeypatch.setattr(project_cmd.orch_subscribe,
+                        "apply_subscription_policy",
+                        lambda profile, **kw: calls.append((profile, kw)) or {})
+    rc = project_cmd._cmd_chat_resume(
+        "hscc", "sess-1",
+        _ns(registry=reg, session_db=_db_session("hscc"),
+            exec_seam=CaptureExec()),
+        resolved)
+    assert rc == 0
+    assert calls == [("hscc-orch", {"pane_backed": True})]
 

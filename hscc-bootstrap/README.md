@@ -8,7 +8,10 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    cluster / Hermes / NAS / disk and explains failures in plain language; a fatal
    miss hard-stops.
 2. **Detect + Configure** — reads the cluster from `sparkrun cluster list`; picks
-   orchestrator + recipe (defaults under `--yes`); suggests a node-count template.
+   orchestrator + recipe (defaults under `--yes`), asks the ONE main
+   orchestrator name (`Main orchestrator name [general]:`, stored once in
+   `~/.hscc/main-orchestrator.json` and never changed by a re-run); suggests a
+   node-count template.
 3. **Install: plugin files** — copies the plugin tree into `~/.hermes/plugins/`
    (backup-then-overwrite; `--no-backup` to overwrite in place). Deployed files
    that differ from the payload (operator patches) are preserved to
@@ -32,6 +35,14 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    bit; `skipped`, never faked, for a non-checkout or a hookless revision).
    Non-fatal: a skipped/failed stage warns that the guard is INACTIVE.
 4. **Install: skills / role profiles / ~/.hscc + serving.json**.
+4a. **Install: main orchestrator board** — creates the board named by the
+   stored main-orchestrator identity (default `general`) and makes it the
+   kanban **current** board, so cards created without an explicit `board=` land
+   there instead of on whichever project board was switched to last.
+   `hermes kanban boards create` is idempotent and the switch is the same
+   pointer write the CLI makes; the legacy `default` board keeps its cards.
+   The doctor row kanban current board (main orchestrator) warns (never
+   fatal) on drift with the one-line `hermes kanban boards switch <name>` fix.
 4b. **Install: snap firmware-notifier mask (log-churn quarantine)** —
    `install_notifier_mask.py` masks snap firmware-updater's crash-looping desktop
    notifier **and the timer that starts it** for the desktop user on every
@@ -43,8 +54,9 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    Unprivileged by construction — the mask lives in the user's own
    `~/.config/systemd/user/` and there is no `sudo` in the module or the
    generated script. Idempotent (already-masked → no-op, zero new `systemctl`
-   calls), `--dry-run` plans without writing, and every mask is confirmed by
-   reading the state back from the node. **The firmware-updater snap itself is
+   calls), the default is a read-only plan (`--dry-run` names it explicitly),
+   only `--apply` writes, and every mask is confirmed by reading the state back
+   from the node. **The firmware-updater snap itself is
    untouched** — `fwupd` updates stay wanted and operator-run. Non-fatal
    (`--skip-node-recovery` to opt out of the node-recovery stages;
    `node_recovery: {firmware_notifier_mask: false}` in `~/.hscc/cluster.json`
@@ -62,7 +74,8 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    SM clock at or under the cap). Set the value with
    `node_recovery: {gpu_clock_cap_mhz: 1900}` or turn it off with `false` in
    `~/.hscc/cluster.json` (off does not remove an installed cap — run
-   `install_gpu_clock_cap.py --uninstall --hosts ...`). Doctor check:
+   `install_gpu_clock_cap.py --uninstall --apply --hosts ...`). The default is
+   a read-only plan; only `--apply` writes. Doctor check:
    `GPU clock cap (node-recovery)`.
 5. **Install: hermes/sparkrun patches** — reapplies the curated upstream patches
    (`apply_patches.py`) so the kanban review + resume hooks land on official
@@ -81,12 +94,15 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    With the service loaded that restart goes through the supervisor — `launchctl
    kickstart -k` on macOS, `systemctl --user restart` on Linux — the only restart
    that keeps the service's interpreter and supervisor, and the PID is verified
-   from the supervisor itself; a failed restart warns, never aborts.
+   from the supervisor itself; a failed restart warns, never aborts. The daemon
+   also owns the main orchestrator's four default wake-ups (health / sweep /
+   memory / settings), delivered through `hscc orch inject --mode auto` into the
+   same running session; list and edit them with `hscc main wakeups`.
 
 ## Files
 | File | Role |
 |------|------|
-| `bootstrap.sh` | the orchestrator script |
+| `bootstrap.sh` | the installer script |
 | `doctor.py` | preflight checks; the feature rows it runs come from its `FEATURE_CHECK_ROWS` registry (one entry per row), not from code in `run_doctor()` |
 | `doctor_rows.py` | the machinery behind that registry: a `FeatureCheckRow` record (key, seam keyword, the hooks that build its verdict, the per-row context it reads), the shared five-field `Check` adapter, and `render_rows()` which resolves each hook on the doctor module **per call** so the row suites can patch them. Adding a doctor row = one entry in `doctor.py::FEATURE_CHECK_ROWS`; see `docs/design/doctor-row-registry-t_32a06db9.md` |
 | `doctor_node_recovery.py` | the doctor's per-node node-recovery check (watchdog armed + panic sysctls in sync), read-only over sparkrun ssh; reuses `hscc-cluster/node_recovery.py` + `install_autoreboot.py` as its single source of truth |

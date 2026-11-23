@@ -4,11 +4,14 @@ Source of truth for https://pom11.github.io/hscc/ . The frontend card renders th
 seven sections below **in this order, verbatim**. Do not reword claims, add
 numbers, or add adjectives in the page — if the copy is wrong, fix it here.
 
-Every claim below was checked against the real thing on 2026-11-18: the
-installed CLI (`hscc` 2.15.11, `hscc --help` and `hscc help <group>`), the real
-template registry (`hscc template list`), and the real widget sources
+Every claim below was checked against the real thing on 2026-11-20: the
+installed CLI (`hscc` 2.16.0, `hscc --help` and `hscc help <group>`), the real
+template registry (`hscc template list`), the real widget sources
 (`ios-app/Sources/HSCCWidgets/`, `ios-app/docs/WIDGET_COVERAGE.md`,
-`macos-app/README.md`). Nothing here is a benchmark, a customer, or a forecast.
+`macos-app/README.md`), and the two design contracts the apps ship against
+(`docs/design/2026-11-20-widget-redesign.md` and
+`docs/design/2026-11-19-main-orchestrator-design.md`). Nothing here is a
+benchmark, a customer, or a forecast.
 
 ---
 
@@ -37,8 +40,15 @@ You watch all of it from your phone or your Mac, without opening a terminal.
 - **Agents work on task boards you can actually read.** Orchestrator agents take
   a goal, split it into cards, and workers pick the cards up — with a review
   step before anything lands.
-- **You see everything from your phone or Mac.** Six widgets, Live Activities,
-  and a menu-bar tile — no laptop required.
+- **One agent runs the whole show.** Bootstrap creates one main orchestrator,
+  named `general` unless you pick another name. It knows every project and the
+  cluster, watches the boards, steers the other orchestrators, and does
+  everything except a LIVE publish.
+- **Green PRs merge in order, not all at once.** The local merge queue rebases
+  each one onto the latest main, runs the project's gates, and merges it. It is
+  on by default for GitHub projects that declare gates.
+- **You see everything from your phone or Mac.** Five widgets, Lock Screen
+  gauges, one Live Activity, and a menu-bar app — no laptop required.
 
 ## 3. What it does
 
@@ -49,11 +59,23 @@ You watch all of it from your phone or your Mac, without opening a terminal.
 - 🔁 **Heals what it can** — restarts a dead model on its own, and speaks up when
   it can't.
 - 💤 **Saves power when idle** — puts the GPU serving layer to sleep after a
-  quiet period and wakes it when work arrives.
+  quiet period once you turn autodown on, and wakes it when work arrives.
+- ⏸️ **Parks one machine when you need it** — `hscc node pause <host>` frees a
+  machine for a training run without editing a template or the serving config:
+  you confirm the plan it prints before anything stops, the pause is a durable
+  record the heal, wake and fleet-up paths honour, and the widgets, the CLI and
+  the API all show it as `paused (reason, since)`. `--until 2h` gives the
+  machine back by itself.
 - 📋 **Runs agents on boards** — cards for todo / ready / running / blocked /
   done, per project, with a standup digest.
-- 📱 **Shows it on your devices** — the same state as widgets on iOS and macOS,
-  plus live tiles on the Lock Screen and Dynamic Island.
+- 🧭 **Keeps one agent in charge** — the main orchestrator, `general` by
+  default, wakes on a schedule, checks every board and pane, and does everything
+  except a LIVE publish, which asks you first.
+- 🔀 **Merges green PRs in order** — one local queue rebases, gates and
+  squash-merges one PR at a time; `hscc merge-queue status` shows the queue.
+- 📱 **Shows it on your devices** — five widgets on iOS and macOS, Lock Screen
+  gauges, one Live Activity, and a CarPlay screen. There are no push
+  notifications to configure.
 
 ## 4. Templates
 
@@ -102,10 +124,14 @@ Which model each template serves lives in the template itself — check
 The whole tool is one command, `hscc`. This is every command group, in the order
 the tool lists them.
 
-<!-- COMMANDS:BEGIN — generated from `hscc --help` (hscc 2.15.11) plus
+<!-- COMMANDS:BEGIN — generated from `hscc --help` (repo VERSION) plus
      `hscc help <group>` for the groups that take subcommands. Format contract
      for the drift test: one bullet per top-level command, in `hscc --help`
-     order, as `- `hscc <cmd>` — plain one-line explanation`. Keep the markers. -->
+     order, as `- `hscc <cmd>` — plain one-line explanation`. Keep the markers.
+     The wording is the card's; the arguments are not — every option and
+     placeholder inside `hscc ...` has to be one `hscc --help` publishes for
+     that command, and scripts/gen_site_commands.py refuses to render a page
+     that advertises one the CLI does not take. -->
 
 ### Daemon control
 
@@ -119,11 +145,13 @@ The background watcher that does the checking and the healing.
 - `hscc uninstall` — remove that auto-start and stop the watcher.
 - `hscc plist` — print the auto-start config without installing it.
 - `hscc log` — read what the watcher has been saying.
+- `hscc start-daemon` — run the watcher loop in the foreground yourself
+  (normally launchd runs it).
 
 ### Health & monitoring
 
 - `hscc check` — run the health checks now instead of waiting, or just one
-  stream (machines, gateway, local, heartbeat, storage, watchdog, triggers).
+  stream (dgx, gateway, local, heartbeat, nas, watchdog, triggers).
 - `hscc check --repo <path>` — is a given checkout still protected by the
   commit-time leak guard? Says so plainly when it isn't.
 - `hscc watch` — follow the check results live.
@@ -136,6 +164,10 @@ The background watcher that does the checking and the healing.
   it.
 - `hscc escalate` — which failures are waiting for a human, without touching
   them.
+- `hscc heal-clear <node>` — clear one machine's heal-breaker strikes; this
+  mutates the ledger, and `--help` clears nothing. Not the `/heal` chat command.
+- `hscc heal-status` — list the heal-breaker strikes per machine, read-only.
+  Not the `/heal` chat command, which restarts unhealthy workers instead.
 
 ### Cluster & templates
 
@@ -159,23 +191,45 @@ The background watcher that does the checking and the healing.
 - `hscc profiles` — how many cards each agent role is holding.
 - `hscc project …` — mission control for several projects at once: standup,
   decompose, review, qa, verify, doctor, metrics and more.
-- `hscc api start` — the read-only HTTP API your phone and Mac read from; prints
-  the pairing QR code (`stop` / `status` too).
-- `hscc autodown` — the idle sleep/wake for the GPU layer: `status`, `enable`,
-  `disable`, `wake`, `cancel`.
+- `hscc api start` — the read-only HTTP API your phone, Mac and CarPlay screen
+  read from; prints the pairing QR code (`stop` / `status` too).
+- `hscc autodown` — the idle sleep/wake for the GPU layer, off until you enable
+  it: `status`, `enable`, `disable`, `wake`, `cancel`.
 - `hscc kanban` — board hygiene: blocked cards (list and recover), stale cards
   (list and archive), and a live board monitor.
+- `hscc merge-queue` — the local queue of green PRs, on by default for GitHub
+  projects with gates: `status`, `list`, `add`, `remove`, `pause`, `resume`,
+  `enable`, `disable`.
 - `hscc cards monitor` — one live panel per running card, streaming what its
   worker is doing.
-- `hscc orch inject` — send a message into a running agent's session.
+- `hscc main` — the main orchestrator (`general` by default): bring its pane up,
+  see whether it is busy, and edit the wake-up schedule the watcher fires into
+  it.
+- `hscc orch inject` — type a message into a running agent's live pane. (Three
+  other things share the "orch" name and are not this: the `orch_message`
+  agent tool, the `/orch-restart` chat command, `/v1/orchestrator/chat`.)
 - `hscc orch waker` — the built-in orchestrator waker: `status`, `enable`,
   `disable`.
+- `hscc node pause <host>` — park one machine and only that machine. It prints
+  the plan — the host, every model it would stop, the reason, the deadline —
+  then asks `Pause <host> and stop these N model(s)? [y/N]`: only `y` proceeds,
+  Enter or `n` records nothing, `--yes` answers it for a script (without it a
+  run with no terminal refuses), and `--dry-run` previews without asking. It
+  refuses, recording nothing, when a model on the machine also runs on other
+  machines — naming that model and its peers — or when the machine runs no
+  models at all. `--force` is only for the guard on the machine your
+  orchestrator model runs on. `hscc node resume <host>` confirms the same way
+  and starts the recorded models back up; `hscc node paused` lists what is
+  parked, read-only.
 
 ### Utility
 
-- `hscc notify "message"` — send a desktop notification.
+- `hscc notify "<title>" "<body>"` — post an alert to the feed (`--level`,
+  `--key`); `hscc notify list` reads it newest first (`--since`, `--limit`,
+  `--json`) and `hscc notify ack` marks one seen. The feed is what the Needs Me
+  widget shows; hscc sends no push notifications.
 - `hscc bootstrap` — the installer, runnable from a repo checkout, a plugin tree
-  or a Homebrew install.
+  or a Homebrew install; it creates the main orchestrator and its board.
 - `hscc update --check` — ask GitHub whether a newer release exists. Reads only;
   it never installs anything.
 
@@ -183,27 +237,43 @@ The background watcher that does the checking and the healing.
 
 ## 6. How it looks
 
-Six widgets, the same six on iPhone and on the Mac desktop, so the cluster is a
-glance instead of a login:
+Five widgets — Cluster, Boards, Running, Needs Me and Merge Queue — the same
+five on iPhone and on the Mac desktop, in a Native look: system colours, SF Pro
+Rounded numbers, and colour used only for state.
 
-- **Cluster** — is it serving, waking up, or down, with a small map of the
-  machines and how long before an idle cluster goes to sleep.
-- **Monitor** — CPU, memory and GPU per machine.
-- **Running cards** — the jobs being worked right now, who is doing them, and
-  for how long.
-- **Kanban monitor** — running, ready and blocked at a glance.
-- **Board status** — todo / ready / running / blocked / done for one board you
-  pick.
-- **Projects** — your projects and the board each one owns.
+- **Cluster** — is it serving, waking up, or down, with throughput and a row per
+  machine showing load and temperature.
+- **Boards** — open cards per board as stacked bars (running, todo, blocked),
+  with the worker-slot cap and cards done today.
+- **Running** — the longest-running card, its elapsed time and a heartbeat, then
+  the other cards being worked right now.
+- **Needs Me** — what is waiting for you from the alert feed, and a calm "All
+  clear" when nothing is. It says "All clear" only when the last check actually
+  succeeded; a failed check shows offline instead.
+- **Merge Queue** — the PR at the front of the local merge queue, its stage
+  (rebase, gates, push, merge), what is waiting behind it, and the last result.
+- **Lock Screen** — all five also have gauge layouts for the Lock Screen, so a
+  glance shows the hottest node, worker slots, the longest run, what needs you,
+  or the merge queue.
 
-**Live Activities** put the same information on the Lock Screen and the Dynamic
-Island while something is happening: the cluster waking, models serving, cards
-running, a board making progress, or the fleet's overall health.
+**One Live Activity: Cluster watch.** It puts the cluster's serving state on the
+Lock Screen and in the Dynamic Island: four node columns with temperature and
+load, throughput, the daemon state and whether autodown is off. It starts from
+the app's Cluster screen and ends after 8 hours or when you stop it.
 
-**You can restyle it.** One global style for every widget and Live Activity, or
-a different one per tile — colour (including a transparent background), font,
-weight, text size, density, and whether the header and icons show. Presets get
-you most of the way there, and everything has a live preview.
+**A CarPlay screen** shows cluster health, boards, running work, what needs you
+and the merge queue on the car display. It runs in Apple's CarPlay simulator
+today; shipping it on the road needs Apple's CarPlay entitlement, which hscc
+does not have yet.
+
+**Fresher widgets on the Mac.** iPhone widgets refresh about every 30 minutes,
+the most often iOS allows, and whenever you open the app. On the Mac, the
+menu-bar app can refresh the desktop widgets every 1, 2, 5 or 15 minutes while
+it runs (Settings → Desktop Widgets). Every widget shows how old its data is.
+
+**No push notifications.** hscc does not ask for notification permission and
+sends nothing to your phone. The Needs Me widget is the at-a-glance view, and
+`hscc notify list` is the full alert feed on the command line.
 
 ## 7. Get it
 

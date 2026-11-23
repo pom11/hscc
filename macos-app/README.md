@@ -2,7 +2,7 @@
 
 Menu-bar-only macOS client for the same HSCC API the iOS app reads. Part 1 is
 the XcodeGen project, the menu bar app and Settings. Part 2 (t_1143c19b) adds
-`HSCCMacWidgets`, a WidgetKit extension that puts the same six widgets on the
+`HSCCMacWidgets`, a WidgetKit extension that puts the same seven widgets on the
 desktop and in Notification Center. Both targets join the iOS app's App Group.
 Part 3 installs the app with Homebrew (cask) and publishes signed, notarized
 releases.
@@ -18,7 +18,7 @@ Sonoma (14) or newer, and upgrades with `brew upgrade --cask hscc-widgets`.
 
 **Add the desktop widgets:** right-click an empty part of the desktop →
 **Edit Widgets** (or click the widget gallery at the bottom of Notification
-Center), search for **HSCC**, then drag any of the six widgets onto the desktop.
+Center), search for **HSCC**, then drag any of the seven widgets onto the desktop.
 The first launch may ask for permission to open the app; after that the tiles
 read the clusters saved in the app.
 
@@ -47,8 +47,8 @@ running-card count or nodes-up/total.
 ## Desktop widgets
 
 The `HSCCMacWidgets` extension compiles the iOS widget sources **by path** from
-`ios-app/Sources/HSCCWidgets`: the same six widgets, providers, configuration
-intents and views. There is no macOS copy to drift. All six offer
+`ios-app/Sources/HSCCWidgets`: the same seven widgets, providers, configuration
+intents and views. There is no macOS copy to drift. All seven offer
 `systemSmall`/`systemMedium`/`systemLarge`; Cluster and Monitor also offer
 `systemExtraLarge`. The accessory families are iOS-only and are guarded with
 `#if os(iOS)` inside the shared files.
@@ -72,6 +72,11 @@ no new backend routes.
 - running cards from `/v1/kanban/running` (title, worker, age);
 - board totals from `/v1/mobile/summary` (todo/ready/running/blocked/done);
 - projects from `/v1/projects`.
+
+The menu bar app carries no notifications: it polls no alert feed and asks for
+no notification permission (operator decision 2026-11-19). The cluster alert
+feed remains a backend feature that neither app surfaces; there is no APNs
+sender and no device registration, so there is nothing to configure.
 
 `/v1/cluster/monitor` exposes no tokens-per-second field in the shared model,
 so the app does not invent one.
@@ -154,10 +159,30 @@ keychain and only the public key is in Info.plist (`SUPublicEDKey`).
 ## Gates
 
 ```sh
-macos-app/scripts/build_check.sh       # both targets, per-target swiftc, 0/0 required
-macos-app/scripts/actool_icon_check.sh # asset catalog + AppIcon resolve
-macos-app/scripts/make_appicon.sh      # regenerate PNGs from ios-app masters
+macos-app/scripts/build_check.sh         # both targets, per-target swiftc, 0/0 required
+macos-app/scripts/widget_parity_check.sh # HSCCMacWidgets' shared sources and family list
+                                         # equal the iOS widget target's, by path,
+                                         # for every tile incl. the graph — plus the
+                                         # graph marks the menu bar app compiles
+macos-app/scripts/actool_icon_check.sh   # asset catalog + AppIcon resolve
+macos-app/scripts/make_appicon.sh        # regenerate PNGs from ios-app masters
 ```
+
+`HSCCMacWidgets` compiles the widget sources out of `../ios-app/Sources/…` by
+path — there is no second copy to keep in sync, and equally no compiler complaint
+when one project lists a file the other forgot. `widget_parity_check.sh` is what
+makes that agreement measured instead of assumed: the two shared-source lists
+must be equal, every listed path must exist, and all four desktop families
+(small, medium, large, extra-large) must be declared and dispatched — for the
+table tiles with an extra-large view of its own (an extra-large arm that reuses
+the large view is the failure that silently drops the six fields only the CLI's
+widest table prints), and for the graph tile with the family handed into the
+panel layout, which is the number that size reads its own density from. The gate
+also refuses a spec where the menu bar app stops compiling the graph marks the
+dropdown draws: those files belong to the widget extension, so the dropdown can
+lose its charts and both build gates stay green, because the widget target
+compiles the same paths either way. It runs in
+CI as the "macOS widget parity gate" step of `app-build-checks.yml`.
 
 The app icon is generated from `ios-app/assets-master/appicon-*.svg`; do not
 hand-drop PNGs. The menu bar mark is `MenuBarIcon.imageset/menubar-h.svg`, a

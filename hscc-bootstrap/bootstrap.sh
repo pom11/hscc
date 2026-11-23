@@ -66,7 +66,7 @@ for a in "$@"; do case "$a" in
   --skip-patches) SKIP_PATCHES=true ;;
   --skip-cli) SKIP_CLI=true ;;
   --skip-node-recovery) SKIP_NODE_RECOVERY=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, ~/.hscc state + serving.json, plugins payload, node hardware watchdog, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node (panic-to-reboot sysctls, hardware watchdog; the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; exit 0 ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, main orchestrator board, ~/.hscc state + serving.json, plugins payload, node hardware watchdog, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node (panic-to-reboot sysctls, hardware watchdog; the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -76,6 +76,93 @@ warn() { echo "  ⚠ $1"; }
 die()  { echo "  ✗ $1" >&2; exit 1; }
 hdr()  { echo; echo "━━━ $1 ━━━"; }
 plan() { echo "  → plan: $1"; }
+
+# ── main orchestrator name (t_c6eccd49) ─────────────────────────────────────
+# ONE name, stored once in ~/.hscc/main-orchestrator.json and resolved by
+# hscc-roles/main_orch.py everywhere. Re-running bootstrap NEVER changes a
+# stored name; the question is asked only when none is stored. Tests extract
+# this function verbatim (keep it self-contained: BOOT_DIR, PYBIN, HSCC_DIR,
+# HERMES_HOME, ASSUME_YES, DRY_RUN, say/ok/warn/plan/die).
+ask_main_orch_name() {
+  local _helper _stored _name _in _why
+  _helper="$BOOT_DIR/../hscc-roles/main_orch.py"
+  _stored="$(HSCC_DIR="$HSCC_DIR" HERMES_HOME="${HERMES_HOME:-}" \
+    "$PYBIN" "$_helper" stored 2>/dev/null || true)"
+  if [ -n "$_stored" ]; then
+    MAIN_ORCH_NAME="$_stored"
+    ok "main orchestrator: $MAIN_ORCH_NAME (stored)"
+    return 0
+  fi
+  _name="general"
+  if ! $ASSUME_YES; then
+    while :; do
+      read -rp "  Main orchestrator name [general]: " _in || _in=""
+      [ -n "${_in:-}" ] && _name="$_in"
+      if _why="$(HSCC_DIR="$HSCC_DIR" HERMES_HOME="${HERMES_HOME:-}" \
+          "$PYBIN" "$_helper" validate "$_name" 2>&1)"; then
+        break
+      fi
+      warn "invalid main orchestrator name: $_why"
+      _name="general"
+    done
+  fi
+  _why="$(HSCC_DIR="$HSCC_DIR" HERMES_HOME="${HERMES_HOME:-}" \
+    "$PYBIN" "$_helper" validate "$_name" 2>&1)" \
+    || die "invalid main orchestrator name: $_why"
+  MAIN_ORCH_NAME="$_name"
+  if $DRY_RUN; then
+    plan "write $HSCC_DIR/main-orchestrator.json (main orchestrator name=$MAIN_ORCH_NAME)"
+  else
+    _stored="$(HSCC_DIR="$HSCC_DIR" HERMES_HOME="${HERMES_HOME:-}" \
+      "$PYBIN" "$_helper" store "$MAIN_ORCH_NAME" 2>&1)" \
+      || die "could not store main orchestrator name: $_stored"
+    ok "main orchestrator: $MAIN_ORCH_NAME"
+  fi
+}
+
+# ── main orchestrator pane (M4, t_d6dee427) ────────────────────────────────
+# `hscc main start` ensures exactly one tmux pane runs the main orchestrator's
+# REPL (window named after the profile; a running pane is reused; no other
+# pane/window is ever killed). Bootstrap never starts a tmux server itself: with
+# no server it prints how to start the pane later. Self-contained for tests
+# (PYBIN, PLUGINS, HSCC_DIR, HERMES_HOME, DRY_RUN, SKIP_ROLES, MAIN_ORCH_NAME,
+# say/ok/warn/plan).
+start_main_orchestrator() {
+  local _name _hscc _out _rc
+  _name="${MAIN_ORCH_NAME:-general}"
+  if $SKIP_ROLES; then
+    warn "main orchestrator pane: skipped (--skip-roles)"
+    return 0
+  fi
+  if $DRY_RUN; then
+    plan "main orchestrator pane: hscc main start (one tmux pane; window named $_name; reuses a running pane)"
+    return 0
+  fi
+  if ! command -v tmux >/dev/null 2>&1 || ! tmux list-sessions >/dev/null 2>&1; then
+    warn "main orchestrator pane: no tmux server — start it later: hscc main start"
+    say "  (hscc main start creates a detached tmux session named $_name)"
+    return 0
+  fi
+  _hscc="$(dirname "$PYBIN")/hscc"
+  if [ -x "$_hscc" ]; then
+    _out=$(HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
+      "$_hscc" main start 2>&1)
+  elif command -v hscc >/dev/null 2>&1; then
+    _out=$(HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
+      hscc main start 2>&1)
+  else
+    _out=$(PYTHONPATH="$PLUGINS${PYTHONPATH:+:$PYTHONPATH}" \
+      HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
+      "$PYBIN" -m hscc_daemon.hscc main start 2>&1)
+  fi
+  _rc=$?
+  if [ $_rc -eq 0 ]; then
+    ok "main orchestrator pane: $_out"
+  else
+    warn "main orchestrator pane not started: $_out"
+    warn "  fix: hscc main start"
+  fi
+}
 
 # ── brew libexec detection (t_bc5a3fee) ─────────────────────────────────────
 # The brew tap (homebrew-hscc) extracts the release tarball under
@@ -134,6 +221,10 @@ if ! $ASSUME_YES && [ "${#HOST_ARR[@]}" -gt 1 ]; then
 fi
 ok "orchestrator: $ORCH"
 
+# Main orchestrator name: asked once (only when none is stored), persisted in
+# ~/.hscc. --yes takes the stored name or "general"; --dry-run only plans.
+ask_main_orch_name
+
 # recipe: sole recipe auto, else pick.
 # (read loop, not mapfile — macOS ships Bash 3.2 which lacks mapfile.)
 RECIPES=()
@@ -185,7 +276,7 @@ else
   # swallowed. rc 3 is NOT a failure: the install succeeded and drifted operator
   # files were preserved + reported — it must surface as a loud warning.
   COPY_RC=0
-  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG) || COPY_RC=$?
+  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" HSCC_DIR="$HSCC_DIR" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG) || COPY_RC=$?
   if [ "$COPY_RC" -eq 0 ]; then
     ok "plugin files copied → $PLUGINS$($NO_BACKUP && echo ' (no backup)')"
   elif [ "$COPY_RC" -eq 3 ]; then
@@ -212,6 +303,21 @@ if len(paths) > 20:
     echo "$COPY" >&2
     die "plugin copy FAILED — aborting (later stages depend on $PLUGINS being populated)"
   fi
+fi
+
+hdr "Install: memori SDK in Hermes environments (memory provider)"
+# Hermes runs from package-manager environments under $HERMES_HOME/installs that
+# never carry the memori SDK, so the memori_byodb memory provider failed to start
+# in every profile (t_4b0e7956). ensure_memori_sdk.py installs it, --no-deps and
+# pinned, wherever it is missing; a Hermes update that rebuilds an environment is
+# repaired by the next bootstrap. A failure only warns: memory is degraded, the
+# rest of the install is not.
+if $DRY_RUN; then
+  plan "memori SDK: $PYBIN $BOOT_DIR/ensure_memori_sdk.py --apply (uv pip install --no-deps into each $HERMES_HOME/installs/*/environments/*/venv missing it)"
+elif MEM_JSON=$(HERMES_HOME="$HERMES_HOME" "$PYBIN" "$BOOT_DIR/ensure_memori_sdk.py" --apply 2>&1); then
+  ok "memori SDK present in every Hermes environment"
+else
+  warn "memori SDK install failed in some Hermes environment — memory provider stays down there: $MEM_JSON"
 fi
 
 hdr "Install: hscc CLI entry point (into the Hermes venv)"
@@ -335,6 +441,74 @@ if $SKIP_ROLES; then warn "skipped"; else
   fi
 fi
 
+# The payload stage above runs BEFORE profile provisioning (generate/orch-all
+# execute the installed hscc-roles), so on a fresh host the main profile does
+# not exist yet and cannot receive the payload — QA t_035b1b0b measured
+# `<main>` registering ZERO hscc plugins on a fresh install, saved only by
+# target_profiles.json=["*"] on the live fleet. install_payload.py now always
+# includes <main> in the resolved roster; this targeted second pass delivers it
+# once the profile exists (t_b312580e). No backup: the first pass already
+# backed up anything that differed, and this pass copies that same payload.
+hdr "Install: main orchestrator plugin payload"
+if $SKIP_ROLES; then warn "skipped"
+elif $DRY_RUN; then plan "main orchestrator payload: install_payload.py --main-only --no-backup → $HERMES_HOME/profiles/${MAIN_ORCH_NAME:-general}/plugins"
+elif [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
+  warn "repo is the runtime dir ($PLUGINS) — skipping plugin copy (in-place layout)"
+else
+  MAIN_COPY_FLAG="--main-only --no-backup"
+  $FORCE && MAIN_COPY_FLAG="$MAIN_COPY_FLAG --force"
+  MAIN_COPY_RC=0
+  MAIN_COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" HSCC_DIR="$HSCC_DIR" "$PYBIN" "$BOOT_DIR/install_payload.py" $MAIN_COPY_FLAG 2>&1) || MAIN_COPY_RC=$?
+  if [ "$MAIN_COPY_RC" -eq 0 ]; then
+    ok "main orchestrator plugin payload → $HERMES_HOME/profiles/${MAIN_ORCH_NAME:-general}/plugins"
+  elif [ "$MAIN_COPY_RC" -eq 3 ]; then
+    ok "main orchestrator plugin payload → $HERMES_HOME/profiles/${MAIN_ORCH_NAME:-general}/plugins"
+    warn "main orchestrator payload reported drift (same-pass copy; first-pass backup holds operator files)"
+  else
+    echo "$MAIN_COPY" >&2
+    die "main orchestrator plugin payload FAILED — <main> would have no hscc plugins"
+  fi
+fi
+
+# The main orchestrator's board (M3, t_7b55db57): create it by the stored name
+# (default `general`) and make it the kanban CURRENT board, so cards created
+# without an explicit board= land there instead of on whichever project board
+# was switched to last. `boards create` is idempotent; `boards switch` is the
+# same pointer write the CLI makes. The legacy `default` board keeps its cards.
+# Runs after profile provisioning so the name is stored and its board can share
+# the identity. Non-fatal: a failed board stage warns with the one-line fix.
+#
+# FAIL-CLOSED ORDER (t_abe94f61, t_6f4895aa): main_board.ensure refuses when the
+# kanban root Hermes would resolve is outside the target HERMES_HOME (a stale
+# HERMES_KANBAN_HOME, or a home inside the native ~/.hermes that resolves back
+# to live state), and it DEFERS while that home has no config.yaml. The deferral
+# is deliberate: driving the CLI here initialises the home first (SOUL, logs,
+# board — config.yaml on a first-run init), so the wiring stage below can no
+# longer tell a genuinely fresh machine from a re-install. Start Hermes once,
+# then re-run bootstrap.
+hdr "Install: main orchestrator board"
+if $DRY_RUN; then
+  plan "main orchestrator board: $PYBIN $BOOT_DIR/main_board.py ensure (hermes kanban boards create + switch; writes $HERMES_HOME/kanban; the default board keeps its cards; deferred until Hermes has initialised the home)"
+elif BOARD_JSON=$(HERMES_HOME="${HERMES_HOME:-}" HSCC_DIR="$HSCC_DIR" \
+    "$PYBIN" "$BOOT_DIR/main_board.py" ensure 2>&1); then
+  BOARD_NAME=$(printf '%s' "$BOARD_JSON" | "$PYBIN" -c \
+    'import json,sys;print(json.load(sys.stdin)["board"])' 2>/dev/null || echo "?")
+  ok "main orchestrator board: $BOARD_NAME (current; created if missing)"
+else
+  BOARD_ERR=$(printf '%s' "$BOARD_JSON" | "$PYBIN" -c \
+    'import json,sys;print(json.load(sys.stdin).get("detail") or "?")' 2>/dev/null \
+    || printf '%s' "$BOARD_JSON")
+  BOARD_ACTION=$(printf '%s' "$BOARD_JSON" | "$PYBIN" -c \
+    'import json,sys;print(json.load(sys.stdin).get("action") or "")' 2>/dev/null \
+    || true)
+  warn "main orchestrator board not ensured: $BOARD_ERR"
+  if [ "$BOARD_ACTION" = "hermes-not-started" ]; then
+    warn "  fix: start Hermes once (it creates $HERMES_HOME/config.yaml), then re-run hscc-bootstrap"
+  else
+    warn "  fix: hermes kanban boards create ${MAIN_ORCH_NAME:-general} --switch"
+  fi
+fi
+
 # Guarded review-skill fan-out (t_bc611809): the dispatcher force-injects
 # sdlc-review for review-lane spawns for ANY assignee, so every reviewer-capable
 # profile must resolve it exactly once. install_review_skill.py is collision-
@@ -453,10 +627,10 @@ hdr "Install: snap firmware-notifier mask (log-churn quarantine)"
 if $SKIP_NODE_RECOVERY || [ -n "${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:-}" ]; then
   warn "skipped (--skip-node-recovery${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:+ / HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY})"
 elif $DRY_RUN; then
-  plan "snap firmware-notifier mask: install_notifier_mask.py --hosts $HOSTS_CSV --dry-run --bootstrap-lines (masks 2 user units per node, read-back verified; writes NOTHING in dry-run; the firmware-updater snap itself untouched)"
+  plan "snap firmware-notifier mask: install_notifier_mask.py --apply --hosts $HOSTS_CSV --bootstrap-lines (masks 2 user units per node, read-back verified; the live run needs --apply, without it the module writes NOTHING; the firmware-updater snap itself untouched)"
 elif [ ! -f "$BOOT_DIR/install_notifier_mask.py" ]; then
   warn "install_notifier_mask.py missing from $BOOT_DIR — the notifier restart loop keeps running (see hscc-bootstrap/README.md)"
-elif NM_RC=0; NM_OUT=$("$PYBIN" "$BOOT_DIR/install_notifier_mask.py" --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || NM_RC=$?; then
+elif NM_RC=0; NM_OUT=$("$PYBIN" "$BOOT_DIR/install_notifier_mask.py" --apply --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || NM_RC=$?; then
   # The module prints OK|/WARN| for EVERY node on both exit paths, so the
   # per-node detail is rendered whether or not rc says "all good"; a non-zero rc
   # only ADDS the closing warning, it never replaces the detail with a dump.
@@ -479,15 +653,15 @@ hdr "Install: GPU clock cap (cooler nodes, ~same speed)"
 # Non-fatal, never silently green: the doctor check 'GPU clock cap
 # (node-recovery)' stays red until every node reads back capped.
 # Value / opt-out: node_recovery.gpu_clock_cap_mhz (int, or false) in
-# ~/.hscc/cluster.json. Undo: install_gpu_clock_cap.py --uninstall --hosts ...
+# ~/.hscc/cluster.json. Undo: install_gpu_clock_cap.py --uninstall --apply --hosts ...
 if $SKIP_NODE_RECOVERY || [ -n "${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:-}" ]; then
   warn "skipped (--skip-node-recovery${HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY:+ / HSCC_BOOTSTRAP_SKIP_NODE_RECOVERY})"
 elif $DRY_RUN; then
-  plan "GPU clock cap: install_gpu_clock_cap.py --hosts $HOSTS_CSV (systemd unit hscc-gpu-clock-cap.service running nvidia-smi -lgc 0,<cap> + read-back; writes NOTHING in dry-run)"
+  plan "GPU clock cap: install_gpu_clock_cap.py --apply --hosts $HOSTS_CSV (systemd unit hscc-gpu-clock-cap.service running nvidia-smi -lgc 0,<cap> + read-back; the live run needs --apply, without it the module only plans)"
 elif [ ! -f "$BOOT_DIR/install_gpu_clock_cap.py" ]; then
   warn "install_gpu_clock_cap.py missing from $BOOT_DIR — GPUs stay on auto clocks"
 else
-  GC_RC=0; GC_OUT=$("$PYBIN" "$BOOT_DIR/install_gpu_clock_cap.py" --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || GC_RC=$?
+  GC_RC=0; GC_OUT=$("$PYBIN" "$BOOT_DIR/install_gpu_clock_cap.py" --apply --hosts "$HOSTS_CSV" --bootstrap-lines 2>&1) || GC_RC=$?
   while IFS= read -r GC_LINE; do
     case "$GC_LINE" in
       OK\|*)   ok "${GC_LINE#OK|}" ;;
@@ -640,12 +814,12 @@ hdr "Install: node-recovery sysctls (panic-to-reboot)"
 # the rest of the install (and the other nodes) still complete.
 if $SKIP_NODE_RECOVERY; then warn "skipped (--skip-node-recovery)"
 elif $DRY_RUN; then
-  plan "node-recovery sysctls: install_autoreboot.py --hosts $HOSTS (drop-in + sysctl --system + read-back; --dry-run writes nothing on any node)"
+  plan "node-recovery sysctls: install_autoreboot.py --apply --hosts $HOSTS (drop-in + sysctl --system + read-back; the live run needs --apply, without it the module only plans)"
 else
   # 2>&1 keeps a transport traceback visible in the report instead of lost;
   # the summariser below picks the LAST line that parses as JSON, so noise
   # cannot turn a good result into a false "not verified".
-  if AR_JSON=$("$PYBIN" "$BOOT_DIR/install_autoreboot.py" --hosts "${HOST_ARR[@]}" 2>&1); then
+  if AR_JSON=$("$PYBIN" "$BOOT_DIR/install_autoreboot.py" --apply --hosts "${HOST_ARR[@]}" 2>&1); then
     AR_STATUS=$("$PYBIN" -c '
 import json, sys
 raw = sys.argv[1]
@@ -660,7 +834,7 @@ for line in reversed(raw.splitlines()):
         continue
     break
 if not isinstance(d, dict):
-    print("WARN|unparseable output — run: hscc-bootstrap/install_autoreboot.py --hosts ... manually")
+    print("WARN|unparseable output — run: hscc-bootstrap/install_autoreboot.py --apply --hosts ... manually")
     sys.exit(0)
 if d.get("skipped_reason"):
     print("OK|node-recovery sysctls skipped — " + str(d["skipped_reason"]))
@@ -687,7 +861,7 @@ if not rs:
 elif failed:
     print("WARN|some nodes FAILED — those nodes can still wedge without rebooting")
 ' "$AR_JSON" 2>/dev/null)
-    [ -z "$AR_STATUS" ] && AR_STATUS="WARN|summary unavailable — run: $PYBIN $BOOT_DIR/install_autoreboot.py --hosts $HOSTS"
+    [ -z "$AR_STATUS" ] && AR_STATUS="WARN|summary unavailable — run: $PYBIN $BOOT_DIR/install_autoreboot.py --apply --hosts $HOSTS"
     while IFS= read -r AR_LINE; do
       case "$AR_LINE" in
         OK\|*)   ok "${AR_LINE#OK|}" ;;
@@ -696,7 +870,7 @@ elif failed:
       esac
     done <<< "$AR_STATUS"
   else
-    warn "node-recovery sysctls FAILED to run — nodes may still never reboot on a kernel wedge. Run: $PYBIN $BOOT_DIR/install_autoreboot.py --hosts $HOSTS"
+    warn "node-recovery sysctls FAILED to run — nodes may still never reboot on a kernel wedge. Run: $PYBIN $BOOT_DIR/install_autoreboot.py --apply --hosts $HOSTS"
   fi
 fi
 
@@ -780,6 +954,10 @@ if $SKIP_DAEMON; then warn "skipped"; else
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
+hdr "Install: main orchestrator pane"
+# hscc main start (reuses a running pane; no tmux server => prints the command)
+start_main_orchestrator
+
 hdr "Done"
 if $DRY_RUN; then
   ok "DRY RUN complete — NOTHING was installed (every planned write is above, marked '→ plan:')."

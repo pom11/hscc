@@ -110,6 +110,25 @@ def _isolate_chat_jobs():
     setattr(threading.current_thread(), "_hscc_job_generation", None)
 
 
+@pytest.fixture(autouse=True)
+def _clear_cluster_snapshot_cache():
+    """Drop the process-wide cluster snapshot cache around every test.
+
+    The cache is a real server cache (20 s TTL). A test that stubs a backing
+    reader must never receive a previous test's snapshot, and a test that
+    checks single-flight must start with no in-flight slot.
+    """
+    import sys
+
+    mod = sys.modules.get("routes_cluster")
+    if mod is not None:
+        mod._reset_cluster_snapshot_cache()
+    yield
+    mod = sys.modules.get("routes_cluster")
+    if mod is not None:
+        mod._reset_cluster_snapshot_cache()
+
+
 @pytest.fixture
 def hscc_dir(tmp_path):
     """A fresh, isolated ~/.hscc stand-in for each test."""
@@ -139,6 +158,13 @@ def _no_tmux_discovery(monkeypatch):
                         lambda port, token: False, raising=False)
     monkeypatch.setattr(gateway_bridge, "_listener_cmdline",
                         lambda port: None, raising=False)
+    # Same contract for the sidecar's parent-liveness watchdog (t_ed2f1abe):
+    # default "no watchdog available", which is the pre-t_ed2f1abe spawn shape
+    # (serve spawned directly into the test's fake Popen). Nothing in this leg
+    # may spawn a real watchdog + a real child; the one case that does pins the
+    # seam to the real script itself.
+    monkeypatch.setattr(gateway_bridge, "_watchdog_script",
+                        lambda: None, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -189,3 +215,22 @@ def _isolate_hscc(tmp_path, monkeypatch):
     from hscc_daemon import state
     monkeypatch.setattr(state, "STATE_DIR",
                         os.path.join(base, "state"), raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_health_cache():
+    """Start every test with an empty in-process health snapshot (t_7babf634).
+
+    ``health_cache`` keeps the verify snapshot in a module global so the
+    ``/v1/health`` hot path never reads the disk. That is exactly what makes it
+    test-polluting: a verdict recorded by one test would answer the next
+    test's ``GET /v1/health``, so an assertion about "the verify I just stubbed"
+    could silently pass on a neighbour's cache. The on-disk file needs no
+    handling here — the autouse ``_isolate_hscc`` fixture already redirects
+    ``~/.hscc`` into this test's own tmp dir.
+    """
+    import health_cache
+
+    health_cache.reset_state()
+    yield
+    health_cache.reset_state()

@@ -367,6 +367,7 @@ def review_queue(
     cards: list[dict],
     *,
     now: Optional[int] = None,
+    merge_states: Optional[dict] = None,
 ) -> list[dict]:
     """Filter + sort cards into the awaiting-review queue.
 
@@ -386,6 +387,10 @@ def review_queue(
     newest-first (descending ``created_at``), where ``age_seconds`` is time
     since the card was created. A card with no ``created_at`` sorts last
     (age unknown) but still appears — the queue never silently drops a row.
+
+    ``merge_states`` (optional) is the merge queue's ``{card_id: row}`` map;
+    when given, each row carries ``merge_state`` and ``merge_pr`` so the
+    review queue can show where the card's PR sits in the landing queue.
     """
     if now is None:
         now = int(time.time())
@@ -424,4 +429,10 @@ def review_queue(
     rows.sort(key=lambda r: (r["_created"] is None, -(r["_created"] or 0)))
     for r in rows:
         r.pop("_created", None)
+
+    if merge_states is not None:
+        for row in rows:
+            state = merge_states.get(str(row.get("card_id"))) or {}
+            row["merge_state"] = state.get("state")
+            row["merge_pr"] = state.get("pr")
     return rows

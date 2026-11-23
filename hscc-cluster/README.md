@@ -1,11 +1,12 @@
 # hscc-cluster
 
-The cluster-control plugin: the **orchestrator-only** toolset Hermes uses to see
-and shape the DGX Spark cluster, plus the topology-free template engine and the
-agentic work-flow helpers.
+The cluster-control plugin: the **main-orchestrator-only** toolset Hermes uses
+to see and shape the DGX Spark cluster, plus the topology-free template engine
+and the agentic work-flow helpers.
 
 > Loaded by Hermes via `register(ctx)` in `__init__.py`. Worker roles never get
-> this toolset — only the orchestrator can change cluster shape.
+> this toolset — only the ONE main orchestrator (named at bootstrap, default
+> `general`) can change cluster shape.
 
 ## When you touch it
 
@@ -22,6 +23,12 @@ The template **format reference** is
 | `cluster_status` | Running models, idle nodes, serving units (+ free-VRAM when probed). |
 | `list_recipes` / `pick_node` | Browse sparkrun recipes / choose an idle worker. |
 | `provision_model` / `stop_model` / `model_health` | Model lifecycle (guarded: `confirm=true`). Correct sparkrun invocation (`--cluster/--port/--ensure`). |
+| `node_pause` / `node_resume` / `node_paused` | Park a node for maintenance (stop its units + record the pause the heal paths skip) / restart the recorded units and clear the pause + heal strikes / list what is parked. Guarded: `confirm=true`; the read is read-only. Both halves call `hscc node …`'s own verb functions — no second policy to drift (t_c28f4f14). |
+| `autodown_status` | Idle autodown state: armed?, idle window, state (reconciled against the live serving probe), last activity, and which interlock holds a teardown off. **Read-only** — same payload as `hscc autodown status --json` (it calls that verb), so CLI, route and tool cannot disagree. No tool for `enable`/`disable`/`wake`/`cancel`: fleet-power mutations are operator scope (t_c036808c, audit §2.4). |
+| `merge_queue_status` | Per-project merge-queue state: enabled (or why off — no repo / no GitHub remote / no gates), paused, queue depth + entries, waiting head, in-flight PR, last outcome. **Read-only** — same payload as `hscc merge-queue status --json` (it calls that verb), so CLI, route and tool cannot disagree. No tool for `add`/`remove`/`pause`/`resume`/`enable`/`disable`: the queue force-pushes and squash-merges, so an agent-writable merge door is a self-merge path (t_96134d32, audit D8). |
+| `doctor` | Every HSCC doctor check as structured findings — `checks[]` with `name` / `ok` / `detail` (the one-line cause) / `fix` / `fatal`, plus `ok` and `fatal_failures`. **Read-only** — it runs the operator's own door (`python3 hscc-bootstrap/doctor.py --json`, the command `bootstrap.sh` Stage 1 runs) and relays its payload, so CLI and tool cannot disagree and nothing is cached. No tool for `--fix`: that mode rewrites `config.yaml` via `enable_plugins.enable`, so repair is CLI-only (t_7f570861, audit §12.2 D11 — the *route* was refused because doctor reads this host; an agent tool runs on this host and stands). |
+| `heal_status` | Per-node heal-breaker strikes: actions inside the rolling window, the age of each strike, whether the daemon is refusing to heal that node and for how long, and the `hscc heal-clear <node>` verb it deliberately does not expose. **Read-only** — `heal_breaker.snapshot()`, the same module and arithmetic `hscc heal-status` and every heal path use. No `heal-clear` tool: clearing re-arms the repair paths, so it stays an operator CLI verb (t_14b86753, audit D4). |
+| `main_status` | The configured main orchestrator and its live shape: name/profile/board from `hscc-roles/main_orch.py`, tmux pane + busy/idle state from the same discovery `hscc main status` uses, and the daemon waker's enabled/freshness/board state. **Read-only** — the main half is the `hscc main status --json` payload (it calls that verb); `main start`/`wakeups`/rename stay CLI-only (t_c920b0ca). |
 | `vllm_logs` / `node_diagnostics` / `nas_diagnose` | Debug a node / NAS. |
 | `restart_model` / `remount_nas` / `repair_nas_export` / `reap_orphans` | Self-heal (guarded). |
 | `orch_message` | Orchestrator-to-orchestrator **nudge** (queue-only, signed, audited) — see [Orchestrator-to-orchestrator messaging](#orchestrator-to-orchestrator-messaging). |
@@ -106,8 +113,12 @@ Registered in `__init__.py` into the `hscc-cluster` toolset as
 1. **Both ends are orchestrators.** The sender is the *running* profile's
    identity (`HERMES_PROFILE`, falling back to the `profiles/<name>` leaf of
    `HERMES_HOME`, else `default`) — never an argument, so a sender cannot sign
-   as someone else. Sender and target must match `*-orch`; worker profiles and
-   `default` are refused, as is `to == sender`.
+   as someone else. Each end must be a `*-orch` profile **or** the configured
+   main orchestrator (the name `hscc-roles/main_orch.py` resolves — the same
+   source `hscc main status` reads, so a renamed main needs no edit here);
+   worker profiles and `default` are refused even if a config names `default`
+   as the main, as is `to == sender`. If the resolver is unreachable the tool
+   falls back to the `*-orch` rule alone rather than guessing a name.
 2. **Queue-only.** Delivery always asks `repl_inject` for `mode="auto"`, so a
    nudge queues behind a running turn; `steer` is never chosen by this tool.
 3. **Auto-signed.** `[from <sender-orch>] ` always, plus `re: t_xxxx ` when

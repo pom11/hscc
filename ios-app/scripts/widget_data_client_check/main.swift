@@ -6,9 +6,10 @@ import Foundation
 // real SharedModels.swift + SharedStore.swift) through a stubbed transport and
 // asserts the four promises the pivot rests on:
 //
-//   1. READ-ONLY: the fetch allowlist is exactly the ten audited read routes,
-//      a mutating-looking path is refused BEFORE the transport sees anything,
-//      and every request that does go out is a GET with the app's headers.
+//   1. READ-ONLY: the fetch allowlist is exactly the eleven audited read
+//      routes, a mutating-looking path is refused BEFORE the transport sees
+//      anything, and every request that does go out is a GET with the app's
+//      headers.
 //   2. TIMEOUT: the per-request ceiling is on the request (and clamped), so an
 //      extension is never left holding URLSession's 60 s default.
 //   3. FAILURE TYPES: each transport/status/decode outcome maps to the one
@@ -104,6 +105,7 @@ let summaryBody = Data(#"""
  "speak":"hscc: 20 open, 3 running, 750 done."}
 """#.utf8)
 
+
 /// The same payload with `done` removed — §6 rule 1 says this must NOT be
 /// readable as zero.
 let summaryMissingDoneBody = Data(#"""
@@ -111,6 +113,22 @@ let summaryMissingDoneBody = Data(#"""
  "boards":[{"board":"hscc","counts":{"todo":17,"ready":0,"running":3,"blocked":0,
              "archived":114},"total":884}],
  "speak":"hscc: 20 open, 3 running."}
+"""#.utf8)
+
+/// The real `GET /v1/alerts?limit=100` shape (card R3): ascending by id, with
+/// one acknowledged row. Placeholder alert text only — the live feed is private.
+let alertsBody = Data(#"""
+{"alerts":[{"id":1,"ts":"2026-11-19T12:00:00Z","title":"Example info alert",
+            "body":"Example body line one.","level":"info","key":null,
+            "acked":false,"acked_at":null},
+           {"id":2,"ts":"2026-11-19T12:28:00Z","title":"Example action alert",
+            "body":"Example body line one.\nExample body line two.",
+            "level":"action","key":"fixture/action","acked":false,"acked_at":null},
+           {"id":3,"ts":"2026-11-19T12:29:00Z","title":"Example acked alert",
+            "body":"History.","level":"critical","key":null,
+            "acked":true,"acked_at":"2026-11-19T12:29:30Z"}],
+ "count":3,"since":null,"limit":100,"oldest_id":1,"latest_id":3,
+ "next_since":3,"has_more":false,"speak":"3 alerts."}
 """#.utf8)
 
 /// §5.5's down-state: 38 B, no `json` key. A SUCCESSFUL read with no nodes.
@@ -138,8 +156,14 @@ let kanbanRunningBody = Data(#"""
 /// reported — a `null` that must stay nil, because a 0.0 would draw a node that
 /// never answered as an idle one. `store.path` is on the wire and deliberately
 /// NOT declared by `ClusterHistoryStore`, so it is never decoded (§7).
+/// `axis`/`source` ARE declared: which axis answered and where the rows came
+/// from are facts a chart branches on, and a key the model does not declare is
+/// invisible to it however much the server states it. `store.tier0_resident` is
+/// `null` here and that is not a missing field: the route reads the 2 s ring only
+/// inside its tier-0 branch, so at tier 1 nobody measured it
+/// (`hscc-api/routes_cluster.py`, since PR #417 / `d6a2d64e`).
 let historyBody = Data(#"""
-{"window":"6h","window_s":21600,"tier":1,"resolution_s":60,"resolution":"60s",
+{"window":"6h","window_s":21600,"axis":"window","source":"sqlite_store","tier":1,"resolution_s":60,"resolution":"60s",
  "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
  "max_fields":["cpu_temp_c_max","gpu_temp_c_max","gpu_power_w_max"],
  "since":1794978300,"until":1794999900,"node":"192.0.2.10",
@@ -148,8 +172,45 @@ let historyBody = Data(#"""
           {"tier":1,"ts":1794978360,"host":"192.0.2.10","gpu_util_pct":0.0,"gpu_power_w":null,"gpu_power_w_max":null,"n":12,"error":"collect failed"}],
  "engines":[{"tier":1,"ts":1794978300,"node":"192.0.2.10","port":"8000","model":"org/Qwen-Test","run":2,"wait":1,"kv":12.5,"gen_tps":40.0,"n":30,"error":null}],
  "counts":{"hosts":2,"engines":1},
- "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":true},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
  "note":"","speak":"Last 6h at 60s resolution: 2 node points, 1 engine point."}
+"""#.utf8)
+
+/// The same tier-1 answer with the "every machine" filter on it: `node` comes
+/// back `all`, which is a filter value and NOT a host name. A projection that
+/// treats it as one matches it against every row's `host`, finds nothing, and
+/// draws an empty series that reads as an empty fleet.
+let historyAllNodesBody = Data(#"""
+{"window":"3600s","window_s":3600,"axis":"tier","source":"sqlite_store","tier":1,"resolution_s":60,"resolution":"60s",
+ "tier_summary":"1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
+ "max_fields":["cpu_temp_c_max","gpu_temp_c_max","gpu_power_w_max"],
+ "since":1794978300,"until":1794999900,"node":"all",
+ "hosts_included":true,"engines_included":true,
+ "hosts":[{"tier":1,"ts":1794978300,"host":"192.0.2.10","gpu_util_pct":94.0,"gpu_power_w":160.5,"gpu_power_w_max":480.0,"n":30,"error":null},
+          {"tier":1,"ts":1794978360,"host":"192.0.2.11","gpu_util_pct":0.0,"gpu_power_w":null,"gpu_power_w_max":null,"n":12,"error":"collect failed"}],
+ "engines":[],
+ "counts":{"hosts":2,"engines":0},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
+ "note":"","speak":"Last hour at 60s resolution: 2 node points."}
+"""#.utf8)
+
+/// The same route's answer for `window=15m` (tier 0) as the deployed topology
+/// serves it: the 2 s ring is the daemon's memory, so this process measured
+/// `tier0_resident == false`, both series came back empty, and `note` says why.
+/// Those are the answers of
+/// `model_decode_check/fixtures/v1_cluster_history_15m.json`, so the two harnesses
+/// cannot drift into disagreeing about what tier 0 replies. It exists because the
+/// tier-1 case alone could not tell "the route answered null" from "the `store`
+/// object never decoded at all" — both read as `nil`.
+let historyTier0Body = Data(#"""
+{"window":"15m","window_s":900,"axis":"window","source":"recorder_ring_absent","tier":0,"resolution_s":2,"resolution":"2s",
+ "tier_summary":"raw 2 s samples from the recorder's in-memory ring, no averaging, and no peak columns",
+ "max_fields":[],"since":1794999000,"until":1794999900,"node":"all",
+ "hosts_included":true,"engines_included":true,"hosts":[],"engines":[],
+ "counts":{"hosts":0,"engines":0},
+ "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":16384,"tier0_resident":false},
+ "note":"tier 0 is the sampler's in-memory ring and lives in the daemon process; this server process cannot read it, so no 2 s points are served here. Use window=1h for the durable 1-minute tier.",
+ "speak":"The 15 m window is the daemon's in-memory ring and this server process does not own it. Ask for window=1h for 1-minute points."}
 """#.utf8)
 
 // MARK: - Harness
@@ -203,13 +264,22 @@ func runAll() async {
 
     // 1. The read allowlist is exactly the audited routes, and it is a closed
     //    set: adding one has to be a deliberate act in this file too.
+    //
+    //    Exactly ONE history read (t_447cc7fc, retired by t_2c629557). The
+    //    recorder used to be reachable through `/v1/cluster/history` AND
+    //    `/v1/metrics/history`, and a closed audited set with both in it would
+    //    have made this list lie about the surface — and made the §2 budget of
+    //    ≤ 2 requests per surface per refresh undecidable for a history card.
     let audited: Set<String> = [
         "/v1/projects", "/v1/mobile/summary",
         "/v1/kanban/running", "/v1/kanban/blocked", "/v1/kanban/stale",
         "/v1/cluster/monitor", "/v1/cluster/status", "/v1/cluster/history",
         "/v1/daemon/host", "/v1/autodown/status",
+        "/v1/alerts", "/v1/merge-queue",
     ]
     check("allowlist is exactly the audited reads", WidgetDataPath.all == audited)
+    check("the audited set carries exactly one history read",
+          audited.filter { $0.hasSuffix("/history") } == ["/v1/cluster/history"])
     for path in audited { check("allowlisted \(path)", WidgetDataPath.isReadPath(path)) }
     for mutation in ["/v1/cards", "/v1/cards/ABC123/kill", "/v1/sessions/ABC/reply",
                      "/v1/kanban/ABC123/assign", "/v1/cluster/autodown/up",
@@ -236,8 +306,18 @@ func runAll() async {
                 && payload.hosts[0].gpu_power_w_max == 480.0)
         check("history names the peak columns it carried",
               payload.max_fields == ["cpu_temp_c_max", "gpu_temp_c_max", "gpu_power_w_max"])
-        check("history reports whether the 2 s ring was readable",
-              payload.tier0Resident == true)
+        // `tier0_resident` is a MEASUREMENT of the 2 s ring, and the route takes
+        // it only inside its tier-0 branch, so a durable window answers `null` for
+        // it — a tier the route never read cannot report residency. The `store`
+        // fields beside it are what give this teeth: they decoded, so the `nil`
+        // below is the wire's `null` and not a `store` object that failed to
+        // decode. The tier-0 case further down is the other half.
+        check("a tier-1 answer leaves the 2 s ring unmeasured, not resident",
+              payload.tier == 1 && payload.tier0Resident == nil
+                && payload.store?.exists == true
+                && payload.store?.db_bytes == 3355443)
+        check("history states which axis answered and where the rows came from",
+              payload.axis == "window" && payload.source == "sqlite_store")
         let historyFields = Mirror(reflecting: payload.store!).children.map { $0.label ?? "" }
         check("the store's server path is never decoded",
               !historyFields.contains("path"))
@@ -251,6 +331,57 @@ func runAll() async {
             && historyRequest?.url?.query?.contains("metrics=") == true)
     check("history's path carries no query string of its own",
           historyRequest?.url?.path == "/v1/cluster/history")
+
+    // 1c. The tier axis. `since`/`until` are the reason this axis exists (a
+    //     preset is anchored to `now` and cannot ask about last night), so they
+    //     must leave as real query items — and the DEFAULTED `window` must not
+    //     ride along: the route answers 400 when both axes are named, and a
+    //     defaulted parameter is exactly how every refresh would 400 while the
+    //     call still compiled.
+    StubTransport.arm(.http(status: 200, body: historyBody))
+    _ = await client.clusterHistory(node: "192.0.2.10", tier: 1,
+                                    since: 1794978300, until: 1794999900)
+    let tierRequest = StubTransport.requests.last
+    let tierQuery = tierRequest?.url?.query ?? ""
+    check("history's tier/since/until/node are real query items",
+          tierQuery.contains("tier=1")
+            && tierQuery.contains("since=1794978300")
+            && tierQuery.contains("until=1794999900")
+            && tierQuery.contains("node=192.0.2.10"))
+    check("the tier axis drops the defaulted window preset (both axes = a 400 "
+          + "on every refresh): \(tierQuery)",
+          !tierQuery.contains("window="))
+    check("the tier axis still uses the bare allowlisted path",
+          tierRequest?.url?.path == "/v1/cluster/history")
+
+    // 1d. The same field where the route DID read the ring. Without this case the
+    //     tier-1 assertion above is worthless: `tier0Resident == nil` would also
+    //     hold if the model simply never read the flag, or if the `store` object
+    //     failed to decode. A `false` at tier 0 is a measurement, and the reason a
+    //     chart draws a gap instead of a quiet fleet rides on `note` — the flag is
+    //     never that reason (`ClusterHistorySeries.reason` reads `note`, and
+    //     cluster_history_chart_check.sh gates that).
+    StubTransport.arm(.http(status: 200, body: historyTier0Body))
+    let ring = await client.clusterHistory(window: "15m", node: "192.0.2.10",
+                                           metrics: ["gpu_util_pct"])
+    switch ring {
+    case .success(let payload):
+        check("a tier-0 answer measures the 2 s ring instead of leaving it open",
+              payload.tier == 0 && payload.resolution_s == 2
+                && payload.tier0Resident == false)
+        check("an empty tier-0 answer carries its reason on note, not on the flag",
+              payload.hosts.isEmpty && payload.engines.isEmpty
+                && payload.tier0Resident == false
+                && (payload.note ?? "").contains("window=1h"))
+        check("a tier-0 answer says as a code that the ring was not readable here",
+              payload.axis == "window" && payload.source == "recorder_ring_absent")
+    case .failure(let failure):
+        check("tier-0 history should decode, got \(String(reflecting: failure))", false)
+    }
+    let ringRequest = StubTransport.requests.last
+    check("the tier-0 read went out as its own request, not a replay of tier 1",
+          ringRequest?.url?.path == "/v1/cluster/history"
+            && ringRequest?.url?.query?.contains("window=15m") == true)
 
     // 2. A refused path never reaches the transport — no request, no side effect.
     StubTransport.arm(.http(status: 200, body: Data("{}".utf8)))
@@ -299,6 +430,13 @@ func runAll() async {
     // 4. Timeout: the ceiling is the client's, not URLSession's, and it clamps.
     check("default ceiling is 8 s", WidgetDataClient.defaultTimeout == 8)
     check("a fresh client uses the default ceiling", client.timeout == 8)
+    // t_c24521ef: a refresh used to build a NEW URLSession and never invalidate
+    // it, leaving one keep-alive pool per refresh until EMFILE. Production
+    // clients (no injected session) must all hold the same one.
+    let sharedSessionClientA = WidgetDataClient(config: testConfig)
+    let sharedSessionClientB = WidgetDataClient(config: testConfig)
+    check("production clients share ONE URLSession",
+          sharedSessionClientA.session === sharedSessionClientB.session)
     check("a non-positive ceiling is clamped, not trusted",
           WidgetDataClient(config: testConfig, timeout: 0).timeout == 1)
     check("an explicit ceiling survives", stubbedClient(timeout: 3).timeout == 3)
@@ -311,6 +449,15 @@ func runAll() async {
     let shortDeadline = await stubbedClient(timeout: 3).projects()
     check("the failure names the ceiling that expired",
           failureOf(shortDeadline) == .timeout(seconds: 3))
+
+    // W19: a cluster read gets a ceiling above the server's own 10/15 s
+    // sparkrun budgets instead of the default 8 s.
+    StubTransport.arm(.error(URLError(.timedOut)))
+    let clusterDeadline = await client.clusterMonitor()
+    check("cluster reads use the cluster ceiling",
+          failureOf(clusterDeadline) == .timeout(seconds: WidgetDataClient.clusterReadTimeout))
+    check("the cluster request carries that ceiling",
+          StubTransport.requests.last?.timeoutInterval == WidgetDataClient.clusterReadTimeout)
 
     // 5. Transport failure that is not a timeout.
     StubTransport.arm(.error(URLError(.cannotConnectToHost)))
@@ -381,14 +528,15 @@ func runAll() async {
         check("complete counts should decode, got \(String(reflecting: summary))", false)
     }
 
-    // 9. §5.5's down-state is a successful read with no nodes, not a failure.
+    // 9. §5.5/W5: a `speak`-only 200 is a degraded monitor, NOT an empty fleet.
+    //    It must take the offline path so a daemon host cannot be counted as
+    //    "serving".
     StubTransport.arm(.http(status: 200, body: monitorDownBody))
     let monitor = await client.clusterMonitor()
-    if case .success(let payload) = monitor {
-        check("fleet-down monitor decodes with no nodes", payload.nodes.isEmpty)
-        check("fleet-down monitor keeps speak", payload.speak == "fleet monitor unavailable")
+    if case .failure(.decoding) = monitor {
+        check("a 200 degraded monitor is a failure, not an empty fleet", true)
     } else {
-        check("fleet-down monitor should succeed, got \(String(reflecting: monitor))", false)
+        check("a 200 degraded monitor should fail, got \(String(reflecting: monitor))", false)
     }
 
     // 10. Query items go through URLQueryItem, never welded into the path.
@@ -402,6 +550,124 @@ func runAll() async {
     _ = await client.mobileSummary(boards: ["hscc", "inc"])
     let scoped = StubTransport.requests.last?.url?.absoluteString ?? ""
     check("mobileSummary scopes boards", scoped.contains("boards=") && scoped.contains("hscc") && scoped.contains("inc"))
+
+    // 10a. Dataset 7 — the operator alert feed (card R3). One GET, a real
+    //      `limit` query item, and the surface projection keeps only the
+    //      unacknowledged rows newest first.
+    StubTransport.arm(.http(status: 200, body: alertsBody))
+    let alertRead = await client.alerts(limit: 100)
+    let alertURL = StubTransport.requests.last?.url?.absoluteString ?? ""
+    check("alerts carries limit=100", alertURL.contains("limit=100"))
+    check("alerts path stayed clean",
+          StubTransport.requests.last?.url?.path == "/v1/alerts")
+    if case .success(let payload) = alertRead {
+        let feed = NeedsMeFeed.from(payload)
+        check("the alert feed decodes and keeps only unacknowledged rows",
+              payload.alerts.count == 3 && feed.count == 2)
+        check("the alert projection is newest first",
+              feed.items.map(\.id) == [2, 1])
+        check("an alert row carries the first body line only",
+              feed.items[0].bodyFirstLine == "Example body line one."
+                && !feed.items[0].bodyFirstLine.contains("\n"))
+        check("the alert level normalises to action",
+              feed.items[0].level == .action)
+    } else {
+        check("alerts should decode, got \(String(reflecting: alertRead))", false)
+    }
+
+    // 10b. W15: follow has_more/next_since so an older unacknowledged alert
+    //      cannot be hidden behind a newer page.
+    let pageOne = Data(#"""
+    {"alerts":[{"id":1,"ts":"2026-11-19T12:00:00Z","title":"Older unacked",
+      "body":"one","level":"critical","key":null,"acked":false,"acked_at":null}],
+     "count":1,"latest_id":2,"next_since":1,"has_more":true,"speak":""}
+    """#.utf8)
+    let pageTwo = Data(#"""
+    {"alerts":[{"id":2,"ts":"2026-11-19T12:01:00Z","title":"Newer acked",
+      "body":"two","level":"info","key":null,"acked":true,"acked_at":"2026-11-19T12:02:00Z"}],
+     "count":1,"latest_id":2,"next_since":2,"has_more":false,"speak":""}
+    """#.utf8)
+    StubTransport.armSequence([.http(status: 200, body: pageOne),
+                               .http(status: 200, body: pageTwo)])
+    let paged = await client.allAlerts(limit: 1)
+    check("allAlerts follows has_more to the last page",
+          StubTransport.requests.count == 2
+            && (StubTransport.requests.last?.url?.absoluteString.contains("since=1") ?? false))
+    if case .success(let payload) = paged {
+        let feed = NeedsMeFeed.from(payload)
+        check("paging can still see the older unacknowledged row",
+              payload.alerts.map(\.id) == [1, 2] && feed.items.map(\.id) == [1])
+    } else {
+        check("allAlerts should page, got \(String(reflecting: paged))", false)
+    }
+
+    //      owns are the reason it exists: a metric the node never reported stays
+    //      a gap a surface can count and caption (never a flattening to 0), and a
+    //      peak rides beside the average it was averaged away by — including the
+    //      axis bound, which must scale by the PEAK or the throttle spike the
+    //      peak column exists for is clipped off the chart.
+    StubTransport.arm(.http(status: 200, body: historyBody))
+    if case .success(let trendPayload) = await client.clusterHistory(window: "6h",
+                                                                     node: "192.0.2.10") {
+        let power = ClusterHistoryTrend.make(trendPayload, field: .gpuPowerW)
+        check("the trend keeps the bucket's mean and its peak",
+              power.points.count == 2 && power.points[0].value == 160.5
+                && power.points[0].peak == 480.0 && power.hasPeaks)
+        check("the axis scales by the peak, not the mean", power.upperBound == 480.0)
+        check("a bucket that never answered is a gap, not a zero",
+              power.gaps == 1 && power.points[1].value == nil
+                && power.points[1].peak == nil)
+        check("the caption names the gap instead of hiding it",
+              power.statusLine.contains("1 not reported"))
+        check("the tier and the step come from the response, not from the points",
+              power.tier == 1 && power.resolutionSeconds == 60 && power.host == "192.0.2.10")
+        let util = ClusterHistoryTrend.make(trendPayload, field: .gpuUtilPct)
+        check("a field with no peak column claims none",
+              !util.hasPeaks && util.points[0].peak == nil
+                && util.points[0].value == 94.0)
+        check("the peak companion exists for temps and power, and nowhere else",
+              ClusterHistoryMetric.gpuPowerW.peakCompanion == .gpuPowerWMax
+                && ClusterHistoryMetric.gpuTempC.peakCompanion == .gpuTempCMax
+                && ClusterHistoryMetric.gpuUtilPct.peakCompanion == nil
+                && ClusterHistoryMetric.gpuPowerWMax.peakCompanion == nil)
+    } else {
+        check("the canonical history answer should decode for the trend", false)
+    }
+    // `node=all` is the route's "every machine" spelling, not a machine name.
+    // Matching it against a row's `host` would hand back an empty series that
+    // looks exactly like an empty fleet, so the series must fall through to the
+    // first host present instead.
+    StubTransport.arm(.http(status: 200, body: historyAllNodesBody))
+    if case .success(let allPayload) = await client.clusterHistory(node: "all", tier: 1) {
+        let series = ClusterHistoryTrend.make(allPayload, field: .gpuPowerW)
+        check("an `all` node filter falls through to the first host present",
+              allPayload.node == "all" && allPayload.hosts.count == 2
+                && series.host == "192.0.2.10" && series.points.count == 1)
+        check("and the series never silently merges the second machine in",
+              !series.points.contains { $0.ts == 1794978360 })
+    } else {
+        check("the node=all answer should decode", false)
+    }
+    // The tier-0 answer the deployed topology gives: an empty pair of series and
+    // a `note` saying the ring is the daemon's. A chart must caption that, not
+    // draw a quiet fleet — the flag is never the reason, `note` is.
+    StubTransport.arm(.http(status: 200, body: historyTier0Body))
+    if case .success(let ringPayload) = await client.clusterHistory(window: "15m") {
+        let ring = ClusterHistoryTrend.make(ringPayload, field: .gpuTempC)
+        check("an empty tier-0 series says so and carries the route's reason",
+              ring.points.isEmpty && ring.hasPeaks == false
+                && ring.statusLine.contains("no rows in this window")
+                && (ring.tier0Notice ?? "").contains("in-memory ring"))
+    } else {
+        check("the tier-0 answer should decode for the trend", false)
+    }
+    // An out-of-range tier is a coding bug in a surface, and a 400 on every
+    // refresh is worse than the chart drawing the nearest real tier: the client
+    // clamps rather than forwards.
+    StubTransport.arm(.http(status: 200, body: historyBody))
+    _ = await client.clusterHistory(node: "192.0.2.10", tier: 9)
+    check("an out-of-range tier is clamped, not forwarded",
+          StubTransport.requests.last?.url?.absoluteString.contains("tier=2") == true)
 
     // 11. The nil-shim the two pre-pivot providers still use keeps working.
     StubTransport.arm(.http(status: 200, body: kanbanRunningBody))
@@ -489,6 +755,37 @@ func runAll() async {
           requestedHosts() == ["host-c.example"])
     check("HTTP 401 is still surfaced as .unauthorized",
           failureOf(authRefusedResult) == .unauthorized)
+
+    // W20: a 404/5xx is an address this API cannot serve — try the fallback and
+    // never pin the broken one as the last-working host.
+    forgetLastWorkingHost()
+    StubTransport.armSequence([.http(status: 503, body: errorBody),
+                               .http(status: 200, body: projectsBody)])
+    let badVersion = await multiClient(host: "host-m.example",
+                                       fallbacks: ["host-n.example"]).projects()
+    check("HTTP 5xx advances to the next address",
+          requestedHosts() == ["host-m.example", "host-n.example"])
+    if case .success = badVersion {
+        check("the healthy fallback's payload is returned", true)
+    } else {
+        check("the healthy fallback's payload is returned, got \(String(reflecting: badVersion))", false)
+    }
+    check("a 5xx address is not remembered as working",
+          HostFailover.lastWorkingHost() == "host-n.example")
+
+    StubTransport.armSequence([.http(status: 404, body: errorBody),
+                               .http(status: 200, body: projectsBody)])
+    forgetLastWorkingHost()
+    let missingRoute = await multiClient(host: "host-o.example",
+                                         fallbacks: ["host-p.example"]).projects()
+    check("HTTP 404 advances to the next address",
+          requestedHosts() == ["host-o.example", "host-p.example"])
+    if case .success = missingRoute {
+        check("a 404 address does not pin the widget", true)
+    } else {
+        check("a 404 address does not pin the widget, got \(String(reflecting: missingRoute))", false)
+    }
+    forgetLastWorkingHost()
 
     StubTransport.arm(.error(URLError(.cannotConnectToHost)))
     let allDown = await multiClient(host: "host-e.example",

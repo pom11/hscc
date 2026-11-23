@@ -2,7 +2,7 @@
 # generate.sh — regenerate HSCC.xcodeproj from project.yml with signing set up.
 #
 # Why this exists: the app AND both app-extension targets (HSCCWidgets,
-# HSCCLiveActivity) each need a DEVELOPMENT_TEAM. Setting it on the app alone
+# HSCCLiveActivityMonitor) each need a DEVELOPMENT_TEAM. Setting it on the app alone
 # still fails the extensions with:
 #     Signing for "HSCCWidgets" requires a development team.
 # And a team picked in the Xcode UI is LOST on the next `xcodegen generate`,
@@ -13,12 +13,19 @@
 # string "${HSCC_DEVELOPMENT_TEAM}" as the team — an invalid ID that produces a
 # confusing error much later. This script refuses to generate in that state.
 #
-# Usage:
+# Usage (either invocation works; the script locates itself, not the cwd):
 #   scripts/generate.sh                      # auto-detect the team, or explain
+#   bash ios-app/scripts/generate.sh         # same thing from the repo root
 #   HSCC_DEVELOPMENT_TEAM=ABCDE12345 scripts/generate.sh
 
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# This script's own directory, resolved BEFORE the cd. ${BASH_SOURCE[0]} is the
+# path the CALLER typed, not where the file lives, so a self-path rebuilt after
+# the cd resolves against ios-app/ and doubles the directory: from the repo root
+# `bash ios-app/scripts/generate.sh` looked for ios-app/ios-app/scripts/... and
+# died with ENOENT on a file that exists and is executable. Resolve once here.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SELF_DIR/.."
 
 if ! command -v xcodegen >/dev/null 2>&1; then
   echo "error: xcodegen not found. Install it with:  brew install xcodegen" >&2
@@ -46,8 +53,8 @@ if [ -z "$team" ]; then
   cat >&2 <<'MSG'
 error: no development team.
 
-All four targets (HSCC, HSCCWidgets, HSCCLiveActivity, HSCCLiveActivityMonitor)
-need one. Find your team
+All three targets (HSCC, HSCCWidgets, HSCCLiveActivityMonitor) need one.
+Find your team
 id in Xcode > Settings > Accounts (or the OU field of your signing certificate),
 then either export it for this shell:
 
@@ -65,14 +72,14 @@ fi
 
 # A source on disk but missing from project.yml is never compiled — the build
 # fails later at the first use site ("Cannot find 'X' in scope"). Catch it here.
-"$(dirname "${BASH_SOURCE[0]}")/check_sources.sh" || exit 1
+"$SELF_DIR/check_sources.sh" || exit 1
 
 echo "development team: $team"
 HSCC_DEVELOPMENT_TEAM="$team" xcodegen generate --spec project.yml
 
 # Prove it actually landed on every target, rather than assuming inheritance.
 missing=0
-for t in HSCC HSCCWidgets HSCCLiveActivity HSCCLiveActivityMonitor; do
+for t in HSCC HSCCWidgets HSCCLiveActivityMonitor; do
   got=$(DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
         xcodebuild -project HSCC.xcodeproj -target "$t" -showBuildSettings 2>/dev/null \
         | awk '/^ *DEVELOPMENT_TEAM = /{print $3; exit}')

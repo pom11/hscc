@@ -1,23 +1,17 @@
 #!/bin/bash
-# cluster_widget_check.sh — prove what the cluster widget shows, by EXECUTING
-# the committed projection + text model.
+# cluster_widget_check.sh — prove what the Cluster C1 widget shows, by
+# EXECUTING the committed projection + text model.
 #
-# The surface mirrors `hscc cluster monitor` / `hscc cluster status`:
-#   * the headline is the CLI host tally (answered / listed), never a state word
-#     the host table does not print;
-#   * every node row is that host's sample + its serving-table model;
-#   * the throughput is the CLI total row's sum of serving[].gen_tps;
-#   * the temperatures are the sample's CPU/GPU temps, not a load average the
-#     CLI host table does not show;
-#   * the old hard-coded `.244/.246/.247/.248` topology glyph is gone — four
-#     invented node identities were the biggest "does not match the CLI" bug;
-#   * the kanban board row is gone from the cluster tile; it is not cluster
-#     monitor output (the board widgets own that data).
+# The 2026-11-20 operator pick is C1 Health line:
+#   small  — one state word ("All up" / "3/4 up" / "Down"), tok/s, hottest temp;
+#   medium — the tally column + one util-meter row per node;
+#   large  — now tok/s, the 2 h total-throughput area chart, the node table
+#            (util, temp, power, tok/s) and the models/daemon footer.
 #
-# Reads are named methods on WidgetDataClient, so the closed GET allowlist stays
-# the gate. Structural greps pin the family dispatch and the removal of the
-# invented glyph; the macOS harness executes the real source against the
-# committed, scrubbed live capture.
+# The large tile pays for GET /v1/cluster/history (gen_tps engine rows) and
+# GET /v1/daemon/host; every other family pays for the monitor read alone.
+# No network, simulator or device: the macOS harness compiles the real sources
+# against the committed fixture.
 #
 # Usage: ios-app/scripts/cluster_widget_check.sh
 set -uo pipefail
@@ -32,15 +26,20 @@ trap 'rm -rf "$TMP"' EXIT
 
 SUBJECT=Sources/HSCCWidgets/ClusterWidget.swift
 VIEWS=Sources/HSCCWidgets/ClusterWidgetViews.swift
+KIT=Sources/HSCCWidgets/NativeStyleKit.swift
 METRICS=Sources/HSCCWidgets/ClusterWidgetMetrics.swift
-READING=Sources/HSCCWidgets/CLIMonitorTableReading.swift
-TABLE=Sources/HSCCWidgets/CLIMonitorHostTableView.swift
-MONVIEWS=Sources/HSCCWidgets/MonitorViews.swift
 MODEL=Sources/Shared/ClusterMonitorViewModel.swift
 TALLY=Sources/Shared/ClusterNodeTally.swift
+GRID=Sources/HSCCWidgets/ClusterSmallGrid.swift
+HIST=Sources/Shared/ClusterHistorySeries.swift
 STORE=Sources/Shared/SharedStore.swift
-for f in "$SUBJECT" "$VIEWS" "$METRICS" "$READING" "$TABLE" "$MONVIEWS" "$MODEL" \
-         "$TALLY" "$STORE" \
+LOCK=Sources/Shared/ClusterLockScreen.swift
+NEEDS=Sources/Shared/NeedsMeReading.swift
+MERGE=Sources/Shared/MergeQueueReading.swift
+READING=Sources/HSCCWidgets/CLIMonitorTableReading.swift
+for f in "$SUBJECT" "$VIEWS" "$KIT" "$METRICS" "$MODEL" "$TALLY" "$GRID" "$HIST" \
+         "$STORE" "$LOCK" "$NEEDS" "$MERGE" "$READING" \
+         Sources/Shared/ClusterMonitorTables.swift \
          scripts/cluster_widget_check/main.swift; do
   [ -f "$f" ] || { echo "error: $f missing" >&2; exit 1; }
 done
@@ -53,91 +52,76 @@ report() {  # report <label> <grep-output> — non-empty output is a failure
     echo "  ok: $1"
   fi
 }
-
 fail_when_absent() {  # fail_when_absent <label> <file> <pattern>
-  if grep -q -- "$3" "$2" 2>/dev/null; then
+  if grep -qF -- "$3" "$2" 2>/dev/null; then
     echo "  ok: $1"
   else
     echo "FAIL: $1  (no '$3' in $2)"; rc=1
   fi
 }
 
-echo "structural proofs on the cluster widget file set"
+echo "structural proofs on the Cluster C1 file set"
 
 report "no /v1/ route literal in the widget file set (reads go through the client)" \
   "$(grep -n '"/v1/' "$SUBJECT" "$VIEWS" "$METRICS")"
 
 reads=$(grep -c 'WidgetData.read(' "$SUBJECT")
-report "exactly 2 WidgetData.read calls (cluster/monitor + cluster/status), got $reads" \
-  "$([ "$reads" -eq 2 ] || echo x)"
+report "3 WidgetData.read sites (monitor + gated history + gated daemon), got $reads" \
+  "$([ "$reads" -eq 3 ] || echo x)"
 fail_when_absent "the row read is cluster/monitor" "$SUBJECT" '$0.clusterMonitor()'
-fail_when_absent "the job/host read is cluster/status" "$SUBJECT" '$0.clusterStatus()'
-report "the cluster tile no longer reads autodown or kanban" \
-  "$(grep -n 'autodownStatus\|kanbanRunning\|kanbanBlocked\|kanbanStale' "$SUBJECT")"
+fail_when_absent "the large tile's chart read is cluster/history" "$SUBJECT" '$0.clusterHistory(window: "6h"'
+fail_when_absent "the large tile's footer read is daemon/host" "$SUBJECT" '$0.daemonHost()'
+fail_when_absent "the history read is family-gated" "$SUBJECT" \
+  'Self.optionalHistory(client: client, enabled: wantsHistory)'
+fail_when_absent "the daemon read is family-gated" "$SUBJECT" \
+  'Self.optionalDaemonHost(client: client, enabled: wantsHistory)'
+skips=$(grep -c 'guard enabled else { return nil }' "$SUBJECT")
+report "both optional reads skip the request entirely when disabled, got $skips (want 2)" \
+  "$([ "$skips" -eq 2 ] || echo x)"
+fail_when_absent "the chart series sums the engine gen_tps rows" "$METRICS" \
+  'for: .genTps'
+fail_when_absent "the chart projection sums by timestamp" "$METRICS" \
+  'sums[sample.t, default: 0] += value'
+fail_when_absent "the chart keeps the last 2 h of the 6 h answer" "$METRICS" \
+  'last - 2 * 60 * 60'
 
-report "the invented .244/.246/.247/.248 topology is gone" \
-  "$(grep -n '\.244\|\.246\|\.247\|\.248\|canonicalPairs\|TopologyPair' "$SUBJECT" "$VIEWS" "$METRICS")"
-report "the load average the CLI host table does not print is gone" \
-  "$(grep -n 'cpuLoad1m\|load1m' "$SUBJECT" "$VIEWS" "$METRICS")"
-
-for fam in systemSmall systemMedium systemLarge accessoryInline accessoryCircular accessoryRectangular; do
+for fam in systemSmall systemMedium systemLarge systemExtraLarge \
+           accessoryInline accessoryCircular accessoryRectangular; do
   fail_when_absent "supportedFamilies offers .$fam" "$VIEWS" ".$fam"
 done
-for fam in systemSmall systemMedium systemLarge accessoryInline accessoryCircular accessoryRectangular; do
+for fam in systemSmall systemMedium systemLarge systemExtraLarge \
+           accessoryInline accessoryCircular accessoryRectangular; do
   fail_when_absent "the view dispatches .$fam" "$VIEWS" "case .$fam:"
 done
-fail_when_absent "large has its own layout" "$VIEWS" 'struct LargeClusterWidget'
+fail_when_absent "small is the C1 state line" "$VIEWS" 'Text(c1.headline)'
+fail_when_absent "medium draws a util meter per node" "$VIEWS" 'MeterBar(value: node.gpuPct'
+fail_when_absent "large draws the 2 h chart" "$VIEWS" 'ClusterThroughputChart(points: entry.throughput)'
+fail_when_absent "large draws the node table" "$VIEWS" 'Grid(alignment: .leading'
+fail_when_absent "large footer names the models" "$VIEWS" 'Text(c1.modelLine)'
+fail_when_absent "large footer names the daemon state" "$VIEWS" 'Text(c1.daemonText)'
+fail_when_absent "accessoryCircular is the L2 hottest-node gauge" "$VIEWS" \
+  'L2Gauge(value: fill, range: 0...90'
+fail_when_absent "accessoryRectangular is the L2 CLUSTER · TOK/S row" "$VIEWS" \
+  'Text(c1.rectangularHeadline)'
+fail_when_absent "accessoryInline is the L2 tally + tok/s line" "$VIEWS" \
+  'Text(c1.inlineL2)'
+fail_when_absent "Lock Screen values are accentable in vibrant rendering" "$VIEWS" \
+  '.widgetAccentable()'
+fail_when_absent "every Home Screen family takes the unconfigured/paused gate" "$VIEWS" \
+  'if !entry.configured || entry.paused'
+fail_when_absent "the shared kit owns AsOfStamp" "$KIT" 'struct AsOfStamp'
+fail_when_absent "the shared kit owns MeterBar" "$KIT" 'struct MeterBar'
+fail_when_absent "the shared kit owns Tile" "$KIT" 'struct Tile'
+fail_when_absent "the shared kit owns the stale/offline rule" "$KIT" 'struct StaleModifier'
+fail_when_absent "temperature bands are 70/75" "$KIT" 'celsius >= 75'
+fail_when_absent "utilisation warns above 85" "$KIT" 'percent > 85'
 
-fail_when_absent "every family renders the shared text model" "$VIEWS" 'entry.text(for:'
-fail_when_absent "small is one headline + detail" "$VIEWS" 'ClusterHeadline(entry: entry, size: 32)'
-fail_when_absent "circular uses the up/total gauge" "$VIEWS" 'Gauge(value:'
-
-fail_when_absent "the projection uses the shared FleetProjection" "$METRICS" 'typealias ClusterFleet = FleetProjection'
-fail_when_absent "status jobs come from workloads.count" "$METRICS" 'response.workloads.count'
-
-# ---------------------------------------------------------------------------
-# The CLI host table (t_2d1c12dc): `systemMedium` IS `host_table`.
-#
-# The executed half below proves the cells, the titles, the verdicts and the
-# row budget. These structural proofs cover what an executed check cannot see:
-# that the two CLI-shaped tiles share the ONE table view, and that no tile has
-# quietly re-typed a column name (a transcription is a column that can drift
-# from the CLI while every executed assertion still passes).
-# ---------------------------------------------------------------------------
-echo ""
-echo "CLI host-table proofs (the medium tile draws host_table)"
-
-fail_when_absent "the cluster medium draws the shared CLI table" "$VIEWS" 'CLIMonitorHostTableView(rows:'
-fail_when_absent "the monitor medium draws the SAME table" "$MONVIEWS" 'CLIMonitorHostTableView(rows:'
-fail_when_absent "both entries hand it rows through the gate-checked accessor" "$VIEWS" 'entry.cliHostRows'
-fail_when_absent "and so does the monitor entry" "$MONVIEWS" 'entry.cliHostRows'
-fail_when_absent "the drawn titles are the CLI's own column list" "$READING" 'CLIMonitorHostRow.columns'
-fail_when_absent "the drawn cells are the CLI's own row" "$READING" 'row.cells'
-fail_when_absent "the verdicts come from the view-model" "$READING" 'ClusterMetricLevel'
-
-# No CLI title re-typed into a body. A grep for the CLI's own header words in
-# the view/metrics files means a second copy of the column list exists, and a
-# second copy is a column that drifts.
-report "no CLI column title is transcribed into a widget body" \
-  "$(grep -n '"CPU Temp"\|"GPU Temp"\|"GPU Power"\|"Swap%"' "$VIEWS" "$MONVIEWS" "$METRICS")"
-
-# A family that reaches `entry.monitor` directly is a family that skipped
-# `cliHostRows`, which is the one place unconfigured / paused / "nodes" off are
-# refused. Numbers on a paused surface is the t_5c554c5b failure again.
-report "no family reaches entry.monitor directly (rows go through cliHostRows)" \
-  "$(grep -n 'entry\.monitor' "$VIEWS" "$MONVIEWS")"
-
-# The reading layer stays Foundation-only so the checks below can compile and RUN
-# it. The comment lines are excluded — the file's own header explains why it must
-# not name a Colour, and prose is not a colour (same rule the paused-copy count
-# learned on #341).
-report "the reading layer names no SwiftUI and no Colour, so it is executed below" \
-  "$(grep -n 'import SwiftUI\|Color' "$READING" | grep -v '^[0-9]*:[[:space:]]*//')"
-
-# The tile draws cells; it does not write any. Every `Text` in it takes a value
-# from the reading layer or the view-model.
-report "the table view composes no cell text of its own" \
-  "$(grep -n 'Text(\s*"' "$TABLE")"
+report "the C1 bodies draw no removed table view" \
+  "$(grep -n 'MonitorTablesBlock\|CLIMonitorHostTableView' "$VIEWS")"
+report "the invented .244/.246/.247/.248 topology is gone" \
+  "$(grep -n '\.244\|\.246\|\.247\|\.248\|canonicalPairs\|TopologyPair' "$SUBJECT" "$VIEWS" "$METRICS")"
+report "the cluster tile reads no autodown or kanban data" \
+  "$(grep -n 'autodownStatus\|kanbanRunning\|kanbanBlocked\|kanbanStale' "$SUBJECT")"
 
 # §7: the workload projection may name ids only — no recipe path, image or
 # container name may even be decoded.
@@ -153,11 +137,19 @@ echo ""
 echo "executed proofs (macOS compile of the real widget + shared sources)"
 
 xcrun swiftc -sdk "$SDK" -o "$TMP/cluster_widget_check" \
+  "$KIT" \
   "$METRICS" \
   "$TALLY" \
   "$MODEL" \
   "$READING" \
+  "$GRID" \
+  Sources/Shared/ClusterMonitorTables.swift \
+  "$HIST" \
+  "$LOCK" \
+  "$NEEDS" \
+  "$MERGE" \
   Sources/Shared/SharedModels.swift Sources/Shared/SharedStore.swift \
+  Sources/Shared/WidgetSurfaceKind.generated.swift \
   Sources/Shared/WidgetDataClient.swift \
   scripts/model_decode_check/ThemeStub.swift \
   scripts/cluster_widget_check/main.swift \
@@ -169,9 +161,46 @@ if [ -s "$TMP/compile.err" ]; then
 fi
 "$TMP/cluster_widget_check" || rc=1
 
+# ---------------------------------------------------------------------------
+# The pause overlay seam (t_983f177e): the copy has ONE owner and the three
+# contract keys are really decoded.
+#
+# The executed half above proves what the phrase says. These two prove it cannot
+# be bypassed: a view that composed its own 'paused (...)' would satisfy every
+# executed assertion (they run on the projection, not on the body), and a wire
+# key declared with a property default compiles, is silently never decoded, and
+# leaves every tile drawing a bare up/down forever.
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "pause-overlay structure"
+
+stray=$(grep -rn 'paused (' Sources/ | grep -v 'Sources/Shared/ClusterNodeTally.swift')
+report "the paused (reason, since) phrase is composed in ONE file" "$stray"
+
+strayWord=$(grep -rn '? "up" : "down"' Sources/ | grep -v 'Sources/Shared/ClusterNodeTally.swift')
+report "no surface composes its own up/down pair" "$strayWord"
+
+defaults=$(grep -nE 'let (status|paused_reason|paused_since): String\? = nil' \
+            Sources/Shared/SharedModels.swift)
+report "no pause key is declared with a property default (the decode trap)" "$defaults"
+
+fail_when_absent "the row word is delegated to FleetFormat.status" "$TALLY" \
+  'FleetFormat.status(node, now: now)'
+fail_when_absent "the tally subtracts parked rows from the down count" "$TALLY" \
+  '!$0.isUp && !$0.isPaused'
+fail_when_absent "the parked row is asked before the up predicate" "$TALLY" \
+  'guard node.isPaused else'
+
+# The gate must not be able to pass without the fixture it names.
+[ -f scripts/model_decode_check/fixtures/v1_cluster_monitor_paused.json ] \
+  && echo "  ok: the paused fixture is committed" \
+  || { echo "FAIL: scripts/model_decode_check/fixtures/v1_cluster_monitor_paused.json missing"; rc=1; }
+
 echo ""
 if [ "$rc" -eq 0 ]; then
-  echo "CLUSTER WIDGET CHECK PASSED — CLI rows, every family's lines, nil-is-not-zero, redaction"
+  echo "CLUSTER WIDGET CHECK PASSED — C1 lines, native kit, nil-is-not-zero, redaction"
   exit 0
 fi
+echo "CLUSTER WIDGET CHECK FAILED — a structural or executed check above is red"
 exit 1

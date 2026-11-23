@@ -179,6 +179,12 @@ def build_api_plist(python_path: str, hscc_api_dir: str, *,
         # down on SIGTERM (t_37948685), and 10s is well past that teardown —
         # launchd's 20s default would only delay a `bootout`/logout.
         "ExitTimeOut": 10,
+        # t_c24521ef: the live API hit EMFILE at launchd's default soft NOFILE
+        # of 256 (258 FDs open; every route failed until restart). The server
+        # now bounds idle keep-alives and concurrent connections, but the unit
+        # must still not carry a limit a handful of clients can exhaust.
+        # Raise the SOFT limit only; the hard limit stays launchd's (unlimited).
+        "SoftResourceLimits": {"NumberOfFiles": 4096},
         "StandardOutPath": log_path or os.path.expanduser("~/.hscc/logs/api.log"),
         "StandardErrorPath": log_path or os.path.expanduser("~/.hscc/logs/api.err.log"),
         "EnvironmentVariables": {

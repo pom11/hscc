@@ -138,3 +138,193 @@ def restore_planted(evicted):
     """Hand back what ``evict_planted`` borrowed, by identity."""
     for name, mod in (evicted or {}).items():
         sys.modules[name] = mod
+
+
+# ---------------------------------------------------------------------------
+# The OTHER residue: hermes' REAL tree, left behind by a closed window
+# (t_572b4856)
+# ---------------------------------------------------------------------------
+#
+# ``hermes_import.agent_tree_on_path`` restores ``sys.path`` correctly — measured
+# over a whole ``hscc_daemon`` leg: 804 events touching the agent tree, zero
+# entries left on the path at the end. What a window cannot take back is what it
+# *imported*: ``sys.modules`` keeps every module the block loaded, and a resident
+# package carries ``__path__`` pointing into ``~/.hermes/hermes-agent``, so from
+# then on ``import hermes_cli.<anything>`` resolves with the tree nowhere on
+# ``sys.path``. A FAILED submodule import is enough to create it — ``from
+# hermes_cli import kanban_db`` on a thin interpreter imports the parent fine,
+# raises on the child, and leaves the parent resident.
+#
+# That is an order dependency, not a capability: the same ``importorskip`` line
+# answers ``No module named 'hermes_cli'`` in a file run alone and ``No module
+# named 'utils'`` in the full leg (full measurement, both interpreters:
+# ``docs/audits/daemon-alone-run-order-dependence_t_572b4856.md``). The rule here
+# is what lets the conftest fixture hand the NEXT test the cache it was given,
+# instead of the cache some earlier test's window happened to leave.
+#
+# Deliberately narrow, like ``is_planted_path``: it recognises a module by where
+# its own file lives, so a planted temp-root fake is still the plant rule's job
+# and this one never touches it.
+#
+# Cost matters here: the fixture calls this for EVERY test in a 4000-test leg, so
+# the classifier must not do a syscall per resident module. Two things keep it
+# flat — a plain string prefix test before any ``realpath``, and a verdict cache
+# keyed by the module OBJECT (a module's ``__file__`` does not change), so after
+# the first scan a call is one dict lookup per module.
+
+_ROOT_ENV = None                     # $HERMES_AGENT_PATH the cache was built for
+_ROOTS = ("", "")                    # (raw, realpath) spellings
+_REALPATH_MEMO = {}
+_VERDICT_CACHE = {}                  # root -> {module object: bool} (identity-keyed)
+_INTERP_ROOTS = None                 # the interpreter's own installation, once
+
+
+def _realpath(path):
+    hit = _REALPATH_MEMO.get(path)
+    if hit is None:
+        hit = _REALPATH_MEMO[path] = os.path.realpath(path)
+    return hit
+
+
+def _interpreter_roots():
+    """realpaths of the interpreter's OWN installation — never residue.
+
+    This matters more than it looks on the canonical runner: hermes' venv lives
+    *inside* the agent tree (``~/.hermes/hermes-agent/venv``), so every third-party
+    package that interpreter boots with — ``rich``, ``typer``, ``pydantic`` — is
+    literally under ``agent_tree_root()``. A rule that called those "residue"
+    evicted them from ``sys.modules`` after every test, and the next test then
+    re-imported a second copy of the same package while the first was still
+    referenced: ``rich.panel`` rendering a title against a freshly-imported
+    ``rich.text`` raised ``TypeError: Text.append() takes from 2 to 3 positional
+    arguments but 24 were given`` and took 5 CLI files / 72 tests down on the
+    canonical interpreter only.
+    """
+    global _INTERP_ROOTS
+    if _INTERP_ROOTS is None:
+        cands = [sys.prefix, getattr(sys, "base_prefix", sys.prefix),
+                 getattr(sys, "exec_prefix", sys.prefix)]
+        try:
+            import site
+            cands += list(site.getsitepackages())
+            cands.append(site.getusersitepackages())
+        except Exception:  # pragma: no cover — a stripped interpreter has no site
+            pass
+        _INTERP_ROOTS = tuple(sorted(
+            {_realpath(os.path.expanduser(str(c))) for c in cands if c}))
+    return _INTERP_ROOTS
+
+
+def _agent_tree_roots():
+    """(raw, realpath) spellings of the agent tree, cached per $HERMES_AGENT_PATH.
+
+    Both are needed: a module's ``__file__`` is spelled with whatever form of the
+    root sat on ``sys.path`` when it was imported, and ``hermes_import`` hands
+    out the un-resolved form.
+    """
+    global _ROOT_ENV, _ROOTS
+    env = os.environ.get("HERMES_AGENT_PATH")
+    if _ROOT_ENV != env or not _ROOTS[0]:
+        try:
+            from hscc_daemon import hermes_import
+            raw = hermes_import.resolve_agent_tree()
+        except Exception:  # pragma: no cover — the fallback is the same resolution
+            raw = os.path.expanduser(env or "~/.hermes/hermes-agent")
+        raw = os.path.expanduser(str(raw))
+        _ROOTS = (raw, _realpath(raw))
+        _ROOT_ENV = env
+    return _ROOTS
+
+
+def agent_tree_root():
+    """realpath of the Hermes agent tree THIS process resolves hermes from.
+
+    Resolved through production's own ``hermes_import.resolve_agent_tree`` so the
+    test rule and the shipped code cannot disagree about where hermes lives. Call
+    it at fixture SETUP, not at teardown: a test that monkeypatches
+    ``HERMES_AGENT_PATH`` to a temp tree is planting, and plants are the rule
+    above.
+    """
+    return _agent_tree_roots()[1]
+
+
+def is_agent_tree_path(path, root=None, interp_roots=None):
+    """True for a path inside hermes' REAL agent tree (never a temp-root plant).
+
+    Excludes the interpreter's own installation: on the canonical runner the venv
+    sits inside the agent tree, so ``site-packages`` must not read as residue —
+    see ``_interpreter_roots``.
+
+    ``root`` / ``interp_roots`` are injectable so a test can exercise both halves
+    against a synthetic tree WITHOUT repatching the module globals: those are read
+    by this module's autouse fixture during its own teardown, and a monkeypatched
+    global is still patched while that runs.
+    """
+    origin = str(path or "")
+    if not origin:
+        return False
+    raw, real = _agent_tree_roots()
+    r = str(root or real)
+    # No syscall unless the string could already be under one of the trees. This
+    # rejects every stdlib and site-packages path, which is >99% of the calls.
+    if not any(origin.startswith(p) for p in (r, raw, real)):
+        return False
+    resolved = _realpath(origin)
+    if not (resolved == r or resolved.startswith(r + os.sep)):
+        return False
+    prefixes = _interpreter_roots() if interp_roots is None else tuple(
+        str(p) for p in interp_roots)
+    return not any(resolved == p or resolved.startswith(p + os.sep)
+                   for p in prefixes)
+
+
+def _is_agent_tree_module(mod, r, interp_roots=None):
+    """Verdict for one module object, cached by identity (see the note above)."""
+    cache = _VERDICT_CACHE.setdefault(r, {})
+    try:
+        verdict = cache.get(mod)
+    except TypeError:                      # unhashable module object
+        verdict = None
+    if verdict is None:
+        verdict = is_agent_tree_path(getattr(mod, "__file__", ""), r, interp_roots)
+        if not verdict:
+            search = getattr(mod, "__path__", None)
+            if isinstance(search, str):
+                search = [search]
+            verdict = bool(search) and any(
+                is_agent_tree_path(p, r, interp_roots) for p in search)
+        try:
+            cache[mod] = verdict
+        except TypeError:
+            pass
+    return verdict
+
+
+def resident_under_agent_tree(root=None, interp_roots=None):
+    """Names of resident modules loaded from hermes' real tree.
+
+    Covers packages with no ``__file__`` (their ``__path__`` is what makes
+    submodules resolvable, so a ``__path__`` under the tree is the residue that
+    matters) and skips a ``__path__`` that is a plain string, which would
+    otherwise iterate as characters.
+    """
+    r = str(root or agent_tree_root())
+    return [name for name, mod in list(sys.modules.items())
+            if mod is not None and _is_agent_tree_module(mod, r, interp_roots)]
+
+
+def restore_agent_tree_cache(root, saved):
+    """Undo one test's window residue: drop what it imported, keep what it found.
+
+    ``root`` / ``saved`` come from the fixture (resolved + snapshotted BEFORE the
+    test ran). Modules that were already resident when the test started are put
+    back by identity, exactly as ``purge_planted`` does for a poisoned cache, so
+    an earlier test keeps the module objects it was handed; anything the test's
+    own window imported goes.
+    """
+    for name in resident_under_agent_tree(root):
+        if name not in saved:
+            del sys.modules[name]
+    if saved:
+        sys.modules.update(saved)
+

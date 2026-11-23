@@ -93,6 +93,17 @@ def _write_raw(path, data):
             json.dump(data, f)
 
 
+def _long_ago_iso():
+    """A stamp no recency window in `verify` can call fresh — DERIVED.
+
+    This case used a pinned ``2020-01-01T00:00:00+00:00``, which is "long ago" only
+    while the clock sits in front of it: freezing the clock behind 2020 made the stream
+    look freshly checked and the excuse case went red (t_0389093a). The windows it has
+    to beat are 600 s floors and a 900 s nas ceiling, so 400 days is not close.
+    """
+    return (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+
+
 def _stream(state_dir, name, ok, **extra):
     data = {"ok": ok, "timestamp": now_iso(), "last_check": now_iso(),
             "stream": name, **extra}
@@ -187,8 +198,8 @@ class TestConfirmedStayDownExcuses:
         from hscc_daemon.verify import check_daemon_streams
         _stand_down(marker)
         _stream(state_dir, "dgx", False, intentional="operator_down",
-                last_check="2020-01-01T00:00:00+00:00",
-                timestamp="2020-01-01T00:00:00+00:00")
+                last_check=_long_ago_iso(),
+                timestamp=_long_ago_iso())
         result = check_daemon_streams(state_dir=str(state_dir))
         assert result["ok"] is False
         assert "dgx.json: stale" in result["detail"]

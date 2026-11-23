@@ -180,6 +180,9 @@ struct MobileSummaryResponse: Decodable, Speakable {
     /// Boards the server could not read, as a COUNT only: an unusable slug is
     /// never echoed back (§6 rule 4).
     let unreadable_boards: Int?
+    /// The server's worker-slot cap (`kanban.max_in_progress`). Absent when
+    /// the config is unset/unreadable, which is NOT the same as a zero cap.
+    let max_in_progress: Int?
     let speak: String
 
     var degraded: Bool { boards == nil }
@@ -384,13 +387,20 @@ struct StaleCardLite: Decodable, Identifiable {
 ///   { "success": true, "output": "<string>", "json": { "timestamp": Double,
 ///     "hosts": [ { "host": "<ip>", "error": null, "sample": { ... },
 ///                  "used_slots": 1, "free_slots": 0 } ] }, "speak": "..." }
-/// When the cluster is unreachable the route degrades to `{ "speak": "fleet
-/// monitor unavailable" }` — no `json` — so `json` is optional here. Every
+/// When the cluster is unreachable the route answers HTTP 503 with
+/// `success: false`, `degraded: true`, `error` and `speak` — no `json` — so
+/// `json` is optional here and `isDegraded` is the explicit signal. Every
 /// numeric field inside `sample` arrives as a STRING, often `""` when a metric
 /// is unreadable on that node; parsed defensively via `MonitorSample`'s
 /// computed `Double?` accessors (a bad/empty string yields nil, never a
 /// decode failure that blanks the whole route).
 struct MonitorResponse: Codable, Speakable {
+    /// The route's own success flag. `nil` from an older server, `false` when
+    /// the live sparkrun/SSH read failed. A degraded body is NOT a snapshot.
+    let success: Bool?
+    /// The route's failure detail when `success` is false. Never rendered raw;
+    /// it is the signal that this is not a fleet sample.
+    let error: String?
     /// The nested per-node payload. Absent when the route degraded.
     let json: MonitorPayload?
     /// The CLI's serving table: one row per (backend, model). Additive on the
@@ -401,10 +411,52 @@ struct MonitorResponse: Codable, Speakable {
     let serving_error: String?
     /// Why the proxy route map could not be refreshed. Nil on a clean poll.
     let serving_proxy_error: String?
+    /// The nodes the operator parked with `hscc node pause` (t_824b617f).
+    ///
+    /// A top-level list and NOT only the annotated rows, because sparkrun does
+    /// not list a machine whose workloads are stopped: a parked host can be
+    /// missing from the frame entirely, and an absent row is a row there is
+    /// nothing to tag. This is the authoritative "these nodes are parked, by
+    /// choice, since then" set, independent of what the sample reached.
+    ///
+    /// Declared WITHOUT a default on the property (a stored property with an
+    /// initial value is silently never decoded); the default is on the INIT
+    /// parameter, so the pre-existing call sites compile untouched.
+    let paused_nodes: [PausedNodeEntry]?
     let speak: String
+
+    init(success: Bool? = nil,
+         error: String? = nil,
+         json: MonitorPayload?,
+         serving: [ServingRow]? = nil,
+         serving_error: String? = nil,
+         serving_proxy_error: String? = nil,
+         paused_nodes: [PausedNodeEntry]? = nil,
+         speak: String) {
+        self.success = success
+        self.error = error
+        self.json = json
+        self.serving = serving
+        self.serving_error = serving_error
+        self.serving_proxy_error = serving_proxy_error
+        self.paused_nodes = paused_nodes
+        self.speak = speak
+    }
 
     /// Computed passthrough so the widget reads the node list directly.
     var nodes: [MonitorNode] { json?.hosts ?? [] }
+
+    /// True when this body is a failure, not a fleet sample.
+    ///
+    /// The old route answered HTTP 200 with `{error, speak}` and no `json`, so
+    /// callers could not tell "the fleet is empty" from "the monitor failed".
+    /// `success == false`/`error` are now stated by the route; a body with no
+    /// monitor frame at all is degraded too, because there is nothing to draw.
+    var isDegraded: Bool {
+        if success == false { return true }
+        if let error, !error.isEmpty { return true }
+        return json == nil
+    }
 }
 
 /// One row of `hscc cluster monitor`'s serving table: the model a backend is
@@ -436,6 +488,57 @@ struct ServingRow: Codable, Identifiable {
     }
 }
 
+/// The pause overlay's wire contract (t_824b617f), named once so a status
+/// literal cannot be spelled three ways across the app, the widgets and the
+/// gates. The server holds the matching constants in
+/// `hscc-api/routes_cluster.py` (`PAUSE_STATUS`, `PAUSE_ROW_KEYS`) and its
+/// `test_routes_cluster_node_pause.py` pins the same three names: renaming one
+/// there is a breaking change for shipped bundles, not a refactor, and the
+/// widget side stops tagging with it.
+enum PauseContract {
+    /// The only value `status` carries for a parked node. Strict equality — any
+    /// other value is not a pause this build knows about, and guessing would
+    /// paint a node as parked because a future server said something else.
+    static let status = "paused"
+
+    /// The three keys a parked row gains. Declared so a decode gate can assert
+    /// the model carries all three instead of a transcription of them.
+    static let rowKeys = ["status", "paused_reason", "paused_since"]
+
+    /// The route's node identity for a pause record: trim and case-fold, and
+    /// nothing else. This MIRRORS the server's `_node_key` on purpose — no
+    /// address normalisation, no hostname suffix stripping — because guessing
+    /// that `node-3` means `192.0.2.13` would invent a pause nobody made.
+    static func nodeKey(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
+/// One entry of the payload's top-level `paused_nodes` list: a node the
+/// operator parked, whether or not the monitor frame reached it.
+///
+/// `node` is the pause record's own identity — the host string the operator
+/// passed to `hscc node pause`. It is NEVER drawn: §7 allows only the app-wide
+/// label rule (`MonitorNode.nodeLabel` — the node's last octet, or its reported
+/// short name), so every surface labels these nodes through `FleetPausedNode`,
+/// which re-derives the label with that rule.
+struct PausedNodeEntry: Codable, Equatable {
+    let node: String?
+    let status: String?
+    let paused_reason: String?
+    let paused_since: String?
+
+    /// Whether this entry is a pause (as opposed to a list an older or a
+    /// half-written payload put something else in).
+    var isPaused: Bool { status == PauseContract.status }
+
+    /// The route's identity for this node, or nil when it names none.
+    var key: String? {
+        guard let node, !PauseContract.nodeKey(node).isEmpty else { return nil }
+        return PauseContract.nodeKey(node)
+    }
+}
+
 /// The nested `json` payload of /v1/cluster/monitor.
 struct MonitorPayload: Codable {
     let timestamp: Double?
@@ -457,8 +560,64 @@ struct MonitorNode: Codable, Identifiable {
     /// have made every model count read `nil` while still compiling. Call sites
     /// that build placeholder nodes pass it explicitly.
     let workloads: [MonitorWorkload]?
+    /// The pause overlay's verdict for this node (t_824b617f): the literal
+    /// `"paused"` when the operator parked it, otherwise the key is ABSENT.
+    ///
+    /// This is the row's pause state and NOT its container state — the
+    /// container status lives at `workloads[].containers[].status`, a different
+    /// key with a different owner. It is also not optional-by-style: nil here
+    /// means "the route did not tag this row", which the overlay emits as
+    /// simply no key, so nil and absent are the same fact.
+    ///
+    /// Declared WITHOUT a default on the property (the decode trap again); the
+    /// defaults live on the INIT parameters below, so a caller that knew only
+    /// the pre-pause keys still compiles.
+    let status: String?
+    /// Why the operator parked it. The route guarantees a string and sends `""`
+    /// when the pause record carried no reason — an empty reason is silence,
+    /// not a reason, and `FleetFormat.paused` treats it that way.
+    let paused_reason: String?
+    /// The instant the pause began, as an ISO-8601 string, or nil when the
+    /// record did not carry one. Nil renders a bare `paused`, never a `—`.
+    let paused_since: String?
 
     var id: String { host }
+
+    /// Whether this row belongs to a node the operator parked.
+    ///
+    /// EVERY surface asks this BEFORE it derives `down` from `error` or from a
+    /// missing sample (the parent route's contract, t_824b617f): the overlay
+    /// deliberately keeps a parked row's `error` — "could not sample this host"
+    /// may still be true, and parking a machine is no reason to lose a real
+    /// diagnostic. A consumer that reads `error` first paints a parked
+    /// machine as a broken one, which faults the operator's own action twice.
+    var isPaused: Bool { status == PauseContract.status }
+
+    /// Explicit memberwise init. The synthesized one now demands the three
+    /// pause keys, which would break every pre-pause call site — the two
+    /// placeholder builders in `ClusterWidgetMetrics.sampleFleet` and the
+    /// widget gate's `main.swift` — so the init is written out and the new keys
+    /// APPEND with nil defaults. Declaration order of the pre-existing five is
+    /// unchanged, because Swift requires init arguments in declaration order.
+    init(host: String,
+         error: String? = nil,
+         sample: MonitorSample? = nil,
+         used_slots: Int? = nil,
+         free_slots: Int? = nil,
+         workloads: [MonitorWorkload]? = nil,
+         status: String? = nil,
+         paused_reason: String? = nil,
+         paused_since: String? = nil) {
+        self.host = host
+        self.error = error
+        self.sample = sample
+        self.used_slots = used_slots
+        self.free_slots = free_slots
+        self.workloads = workloads
+        self.status = status
+        self.paused_reason = paused_reason
+        self.paused_since = paused_since
+    }
 
     /// Whether to count this host as UP. The honest reading of the wire: the
     /// route lists every host it tried to sample and puts the failure in
@@ -466,24 +625,73 @@ struct MonitorNode: Codable, Identifiable {
     /// metric gap on a live host, not a host that is down.
     var isUp: Bool { error == nil }
 
-    /// The node's display label: the sample hostname when the API carried one,
-    /// otherwise the last octet of `host` — never the whole address (§7). This is
-    /// the single rule every surface uses; `MonitorViews` used to carry its own
-    /// copy of it. A configured label beats it.
+    /// The node's display label. THE one rule, and the only label path any
+    /// surface draws a node by — widget, desktop widget, menu bar, CarPlay row,
+    /// Live Activity column, parked row and all. It delegates to
+    /// `nodeLabel(host:reportedHostname:)` so no surface can hold a private
+    /// spelling of a node's identity.
     var displayLabel: String {
-        if let hostname = sample?.hostname, !hostname.isEmpty { return hostname }
-        return Self.shortTail(host)
+        Self.nodeLabel(host: host, reportedHostname: sample?.hostname)
     }
 
-    /// Last octet of the first dotted-quad, as ".NN". Same derivation as
-    /// `shortTail` in scripts/widget_datapath_live/template.swift, so widget,
-    /// Live Activity and live probe can never disagree on a node's identity.
-    static func shortTail(_ line: String) -> String {
-        let ips = line.split(whereSeparator: { !$0.isNumber && $0 != "." })
+    // MARK: - The node label (apps 1.4.4 operator rule)
+    //
+    // The operator's own words: a node is named by the LAST OCTET of its IP —
+    // `244`, `246` — never by a positional row-number name. Derived at runtime
+    // from the host address the route already returns, so a fifth node labels
+    // itself and a renumbered fleet needs no app change.
+    //
+    // Why the octet beats a reported hostname: the positional name was numbered
+    // by where sparkrun happened to put the row, so it changed meaning when the
+    // frame reordered, and the operator could not tell which machine a tile
+    // meant. The last octet is the same answer every time for the same machine.
+    // A hostname is only useful when there is no IPv4 to read, so it becomes the
+    // fallback rather than the preference it was before 1.4.4 — and when it is
+    // used it is the short name the current derivation yields, never a new
+    // truncation rule invented here.
+    //
+    // §7 still holds: the label carries no dotted quad. One octet is not an
+    // address any more than a house number is a postcode.
+
+    /// THE node label rule. The last dot-separated component of an IPv4 host,
+    /// as digits (`10` for `192.0.2.10`, `2` for `192.0.2.2`). A host with no
+    /// IPv4 in it falls back to the reported hostname, then to `host` itself —
+    /// whatever the existing short-name derivation yields, unchanged.
+    /// Never empty, never a dotted quad.
+    static func nodeLabel(host: String, reportedHostname: String?) -> String {
+        if let octet = lastOctet(of: host) { return octet }
+        if let reportedHostname, !reportedHostname.isEmpty { return reportedHostname }
+        return host.isEmpty ? "?" : host
+    }
+
+    /// The last dot-separated component of the first IPv4 dotted-quad in a
+    /// string, as written (`"10"` for `192.0.2.10`). nil when the string carries
+    /// no dotted quad at all, which is what makes a hostname fall through to
+    /// `nodeLabel`'s fallback instead of being mangled.
+    ///
+    /// This is the file's ONLY IPv4 parse: `shortTail` is expressed through it,
+    /// so the label and the identity tail can never disagree about which
+    /// machine a host string names.
+    static func lastOctet(of text: String) -> String? {
+        let ips = text.split(whereSeparator: { !$0.isNumber && $0 != "." })
             .map(String.init).filter { $0.split(separator: ".").count == 4 }
-        guard let ip = ips.first else { return line.isEmpty ? "?" : line }
-        let tail = ip.split(separator: ".").last.map(String.init) ?? ip
-        return "." + tail
+        guard let ip = ips.first,
+              let tail = ip.split(separator: ".").last.map(String.init),
+              !tail.isEmpty, tail.allSatisfy({ $0.isNumber }) else { return nil }
+        return tail
+    }
+
+    /// The same octet, dot-prefixed (`.244`), for the places that use it as an
+    /// IDENTITY tail rather than as a label — matching a serving row's `node`
+    /// against a host row, in the widget's C1 pairing and the menu bar's serving
+    /// cell. NOT a label any more: since apps 1.4.4 every surface that NAMES a
+    /// node uses `nodeLabel` above, including the history chart's series legend.
+    /// Unchanged since before 1.4.4 on purpose: those comparisons pair two strings
+    /// produced by this one function, and a label change must not become a matching
+    /// change — a mismatch there silently pairs a model with the wrong machine.
+    static func shortTail(_ line: String) -> String {
+        if let tail = lastOctet(of: line) { return "." + tail }
+        return line.isEmpty ? "?" : line
     }
 }
 
@@ -928,10 +1136,22 @@ struct ClusterHistoryPoint: Decodable {
     let gpu_temp_c_max: Double?
     let cpu_temp_c_max: Double?
     let mem_used_pct: Double?
+    /// VRAM as the recorder actually stores it: a megabyte figure. There is no
+    /// `gpu_mem_total_mb` column, so no percentage of VRAM exists to draw — a
+    /// surface that shows "VRAM" shows MB, never a share of a total the route
+    /// never sends (`ClusterHistoryMetric.vramUsedMb` is the one place that
+    /// spelling is allowed, and `cluster_history_chart_check.sh` holds it).
+    let gpu_mem_used_mb: Double?
     let run: Int?
     let wait: Int?
     let kv: Double?
     let gen_tps: Double?
+    /// Prompt-side throughput. The recorder keeps `run`/`wait`/`kv`/`gen_tps`
+    /// AND `prompt_tps` (its `ENGINE_FIELDS`), and the store's columns are
+    /// sqlite `REAL`, so this route answers `2.0` for a count of 2 — the integer
+    /// fields above only decode because JSONDecoder converts an integral number
+    /// losslessly, which the committed `v1_cluster_history_6h.json` now pins.
+    let prompt_tps: Double?
 }
 
 /// GET /v1/cluster/history — the recorder's stored series over three tiers.
@@ -945,6 +1165,18 @@ struct ClusterHistoryPoint: Decodable {
 struct ClusterHistoryResponse: Decodable, Speakable {
     let window: String
     let window_s: Int?
+    /// Which axis the request asked on: `"window"` is a preset anchored to `now`,
+    /// `"tier"` an explicit `since`/`until` span. On the tier axis `window` is a
+    /// derived span label (`"3600s"`), never a preset name. Stated by the server
+    /// so a surface never infers the axis from which keys happen to be non-null.
+    let axis: String?
+    /// Where the rows came from, as a CODE — `recorder_ring`,
+    /// `recorder_ring_absent`, `sqlite_store`, `sqlite_store_absent`. A chart
+    /// branches on this, not on the English of `note`: an absent ring is drawn as
+    /// a gap with a reason, and that decision needs a stable value to compare, not
+    /// a sentence the server may reword. `nil` only on a failed read, which
+    /// `error` states.
+    let source: String?
     let tier: Int
     let resolution_s: Int
     let resolution: String
@@ -964,8 +1196,11 @@ struct ClusterHistoryResponse: Decodable, Speakable {
     let speak: String
     let store: ClusterHistoryStore?
 
-    /// `false` here means the 2 s ring is not readable from the serving process,
-    /// which a chart must render as a gap with a reason, not as a quiet fleet.
+    /// Whether the 2 s ring was readable from the serving process — answered at
+    /// tier 0 only. `false` there means it is not, which a chart must render as a
+    /// gap with a reason, not as a quiet fleet; `nil` means the served tier never
+    /// read the ring, so it reports nothing either way (the reason for an empty
+    /// answer is `note`). Not a non-optional: `null` is a real value on the wire.
     var tier0Resident: Bool? { store?.tier0_resident }
 }
 
@@ -1017,4 +1252,3 @@ struct AutodownStatusResponse: Decodable, Speakable {
     let active_cron_model: [String]?
     let speak: String
 }
-

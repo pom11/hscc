@@ -7,6 +7,7 @@ import pytest
 import rolelib
 import generator
 import hermes_gap
+import main_orch
 
 
 def test_compose_soul_has_all_three_layers():
@@ -30,27 +31,98 @@ def test_compose_soul_orchestrator_skips_worker_ops():
     assert "gateway node" in soul.lower()
 
 
-def test_project_orch_work_rules_carry_the_orch_message_nudge_rule():
-    """t_1d284d82: `orch_message` is a NUDGE channel, not a work order.
+def test_project_orch_work_rules_route_nudges_through_the_main_orchestrator():
+    """t_1d284d82 + t_a3557207: a nudge is not a work order — and not this
+    profile's channel either.
 
     The rule has to live INSIDE the generated "## How you manage work" list (an
     orch reads that list as its work-management contract), so it is asserted on
-    the text that follows the heading — not merely somewhere in the SOUL.
+    the text that follows the heading — not merely somewhere in the SOUL. QA F4
+    measured the old wording promising the `orch_message` tool to homes the
+    main-only tier leaves with 0 cluster tools, so the rule now points at the
+    main orchestrator and names no tool.
     """
     spec = {"name": "demo-orch", "identity": "You orchestrate demo.\n",
             "preload_skills": []}
     soul = generator.compose_soul(spec, base_identity="BASE")
     assert "## How you manage work" in soul
     section = soul.split("## How you manage work", 1)[1]
-    assert "`orch_message`" in section
-    assert "11. **`orch_message` is a nudge, not a work order.**" in section
-    assert "never by commenting on DONE cards" in section
+    assert "11. **Nudges go through the main orchestrator.**" in section
+    assert "orch_message" not in section
+    assert "ask it to pass the nudge on" in section
+    assert "Never comment on DONE cards" in section
     assert "on a CARD on the right board (`--board` explicit)" in section
-    # Workers cannot send orch_message at all (the tool refuses a non-orch
-    # sender), so the rule belongs to the orchestrator block only.
+    # The main keeps the tool; a worker never names it.
+    main_soul = generator.compose_soul(
+        {"name": main_orch.DEFAULT_NAME, "identity": "You orchestrate.\n",
+         "preload_skills": []},
+        base_identity="BASE")
+    assert "`orch_message`" in main_soul
     worker = generator.compose_soul(
         {"name": "coder", "identity": "You build.\n", "preload_skills": []},
         base_identity="BASE")
+    assert "orch_message" not in worker
+
+
+# --- t_1992ab13: the MAIN orchestrator's SOUL must name the nudge TOOL -------
+#
+# t_9e3d868f made `orch_message` accept the CONFIGURED main orchestrator as
+# sender and as target, so the policed channel is now available to exactly the
+# profile whose SOUL still said "only through `hscc orch inject`". The fix was
+# real and undiscoverable: the main kept shelling out to the CLI verb and
+# forfeited the rate limit, the reply-loop guard, the exactly-one-pane rule and
+# the signed audit line. Same discipline as the rule-11 pin above — assert the
+# text AFTER the heading, so a stray mention elsewhere cannot pass.
+
+TALKING_HEADING = "## Talking to orchestrators"
+
+
+@pytest.mark.parametrize("main_name", [main_orch.DEFAULT_NAME, "ops"])
+def test_main_orch_talking_section_names_the_orch_message_channel(
+        tmp_path, monkeypatch, main_name):
+    """The main's own channel section names `orch_message` as the agent path."""
+    monkeypatch.setenv("HSCC_DIR", str(tmp_path / "hscc"))   # sealed: nothing stored
+    if main_name != main_orch.DEFAULT_NAME:
+        main_orch.store_name(
+            main_name, profiles_dir=str(tmp_path / "profiles"),
+            registry_path=str(tmp_path / "absent-registry.yaml"))
+    soul = generator.compose_soul(
+        {"name": main_name, "identity": "You orchestrate.\n",
+         "preload_skills": []},
+        base_identity="BASE")
+    assert soul.count(TALKING_HEADING) == 1, (
+        "the main's channel section must appear exactly once")
+    section = soul.split(TALKING_HEADING, 1)[1].split("\n## ", 1)[0]
+
+    # The tool is named, with the properties that make it the preferred path.
+    assert "`orch_message`" in section
+    for property_ in ("queue-only", "rate-limited", "audited"):
+        assert property_ in section, f"section drops the {property_!r} property"
+    # A nudge reaches an orchestrator at either end — the main included, which
+    # is the whole point of t_9e3d868f — and refuses the reserved profiles.
+    assert "main orchestrator (you)" in section
+    assert "`default`" in section
+
+    # `hscc orch inject` is demoted, not deleted: dry-run probe + fallback.
+    assert "`hscc orch inject`" in section
+    assert "--dry-run" in section
+    assert "fallback" in section
+    # The sentence that made this card exists must not come back.
+    assert "only through `hscc orch inject`" not in section
+
+    # The safety sentences the section has always carried stay put.
+    assert "no `~/bin` scripts and no side channels" in section
+    assert "A nudge is not a work order" in section
+    assert "steer when the orchestrator is busy; plain when it is idle" in \
+        section.lower()
+
+
+def test_a_worker_soul_still_never_names_the_nudge_channel():
+    """The section is orchestrator-only; a worker still cannot send."""
+    worker = generator.compose_soul(
+        {"name": "sweeper", "identity": "You sweep.\n", "preload_skills": []},
+        base_identity="BASE")
+    assert TALKING_HEADING not in worker
     assert "orch_message" not in worker
 
 
@@ -192,6 +264,49 @@ def test_generate_profile_idempotent(tmp_path, monkeypatch):
     generator.generate_profile(spec, base_identity="BASE")
     changed_second = generator.generate_profile(spec, base_identity="BASE")
     assert changed_second is False  # unchanged content → no rewrite
+
+
+# -- new profiles get an explicit plugins.enabled (R5, t_e98c6ad4) -----------
+
+def test_generate_profile_seeds_the_plugin_tier(tmp_path, monkeypatch):
+    """A profile created AFTER the last bootstrap is the gap R5 names.
+
+    ``_migrate_to_21`` fills a key-less config with every manifest-bearing dir
+    under the home's ``plugins/``, so "no plugins key" is not neutral: on this
+    fleet it means a worker home one migration away from the whole cluster
+    surface. ``generate_profile`` therefore hands the home to the bootstrap
+    writer, which asks ``main_orch`` (not this file) what the tier is.
+
+    Sealed two ways: ``HSCC_DIR`` holds a NON-default stored main name so the
+    answer cannot come from the live ``~/.hscc``, and ``HERMES_HOME``/
+    ``PROFILES_DIR`` so nothing near the real tree is written.
+    """
+    import main_orch
+    hscc = tmp_path / "hscc-state"
+    hscc.mkdir()
+    monkeypatch.setenv("HSCC_DIR", str(hscc))
+    main_orch.store_name("ops", registry_path="/nonexistent.yaml")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n", "preload_skills": []}
+
+    assert generator.generate_profile(spec, base_identity="BASE") is True
+    cfg = yaml.safe_load(open(os.path.join(str(tmp_path / "profiles" / "coder"),
+                                            "config.yaml")))
+    assert cfg["plugins"]["enabled"] == ["hscc-cluster"]   # worker: hooks only
+
+    # The orchestrator's OWN home is the one home that gets the tools, and the
+    # name that decides it came from the state file — nothing spells it here.
+    orch_spec = {"name": "ops", "identity": "You orchestrate.\n",
+                 "preload_skills": [], "kind": "orchestrator"}
+    generator.generate_profile(orch_spec, base_identity="BASE")
+    cfg = yaml.safe_load(open(os.path.join(str(tmp_path / "profiles" / "ops"),
+                                           "config.yaml")))
+    assert cfg["plugins"]["enabled"] == ["hscc-cluster", "hscc-commands",
+                                         "sparkrun-hermes"]
+
+    # Seeding must not make regeneration look like a change forever.
+    assert generator.generate_profile(spec, base_identity="BASE") is False
 
 
 # -- SOUL regeneration keeps operator-owned trailing sections (t_8695aa1a) --

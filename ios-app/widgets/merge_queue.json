@@ -1,0 +1,30 @@
+{
+  "order": 9,
+  "bundle_order": 9,
+  "kind": "widget",
+  "surface_case": "widgetMergeQueue",
+  "surface_raw": "widget.mergeQueue",
+  "display_name": "Merge Queue",
+  "icon": "arrow.triangle.merge",
+  "widget_type": "MergeQueueWidget",
+  "sources": [
+    "Sources/HSCCWidgets/MergeQueueWidget.swift"
+  ],
+  "coverage_ios": [
+    "declared-and-renders (`SmallMergeQueue`)",
+    "declared-and-renders (`MediumMergeQueue`)",
+    "declared-and-renders (`LargeMergeQueue`)",
+    "declared-and-renders (`Text(entry.inlineLine)` — `⇢ #485 gates · 2 waiting`)",
+    "declared-and-renders (`MergeQueueCircular` — queued count)",
+    "declared-and-renders (`MergeQueueRectangular` — head PR + stage + waiting)"
+  ],
+  "coverage_macos": [
+    "declared-and-renders (`SmallMergeQueue`)",
+    "declared-and-renders (`MediumMergeQueue`)",
+    "declared-and-renders (`LargeMergeQueue`)",
+    "absent"
+  ],
+  "coverage_source": "`ios-app/Sources/HSCCWidgets/MergeQueueWidget.swift`",
+  "decode_hook": "checkMergeQueueWidget",
+  "id": "merge_queue"
+}

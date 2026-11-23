@@ -191,19 +191,109 @@ def test_every_tools_table_reaches_the_register_loop(plugin_dir):
     )
 
 
-def test_cluster_manifest_is_exactly_the_23_registered_tools():
-    """The concrete GAP-A-7 receipt: 23 tools, the 10 that were missing are
-    named. If this count changes intentionally, the per-table tests above are
-    the generic contract — update the number here knowingly, never by drift."""
+def test_cluster_manifest_is_exactly_the_30_registered_tools():
+    """The concrete GAP-A-7 receipt: the manifest and the registry are the same
+    set, at the count that set currently has. If this count changes
+    intentionally, the per-table tests above are the generic contract — update
+    the number here knowingly, never by drift.
+
+    Amended 23 -> 26 by t_c28f4f14: `node_pause` / `node_resume` (in `_OPS_TOOLS`)
+    and `node_paused` (in `_READ_TOOLS`), the agent half of `hscc node ...`.
+    All three are in a table the register() loop concatenates and are declared
+    in plugin.yaml, so both directions of the contract above hold.
+
+    Amended 26 -> 27 by t_c036808c: `autodown_status` (in `_READ_TOOLS`), the
+    read-only agent half of `hscc autodown`. The four MUTATING verbs
+    (enable/disable/wake/cancel) are deliberately NOT in the count — the audit
+    (docs/audits/2026-11-23-agent-surface.md §2.4) closed that door.
+
+    Amended 27 -> 28 by t_96134d32: `merge_queue_status` (in `_READ_TOOLS`), the
+    read-only agent half of `hscc merge-queue`. The six MUTATING verbs
+    (add/remove/pause/resume/enable/disable) are deliberately NOT in the count —
+    the queue force-pushes and squash-merges, so an agent-writable merge door is
+    a self-merge path (docs/audits/2026-11-23-agent-surface.md D8).
+
+    Amended 28 -> 29 by t_7f570861: `doctor` (in `_READ_TOOLS`), the read-only
+    findings of the preflight doctor. The one MUTATING mode of that door is
+    deliberately NOT in the count: `--fix` calls `run_doctor_fix` →
+    `enable_plugins.enable` and rewrites the operator's `config.yaml`, so repair
+    stays CLI-only. Note §12.2's ruling on D11 — the *HTTP route* was refused
+    ("it reads this host's trees"); "the read-only agent *tool* is a different
+    surface and stands", which is what this row now counts.
+
+    Amended 29 -> 30 by t_14b86753: `heal_status` (in `_READ_TOOLS`), the
+    read-only agent half of `hscc heal-status`. `heal-clear` is deliberately
+    NOT in the count — clearing a breaker re-arms the daemon's repair paths, so
+    it stays an operator CLI verb (docs/audits/2026-11-23-agent-surface.md D4).
+
+    Amended 30 -> 31 by t_c920b0ca: `main_status` (in `_READ_TOOLS`), the
+    read-only agent half of `hscc main status` + `hscc orch waker status`. The
+    lifecycle verbs (`start`, `wakeups`, and any rename) are deliberately NOT in
+    the count — an agent that can spawn, re-attach or re-schedule the operator's
+    main orchestrator is the door this tool exists to withhold.
+    """
     declared = _manifest_tools(str(REPO / "hscc-cluster"))
     assert len(declared) == len(_registered_names(
-        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 23
+        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 31
     for previously_missing in ("orch_message", "apply_template", "list_templates",
                                "preview_template", "fleet_stats", "cluster_verify",
                                "cluster_throughput", "autoscale_advice",
                                "discovery_status", "nas_status"):
         assert previously_missing in declared, \
             f"GAP-A-7 regression: {previously_missing} dropped from the manifest"
+    # The node-pause trio is part of the manifest now, not just the registry.
+    for node_pause_tool in ("node_pause", "node_resume", "node_paused"):
+        assert node_pause_tool in declared, \
+            f"t_c28f4f14 regression: {node_pause_tool} missing from the manifest"
+    # The autodown read is part of the manifest too, and the mutating half of
+    # the verb group must stay out of it (the audit's verdict, asserted here so
+    # a future "just add enable" edit has to edit this line to pass).
+    assert "autodown_status" in declared, \
+        "t_c036808c regression: autodown_status missing from the manifest"
+    for mutating in ("autodown_enable", "autodown_disable", "autodown_wake",
+                     "autodown_cancel"):
+        assert mutating not in declared, (
+            f"{mutating} is a fleet-power mutation — CLI + confirm-gated route "
+            "only, per docs/audits/2026-11-23-agent-surface.md §2.4")
+    # The merge-queue read is part of the manifest, and its six mutating verbs
+    # must stay out (audit D8: the queue force-pushes and squash-merges, so an
+    # agent-writable merge door is a self-merge path).
+    assert "merge_queue_status" in declared, \
+        "t_96134d32 regression: merge_queue_status missing from the manifest"
+    for mutating in ("merge_queue_add", "merge_queue_remove", "merge_queue_pause",
+                     "merge_queue_resume", "merge_queue_enable",
+                     "merge_queue_disable"):
+        assert mutating not in declared, (
+            f"{mutating} is a merge-queue mutation (force-push + squash-merge) — "
+            "CLI only, per docs/audits/2026-11-23-agent-surface.md D8")
+    # The doctor read is part of the manifest, and its one mutating mode must
+    # stay out (t_7f570861): `--fix` is `run_doctor_fix` → `enable_plugins.enable`
+    # → a rewrite of the operator's config.yaml, which is operator scope.
+    assert "doctor" in declared, \
+        "t_7f570861 regression: doctor missing from the manifest"
+    for mutating in ("doctor_fix", "doctor_apply", "doctor_repair",
+                     "doctor_enable", "doctor_write"):
+        assert mutating not in declared, (
+            f"{mutating} would be the doctor's repair side (config.yaml rewrite "
+            "via enable_plugins.enable) — CLI + `--fix` only, per "
+            "docs/audits/2026-11-23-agent-surface.md §12.2 D11")
+    # The heal-breaker read is part of the manifest, and its clear half must
+    # stay out (audit D4: clearing re-arms the daemon's repair paths, so it is
+    # an operator decision, not a per-turn agent call).
+    assert "heal_status" in declared, \
+        "t_14b86753 regression: heal_status missing from the manifest"
+    assert "heal_clear" not in declared, (
+        "heal_clear is an operator mutation — CLI only, per "
+        "docs/audits/2026-11-23-agent-surface.md D4")
+    # The main-orchestrator read is part of the manifest, and the lifecycle
+    # verbs stay out: spawning/re-attaching the operator's pane or rewriting its
+    # wake schedule is operator scope, not a per-turn agent action.
+    assert "main_status" in declared, \
+        "t_c920b0ca regression: main_status missing from the manifest"
+    for lifecycle in ("main_start", "main_wakeups", "main_rename"):
+        assert lifecycle not in declared, (
+            f"{lifecycle} is a main-orchestrator lifecycle mutation — CLI only, "
+            "per t_c920b0ca")
 
 
 @pytest.mark.parametrize("plugin_dir", MANIFESTED,

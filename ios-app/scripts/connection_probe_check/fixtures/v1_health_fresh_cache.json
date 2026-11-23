@@ -1,0 +1,20 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "plugins",
+      "ok": true,
+      "detail": "all core commands found"
+    },
+    {
+      "name": "proxy",
+      "ok": true,
+      "detail": "3 models available"
+    }
+  ],
+  "speak": "All checks passed.",
+  "age_seconds": 45,
+  "generated_at": 1795149615,
+  "stale": false,
+  "source": "cache"
+}

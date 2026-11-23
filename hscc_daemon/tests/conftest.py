@@ -263,7 +263,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
             autodown, cli as hscc_cli, daemon_ops, daemon_singleton, desktop,
             health,
             heal_breaker, heal_lease,
-            hscc, lifecycle,
+            hscc, lifecycle, node_pauses,
+            proxy_log_archive,
             serving, state, trigger, update_check, usage,
         )
         def p(sub):
@@ -379,6 +380,24 @@ def _isolate_hscc(tmp_path, monkeypatch):
              {"failures": 0, "warned": False, "last_success_at": None,
               "last_good_epoch": None, "last_good": None}),
             (health, "_fleet_last_seen_epoch", None),
+            # proxy_log_archive.py (t_9713c765) — the pre-restart copy of
+            # sparkrun's litellm.log. BOTH sides must be pinned. PROXY_LOG_DIR
+            # is where the archives are WRITTEN (~/.hscc/proxy-logs), so an
+            # unredirected path would litter the operator's real ~/.hscc from
+            # any test that reaches a proxy repair. SRC_OVERRIDE is the READ
+            # side: pinned to a path that does not exist, so no test can ever
+            # observe — or depend on — the live proxy's log; the archive then
+            # no-ops ("absent") unless a test points it at its own fake file.
+            (proxy_log_archive, "PROXY_LOG_DIR", p("proxy-logs")),
+            (proxy_log_archive, "SRC_OVERRIDE", p("absent-litellm.log")),
+            (proxy_log_archive, "PROXY_LOG_KEEP", 5),
+            (proxy_log_archive, "PROXY_LOG_CAP_BYTES", 64 * 1024 * 1024),
+            # health.py (t_892378c1) — the log-on-change latch behind the
+            # paused-host router WARN. In-process only (nothing on disk), but
+            # without a per-test reset a test that saw a stale entry leaves the
+            # NEXT test's identical WARN suppressed, so the suite would pass or
+            # fail on test ORDER. Rebound fresh, exactly like the latch above.
+            (health, "_paused_stale_router_state", {"signature": None}),
             # heal_lease.py (F2) — the durable single-flight repair lease. This
             # MUST be redirected: check_workers / check_proxy / recover now all
             # take and release it, so an unredirected path would write a LIVE
@@ -391,6 +410,14 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # write strikes into the operator's real ~/.hscc and could suspend
             # healing a LIVE node from the test run.
             (heal_breaker, "HEAL_BREAKER_FILE", p("heal-breaker.json")),
+            # node_pauses.py (t_28caea71) — the durable node-pause overlay. Its
+            # default root is one module constant, and every read AND write
+            # resolves through it at CALL time, so an unsealed root would let a
+            # test that forgets the `directory=` seam write a LIVE pause into the
+            # operator's ~/.hscc — where the running daemon's watchdog would then
+            # honour it and stop healing a real node. The seam is the primary
+            # defence (test_node_pauses.py always passes it); this is the seal.
+            (node_pauses, "HSCC_DIR", base),
             # update_check.py (t_a4055572) — the 24h GitHub-release cache. It
             # is the ONE file this module may ever write, and both ambient
             # surfaces (the status notice and the daemon's daily tick) reach
@@ -533,11 +560,14 @@ def _hermetic_kanban_root(tmp_path, monkeypatch):
 # above and swaps the live fence out from under the running suite. Importing
 # ``hermes_cli_plant`` has no such side effect and is what every site does.
 from hscc_daemon.tests.hermes_cli_plant import (  # noqa: E402
+    agent_tree_root as _agent_tree_root,
     evict_planted as _evict_planted_hermes_cli,
     hermes_cli_names as _hermes_cli_names,
     is_planted_path as _is_planted_path,
     poison_reason as _hermes_cli_poison_reason,
-    purge_planted as _purge_planted_hermes_cli)
+    purge_planted as _purge_planted_hermes_cli,
+    resident_under_agent_tree as _resident_under_agent_tree,
+    restore_agent_tree_cache as _restore_agent_tree_cache)
 
 
 @pytest.fixture(autouse=True)
@@ -545,24 +575,36 @@ def _hermetic_hermes_cli_imports():
     """Pin the ``hermes_cli`` import cache per test, like every other hermetic
     autouse fixture here pins the kanban root, the topology and sparkrun.
 
-    Teardown does two things, both cheap (the real subtree re-imports in ~5 ms
+    Teardown does three things, all cheap (the real subtree re-imports in ~5 ms
     once the source is cached):
 
       * drop every ``sys.path`` entry under a pytest temp root, so a planted
         ``<tmp>/hermes-agent`` cannot be the winner for a LATER test;
+      * put the ``sys.modules`` cache back to exactly what this test FOUND, so
+        nothing a window imported while the test ran is handed to the next one
+        (t_572b4856 — see ``hermes_cli_plant``'s second rule: a closed window
+        restores ``sys.path`` but not what it imported, and a resident
+        ``hermes_cli`` carries ``__path__`` into the real tree, which is how one
+        ``importorskip`` line came to answer ``No module named 'hermes_cli'``
+        alone and ``No module named 'utils'`` in-leg);
       * if the resident cache is poisoned by this test — a planted module, or a
         real module still holding one — purge the whole subtree and put back the
         cache as this test found it.
 
-    A test that only ever touched the REAL library pays nothing: no purge, no
-    re-import. The point is that one file planting a fake can no longer decide
-    what a later file's board enumeration sees.
+    A test that only ever touched the REAL library pays the re-import, nothing
+    else. The point is that neither a file planting a fake nor a file that
+    opened one import window can decide what a later file sees.
     """
     saved = {n: sys.modules[n] for n in _hermes_cli_names()}
+    # Resolved BEFORE the test runs: a test that points HERMES_AGENT_PATH at a
+    # temp tree is planting, and that is the plant rule's job, not this one's.
+    agent_root = _agent_tree_root()
+    saved_tree = {n: sys.modules[n] for n in _resident_under_agent_tree(agent_root)}
     yield
     strays = [p for p in sys.path if _is_planted_path(p)]
     if strays:
         sys.path[:] = [p for p in sys.path if not _is_planted_path(p)]
+    _restore_agent_tree_cache(agent_root, saved_tree)
     if _hermes_cli_poison_reason() is not None:
         _purge_planted_hermes_cli(saved)
 
@@ -672,6 +714,30 @@ def _hermetic_sparkrun_resolution(tmp_path, monkeypatch):
     sparkrun_bin.reset_cache()
     yield str(fake_cli)
     sparkrun_bin.reset_cache()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_process_table(monkeypatch):
+    """No parent readable by default: no test walks the operator's real PIDs.
+
+    "Is this PID ours?" (:func:`hscc_daemon.health._pid_ancestry_walk`,
+    t_0df7fc35) answers with an UPWARD ``ps -o ppid= -p`` walk — this machine's
+    process table, ambient state on exactly the same footing as the real
+    ``sparkrun`` CLI pinned directly above. Fence the seam to "no parent can be
+    read", which is the tri-state's NOT-EVALUABLE answer: a test that forgot to
+    install its own tree can therefore never turn green (the repair verifier
+    reports UNVERIFIED) and can never become a kill either (the reap refuses on
+    ``None``) — failing closed is the whole point of the third state.
+
+    t_640be7a2 fenced the DOWNWARD seam (``_proc_children``) for the same
+    reason. That walk is deleted, so the fence moved onto the one seam left;
+    there is now exactly ONE process-table seam to fake, never one per direction.
+    A test that cares about process identity installs its own parent map.
+    """
+    from hscc_daemon import health
+
+    monkeypatch.setattr(health, "_proc_ppid", lambda pid: None)
+    yield
 
 
 class _SubprocessResult:

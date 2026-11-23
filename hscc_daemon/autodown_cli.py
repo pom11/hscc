@@ -525,6 +525,47 @@ def _cmd_wake(rest, json_mode, theme_name=None):
     result = autodown.autoup()
     res = result.get("result", "?")
 
+    if res == "all-paused":
+        # EVERY unit of the wake plan is parked by ``node_pauses`` (autodown
+        # §1c, t_af9901e2): autoup issued no start, restored the state it
+        # stamped, and left the block latched and the watchdog holding — the
+        # posture a parked fleet asks for. Nothing failed, and there is nothing
+        # to undo: this is the operator's own instruction being honoured, the
+        # same reading ``cmd_cluster_up`` gives it with ``success: True``
+        # (t_3b909c61 / #576) — "there was nothing to do, which is not an
+        # error". So the verb reports a no-op and exits 0 on BOTH surfaces:
+        # exit 1 here is not merely wording, it is what a waker / cron step /
+        # CI gate branches on, and it pages about a pause the operator made.
+        #
+        # NOT folded into the ``up`` branch: a completed wake and a wake that
+        # started nothing are different facts, and the operator has to be told
+        # WHICH units are parked and how to put one back.
+        parked = [str(u) for u in (result.get("paused") or [])]
+        if json_mode:
+            # ``paused`` is the same key and element type ``autoup`` and
+            # ``cmd_cluster_up`` return, so one consumer can read any of the
+            # three seams. ``state`` is READ BACK instead of asserted: this
+            # wake put the prior state back, so "waking" would be false, and a
+            # stay-down consumer (``health.check_workers`` / ``check_proxy``)
+            # must not read a wake in flight that does not exist.
+            print(json.dumps({"result": res, "wake_source": "cli",
+                              "state": autodown.load_config().get("state"),
+                              "paused": parked}))
+        else:
+            rows = ["autodown: wake did [warn]nothing[/warn] (all-paused)"
+                    " — every unit is parked",
+                    "  parked units:    "
+                    + (", ".join(theme.esc(u) for u in parked)
+                       if parked else "(none reported)"),
+                    "  nodes holding them:  hscc node paused",
+                    "  put one back:    hscc node resume <host>",
+                    "  then wake again: hscc autodown wake",
+                    "  Nothing was started; state and the watchdog block are "
+                    "unchanged."]
+            _print_status_panel("\n".join(rows), status="warn",
+                                title="autodown wake", theme_name=theme_name)
+        return 0
+
     if json_mode:
         print(json.dumps({"result": res, "state": "waking",
                           "wake_source": "cli"}))

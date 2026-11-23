@@ -1,0 +1,30 @@
+# HSCC — test-only dependencies for the CI pytest legs (t_23bf61f3)
+#
+# requirements.txt stays the DEPLOYED plugin set. Nothing here is needed by a
+# plugin at runtime that does not already import it lazily:
+#   * websockets  — imported at module scope by hscc-api/tests/test_*.py only;
+#                   the production ws route does not import it.
+#   * mcp         — hscc-project/flightdeck/mcp_server.py imports it lazily and
+#                   falls back; the MCP tests import the SDK directly.
+#   * sqlalchemy  — memori_byodb/_client.py raises a RuntimeError naming the
+#                   pip install when it is absent, i.e. optional at runtime.
+#   * aiohttp     — memori_byodb/local_augmentation.py imports it at module scope;
+#                   the BYODB tests collect that module directly.
+#   * numpy/Pillow — comfyui-sparkrun/media.py imports them lazily and raises
+#                   MediaRuntimeMissing; its tests build real images, so they
+#                   need the real packages.
+#   * setuptools  — hscc-project/tests/test_packaging.py builds a package; the
+#                   Python 3.13 venv no longer ships setuptools.
+#
+# Exact pins: a CI gate must not go red because a dependency released a new
+# major between two runs. They match the working hermes venv on the Spark host
+# (measured 2026-11-19) rather than floating.
+-r requirements.txt
+pytest==9.1.1
+websockets==15.0.1
+mcp==2.3.0
+sqlalchemy==2.0.52
+aiohttp==3.14.5
+numpy==2.4.3
+Pillow==13.0.0
+setuptools==84.0.0

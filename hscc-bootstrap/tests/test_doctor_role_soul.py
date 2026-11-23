@@ -90,6 +90,11 @@ def _home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HSCC_DIR", str(tmp_path / ".hscc"))
+    # sparkrun is a FATAL preflight check. A CI/dev box that has not installed
+    # it must not sink this unrelated row's verdict; the probe itself is
+    # covered by test_doctor.TestSparkrunCheck.
+    monkeypatch.setattr(doctor, "_sparkrun_ok",
+                        lambda: doctor.Check("sparkrun", True, detail="stubbed"))
     return home
 
 

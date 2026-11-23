@@ -1,15 +1,16 @@
 import Foundation
 
 // ---------------------------------------------------------------------------
-// BoardStatusReading.swift — the executable half of the Board Status widget.
+// BoardStatusReading.swift — the board projection shared by the Board Progress
+// Live Activity (the Board Status widget itself was retired by CARD B3).
 //
-// WHY THIS FILE EXISTS. `BoardStatusWidget.swift` imports WidgetKit + AppIntents,
-// so no gate on this host can compile it: the macOS SDK marks the accessory
-// families unavailable, and `build_check.sh` only ever COMPILES the iOS target —
-// it never runs a provider. That combination is how a widget ships a false zero
-// with every gate green. So every decision that produces a NUMBER lives here, on
-// Foundation only, and `scripts/board_status_widget_check.sh` compiles THIS file
-// against the real `SharedModels.swift` / `SharedStore.swift` /
+// WHY THIS FILE EXISTS. The Live Activity extension imports WidgetKit, so no
+// gate on this host can run its provider: the macOS SDK marks the accessory
+// families unavailable, and `build_check.sh` only ever COMPILES the iOS target.
+// That combination is how a surface ships a false zero with every gate green.
+// So every decision that produces a NUMBER lives here, on Foundation only, and
+// the app-side driver compiles THIS file against the real `SharedModels.swift` /
+// `SharedStore.swift` /
 // `WidgetDataClient.swift` and EXECUTES those rules headlessly. Same split as
 // `ClusterWidgetMetrics.swift` for the cluster widget.
 //
@@ -106,6 +107,11 @@ struct BoardStatusProjection: Codable, Equatable {
     /// board simply was not in the response.
     init?(summary: MobileSummaryResponse, boardSlug: String?) {
         guard !summary.degraded else { return nil }
+        // The all-boards sum below is only honest when the envelope says it
+        // carried every board. Truncated/omitted/unreadable payloads refuse the
+        // read so the caller keeps its last-known numbers (audit W13).
+        if summary.truncated == true || (summary.omitted_boards ?? 0) > 0 { return nil }
+        if boardSlug == nil, (summary.unreadable_boards ?? 0) > 0 { return nil }
         source = .compact
         self.boardSlug = boardSlug
         if let slug = boardSlug {
@@ -214,6 +220,13 @@ enum BoardStatusSnapshotStore {
     static let snapshotKey = "hscc.boardstatus.snapshot"
     static let boardsKey = "hscc.boardstatus.boards"
 
+    /// One slot per board, so two Board Status instances cannot overwrite each
+    /// other's fallback (audit W12). The all-boards slot keeps the original key.
+    static func snapshotKey(boardSlug: String?) -> String {
+        guard let boardSlug, !boardSlug.isEmpty else { return snapshotKey }
+        return snapshotKey + "." + boardSlug
+    }
+
     private struct Stored: Codable {
         let projection: BoardStatusProjection
         let at: Date
@@ -222,7 +235,7 @@ enum BoardStatusSnapshotStore {
     /// Keep the numbers for the board they belong to. A snapshot of another
     /// board is not "last known" for this one — it is someone else's board.
     static func load(boardSlug: String?) -> (value: BoardStatusProjection, at: Date)? {
-        guard let data = SharedStore.suite?.data(forKey: snapshotKey),
+        guard let data = SharedStore.suite?.data(forKey: snapshotKey(boardSlug: boardSlug)),
               let stored = try? JSONDecoder().decode(Stored.self, from: data),
               stored.projection.boardSlug == boardSlug,
               stored.projection.hasNumbers else { return nil }
@@ -232,7 +245,7 @@ enum BoardStatusSnapshotStore {
     static func save(_ projection: BoardStatusProjection, at date: Date) {
         guard let defaults = SharedStore.suite, projection.hasNumbers else { return }
         guard let data = try? JSONEncoder().encode(Stored(projection: projection, at: date)) else { return }
-        defaults.set(data, forKey: snapshotKey)
+        defaults.set(data, forKey: snapshotKey(boardSlug: projection.boardSlug))
     }
 
     /// Slugs the picker falls back to when the cluster is not answering.

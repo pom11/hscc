@@ -11,8 +11,9 @@ import SwiftUI
 // Activity (docs/CONSOLE_RETIREMENT.md §2.3).
 //
 // Everything here is a byte-for-byte move out of the files it replaces:
-//   * the connection + widget Sections, the cluster list, the QR flow, the
-//     notification toggles and `WidgetSurfaceEditor` from `SettingsView.swift`;
+//   * the connection + widget Sections, the cluster list, the QR flow and
+//     `WidgetSurfaceEditor` from `SettingsView.swift`;
+//     the notification toggles are gone under the 2026-11-19 operator decision;
 //   * `ConnectionBanner` from `ContentView.swift`;
 //   * `makeClient()` and the lifecycle seeding from `AppShell.swift`.
 // Renaming the screen to `ConfigView` is the only content change.
@@ -138,6 +139,7 @@ struct ConfigView: View {
     @EnvironmentObject private var router: DeepLinkRouter
     /// In-app update feed (t_2a1e5913). Injected by HSCCApp; about/banner only.
     @EnvironmentObject private var updates: UpdateChecker
+    @Environment(\.openURL) private var openURL
 
     // Local editing state seeded from the store.
     @State private var hostField: String = ""
@@ -147,6 +149,8 @@ struct ConfigView: View {
     /// Same port and token; reordering here changes the failover order.
     @State private var fallbackFields: [String] = []
     @State private var showingToken = false
+    /// Whether the operator-started Cluster watch Live Activity is up.
+    @State private var clusterWatchRunning = false
     /// True while the operator is defining a brand-new cluster (Add Cluster was
     /// tapped and the form fields were cleared). Save then CREATES a new
     /// cluster instead of editing the active one. Reset to false on load.
@@ -159,21 +163,6 @@ struct ConfigView: View {
     @State private var testIsSuccess: Bool?
     @State private var testReport: ConnectionTestReport?
     @State private var isTesting = false
-
-    // Notification toggles — backed by the shared App-Group suite so the
-    // foreground NotificationCoordinator reads the identical store the operator
-    // edits here (one source of truth, reachable across processes/widgets).
-    // The default-`true` on a fresh install matches `NotifyPreferences.isEnabled`
-    // (absent key ⇒ on), so what the toggle shows always equals what fires.
-    @AppStorage("hscc.notify.enabled.needsReview",
-                store: UserDefaults(suiteName: AppGroup.suiteName))
-    private var notifyNeedsReview = true
-    @AppStorage("hscc.notify.enabled.cardFailedBlocked",
-                store: UserDefaults(suiteName: AppGroup.suiteName))
-    private var notifyCardFailedBlocked = true
-    @AppStorage("hscc.notify.enabled.fleetUnreachable",
-                store: UserDefaults(suiteName: AppGroup.suiteName))
-    private var notifyFleetUnreachable = true
 
     // QR-scan flow state.
     @State private var showingScanner = false
@@ -210,6 +199,29 @@ struct ConfigView: View {
                     Text("Clusters")
                 } footer: {
                     Text("Keep several clusters and switch with one tap. Each cluster keeps its own token in the Keychain. Switching clears all cached state from the previous cluster.")
+                }
+
+                Section {
+                    Button {
+                        Task {
+                            if clusterWatchRunning {
+                                ClusterHealthActivityDriver.shared.stop()
+                                clusterWatchRunning = false
+                            } else {
+                                clusterWatchRunning = await ClusterHealthActivityDriver.shared.start()
+                            }
+                        }
+                    } label: {
+                        Label(clusterWatchRunning ? "Stop Cluster watch" : "Start Cluster watch",
+                              systemImage: clusterWatchRunning ? "stop.circle" : "play.circle")
+                    }
+                    .accessibilityLabel(clusterWatchRunning
+                                        ? "Stop the Cluster watch Live Activity"
+                                        : "Start the Cluster watch Live Activity")
+                } header: {
+                    Text("Cluster watch")
+                } footer: {
+                    Text("The only Live Activity. It shows the fleet's node temperatures, utilisation, tok/s, daemon state and whether autodown is armed. Started here, it ends after eight hours or when you stop it.")
                 }
 
                 Section {
@@ -370,35 +382,11 @@ struct ConfigView: View {
                 }
 
                 Section {
-                    Toggle("New card needs review", isOn: $notifyNeedsReview)
-                    Toggle("Card failed or blocked", isOn: $notifyCardFailedBlocked)
-                    Toggle("Cluster unreachable", isOn: $notifyFleetUnreachable)
-
-                    Button {
-                        Task { await NotificationCoordinator.shared.testNotification() }
-                    } label: {
-                        Label("Send test notification", systemImage: "bell.badge")
-                    }
-                } header: {
-                    Text("Notifications")
-                } footer: {
-                    // Be honest: toggles flipped on do nothing if iOS-level
-                    // authorization was denied or never granted. Surface that
-                    // right here instead of the operator wondering why no banner
-                    // ever arrives.
-                    if !NotificationCoordinator.shared.canDeliver {
-                        Text("Notifications are off in iOS Settings — enable them for HSCC there to receive alerts.")
-                    } else {
-                        Text("Get a banner when the daemon reports something needing you: a card in the review queue, a failed or blocked card, or the cluster going unreachable.")
-                    }
-                }
-
-                Section {
                     widgetsAndLiveActivitiesRows
                 } header: {
                     Text("Widgets & Live Activities")
                 } footer: {
-                    Text("Shared settings every widget and Live Activity reads. Each surface can be turned on or off, set its refresh rate, choose which content to show, and be pointed at one board, project or node — a surface with no choice of its own follows the fleet-wide scope. The OS does not reliably honor widget refresh rates below about 5 minutes.")
+                    Text("Shared settings every widget and Live Activity reads. Each surface can be turned on or off, set its refresh rate, and choose which content to show; the Boards widget can be pointed at one board. WidgetKit delivers about 40–70 reloads per day across every placed widget, so the refresh presets start at 30 minutes.")
                 }
 
                 Section {
@@ -432,6 +420,18 @@ struct ConfigView: View {
                         }
                     }
                     .disabled(updates.isChecking)
+
+                    // Opens the install page in Safari (the Ad Hoc install
+                    // page hosts the itms-services manifest).
+                    Button {
+                        openURL(updates.installURL)
+                    } label: {
+                        if let update = updates.available {
+                            Label("Install \(update.version)", systemImage: "arrow.down.circle.fill")
+                        } else {
+                            Label("Open install page", systemImage: "safari")
+                        }
+                    }
 
                     if let lastResult = updates.lastResult {
                         Label {
@@ -890,6 +890,13 @@ struct ConfigView: View {
                             Text(scopeLine(kind))
                                 .font(.caption)
                                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            // The Lock Screen families this surface ships
+                            // (L2 Gauges). Live Activities omit the line.
+                            if let lockScreen = kind.lockScreenFamilies {
+                                Text(lockScreen)
+                                    .font(.caption)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            }
                         }
                         Spacer(minLength: 0)
                     }
@@ -991,25 +998,20 @@ struct ConfigView: View {
     }
 
     /// One onAppear for the whole app: seed the surviving subsystems with a
-    /// client built from the CURRENT settings, then re-hydrate any wake Live
-    /// Activity orphan the last process kill left behind (a deinit does not run
-    /// when the process is killed, so this sweep is what ends a stale bubble).
-    /// The monitor activity's matching `sweepLeftoverMonitors()` runs from
-    /// `NotificationsAppDelegate` / `HSCCApp`, not here; the session activity's
-    /// `sweepLeftoverSessions()` left with the activity itself (t_3b15b8c9).
+    /// client built from the CURRENT settings, then reflect the Cluster watch
+    /// state the driver adopted at launch. The activity's orphan sweep runs in
+    /// `LaunchAppDelegate`, not here.
     private func rootDidAppear() {
         loadFromStore()
         seedClients()
-        LiveActivityManager.sweepLeftoverWakes()
+        clusterWatchRunning = ClusterHealthActivityDriver.shared.isRunning
     }
 
-    /// The two subsystems that still reach the daemon both take the same
-    /// client: the operator-alert notifier (`Notify/`, which polls on its own
-    /// schedule) and the deep-link router. (The reply watcher took a third
-    /// seeding until the chat family it served was retired — t_9d5a30c9.)
+    /// The one subsystem that still reaches the daemon takes the same client:
+    /// the deep-link router. (The reply watcher took a second seeding until
+    /// the chat family it served was retired — t_9d5a30c9.)
     private func seedClients() {
         let client = makeClient()
-        NotificationCoordinator.shared.setClient(client)
         router.setClient(client)
     }
 
@@ -1027,8 +1029,21 @@ struct ConfigView: View {
 // the display mapping below. No bespoke per-surface editors.
 
 /// Presets offered for refresh cadence. `nil` = Off (surface not refreshed).
-/// WidgetKit does not reliably honor rates below ~5 minutes, noted in the UI.
-private let refreshPresets: [(label: String, minutes: Int?)] = [
+///
+/// WidgetKit delivers roughly 40–70 timeline reloads per day, and every placed
+/// widget shares that budget. The old 5/15-minute presets asked for 96–288
+/// reloads/day and were silently coalesced, so the UI promised a cadence the OS
+/// could not honour (audit W16). Widgets now offer deliverable values only.
+/// Live Activities are pushed by the app, not WidgetKit, so they keep the
+/// shorter cadences.
+private let widgetRefreshPresets: [(label: String, minutes: Int?)] = [
+    ("Off", nil),
+    ("30 min", 30),
+    ("60 min", 60),
+    ("2 hours", 120),
+]
+
+private let activityRefreshPresets: [(label: String, minutes: Int?)] = [
     ("Off", nil),
     ("5 min", 5),
     ("15 min", 15),
@@ -1087,7 +1102,8 @@ struct WidgetSurfaceEditor: View {
                     get: { surface.refreshMinutes },
                     set: { store.setRefreshMinutes($0, for: kind) }
                 )) {
-                    ForEach(refreshPresets, id: \.label) { preset in
+                    ForEach(kind.isLiveActivity ? activityRefreshPresets : widgetRefreshPresets,
+                            id: \.label) { preset in
                         if let minutes = preset.minutes {
                             Text(preset.label).tag(minutes)
                         } else {
@@ -1100,7 +1116,7 @@ struct WidgetSurfaceEditor: View {
             } footer: {
                 Text(kind.isLiveActivity
                     ? "How often the app pushes an update while the Live Activity is active. Live Activities cannot fetch on their own — this is the app's push cadence."
-                    : "How often the widget refreshes its timeline. The OS does not reliably honor widget refresh rates below about 5 minutes.")
+                    : "How often the widget refreshes its timeline. WidgetKit delivers about 40–70 reloads per day across every placed widget, so 30 minutes is the shortest cadence it can honour reliably; the app also reloads timelines when it opens and after a successful fetch.")
             }
 
             // MARK: Scope — what THIS widget points at (t_3dd38411)
@@ -1114,14 +1130,20 @@ struct WidgetSurfaceEditor: View {
                         Text((store.scope(for: kind) ?? WidgetScope()).summaryLine)
                             .multilineTextAlignment(.trailing)
                     }
-                    Picker("Board", selection: scopeSelection(.board)) {
-                        scopeRows(boardOptions ?? [], showSubtitle: false)
+                    if kind.scopeLevels.contains(.board) {
+                        Picker("Board", selection: scopeSelection(.board)) {
+                            scopeRows(boardOptions ?? [], showSubtitle: false)
+                        }
                     }
-                    Picker("Project", selection: scopeSelection(.project)) {
-                        scopeRows(projectOptions ?? [], showSubtitle: true)
+                    if kind.scopeLevels.contains(.project) {
+                        Picker("Project", selection: scopeSelection(.project)) {
+                            scopeRows(projectOptions ?? [], showSubtitle: true)
+                        }
                     }
-                    Picker("Node", selection: scopeSelection(.node)) {
-                        scopeRows(nodeOptions ?? [], showSubtitle: false)
+                    if kind.scopeLevels.contains(.node) {
+                        Picker("Node", selection: scopeSelection(.node)) {
+                            scopeRows(nodeOptions ?? [], showSubtitle: false)
+                        }
                     }
 
                     if loadingScopeOptions {
@@ -1156,7 +1178,7 @@ struct WidgetSurfaceEditor: View {
                     Text("Scope")
                 } footer: {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                        Text("Point this widget at one slice of the fleet. The picker you touch decides the whole scope: choosing a board drops a project or node, and choosing All in any of them clears it for this widget.")
+                        Text("Point this widget at one board. The picker decides the scope: choosing a board narrows the Boards tile, and choosing All clears it for this widget.")
                         if store.setting(for: kind).scope == nil {
                             Text("This widget has no choice of its own, so it follows the fleet-wide scope — currently \((store.settings.scope ?? WidgetScope()).summaryLine). That one is set in the widget's own configuration sheet, or by Siri.")
                         } else {
@@ -1217,9 +1239,11 @@ struct WidgetSurfaceEditor: View {
     /// i.e. the cluster answered nothing. Reported as such, never as an empty
     /// fleet.
     private var scopeListsAreEmpty: Bool {
-        (boardOptions?.count ?? 0) <= 1
-            && (projectOptions?.count ?? 0) <= 1
-            && (nodeOptions?.count ?? 0) <= 1
+        var lists: [[ScopeChoice]?] = []
+        if kind.scopeLevels.contains(.board) { lists.append(boardOptions) }
+        if kind.scopeLevels.contains(.project) { lists.append(projectOptions) }
+        if kind.scopeLevels.contains(.node) { lists.append(nodeOptions) }
+        return lists.allSatisfy { ($0?.count ?? 0) <= 1 }
     }
 
     /// The rows of one picker. "All" is ALWAYS present and needs no network, so

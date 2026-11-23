@@ -15,6 +15,8 @@ Tests and CI use the flag; they never have to relocate HOME to be safe.
 Commands:
   generate [--hermes-home DIR]
                            Build/refresh all role profiles from roles/*.yaml
+                           (the legacy cluster-wide role is generated retired
+                           in favour of the stored main orchestrator)
   create <name> <desc...>  Author a new role spec from a description AND report
                            what git must do to keep it: an untracked spec is
                            deleted by the next re-sync of the deployed plugin dir
@@ -72,6 +74,7 @@ import orchestrators
 import orch_sync
 import reasoning_sync
 import role_soul_check
+import migrate_main
 import _theme
 from _theme import escape, make_console, panel, status_panel, table
 
@@ -178,6 +181,14 @@ def cmd_generate(argv=()):
     result = {"generated": out}
     if failures:
         result["failures"] = failures
+    # The legacy cluster-wide role is retired by compose_soul above. The
+    # data-preserving half (copy the old catch-all's memory/sessions, mark the
+    # catch-all retired) needs the main profile to exist; on a fresh install
+    # generate runs first, so it reports "missing" and orch-all finishes the
+    # migration after creating the main profile.
+    migration = migrate_main.migrate(rolelib.PROFILES_DIR)
+    if migration.get("changed"):
+        result["migration"] = migration
     # --json byte-identity: the machine payload stays RAW print(json.dumps),
     # never routed through a Console (no ANSI / no reformat) — bootstrap and
     # scripts capture + json.load() this.
@@ -372,8 +383,12 @@ def cmd_orch_all(argv):
     without enumerating projects itself.
 
     stdout is PURE JSON (callers may capture + ``json.load()`` it): per-profile
-    results (profile/session/board/changed) plus any failures. Warnings for a
-    missing/unreadable registry go to stderr, not stdout. A failure on one
+    results (profile/session/board/changed) plus any failures. On an existing
+    install it also migrates to the main orchestrator: the legacy identities'
+    memories/sessions are copied (missing files only, never moved or
+    overwritten), both legacy SOULs are marked retired, and a ``migration``
+    block is added only when that run actually changed something. Warnings for
+    a missing/unreadable registry go to stderr, not stdout. A failure on one
     project never aborts the rest — every project is attempted, failures are
     collected, and the exit code is non-zero iff at least one failed.
     """
@@ -425,6 +440,13 @@ def cmd_orch_all(argv):
     report = {"requested": targets, "ensured": ensured}
     if failures:
         report["failures"] = failures
+    # Upgrade path: the main profile now exists (or existed), so carry the
+    # legacy catch-all's memory/sessions over and retire both old identities.
+    # A fresh install and every re-run report changed=False, leaving the JSON
+    # contract unchanged.
+    migration = migrate_main.migrate(rolelib.PROFILES_DIR)
+    if migration.get("changed"):
+        report["migration"] = migration
     # --json byte-identity: raw print(json.dumps), never themed.
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 1 if failures else 0
@@ -491,10 +513,11 @@ print(json.dumps({
 def _provision_profile_names(registry=None):
     """The profile names provision-check iterates — exactly the set orch-all
     provisions: an orchestrator profile per registry project (``<P>-orch``)
-    plus the ``general`` catch-all (``general-orch``). Degrades to just the
-    catch-all on a missing/unreadable registry, mirroring orch-all."""
+    plus the main orchestrator (the name stored by bootstrap, default
+    ``general``). Degrades to just the main profile on a missing/unreadable
+    registry, mirroring orch-all."""
     projects = orchestrators.list_registry_projects(registry)
-    return [f"{p}-orch" for p in projects] + [orchestrators.GENERAL_PROFILE]
+    return [f"{p}-orch" for p in projects] + [orchestrators.main_profile()]
 
 
 def _nested_get(data, keys):
@@ -586,7 +609,8 @@ def cmd_provision_check(argv):
     Usage: hscc.py provision-check [--registry PATH] [--profile NAME] [--json]
 
     For every profile in the provisioning set (a ``<P>-orch`` per registry
-    project plus the ``general-orch`` catch-all — the same set orch-all
+    project plus the main orchestrator (the bootstrap-stored name, default
+    ``general``) — the same set orch-all
     provisions) this resolves <profile>/config.yaml and reports the values
     Hermes would ACTUALLY use: memory.provider, memory.memory_char_limit,
     compression.threshold_tokens (compaction cap) and the aggregate

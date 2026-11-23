@@ -124,9 +124,14 @@ INTENT="Sources/HSCC/Intents/WidgetScopePickerIntent.swift"
 
 # Extract the model block verbatim (WidgetSurfaceKind .. end of the availableSections
 # extension). Line-anchored on stable markers; no hand-copy -> no drift.
+ENUM="Sources/Shared/WidgetSurfaceKind.generated.swift"
 start=$(grep -n "^// Widgets & Live Activities shared settings" "$SRC" | head -1 | cut -d: -f1)
 end=$(grep -n "^/// A lightweight read of the token" "$SRC" | head -1 | cut -d: -f1)
-model=$(sed -n "${start},$((end-1))p" "$SRC")
+# The enum case list is generated into its own file (one JSON per surface).
+# Prepend it so the harness still compiles the REAL enum + the REAL settings
+# structs/extension extracted from SharedStore.swift.
+model="$(cat "$ENUM")
+$(sed -n "${start},$((end-1))p" "$SRC")"
 
 # The storage key comes from the real AppGroup enum (verbatim). The suite no
 # longer exists there as a literal: SharedStore reads HSCCAppGroup from the
@@ -194,7 +199,7 @@ func check(_ name: String, _ cond: Bool) {
     if cond { print("  ok: \(name)") } else { failures.append(name); print("FAIL: \(name)") }
 }
 
-// 1. defaulting is backward compatible: absent store -> every surface on, 5/15
+// 1. defaulting is backward compatible: absent store -> every surface on, 30/15
 //    min, all sections.
 let defaults = AppGroupWidgetSettings.defaults()
 // The count is READ, not remembered. This line used to be
@@ -211,8 +216,8 @@ for kind in WidgetSurfaceKind.allCases {
     check("\(kind.rawValue) defaults active", s.isActive)
     check("\(kind.rawValue) defaults all sections",
           s.showSections == Set(kind.availableSections))
-    check("\(kind.rawValue) defaults cadence \(kind.isLiveActivity ? 15 : 5)",
-          s.refreshMinutes == (kind.isLiveActivity ? 15 : 5))
+    check("\(kind.rawValue) defaults cadence \(kind.isLiveActivity ? 15 : 30)",
+          s.refreshMinutes == (kind.isLiveActivity ? 15 : 30))
 }
 
 // 1a. The registry's own invariants (t_71deac83 added a surface; these are the
@@ -233,35 +238,35 @@ check("every registry key is namespaced by surface kind",
 // not a gap the editor has to paper over: the bounded read path must keep the
 // set empty rather than invent one.
 check("a surface with no sections stays section-less through the bounded path",
-      defaults.setting(for: .liveActivityCards).showSections.isEmpty)
-check("the running-cards surface is push-fed (15-min default)",
-      WidgetSurfaceKind.liveActivityCards.isLiveActivity
-        && noEntries.setting(for: .liveActivityCards).refreshMinutes == 15)
-check("the running-cards registry key is stable",
-      WidgetSurfaceKind.liveActivityCards.rawValue == "liveActivity.cards")
+      defaults.setting(for: .widgetCardsRunning).showSections.isEmpty)
+check("the Cluster watch surface is push-fed (15-min default)",
+      WidgetSurfaceKind.liveActivityClusterHealth.isLiveActivity
+        && noEntries.setting(for: .liveActivityClusterHealth).refreshMinutes == 15)
+check("the Cluster watch registry key is stable",
+      WidgetSurfaceKind.liveActivityClusterHealth.rawValue == "liveActivity.clusterHealth")
 
 // 2. empty store (no entry for a surface) -> setting(for:) still returns ON
 //    defaults (the pre-existing Cluster widget must render unchanged).
 let empty = AppGroupWidgetSettings(surfaces: [:])
 let clusterDefault = empty.setting(for: .widgetCluster)
 check("absent surface defaults ON backward compatible", clusterDefault.isActive)
-check("absent widget defaults 5 min", clusterDefault.refreshMinutes == 5)
-let wakeDefault = empty.setting(for: .liveActivityWake)
-check("absent Live Activity defaults 15 min", wakeDefault.refreshMinutes == 15)
+check("absent widget defaults 30 min", clusterDefault.refreshMinutes == 30)
+let watchDefault = empty.setting(for: .liveActivityClusterHealth)
+check("absent Live Activity defaults 15 min", watchDefault.refreshMinutes == 15)
 
 // 3. bounded set: a stale/foreign section id is stripped by setting(for:).
 var foreign = AppGroupWidgetSettings(surfaces: [
     .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
-                                          showSections: ["state", "bogus_section"])
+                                          showSections: ["nodes", "bogus_section"])
 ])
 let bounded = foreign.setting(for: .widgetCluster)
 check("foreign section stripped (bounded set)",
-      bounded.showSections == ["state"] && !bounded.showSections.contains("bogus_section"))
+      bounded.showSections == ["nodes"] && !bounded.showSections.contains("bogus_section"))
 
 // 4. Codable round-trip: encode -> decode yields an equal registry.
 foreign = AppGroupWidgetSettings(surfaces: [
-    .liveActivityMonitor: WidgetSurfaceSettings(isActive: false, refreshMinutes: 30,
-                                                showSections: ["state", "host"]),
+    .liveActivityClusterHealth: WidgetSurfaceSettings(isActive: false, refreshMinutes: 30,
+                                                      showSections: ["nodes"]),
     .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 60,
                                           showSections: ["state", "board"]),
 ])
@@ -300,36 +305,14 @@ check("Off (0) refresh is stored", off.setting(for: .widgetCluster).refreshMinut
 //    (The t_fa7926fb pair is the reason this list exists at all — a permanent
 //    identifier chosen in a card body deserves one assertion that says so.)
 check("widget.cluster registry key", WidgetSurfaceKind.widgetCluster.rawValue == "widget.cluster")
-check("liveActivity.monitor registry key", WidgetSurfaceKind.liveActivityMonitor.rawValue == "liveActivity.monitor")
+check("liveActivity.clusterHealth registry key", WidgetSurfaceKind.liveActivityClusterHealth.rawValue == "liveActivity.clusterHealth")
 check("widget.cardsRunning registry key", WidgetSurfaceKind.widgetCardsRunning.rawValue == "widget.cardsRunning")
 check("widget.kanbanMonitor registry key", WidgetSurfaceKind.widgetKanbanMonitor.rawValue == "widget.kanbanMonitor")
 
-// 7b. The board status surface (t_09cd8abf): the key itself, the two settings
-//     this entry exists for (pause + cadence) surviving the encode/decode the
-//     extension actually performs, and the honest default for an install that
-//     has never seen this surface (ON at the widget cadence — a new registry
-//     key must never silently pause a widget that is on the Home Screen).
-check("widget.boardStatus registry key",
-      WidgetSurfaceKind.widgetBoardStatus.rawValue == "widget.boardStatus")
-check("board status is a widget (self-fetching, 5-min default)",
-      !WidgetSurfaceKind.widgetBoardStatus.isLiveActivity)
-check("board status declares no optional content section",
-      WidgetSurfaceKind.widgetBoardStatus.availableSections.isEmpty)
-let pausedBoard = AppGroupWidgetSettings(surfaces: [
-    .widgetBoardStatus: WidgetSurfaceSettings(isActive: false, refreshMinutes: 0, showSections: [])
-])
-if let boardData = try? JSONEncoder().encode(pausedBoard),
-   let boardBack = try? JSONDecoder().decode(AppGroupWidgetSettings.self, from: boardData) {
-    check("paused board status reads back paused",
-          boardBack.setting(for: .widgetBoardStatus).isActive == false)
-    check("board status Off cadence stays 0 (the provider maps 0 to atEnd, not a loop)",
-          boardBack.setting(for: .widgetBoardStatus).refreshMinutes == 0)
-} else {
-    check("paused board status encodes and decodes", false)
-}
-let untouchedBoard = AppGroupWidgetSettings(surfaces: [:]).setting(for: .widgetBoardStatus)
-check("board status with no stored entry defaults ON", untouchedBoard.isActive)
-check("board status with no stored entry defaults 5 min", untouchedBoard.refreshMinutes == 5)
+// 7b. The Boards widget keeps the Kanban Monitor registry key so a widget
+//     already placed on a Home Screen survives the consolidation.
+check("widget.kanbanMonitor registry key (permanent App Group key)",
+      WidgetSurfaceKind.widgetKanbanMonitor.rawValue == "widget.kanbanMonitor")
 
 // 7c. the two surfaces t_fa7926fb added (running cards, kanban monitor) behave
 //     like the widgets they are. First half: the rule that keeps a fresh install
@@ -337,17 +320,17 @@ check("board status with no stored entry defaults 5 min", untouchedBoard.refresh
 //     NEVER "paused" — and the seed a brand-new store gets must not pause them
 //     either. ${BT}AppGroupWidgetSettings.defaults()${BT} DERIVES from ${BT}isLiveActivity${BT}
 //     and ${BT}availableSections${BT}, so this is the executed proof that the pair
-//     landed in the 5-minute widget branch and not the 15-minute Live Activity
-//     one; a wrong branch there is a widget that refreshes three times too
-//     slowly on every device, quietly.
+//     landed in the 30-minute widget branch and not the 15-minute Live Activity
+//     one; a wrong branch there is a widget that refreshes on the wrong
+//     schedule on every device, quietly.
 for kind in [WidgetSurfaceKind.widgetCardsRunning, .widgetKanbanMonitor] {
     let s = AppGroupWidgetSettings(surfaces: [:]).setting(for: kind)
     check("\(kind.rawValue) with no entry is ON (absent is not paused)", s.isActive)
-    check("\(kind.rawValue) with no entry takes the 5-min widget cadence",
-          s.refreshMinutes == 5)
+    check("\(kind.rawValue) with no entry takes the 30-min widget cadence",
+          s.refreshMinutes == 30)
     let seeded = AppGroupWidgetSettings.defaults().setting(for: kind)
     check("\(kind.rawValue) is ON at the widget cadence in the first-launch seed",
-          seeded.isActive && seeded.refreshMinutes == 5)
+          seeded.isActive && seeded.refreshMinutes == 30)
     check("\(kind.rawValue) is not a Live Activity", !kind.isLiveActivity)
     check("\(kind.rawValue) declares no sections (one dataset, nothing optional)",
           kind.availableSections.isEmpty)
@@ -371,44 +354,6 @@ check("paused running-cards keeps the cadence the operator chose", pausedCards.r
 check("running-cards honours its empty section declaration", pausedCards.showSections.isEmpty)
 check("kanban monitor Off (0) survives alongside the pause",
       pausedPair.setting(for: .widgetKanbanMonitor).refreshMinutes == 0)
-
-// 7d. the projects surface (t_5f246177), the LAST widget in HSCCWidgets to join
-//     this registry. Same three claims as 7c, asserted separately because this
-//     raw value is the one that gets written to an installed device the moment
-//     the operator touches its row — and because the failure it guards against is
-//     specific to a NEW key: setting(for:) fills an absent surface with ON, so
-//     adding the key cannot blank a widget already on the Home Screen of an
-//     installed device, and if that ever stopped being true the widget would
-//     silently stop drawing projects on every device that never opened Settings.
-//     (No backticks in this heredoc body on purpose — the heredoc is UNQUOTED, so
-//     bash command-substitutes a backtick pair instead of leaving it in the Swift,
-//     which mangles the line and prints a command-not-found nobody reads.)
-check("widget.projects registry key (permanent App Group key)",
-      WidgetSurfaceKind.widgetProjects.rawValue == "widget.projects")
-check("projects is a widget (self-fetching, 5-min default)",
-      !WidgetSurfaceKind.widgetProjects.isLiveActivity)
-check("projects declares no optional content section",
-      WidgetSurfaceKind.widgetProjects.availableSections.isEmpty)
-let projectsAbsent = AppGroupWidgetSettings(surfaces: [:]).setting(for: .widgetProjects)
-check("widget.projects with no entry is ON (absent is not paused)",
-      projectsAbsent.isActive)
-check("widget.projects with no entry takes the 5-min widget cadence",
-      projectsAbsent.refreshMinutes == 5)
-let projectsSeeded = AppGroupWidgetSettings.defaults().setting(for: .widgetProjects)
-check("widget.projects is ON at the widget cadence in the first-launch seed",
-      projectsSeeded.isActive && projectsSeeded.refreshMinutes == 5)
-check("the seed for widget.projects carries no sections either",
-      projectsSeeded.showSections.isEmpty)
-let pausedProjects = AppGroupWidgetSettings(surfaces: [
-    .widgetProjects: WidgetSurfaceSettings(isActive: false, refreshMinutes: 0,
-                                           showSections: ["state", "board"])
-]).setting(for: .widgetProjects)
-check("paused projects stays paused through the bounding read the widget performs",
-      !pausedProjects.isActive)
-check("widget.projects Off (0) survives alongside the pause (the provider maps it to atEnd)",
-      pausedProjects.refreshMinutes == 0)
-check("widget.projects honours its empty section declaration against a foreign blob",
-      pausedProjects.showSections.isEmpty)
 
 // ---- widget scope (t_98fb8726): the intent's write, the widget's read ------
 // Everything from here to the restore is the code the configuration intent
@@ -522,25 +467,25 @@ let carried = AppGroupWidgetSettings(surfaces: [
 check("per-widget scope survives the bounded read path",
       carried.setting(for: .widgetCluster).scope == WidgetScope(board: "radio"))
 check("a surface with no scope of its own reads nil, not an empty scope",
-      carried.setting(for: .widgetMonitor).scope == nil)
+      carried.setting(for: .widgetNeedsMe).scope == nil)
 
 let mixed = AppGroupWidgetSettings(
     surfaces: [
         .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                               showSections: ["state"], scope: WidgetScope(board: "radio")),
-        .widgetMonitor: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
+        .widgetNeedsMe: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                               showSections: ["state"], scope: WidgetScope()),
         // A surface with NO choice of its own: absent key on disk, inherits.
-        .liveActivityWake: WidgetSurfaceSettings(isActive: true, refreshMinutes: 15,
-                                                 showSections: ["state"]),
+        .liveActivityClusterHealth: WidgetSurfaceSettings(isActive: true, refreshMinutes: 15,
+                                                          showSections: ["nodes"]),
     ],
     scope: WidgetScope(node: ".244"))
 check("scope(for:) keeps the surface own board",
       mixed.scope(for: .widgetCluster) == WidgetScope(board: "radio"))
 check("scope(for:) inherits the fleet default when the surface never chose",
-      mixed.scope(for: .liveActivityWake) == WidgetScope(node: ".244"))
+      mixed.scope(for: .liveActivityClusterHealth) == WidgetScope(node: ".244"))
 check("an explicit All on the surface does not inherit the fleet default",
-      mixed.scope(for: .widgetMonitor) == WidgetScope() && (mixed.scope(for: .widgetMonitor)?.isAll ?? false))
+      mixed.scope(for: .widgetNeedsMe) == WidgetScope() && (mixed.scope(for: .widgetNeedsMe)?.isAll ?? false))
 
 // The on-disk shape of the two states that look alike: a never-chosen surface
 // carries NO scope key, an explicit All carries an empty object. Hand-typed
@@ -564,9 +509,9 @@ if let mixedData = try? JSONEncoder().encode(mixed),
    let mixedDict = try? JSONSerialization.jsonObject(with: mixedData) as? [String: Any] {
     check("the surfaces map is stored as the flat key/value array Swift writes",
           mixedDict["surfaces"] is [Any])
-    let wakeEntry = surfaceEntry(mixedDict, "liveActivity.wake")
-    check("a never-chosen surface stores no scope key", wakeEntry != nil && wakeEntry?["scope"] == nil)
-    let monitorScope = surfaceEntry(mixedDict, "widget.monitor")?["scope"] as? [String: Any]
+    let watchEntry = surfaceEntry(mixedDict, "liveActivity.clusterHealth")
+    check("a never-chosen surface stores no scope key", watchEntry != nil && watchEntry?["scope"] == nil)
+    let monitorScope = surfaceEntry(mixedDict, "widget.needsMe")?["scope"] as? [String: Any]
     check("an explicit All stores an empty scope object",
           monitorScope != nil && monitorScope?.isEmpty == true)
     let clusterScope = surfaceEntry(mixedDict, "widget.cluster")?["scope"] as? [String: Any]
@@ -600,9 +545,9 @@ check("the store reads the seeded fleet default as its own scope",
 // The screen folds with the SAME static the configuration intent folds with —
 // one rule for what a three-picker sheet means, two entry points.
 screen.setScope(WidgetScope.buildPickerSelection(board: "radio", project: nil, node: nil),
-                for: .widgetMonitor)
+                for: .widgetCluster)
 check("the screen per-widget write lands where the widgets read",
-      AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor) == WidgetScope(board: "radio"))
+      AppGroupWidgetSettings.load()?.scope(for: .widgetCluster) == WidgetScope(board: "radio"))
 check("the fleet default survives a per-widget write",
       AppGroupWidgetSettings.load()?.scope == WidgetScope(board: "hscc"))
 check("cadence survives a per-widget scope write",
@@ -620,14 +565,14 @@ check("a fleet scope the intent wrote mid-session survives the screen write",
 check("the screen write still landed",
       AppGroupWidgetSettings.load()?.setting(for: .widgetCluster).refreshMinutes == 11)
 check("the per-widget scope still rides the same blob",
-      AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor) == WidgetScope(board: "radio"))
+      AppGroupWidgetSettings.load()?.scope(for: .widgetCluster) == WidgetScope(board: "radio"))
 
-screen.setScope(WidgetScope(), for: .widgetMonitor)
+screen.setScope(WidgetScope(), for: .widgetCluster)
 check("an explicit All written by the screen stops the inheritance",
-      AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor)?.isAll ?? false)
-screen.setScope(nil, for: .widgetMonitor)
+      AppGroupWidgetSettings.load()?.scope(for: .widgetCluster)?.isAll ?? false)
+screen.setScope(nil, for: .widgetCluster)
 check("dropping the surface choice re-inherits the fleet default",
-      AppGroupWidgetSettings.load()?.scope(for: .widgetMonitor) == WidgetScope(board: "intent-late"))
+      AppGroupWidgetSettings.load()?.scope(for: .widgetCluster) == WidgetScope(board: "intent-late"))
 
 // 18. APPEARANCE (t_444519ae): the stored style model. Old blobs must decode
 //     to the app Theme default with no migration prompt; a per-surface
@@ -645,7 +590,7 @@ if let oldStyleData = try? JSONEncoder().encode(legacyStyleBlob) {
         check("old data decodes with no global style (Theme default)",
               oldStyle.style == nil && oldStyle.resolvedStyle(for: .widgetCluster) == themeDefault)
         check("old data's untouched surface also resolves to the Theme default",
-              oldStyle.resolvedStyle(for: .widgetMonitor) == themeDefault)
+              oldStyle.resolvedStyle(for: .widgetCluster) == themeDefault)
     } else {
         check("old data decodes with no global style (Theme default)", false)
         check("old data's untouched surface also resolves to the Theme default", false)
@@ -683,16 +628,16 @@ let surfaceStyle = WidgetStyle.presets.first(where: { preset in preset.id == "mo
 let styled = AppGroupWidgetSettings(surfaces: [
     .widgetCluster: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                           showSections: ["state"], style: surfaceStyle),
-    .widgetMonitor: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
+    .widgetNeedsMe: WidgetSurfaceSettings(isActive: true, refreshMinutes: 5,
                                           showSections: ["state"]),
 ], style: globalStyle)
 check("per-surface override beats the global style",
       styled.resolvedStyle(for: .widgetCluster) == surfaceStyle)
 check("a surface with no override inherits the global style",
-      styled.resolvedStyle(for: .widgetMonitor) == globalStyle)
+      styled.resolvedStyle(for: .widgetNeedsMe) == globalStyle)
 check("style(for:) reports only a real override",
       styled.style(for: .widgetCluster) == surfaceStyle
-      && styled.style(for: .widgetMonitor) == nil)
+      && styled.style(for: .widgetNeedsMe) == nil)
 var droppedOverride = styled
 droppedOverride.surfaces[.widgetCluster] = WidgetSurfaceSettings(
     isActive: true, refreshMinutes: 5, showSections: ["state"])
@@ -700,7 +645,7 @@ check("Use global (no override) falls back to the global style",
       droppedOverride.resolvedStyle(for: .widgetCluster) == globalStyle
       && droppedOverride.style(for: .widgetCluster) == nil)
 check("no global style at all resolves to the Theme default",
-      AppGroupWidgetSettings(surfaces: [:]).resolvedStyle(for: .widgetMonitor) == themeDefault)
+      AppGroupWidgetSettings(surfaces: [:]).resolvedStyle(for: .widgetCluster) == themeDefault)
 
 // The app-side write path the editor drives, against the REAL suite domain.
 let appearanceSeed = AppGroupWidgetSettings(surfaces: [:], style: globalStyle)
@@ -709,17 +654,17 @@ if let appearanceData = try? JSONEncoder().encode(appearanceSeed) {
 }
 let appearanceScreen = WidgetSettingsStore()
 check("the store reads the global style", appearanceScreen.globalStyle == globalStyle)
-appearanceScreen.setStyle(surfaceStyle, for: .widgetMonitor)
+appearanceScreen.setStyle(surfaceStyle, for: .widgetCluster)
 check("a per-surface style write lands where the widgets read",
-      AppGroupWidgetSettings.load()?.style(for: .widgetMonitor) == surfaceStyle)
-check("the store resolves the override", appearanceScreen.resolvedStyle(for: .widgetMonitor) == surfaceStyle)
-appearanceScreen.useGlobalStyle(for: .widgetMonitor)
+      AppGroupWidgetSettings.load()?.style(for: .widgetCluster) == surfaceStyle)
+check("the store resolves the override", appearanceScreen.resolvedStyle(for: .widgetCluster) == surfaceStyle)
+appearanceScreen.useGlobalStyle(for: .widgetCluster)
 check("Use global drops the override and re-inherits",
-      AppGroupWidgetSettings.load()?.style(for: .widgetMonitor) == nil
-      && appearanceScreen.resolvedStyle(for: .widgetMonitor) == globalStyle)
+      AppGroupWidgetSettings.load()?.style(for: .widgetCluster) == nil
+      && appearanceScreen.resolvedStyle(for: .widgetCluster) == globalStyle)
 appearanceScreen.setGlobalStyle(surfaceStyle)
 check("a global style write persists to the shared blob",
-      AppGroupWidgetSettings.load()?.resolvedStyle(for: .widgetMonitor) == surfaceStyle)
+      AppGroupWidgetSettings.load()?.resolvedStyle(for: .widgetCluster) == surfaceStyle)
 
 // 19. restore the host's prior state — the gate must leave nothing behind.
 if let priorBlob { realSuite.set(priorBlob, forKey: AppGroupWidgetSettings.storageKey) }
@@ -846,6 +791,12 @@ cok "the shared editor offers the refresh cadence picker" 'Picker("Refresh", sel
 # its writes go through the shared store (not a second App Group key).
 cok "the settings screen links to the appearance editor" "WidgetAppearanceView()"
 cok "the settings screen has an Appearance section" 'Text("Appearance")'
+# L2 Lock Screen (2026-11-20): each widget row names the accessory families it
+# ships; a Live Activity row has none and therefore omits the line.
+cok "the surface rows name their Lock Screen families" "kind.lockScreenFamilies"
+grep -q "var lockScreenFamilies: String?" Sources/HSCC/Views/WidgetSurfaceLabels.swift \
+  && echo "  ok: the shared surface metadata owns the Lock Screen family line" \
+  || gfail "the shared surface metadata has no Lock Screen family line"
 
 APPEARANCE="Sources/HSCC/Views/WidgetAppearanceView.swift"
 [ -f "$APPEARANCE" ] || { echo "appearance editor missing: $APPEARANCE" >&2; exit 1; }
@@ -880,7 +831,8 @@ if [ -f "$MAC_SETTINGS" ] && [ -f "$MAC_SPEC" ]; then
   grep -q "WidgetCenter.shared.reloadAllTimelines()" "$MAC_SETTINGS" \
     && echo "  ok: macOS settings writes reload desktop widget timelines" \
     || gfail "macOS settings writes reload desktop widget timelines"
-  for reused in WidgetSettingsStore.swift Views/WidgetAppearanceView.swift Views/WidgetSurfaceLabels.swift; do
+  for reused in WidgetSettingsStore.swift Views/WidgetAppearanceView.swift \
+                Views/WidgetSurfaceLabels.swift Views/WidgetSurfaceLabels.generated.swift; do
     grep -qF -- "- path: ../ios-app/Sources/HSCC/$reused" "$MAC_SPEC" \
       && echo "  ok: macOS app compiles $reused by path" \
       || gfail "macOS app does not compile $reused by path"
@@ -908,11 +860,11 @@ sfail() { echo "  FAIL: $1"; grepfail=$((grepfail+1)); }
 sok() { echo "  ok: $1"; }
 norm_list() { printf '%s\n' "$1" | sed '/^$/d' | sort; }
 
-surface_cases=$(sed -n '/^enum WidgetSurfaceKind: String, CaseIterable, Codable {/,/^}/p' "$SRC" \
+surface_cases=$(sed -n '/^enum WidgetSurfaceKind: String, CaseIterable, Codable {/,/^}/p' "$ENUM" \
   | sed -n 's/^    case \([A-Za-z][A-Za-z0-9]*\).*/\1/p')
 surface_case_count=$(printf '%s\n' "$surface_cases" | sed '/^$/d' | wc -l | tr -d ' ')
 if [ "$surface_case_count" -lt 1 ]; then
-  sfail "the registry enum could not be read from $SRC"
+  sfail "the registry enum could not be read from $ENUM"
 fi
 
 # One row per case is not enough if the row has no name or icon: the shared
@@ -920,7 +872,7 @@ fi
 # case must be present in both switches. The switches moved out of ConfigView
 # into WidgetSurfaceLabels.swift (t_1143c19b) so the macOS Settings window
 # compiles the same metadata instead of a second copy.
-META="Sources/HSCC/Views/WidgetSurfaceLabels.swift"
+META="Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift"
 [ -f "$META" ] || { echo "surface display metadata missing: $META" >&2; exit 1; }
 meta_bad=0
 for c in $surface_cases; do
@@ -936,24 +888,25 @@ done
 # what proves the row's pause/cadence controls reach the surface rather than a
 # second switch the screen does not use.
 WIDGETS_DIR="Sources/HSCCWidgets"
-WIDGET_BUNDLE="$WIDGETS_DIR/HSCCWidgetsBundle.swift"
-widget_names=$(sed -n '/^struct HSCCWidgetsBundle: WidgetBundle {/,/^}/p' "$WIDGET_BUNDLE" \
+WIDGET_BUNDLE="$WIDGETS_DIR/HSCCWidgetList.generated.swift"
+widget_names=$(sed -n '/^struct HSCCWidgetList: WidgetBundle {/,/^}/p' "$WIDGET_BUNDLE" \
   | sed -n 's/^        \([A-Za-z][A-Za-z0-9]*\)()$/\1/p')
 widget_count=$(printf '%s\n' "$widget_names" | sed '/^$/d' | wc -l | tr -d ' ')
 sok "the widget bundle declares $widget_count widget surface(s)"
-# Bundle type -> registry case. Explicit because a widget can keep its struct
-# and its provider in different files (ClusterWidget does), so the name is the
-# stable link. A new bundle entry with no line here fails closed.
+# Bundle type -> registry case comes from the per-widget JSON manifests, so a
+# new widget does not edit this gate either.
+widget_kind_map=$(python3 - <<'PY'
+import glob, json
+for path in sorted(glob.glob("widgets/*.json")):
+    if path.rsplit("/", 1)[-1].startswith("_"):
+        continue
+    d = json.load(open(path))
+    if d.get("widget_type"):
+        print(d["widget_type"], d["surface_case"])
+PY
+)
 widget_kind_for() {
-  case "$1" in
-    ClusterWidget) echo widgetCluster ;;
-    MonitorWidget) echo widgetMonitor ;;
-    CardsRunningWidget) echo widgetCardsRunning ;;
-    KanbanMonitorWidget) echo widgetKanbanMonitor ;;
-    ProjectsWidget) echo widgetProjects ;;
-    BoardStatusWidget) echo widgetBoardStatus ;;
-    *) echo "" ;;
-  esac
+  printf '%s\n' "$widget_kind_map" | awk -v t="$1" '$1 == t { print $2; exit }'
 }
 used_widget_kinds=""
 for w in $widget_names; do
@@ -975,7 +928,7 @@ for w in $widget_names; do
   sok "widget $w is wired to $kind"
 done
 registered_widget_kinds=$(printf '%s\n' "$surface_cases" | while IFS= read -r c; do
-  grep -q "^    case $c = \"widget\." "$SRC" && printf '%s\n' "$c"
+  grep -q "^    case $c = \"widget\." "$ENUM" && printf '%s\n' "$c"
 done)
 if [ "$(norm_list "$used_widget_kinds")" != "$(norm_list "$registered_widget_kinds")" ]; then
   sfail "the widget cases in the registry and the widgets in the bundle are not the same set"
@@ -989,16 +942,12 @@ fi
 # closed rather than being skipped.
 la_case_for() {
   case "$1" in
-    WakingActivityAttributes) echo liveActivityWake ;;
-    MonitorActivityAttributes) echo liveActivityMonitor ;;
     ClusterHealthActivityAttributes) echo liveActivityClusterHealth ;;
-    CardsRunningActivityAttributes) echo liveActivityCards ;;
-    BoardProgressActivityAttributes) echo liveActivityBoardProgress ;;
     *) echo "" ;;
   esac
 }
 la_types=$(grep -rhoE 'ActivityConfiguration\(for: [A-Za-z][A-Za-z0-9]*\.self\)' \
-  Sources/HSCCLiveActivity Sources/HSCCLiveActivityMonitor \
+  Sources/HSCCLiveActivityMonitor \
   | sed -E 's/.*for: ([A-Za-z][A-Za-z0-9]*)\.self.*/\1/' | sort -u)
 la_count=$(printf '%s\n' "$la_types" | sed '/^$/d' | wc -l | tr -d ' ')
 sok "the Live Activity extensions declare $la_count activity surface(s)"
@@ -1016,7 +965,7 @@ for t in $la_types; do
   sok "Live Activity $t is wired to $kind"
 done
 registered_la_kinds=$(printf '%s\n' "$surface_cases" | while IFS= read -r c; do
-  grep -q "^    case $c = \"liveActivity\." "$SRC" && printf '%s\n' "$c"
+  grep -q "^    case $c = \"liveActivity\." "$ENUM" && printf '%s\n' "$c"
 done)
 if [ "$(norm_list "$used_la_kinds")" != "$(norm_list "$registered_la_kinds")" ]; then
   sfail "the Live Activity cases in the registry and the activities in the extensions are not the same set"
@@ -1025,12 +974,17 @@ else
 fi
 # A raw value IS the App Group key: pin the newest one to its literal for the
 # same reason every older surface is pinned in the executed harness.
-grep -q 'case liveActivityBoardProgress = "liveActivity.boardProgress"' "$SRC" \
-  && sok "liveActivity.boardProgress registry key" \
-  || sfail "liveActivity.boardProgress registry key"
-grep -q 'setting(for: .liveActivityBoardProgress)' Sources/HSCC/BoardProgressActivityDriver.swift \
-  && sok "the board-progress driver reads its registry entry" \
-  || sfail "the board-progress driver reads its registry entry"
+grep -q 'case liveActivityClusterHealth = "liveActivity.clusterHealth"' "$ENUM" \
+  && sok "liveActivity.clusterHealth registry key" \
+  || sfail "liveActivity.clusterHealth registry key"
+grep -q 'setting(for: .liveActivityClusterHealth)' Sources/HSCC/ClusterHealthActivityDriver.swift \
+  && sok "the Cluster watch driver reads its registry entry" \
+  || sfail "the Cluster watch driver reads its registry entry"
+for removed in liveActivityWake liveActivityMonitor liveActivityCards liveActivityBoardProgress; do
+  grep -q "case $removed" "$ENUM" \
+    && sfail "removed Live Activity $removed is still in the registry" \
+    || sok "removed Live Activity $removed is gone from the registry"
+done
 
 # Gate-integrity assertions (the generated harness): reported with the greps
 # because they are assertions about THIS gate rather than about the app, and

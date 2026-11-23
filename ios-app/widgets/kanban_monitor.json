@@ -1,0 +1,29 @@
+{
+  "order": 5,
+  "bundle_order": 4,
+  "kind": "widget",
+  "surface_case": "widgetKanbanMonitor",
+  "surface_raw": "widget.kanbanMonitor",
+  "display_name": "Boards",
+  "icon": "list.bullet.rectangle",
+  "widget_type": "KanbanMonitorWidget",
+  "sources": [
+    "Sources/HSCCWidgets/KanbanMonitorWidget.swift"
+  ],
+  "coverage_ios": [
+    "declared-and-renders (`SmallKanbanMonitor`)",
+    "declared-and-renders (`MediumKanbanMonitor`)",
+    "declared-and-renders (`LargeKanbanMonitor`)",
+    "declared-and-renders (`Text(entry.inlineLine)` — `2 running · 38 blocked`)",
+    "declared-and-renders (`KanbanMonitorCircular` — L2 running/slots gauge)",
+    "declared-and-renders (`KanbanMonitorRectangular` — running + done/blocked)"
+  ],
+  "coverage_macos": [
+    "declared-and-renders (`SmallKanbanMonitor`)",
+    "declared-and-renders (`MediumKanbanMonitor`)",
+    "declared-and-renders (`LargeKanbanMonitor`)",
+    "declared-and-renders (`LargeKanbanMonitor` \u2014 XL reuses the large renderer)"
+  ],
+  "coverage_source": "`ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift`",
+  "id": "kanban_monitor"
+}

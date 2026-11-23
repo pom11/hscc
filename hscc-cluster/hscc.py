@@ -585,6 +585,14 @@ STAY_DOWN_CONFIRMATION = (
     "fleet marked deliberately down — the daemon will not relaunch workers, "
     "the proxy or the notifier until `hscc cluster up`")
 
+#: The reason text THIS surface stamps into the post-boot stay-down record.
+#: A DEFAULT, not a constant: `/cluster-down` (hscc-commands) passes its own so
+#: the record still names which surface claimed the stay-down, while the marker
+#: itself stays the ONE shared record. `hscc_daemon/verify.py` documents that no
+#: substring of this text is ever a safety property, so rewording it here is
+#: cosmetic — but the CLI wording is pinned verbatim, so it stays as-is.
+STAY_DOWN_REASON = "hscc cluster down"
+
 
 def _benign_no_workloads_note(res):
     """Short note when a nonzero sparkrun exit only says "already down".
@@ -618,13 +626,26 @@ def _benign_no_workloads_note(res):
             "(sparkrun exited nonzero on an already-down host)")
 
 
-def cmd_cluster_down(dry_run=False):
+def cmd_cluster_down(dry_run=False, reason=STAY_DOWN_REASON):
     """Stop ALL sparkrun workloads across the fleet. ``[--dry-run]``.
 
     The single source of truth for a full fleet down: issues ONE
     ``sparkrun stop --all`` built by ``serving.fleet_down_cmd()``, scoped to
     the configured cluster. Prints the exact command; ``--dry-run`` prints
     without executing. autodown.teardown() uses this same builder.
+
+    t_bf8577f9 (audit F5): ``/cluster-down`` (hscc-commands) now DELEGATES here
+    instead of running its own per-node ``sparkrun stop --all --hosts <node>``
+    loop, so the slash surface and this one cannot disagree again — same host
+    scope (sparkrun's cluster, not whatever serving.json happened to list), same
+    benign-``already down`` classification, same marker bookkeeping. ``reason``
+    exists so the delegating surface can still record WHICH surface claimed the
+    stay-down; the CLI default keeps the CLI's marker wording byte-identical.
+    The marker outcome is also reported in the ADDITIVE ``stay_down_marker`` key
+    (``{"cleared", "reason", "error"}``), the same pattern as ``benign_*``:
+    ``success`` still means "sparkrun exited 0" for ``--json`` consumers, and a
+    caller that renders its own text (the slash verb) does not have to re-read
+    this function's ``print`` output to know whether the record was claimed.
 
     t_576964d5: a real (non-dry-run) down ALSO clears the post-boot
     expected_up marker — this verb IS the operator's "stay down" intent, so
@@ -663,15 +684,136 @@ def cmd_cluster_down(dry_run=False):
         res["benign_note"] = note
     pb = _post_boot_module()
     cleared = False
-    if pb is not None:
+    marker_error = None
+    if pb is None:
+        marker_error = "hscc_daemon.post_boot is not importable from this install"
+    else:
         try:
-            pb.clear_expected_up("hscc cluster down")
+            pb.clear_expected_up(reason)
             cleared = True
         except Exception as e:
+            marker_error = str(e)
             print(f"WARN: expected_up marker clear failed: {e}")
+    # Additive (t_bf8577f9): the record's outcome, for a caller that renders its
+    # own text. Nothing here changes `success` — see the docstring.
+    res["stay_down_marker"] = {"cleared": cleared, "reason": reason,
+                               "error": marker_error}
     if cleared:
         print(STAY_DOWN_CONFIRMATION)
     return res
+
+
+# ── NODE-PAUSE SKIP SEAM (t_3b909c61) ──────────────────────────────────────
+#
+# WHY A FLEET UP MUST ASK THE OVERLAY
+# -----------------------------------
+# ``hscc_daemon.node_pauses`` is the operator's one durable way to park a node
+# "without touching any config", and a fleet up is the path that would silently
+# undo it: every entry it issues is ``sparkrun run … --ensure``, whose whole
+# point is to make the declared workload exist again. A pause this verb did not
+# honour is not a paused node — it is a node the operator parked and the CLI
+# walked back into service, which is the exact failure the overlay module's
+# docstring exists to remove. The daemon's wake path already holds this line
+# (``autodown._parked_nodes`` / ``_partition_wake_plan``); this is the CLI-side
+# twin of those SAME semantics, written against the same public reader rather
+# than imported across the package boundary.
+#
+# ``paused_nodes()``, NEVER ``paused(host)``
+# -----------------------------------------
+# A pause record is keyed by the host it was issued against and lists the rest
+# of the unit's span in ``span_nodes``. ``node_pauses.paused()`` documents that
+# it does NOT follow ``span_nodes``, so a keyed-only lookup would start the
+# other half of a tensor-parallel pair out from under the pause — a half-started
+# unit, which is worse than a skip. ``paused_nodes()`` is the documented one-call
+# form for a seam about to loop over a fleet (keyed hosts ∪ their span nodes),
+# and it is resolved ONCE per invocation, both because that is the loop it is
+# written for and because a fleet up must not see the overlay change halfway
+# through its own plan.
+#
+# FAIL-OPEN ON AN UNREADABLE OVERLAY, LOUDLY
+# -----------------------------------------
+# ``node_pauses.load()`` cannot raise by construction (missing file ⇒ no pauses,
+# quietly; present-but-corrupt ⇒ no pauses plus a WARN), so anything escaping
+# the read here is a bug in the overlay module, not a pause signal. Failing
+# CLOSED on it — skipping every unit — would let one unreadable file disable the
+# fleet's ability to boot itself, an outage strictly worse than the one bad start
+# it might prevent. So an exception is reported as an ERROR naming the risk and
+# the plan proceeds UNFILTERED. "Fail open" here means *unfiltered*, which is
+# the scary direction; the log line says so.
+def _parked_nodes():
+    """Every node the pause overlay currently holds; ``set()`` when none.
+
+    Read through the overlay module's own default root (HOME's ``~/.hscc``) —
+    the record the CLI writes and the daemon reads. Tests seal that root by
+    patching ``node_pauses.HSCC_DIR``, which ``overlay_path`` resolves per call,
+    so reads and writes are sealed together. There is deliberately no
+    ``pauses_directory=`` parameter here: it would be a test-only argument on a
+    signature three production callers pass positionally.
+    """
+    try:
+        from hscc_daemon import node_pauses
+        return set(node_pauses.paused_nodes())
+    except Exception as e:  # noqa: BLE001 - see the FAIL-OPEN note above
+        print(f"ERROR: node-pause overlay unreadable ({type(e).__name__}: {e}) "
+              f"— proceeding with the FULL plan; a parked node may be "
+              f"relaunched. Check ~/.hscc/node_pauses.json")
+        return set()
+
+
+def _partition_up_plan(plan, parked_nodes):
+    """Split a fleet-up plan into ``(startable, parked)`` by the overlay.
+
+    ``parked`` is ``[(entry, [blocked_nodes…]), …]`` in plan order, so the
+    caller can report WHICH node of the unit is parked, not just that it was
+    skipped. A unit whose span contains even ONE parked node is parked as a
+    whole — the span is one workload and cannot come up around its own missing
+    member. Node names are compared as strings so a plan entry that carries
+    non-string hosts still matches the overlay's record.
+    """
+    plan = list(plan or [])
+    if not parked_nodes:
+        return plan, []
+    startable, parked = [], []
+    for entry in plan:
+        blocked = [n for n in (entry.get("nodes") or [])
+                   if str(n) in parked_nodes]
+        if blocked:
+            parked.append((entry, blocked))
+        else:
+            startable.append(entry)
+    return startable, parked
+
+
+def _pause_display(node):
+    """Best-effort ``(reason, owner)`` for ONE already-parked node, display only.
+
+    ``owner`` is the pause record's KEY — the host ``hscc node resume`` accepts.
+    A node held only through its unit's ``span_nodes`` is not resumable itself:
+    the verb refuses it with "resume the owner, not this node". So the hint must
+    name the key, not the plan-ordered node that happened to be reported first
+    (t_c223d16f: keying a TP pause on its SECOND plan node was enough to make the
+    printed command a refusal). ``list_pauses()`` (not ``paused()``) because the
+    node may be held only through its unit's span, and reading the mapping is
+    what surfaces the key the entry itself does not carry.
+
+    The skip DECISION never comes from here — it comes from the single
+    ``paused_nodes()`` resolution above — so a second read used only to name the
+    reason and the owner cannot change what this pass skips.
+    """
+    try:
+        from hscc_daemon import node_pauses
+        node = str(node)
+        pauses = node_pauses.list_pauses()
+    except Exception:  # noqa: BLE001 - a missing hint must never sink a report
+        return (None, None)
+    entry = pauses.get(node)
+    if isinstance(entry, dict):
+        return ((entry.get("reason") or "").strip() or None, node)
+    for owner, candidate in pauses.items():
+        if node in (candidate.get("span_nodes") or []):
+            reason = (candidate.get("reason") or "").strip() or None
+            return (reason, owner)
+    return (None, None)
 
 
 def cmd_cluster_up(dry_run=False, nodes=None):
@@ -689,6 +831,22 @@ def cmd_cluster_up(dry_run=False, nodes=None):
     that rebooted, through THIS surface rather than a second start path.
     ``None`` (the default, every existing caller) is the full fleet-up plan,
     byte-identical to the previous behaviour.
+
+    NODE-PAUSE SKIP (t_3b909c61): a unit with even ONE node held by
+    ``node_pauses`` is skipped WHOLE — it is never launched, never enters
+    ``issued``, and is reported under the additive ``paused`` key with a line
+    naming the unit, the parked node, the pause reason and the resume command.
+    A skip is NOT a failure: ``success`` stays True (post-boot reads that one
+    boolean and would otherwise page the operator about their own pause).
+    Naming a parked host in ``nodes=`` does not override this — naming is
+    scoping, not an opt-out; ``hscc node resume <host>`` is the only
+    resume path and it does not go through this verb. There is no
+    ``--include-paused`` by design (see docs/ops/node-pause.md): a flag that
+    started a unit under a live pause record would make the overlay false for
+    the watchdog, the heal breaker, autoscale and the health API at once.
+    When EVERY unit of the (possibly narrowed) plan is parked the result carries
+    ``result: "all-paused"`` with ``success: True`` — there was nothing to do,
+    which is not an error. An unreadable overlay FAILS OPEN to the full plan.
 
     Hardened per t_be4b94ca (2026-10-22: an already-serving unit's launch hung
     ~19 min under the 1200s model-load grace, and the SERIAL loop starved the
@@ -720,7 +878,8 @@ def cmd_cluster_up(dry_run=False, nodes=None):
     if serving is None:
         return {"error": "cannot import hscc_daemon.serving (fleet up "
                          "requires the daemon's serving module)"}
-    plan = serving.fleet_up_plan()
+    full_plan = serving.fleet_up_plan()
+    plan = full_plan
     if nodes:
         # Scope to units whose span touches a named host (a TP unit launches
         # as its whole group, so membership is span-intersection, not head
@@ -729,24 +888,53 @@ def cmd_cluster_up(dry_run=False, nodes=None):
         plan = [e for e in plan
                 if wanted & {str(n) for n in (e.get("nodes") or [])}]
     if not plan:
+        # Deliberately BEFORE the pause partition: a genuinely missing/empty
+        # serving.json must keep reporting ITS OWN error, and a fleet whose
+        # every unit happens to be parked must report `all-paused` instead of
+        # masquerading as a config problem.
         return {"error": "no serving units to start (serving.json missing or "
                          "empty?)", "units": 0}
+
+    # NODE-PAUSE PARTITION (t_3b909c61) — see the NODE-PAUSE SKIP SEAM note
+    # above _parked_nodes for why a wake/up must consult the overlay, why one
+    # resolution serves the whole pass, and why a corrupt overlay fails OPEN to
+    # the full plan. Two axes, one read: the operator's claim of what should be
+    # running is the FULL plan minus what is parked; the launches of THIS pass
+    # are the (possibly ``nodes=``-narrowed) plan minus the same parked units.
+    # ``nodes=`` scoping never shrinks the claim — the pause does.
+    held = _parked_nodes()
+    startable_claim, _ = _partition_up_plan(full_plan, held)
+    plan, parked = _partition_up_plan(plan, held)
+    for entry, blocked in parked:
+        names = ", ".join(str(n) for n in blocked)
+        reason, owner = _pause_display(blocked[0])
+        print(f"Unit {entry['unit_id']} SKIPPED — {names} "
+              f"{'is' if len(blocked) == 1 else 'are'} parked by node_pauses"
+              f"{f' ({reason})' if reason else ''}; not launched. "
+              f"Put it back with: hscc node resume {owner or blocked[0]}")
+    if parked and not plan:
+        print(f"cluster up: every unit in the plan is parked by node_pauses — "
+              f"{len(parked)} unit(s) skipped, nothing launched "
+              f"(hscc node paused lists them)")
+
     # A2 launch guard (HEAL_CASCADE 2026-10-14): one status fetch for the whole
     # plan, then every unit is checked host-by-host before its start is issued.
     # A refused unit is reported, never silently skipped; dry-run shows the
     # plan regardless (nothing is launched, so nothing can over-commit).
     from hscc_daemon import health as _daemon_health  # deferred: CLI stays light
-    guard_status = (None if dry_run
+    guard_status = (None if (dry_run or not plan)
                     else _daemon_health._launch_guard_status_fn())
 
     # Record the operator's "expected up" claim BEFORE launching (t_576964d5):
     # the marker says what the fleet SHOULD be running even if this command's
-    # own launches then fail or are interrupted. Full footprint, always.
+    # own launches then fail or are interrupted. Full footprint (always,
+    # regardless of ``nodes`` scoping) MINUS the parked units (t_3b909c61):
+    # the marker is what post-boot relaunches from, so a parked unit must stop
+    # being a relaunch candidate at its source, not only at the launch seam.
     pb = None if dry_run else _post_boot_module()
     if pb is not None:
         try:
-            pb.record_expected_up(serving.fleet_up_plan(),
-                                  reason="hscc cluster up")
+            pb.record_expected_up(startable_claim, reason="hscc cluster up")
         except Exception as e:
             print(f"WARN: expected_up marker record failed: {e}")
 
@@ -797,9 +985,11 @@ def cmd_cluster_up(dry_run=False, nodes=None):
                             "output": f"launcher raised "
                                       f"{type(exc).__name__}: {exc}"}
         issued = [r for r in issued if r is not None]
-    return {
+    res = {
         "success": not dry_run and all(i.get("success") for i in issued),
         "dry_run": bool(dry_run),
+        # The STARTABLE plan: this verb never claims a launch it did not issue,
+        # so `units` and `plan` exclude the parked units (t_3b909c61).
         "units": len(plan),
         "plan": [
             {"kind": e["kind"], "nodes": e["nodes"], "port": e["port"],
@@ -808,7 +998,22 @@ def cmd_cluster_up(dry_run=False, nodes=None):
             for e in plan
         ],
         "issued": issued,
+        # Additive (t_3b909c61): unit ids SKIPPED because a node of their span
+        # is held by node_pauses. Same key and element type autodown.autoup
+        # returns, so one consumer can read either seam. A skip is NOT a
+        # failure — it never enters `issued` and `success` above stays True.
+        # Which node and why go to stdout, not into the dict; `hscc node
+        # paused` is the query for that detail.
+        "paused": [e["unit_id"] for e, _ in parked],
     }
+    if parked and not plan:
+        # Every unit of this pass's plan is parked: nothing to do, which is not
+        # an error and must not exit non-zero. `result` is the outcome-label
+        # name this family already uses (autodown.autoup: ok|busy|no-units|
+        # all-paused) and is ABSENT on every other path, so existing consumers
+        # see exactly the dict they saw before.
+        res["result"] = "all-paused"
+    return res
 
 
 def cmd_info():

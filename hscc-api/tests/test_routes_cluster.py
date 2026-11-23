@@ -12,6 +12,7 @@ traceback leak). The pure ``_speak_*`` helpers are also tested directly.
 """
 
 import json
+import threading
 
 import pytest
 
@@ -87,7 +88,9 @@ def test_cluster_status_shape(running, token, stub_cluster):
     })
     status, payload = _request(running, token, "/v1/cluster/status")
     assert status == 200
-    assert set(payload) == {"workloads", "idle_hosts", "total_hosts", "speak"}
+    assert set(payload) == {"workloads", "idle_hosts", "total_hosts", "speak",
+                            "taken_at"}
+    assert payload["taken_at"].endswith("Z")
     assert len(payload["workloads"]) == 1
     assert payload["workloads"][0]["name"] == "qwen"
     assert payload["idle_hosts"] == ["192.0.2.11"]
@@ -184,6 +187,8 @@ def test_cluster_monitor_shape(running, token, stub_cluster):
     status, payload = _request(running, token, "/v1/cluster/monitor")
     assert status == 200
     assert payload["success"] is True
+    assert payload["degraded"] is False
+    assert payload["taken_at"].endswith("Z")
     assert payload["speak"] == "Fleet snapshot: 3 hosts sampled."
     # The serving section is the same one `hscc cluster monitor` renders.
     assert payload["serving"][0]["model"] == "m"
@@ -191,21 +196,203 @@ def test_cluster_monitor_shape(running, token, stub_cluster):
 
 
 def test_cluster_monitor_failure_names_the_cause(running, token, stub_cluster):
+    """A degraded monitor is NOT HTTP 200 with a missing `json` (W5).
+
+    The old body was indistinguishable from a healthy empty fleet and let the
+    app count the daemon host as serving. It must be non-2xx with an explicit
+    success:false/degraded:true and no snapshot.
+    """
     stub_cluster(monitor={"success": False, "error": "no monitor output"})
     status, payload = _request(running, token, "/v1/cluster/monitor")
-    assert status == 200
+    assert status == 503
+    assert payload["success"] is False
+    assert payload["degraded"] is True
     assert payload["error"] == "no monitor output"
     assert payload["speak"] == "Fleet monitor failed: no monitor output"
+    assert "json" not in payload
+    assert payload["taken_at"].endswith("Z")
 
 
 def test_cluster_monitor_run_cmd_error_dict_degrades(running, token, stub_cluster):
     """A plain {"error": "..."} (not the run_cmd shape) reports the cause."""
     stub_cluster(monitor={"error": "cluster engine command failed"})
     status, payload = _request(running, token, "/v1/cluster/monitor")
-    assert status == 200
+    assert status == 503
+    assert payload["success"] is False
+    assert payload["degraded"] is True
     assert payload["error"] == "cluster engine command failed"
     assert payload["speak"] == \
         "Fleet monitor failed: cluster engine command failed"
+    assert "json" not in payload
+
+
+def test_cluster_monitor_exception_degrades_with_the_same_contract(
+        running, token, stub_cluster, monkeypatch):
+    def boom():
+        raise RuntimeError("secret ssh failure")
+    monkeypatch.setattr(routes_cluster, "_backing_cluster_monitor", boom)
+    status, payload = _request(running, token, "/v1/cluster/monitor")
+    assert status == 503
+    assert payload["success"] is False and payload["degraded"] is True
+    assert payload["error"] == "RuntimeError: secret ssh failure"
+    assert "traceback" not in json.dumps(payload).lower()
+
+
+def test_cluster_status_snapshot_is_cached_for_20s_with_taken_at(
+        running, token, monkeypatch):
+    """Two refreshes inside the TTL run ONE sparkrun status, same taken_at."""
+    calls = []
+
+    def backing():
+        calls.append(len(calls) + 1)
+        return {"workloads": [], "idle_hosts": [],
+                "total_hosts": len(calls)}
+
+    monkeypatch.setattr(routes_cluster, "_backing_cluster_status", backing)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(routes_cluster, "_cluster_cache_now",
+                        lambda: clock["now"])
+
+    status, first = _request(running, token, "/v1/cluster/status")
+    clock["now"] = 1019.0
+    status2, second = _request(running, token, "/v1/cluster/status")
+    assert status == status2 == 200
+    assert first["total_hosts"] == second["total_hosts"] == 1
+    assert first["taken_at"] == second["taken_at"]
+    assert len(calls) == 1
+    assert routes_cluster.CLUSTER_SNAPSHOT_TTL_S == 20.0
+
+    clock["now"] = 1021.0
+    status3, third = _request(running, token, "/v1/cluster/status")
+    assert status3 == 200
+    assert third["total_hosts"] == 2
+    assert third["taken_at"] != first["taken_at"]
+    assert len(calls) == 2
+
+
+def test_cluster_monitor_snapshot_caches_the_sparkrun_and_serving_reads(
+        running, token, monkeypatch):
+    """The monitor cache covers BOTH live reads, not just the sparkrun frame."""
+    monitor_calls, serving_calls = [], []
+
+    def monitor():
+        monitor_calls.append(1)
+        return {"success": True, "output": "{}",
+                "json": {"timestamp": 1795000000.0,
+                         "hosts": [{"host": "192.0.2.10", "error": None,
+                                    "sample": {}}]}}
+
+    def serving():
+        serving_calls.append(1)
+        return {"rows": [], "proxy_error": None}
+
+    monkeypatch.setattr(routes_cluster, "_backing_cluster_monitor", monitor)
+    monkeypatch.setattr(routes_cluster, "_backing_serving_snapshot", serving)
+    clock = {"now": 2000.0}
+    monkeypatch.setattr(routes_cluster, "_cluster_cache_now",
+                        lambda: clock["now"])
+
+    status, first = _request(running, token, "/v1/cluster/monitor")
+    clock["now"] = 2019.0
+    status2, second = _request(running, token, "/v1/cluster/monitor")
+    assert status == status2 == 200
+    assert first["taken_at"] == second["taken_at"]
+    assert len(monitor_calls) == len(serving_calls) == 1
+
+    clock["now"] = 2021.0
+    status3, third = _request(running, token, "/v1/cluster/monitor")
+    assert status3 == 200
+    assert third["taken_at"] != first["taken_at"]
+    assert len(monitor_calls) == len(serving_calls) == 2
+
+
+def test_cluster_monitor_cache_is_single_flight(running, token, monkeypatch):
+    """A burst of widget reloads shares ONE in-progress sparkrun read.
+
+    Every wait is bounded and event-driven; there is no wall-clock sleep left
+    to outrun (t_5d6ea1c4). Three rendezvous carry the timing:
+
+    ``gate``    -- ``Barrier(6 clients + this thread)``, so the six requests and
+                   the moment the build is allowed to end start from one instant.
+    ``arrived`` -- ``Barrier(6)`` inside a wrapper around ``_cluster_snapshot``:
+                   proof that all six requests are *inside the cache call at the
+                   same time*, which is the condition single-flight exists to
+                   satisfy. The old test took that on trust for 0.25 s and hoped;
+                   a barrier states it, and fails loudly when it does not hold.
+    ``release`` -- the only thing that ends the build, so the build cannot have
+                   finished before the burst arrived on it.
+
+    ``assert not errors`` stays strict on purpose: a connection error IS a
+    failure here. It just can no longer be the listener's fault. Six
+    simultaneous connects used to overflow ``socketserver``'s ``listen(5)``
+    accept queue, and XNU reset the overflow socket before a byte of HTTP was
+    spoken -- 33 of 37 captured resets landed in ``connect()``, which rules out
+    keep-alive, handler lifecycle and this cache alike. See
+    ``_ApiServer.request_queue_size``.
+    """
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_monitor():
+        calls.append(1)
+        entered.set()
+        release.wait(timeout=10)      # bounded; the test owns the release
+        return {"success": True, "output": "{}",
+                "json": {"timestamp": 1795000000.0,
+                         "hosts": [{"host": "192.0.2.10", "error": None,
+                                    "sample": {}}]}}
+
+    monkeypatch.setattr(routes_cluster, "_backing_cluster_monitor", slow_monitor)
+    monkeypatch.setattr(routes_cluster, "_backing_serving_snapshot",
+                        lambda: {"rows": [], "proxy_error": None})
+
+    clients = 6
+    arrived = threading.Barrier(clients)
+    real_snapshot = routes_cluster._cluster_snapshot
+
+    def spy_snapshot(key, build):
+        # Runs on the handler thread, before the cache is consulted: a trip
+        # here means six requests reached the cache concurrently.
+        arrived.wait(timeout=10)
+        return real_snapshot(key, build)
+
+    monkeypatch.setattr(routes_cluster, "_cluster_snapshot", spy_snapshot)
+
+    gate = threading.Barrier(clients + 1)      # the six clients + this thread
+    results = []
+    errors = []
+
+    def one():
+        try:
+            gate.wait(timeout=10)
+            results.append(_request(running, token, "/v1/cluster/monitor"))
+        except Exception as exc:      # pragma: no cover - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=one) for _ in range(clients)]
+    for thread in threads:
+        thread.start()
+    reached = False
+    try:
+        gate.wait(timeout=10)
+        reached = entered.wait(timeout=10)
+    finally:
+        release.set()                 # the build is never left blocked
+
+    for thread in threads:
+        thread.join(timeout=10)
+    alive = [t for t in threads if t.is_alive()]
+
+    # Connection errors first: with an accept queue too shallow for the burst
+    # this is what actually goes wrong, and it is the failure an operator needs
+    # to see. Everything after it is the cache contract.
+    assert not errors, f"a connection died underneath the burst: {errors}"
+    assert not alive, f"clients never finished: {alive}"
+    assert reached, "the burst never reached the build"
+    assert len(results) == clients
+    assert all(status == 200 for status, _payload in results)
+    assert len(calls) == 1, "the burst did not share one build"
 
 
 def test_cluster_jobs_shape(running, token, stub_cluster):
@@ -270,6 +457,13 @@ def test_health_ok_shape(running, token, stub_fleet):
     assert payload["ok"] is True
     assert len(payload["checks"]) == 5
     assert payload["speak"] == "All checks passed."
+    assert isinstance(payload["speak"], str) and payload["speak"]
+    # t_7babf634: this test's tmp dir has never held a snapshot and the
+    # in-process cache is reset per test, so the stubbed verify must be the
+    # FIRST (and only) one — the inline path. Every later poll in the same
+    # process would be answered from the cache instead; test_health_cache.py
+    # pins that half.
+    assert payload["source"] == "inline"
 
 
 def test_health_partial_shape(running, token, stub_fleet):

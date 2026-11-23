@@ -48,6 +48,13 @@ PERIODIC_INTERVALS = {
     # stays a no-op that STILL stamps, so the stream never goes dark and
     # staleness never false-fires on a deliberately-disabled feature.
     "orch_waker": 30,
+    # M5 (the main orchestrator's wake-ups): the daemon-owned schedule tick
+    # (check_main_wakeups -> main_wakeups.tick). 30 s is only the CHECK cadence;
+    # each wake-up's own schedule is evaluated inside the tick and the state
+    # file persists last-fired, so a restart neither double-fires nor forgets.
+    # A missing pane is a persisted skip, not a retry every tick — the tick
+    # advances the schedule and doctor reads the skip stamp.
+    "main_wakeups": 30,
     # GAP-F-4 (t_51931733): the paused-board enforcer tick
     # (check_kanban_enforce -> kanban_pause.enforce_tick -> enforce). 60 s
     # matches the dispatcher/engine_wedge supervision class: when nothing is
@@ -109,6 +116,27 @@ PERIODIC_INTERVALS = {
     # like every other stream, and the tick stamps on every path including the
     # one where the sampler raised.
     "metrics_history": 2,
+    # MQ1 (operator 2026-11-19): the local merge queue tick. 60 s is the
+    # dispatcher-class cadence: one PR per project per tick, and each tick is
+    # cheap when nothing is queued (state read only). A tick that is actively
+    # running gates blocks its own stream thread, so verify's per-stream rule
+    # widens this to the usual 600 s floor; the queue ledger, not this thread,
+    # is the durable source of truth across restarts.
+    "merge_queue": 60,
+    # t_110adc1a: the node-pause EXPIRY tick
+    # (node_pause_exec.check_node_pause_expiry -> expiry_tick ->
+    # auto_resume_expired). 60 s is the kanban_enforce class, and for the same
+    # reason: when nothing is paused the tick costs ZERO subprocesses and no
+    # fleet read — list_pauses() short-circuits on os.path.exists and the pass
+    # returns before it can reach plan()/resume_units() — while a pause whose
+    # --until has passed comes back within a minute. The schedule is the overlay
+    # FILE (~/.hscc/node_pauses.json), recomputed from disk every tick: nothing
+    # is held in memory, so a daemon restart neither forgets a due resume nor
+    # fires one twice. verify's per-stream rule widens it to max(600, 2*60+90) =
+    # the 600 s floor like every other stream, and the tick stamps on every path
+    # (idle, resumed, kept, skipped, raising), so a deliberately idle stream is
+    # never mistaken for a dead one.
+    "node_pause_expiry": 60,
 }
 
 
@@ -711,10 +739,13 @@ def run_daemon_loop():
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from . import recover
     from . import orch_waker
+    from . import main_wakeups
     from . import kanban_pause
+    from . import node_pause_exec
     from .proxy_stall import check_proxy_stall
     from .stream_silence import check_stream_silence
     from .metrics_history import check_metrics_history
+    from .merge_queue import check_merge_queue
     from .state import now_iso, write_state
     from . import sparkrun_bin
 
@@ -792,6 +823,10 @@ def run_daemon_loop():
         # take another stream down — and its state file feeds the same
         # per-stream staleness math as every other stream.
         "orch_waker": orch_waker.check_orch_waker,
+        # M5: the daemon-owned main-orchestrator wake-ups. Same supervised
+        # thread machinery as every stream; the tick never raises and stamps
+        # state/main_wakeups.json on every path (including all-disabled).
+        "main_wakeups": main_wakeups.check_main_wakeups,
         # GAP-F-4 (t_51931733): the paused-board enforcer's check body. Same
         # machinery as every stream above: its own supervised
         # _run_supervised_periodic thread (error isolation + respawn), and its
@@ -818,6 +853,19 @@ def run_daemon_loop():
         # rather than adding a poller of its own, and every sample it takes goes
         # to the tiered store under ~/.hscc/metrics.
         "metrics_history": check_metrics_history,
+        # MQ1: the local merge queue. Same supervised-thread machinery as every
+        # other stream; the tick never raises and stamps merge_queue.json on
+        # every path, so a disabled queue is visibly alive, not dark.
+        "merge_queue": check_merge_queue,
+        # t_110adc1a: the node-pause expiry tick — the seam that makes
+        # `hscc node pause --until 2h` a SCHEDULE instead of a note. Same
+        # supervised-thread machinery as every stream above; the tick body is in
+        # the feature module next to the resume policy it runs
+        # (node_pause_exec.expiry_tick), exactly like kanban_pause.enforce_tick.
+        # It stamps node_pause_expiry.json on every path and never raises, so an
+        # idle overlay is a visibly-healthy stream, and a past-due pause the
+        # daemon could not resume is a red stream rather than a silent skip.
+        "node_pause_expiry": node_pause_exec.check_node_pause_expiry,
     }
 
     # GAP-B-6 (t_2039a319): both cadences come from PERIODIC_INTERVALS — the

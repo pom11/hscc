@@ -4,6 +4,9 @@ Tests are fully isolated: subprocess is mocked, file I/O uses tmp_path.
 """
 import json
 import os
+import sys
+import time
+
 import pytest
 from pathlib import Path
 
@@ -263,6 +266,121 @@ class TestWriteJsonFile:
         path = str(tmp_path / "atomic.json")
         write_json_file(path, {"test": True})
         assert not Path(path + ".tmp").exists()
+
+
+class TestRunCmdUntilReady:
+    """``run_cmd(ready=…)``: the bounded wait that ends when the WORKLOAD is up.
+
+    t_09708c17 DEFECT 3. A ``sparkrun run`` CLIENT can sit on a child ssh
+    session for tens of minutes after the container it launched is serving, so
+    "the client returned" is not a success signal a resume may trust. These run
+    REAL children (no fake_subprocess): the point is that the wait is bounded,
+    that the child is really signalled, and that the outcome is reported as
+    "verified by the probe, client detached" rather than as a hang or a failure.
+    """
+
+    #: A child that starts, says so, and then never returns on its own.
+    WEDGE = "import sys, time; print('client up', flush=True); time.sleep(600)"
+
+    def _wedged_child(self, tmp_path):
+        pid_file = tmp_path / "child.pid"
+        script = (f"import os, time\n"
+                  f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                  f"print('client up', flush=True)\n"
+                  f"time.sleep(600)\n")
+        path = tmp_path / "wedged_client.py"
+        path.write_text(script)
+        return [sys.executable, str(path)], pid_file
+
+    def test_a_child_that_becomes_ready_is_cut_loose_and_reports_ok(self):
+        from hscc_daemon.util import run_cmd
+        started = time.monotonic()
+        res = run_cmd([sys.executable, "-c", self.WEDGE], timeout=120,
+                      ready=lambda: True)
+        assert res["ok"] is True
+        assert res["detached"] is True and res["timed_out"] is False
+        assert res["verified_by"] == "health probe"
+        # The probe ended the wait, not the bound.
+        assert time.monotonic() - started < 15, res
+
+    def test_the_cut_loose_client_is_really_gone(self, tmp_path):
+        """A detach that leaves an orphaned client is a leak, not a detach."""
+        import errno
+
+        from hscc_daemon.util import run_cmd
+        argv, pid_file = self._wedged_child(tmp_path)
+        # "Ready" = the client got far enough to record its own pid and is still
+        # sitting there: the detach happens mid-flight, not after an exit.
+        res = run_cmd(argv, timeout=120, ready=pid_file.exists)
+        assert res["detached"] is True and res["ok"] is True
+        pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError as e:
+                # EPERM would mean "still alive, not ours"; only "no such
+                # process" counts as reaped.
+                assert e.errno == errno.ESRCH, e
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail(f"client {pid} outlived the detach")
+
+    def test_the_deadline_alone_also_cuts_loose_and_says_timed_out(self):
+        from hscc_daemon.util import run_cmd
+        started = time.monotonic()
+        res = run_cmd([sys.executable, "-c", self.WEDGE], timeout=1,
+                      ready=lambda: False)
+        assert res["ok"] is False
+        assert res["detached"] is True and res["timed_out"] is True
+        assert "timed out after 1s" in res["output"]
+        assert time.monotonic() - started < 15, res
+
+    def test_a_child_that_exits_on_its_own_is_not_a_detach(self, tmp_path):
+        """The ordinary path: ``--ensure`` returns and nothing was signalled.
+        stdout/stderr keep the shape ``run_cmd`` has always returned."""
+        from hscc_daemon.util import run_cmd
+        script = tmp_path / "quick.py"
+        script.write_text("import sys\n"
+                          "print('ensured')\n"
+                          "sys.stderr.write('a warning\\n')\n"
+                          "sys.exit(0)\n")
+        res = run_cmd([sys.executable, str(script)], timeout=30,
+                      ready=lambda: False)
+        assert res["ok"] is True and res["detached"] is False
+        assert res["output"] == "ensured" and res["stderr"] == "a warning"
+        assert "verified_by" not in res
+
+    def test_a_failing_child_still_reports_its_folded_stderr(self, tmp_path):
+        from hscc_daemon.util import run_cmd
+        script = tmp_path / "fails.py"
+        script.write_text("import sys\n"
+                          "sys.stderr.write('Recipe not found\\n')\n"
+                          "sys.exit(3)\n")
+        res = run_cmd([sys.executable, str(script)], timeout=30,
+                      ready=lambda: False)
+        assert res["ok"] is False and res["detached"] is False
+        assert "Recipe not found" in res["output"] and "Recipe" in res["stderr"]
+
+    def test_a_probe_that_raises_is_answered_as_not_ready(self):
+        """A refusing endpoint is 'not up yet', not an error that aborts a
+        launch already in flight."""
+        from hscc_daemon.util import run_cmd
+
+        def angry():
+            raise ConnectionRefusedError("connection refused")
+
+        res = run_cmd([sys.executable, "-c", self.WEDGE], timeout=1,
+                      ready=angry)
+        assert res["ok"] is False and res["timed_out"] is True
+
+    def test_a_command_that_cannot_start_is_loud_not_a_hang(self, tmp_path):
+        from hscc_daemon.util import run_cmd
+        res = run_cmd([str(tmp_path / "no-such-binary")], timeout=5,
+                      ready=lambda: True)
+        assert res["ok"] is False
+        assert "Command failed" in res["output"]
 
 
 if __name__ == "__main__":

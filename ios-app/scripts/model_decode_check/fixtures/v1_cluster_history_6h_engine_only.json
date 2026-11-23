@@ -1,0 +1,171 @@
+{
+ "axis": "window",
+ "counts": {
+  "engines": 12,
+  "hosts": 0
+ },
+ "engines": [
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999180
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999240
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999300
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999360
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999420
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999480
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999540
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999600
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999660
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999720
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999780
+  },
+  {
+   "error": null,
+   "gen_tps": 40.0,
+   "model": "org/Qwen-Test",
+   "n": 30,
+   "node": "192.0.2.10",
+   "port": "8000",
+   "run": 2.0,
+   "tier": 1,
+   "ts": 1794999840
+  }
+ ],
+ "engines_included": true,
+ "hosts": [],
+ "hosts_included": false,
+ "max_fields": [],
+ "metrics": [
+  "gen_tps",
+  "run"
+ ],
+ "node": "all",
+ "note": "",
+ "resolution": "60s",
+ "resolution_s": 60,
+ "since": 1794978300,
+ "source": "sqlite_store",
+ "speak": "Last 6h at 60s resolution: 0 node points, 12 engine points.",
+ "store": {
+  "bound_bytes": 10485760,
+  "db_bytes": 16384,
+  "error": null,
+  "exists": true,
+  "path": "/Users/example/.hscc/metrics/history.db",
+  "tier0_resident": null,
+  "tier1_rows": 24,
+  "tier2_rows": 6
+ },
+ "tier": 1,
+ "tier_summary": "1-minute averages, with peaks for cpu_temp_c_max, gpu_temp_c_max, gpu_power_w_max",
+ "until": 1794999900,
+ "window": "6h",
+ "window_s": 21600
+}

@@ -281,6 +281,61 @@ both directions — a wrong badge, a fake command, a deleted script and an
 UNLISTED docs file (plus a fence-only reference that must not count) all
 MUST fail the lint.
 
+## Alone-vs-in-leg sweep gate (`alone_sweep_gate.sh`) — nightly, not per-PR
+
+`scripts/run_tests.sh` runs a leg as ONE pytest process over the whole dir, so a
+leg can print `ALL GREEN` while a file inside it FAILS — or skips for a different
+reason — when run by itself. When that happens the leg is answering a question
+about test **order**, and the dual-interpreter stamp's promise ("a FAILED in a
+sibling leg is a regression") is false. It happened twice in `hscc_daemon` and the
+leg was green both times; the measurement, the mechanism and the reasoning are in
+`docs/audits/daemon-alone-run-order-dependence_t_572b4856.md`.
+
+```bash
+scripts/alone_sweep_gate.sh --preflight     # wiring only, runs nothing
+scripts/alone_sweep_gate.sh                 # both stamp interpreters (~11 min here)
+scripts/install_alone_sweep_gate.sh         # daily 04:30 Hermes cron job
+scripts/install_alone_sweep_gate.sh --status
+scripts/install_alone_sweep_gate.sh --uninstall
+```
+
+The gate routes the audit's own tooling (`docs/audits/support/t_572b4856/alone_sweep.sh`
++ its `diff_alone_vs_leg.py`): the leg once through the canonical runner, then
+every one of its test files alone with the same argv and the same env scrub, then
+a diff per nodeid **and** per skip reason. It has no pytest call of its own, so
+the measurement cannot drift from the gate. Exit `0` agreement, `1` a file answers
+alone differently, `2` **not measured** (no interpreter, broken wiring, another
+pass holding the lock) — a pass that measured nothing is never reported green.
+
+**Why a schedule and not the PR lane**: ~131 pytest processes plus a fresh leg,
+and `hscc_daemon` is a macOS-only leg — CI's smallest runner pool at ~10x the
+minute cost — so per-PR it is slower than the suite it guards. The property has
+also only ever been measured on this host's two interpreters; the CI runner's thin
+venv is a third environment nobody has swept, and a blocking gate is worth only
+what its baseline is. The cheap always-on half — the diff tool's teeth on
+fixtures, the argv/scrub drift pins, the "no curated subset" pin and the
+fail-closed pins — runs inside the `scripts` leg in milliseconds
+(`scripts/tests/test_alone_sweep_gate.py`). Reports land under
+`~/.hscc/alone-sweep/` (`latest.txt` + a `verdict.json` per interpreter). Liveness
+is not left to that dir: every non-preflight pass stamps
+`hscc_daemon/cron_watchers.py` (stream `alone_sweep_gate`, nightly cadence), so the
+bootstrap doctor (`hscc-bootstrap/doctor.py`) warns on its `cron watchers` row when
+the job stops firing **or** fires and comes back `GATE RED` — the row is liveness,
+and the verdict rides inside the stamp. `scripts/install_alone_sweep_gate.sh` with
+`--status` prints that same verdict line, **and** the path the wrapper actually runs —
+`runs <gate>`, or `DANGLING` when the checkout it was baked from has moved (the wrapper
+is bound by name, so a moved checkout otherwise looks untouched here and dies at 04:30).
+`hermes cron runs` keeps the per-run record.
+
+The **CI posture is a separate environment and is swept separately** (t_4447d736): the
+nightly above runs on the host that carries both stamp interpreters, while
+`.github/workflows/pytest-legs.yml` has an advisory `alone-sweep` job — dispatched with
+`alone_sweep=true`, `needs: leg` so it never runs alongside the leg it compares against,
+on the runner's own `requirements-ci.txt` venv — that answers the same question for the
+environment the nightly cannot see. It is advisory on purpose and its verdict comes from
+`.github/scripts/sweep_verdict.sh`; what it took and what it found is
+`docs/audits/daemon-alone-run-order-dependence_t_572b4856.md` §11.
+
 ## Customization
 
 Each script is self-contained shell + hardcoded host IPs / model ids. Cluster topology assumptions live at the top of each script — edit there if your cluster differs.
@@ -304,13 +359,26 @@ dependencies (hermes-agent, sparkrun) current, gated by human review:
 3. A worker upgrades the runtime, re-bootstraps, runs the suites, and reports on
    the card. The human reviewer merges the PR (bumping the lock) once satisfied.
 
-Install the cluster side (installs the poller to `~/.hermes/scripts/` and
-registers the Hermes cron job, idempotently):
+Install the cluster side (idempotently). It does **not** copy the poller: it
+generates `<$HERMES_HOME>/scripts/hscc-dep-watcher.py`, a stub with this
+checkout's path baked in that runs `scripts/dep_pr_watcher.py`, and binds the
+Hermes cron job to that. So `git pull` is what changes what the job runs, and
+there is no second copy of the code on the host to go stale. (A deployed copy
+that could go stale is what `hscc_daemon/cron_watchers.py`'s `copy-drifted`
+doctor row still catches on a host that has not re-installed yet — t_95eb9f15
+made it visible, t_accbc5da removed the shape.):
 
 ```
 scripts/install_dep_watcher.sh            # daily 08:00 by default
+scripts/install_dep_watcher.sh --status    # cron + wrapper target + liveness
 scripts/install_dep_watcher.sh --uninstall
 ```
+
+`scripts/install_escalate_watcher.sh` (`hscc-escalate-watcher`, every 15 min)
+installs `scripts/escalate_watcher_run.py` the same generated-stub way, with the
+same `--status` / `--uninstall` pair. All three watcher installers
+(`install_alone_sweep_gate.sh` included) now share that shape: one file under
+`<bound home>/scripts/`, generated, pointing into git.
 
 The GitHub Action runs from the default branch once merged; the poller/cron is
 independent and needs no network path from GitHub to the cluster.

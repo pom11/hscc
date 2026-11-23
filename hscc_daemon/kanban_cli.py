@@ -112,6 +112,14 @@ pass --older-than 0 for ALL non-terminal cards.
       done.
 
 '--theme <name>' selects the human palette.""" % DEFAULT_STALE_DAYS,
+    # Audit F8 (docs/audits/2026-11-23-agent-surface.md:158) named this verb's
+    # honest situation: the SAME read already has a route door, but under a
+    # different name (`GET /v1/kanban/running`), and nothing on the monitor
+    # surface said so. The pointer below is the fix — a name, not a new door:
+    # no tool and no mutation was invented for `kanban monitor` (the row's
+    # --live loop is a TTY panel; `kanban pause/resume/paused/enforce` stay
+    # CLI-only per decision D6). Pinned by
+    # hscc-api/tests/test_kanban_monitor_route_pointer.py.
     "monitor": """\
 hscc kanban monitor [--live] [--interval <s>] [--board <slug>] [--json]
 
@@ -120,6 +128,10 @@ worker, run time, heartbeat age), ready cards waiting for a slot,
 per-board counts by status, and the last hour's outcomes. The
 header shows the global kanban.max_in_progress slots in use.
 Read-only: never claims, promotes or archives.
+
+Route parity: GET /v1/kanban/running answers this same read
+              from the same kanban_live collect pass, for a
+              caller with no TTY. Read-only there too.
 
   --live          refresh until Ctrl-C (default every 5s)
   --interval <s>  refresh period for --live (whole seconds, >= 1)
@@ -331,18 +343,19 @@ def _cmd_monitor(rest, json_mode, theme_name=None):
     if json_mode and opts["live"]:
         return _error("--json is a single snapshot; drop --live", json_mode)
     if json_mode:
-        print(json.dumps(kanban_live.attach_orchestrators(
-            kanban_live.attach_tokens(kanban_live.collect(
-                board=opts["board"], registered_only=True))),
-                         default=list))
+        print(json.dumps(kanban_live.attach_merge_queue(
+            kanban_live.attach_orchestrators(kanban_live.attach_tokens(
+                kanban_live.collect(board=opts["board"], registered_only=True))),
+            board=opts["board"]), default=list))
         return 0
     console = _console(theme_name)
     if opts["live"]:
         return kanban_live.run_live(console, interval=opts["interval"],
                                     board=opts["board"])
-    data = kanban_live.attach_orchestrators(
-        kanban_live.attach_tokens(kanban_live.collect(
-            board=opts["board"], registered_only=True)))
+    data = kanban_live.attach_merge_queue(
+        kanban_live.attach_orchestrators(kanban_live.attach_tokens(
+            kanban_live.collect(board=opts["board"], registered_only=True))),
+        board=opts["board"])
     console.print(kanban_live.render(data, snapshot=True, width=console.width))
     return 1 if data["errors"] and not data["boards"] else 0
 

@@ -29,9 +29,11 @@ import os
 import re
 import sys
 import secrets
+import signal
 import socket
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 # The profile-root INTENT gate (t_c443c001). Imported at module level so the
@@ -611,9 +613,14 @@ ROUTES = []
 def handle_ping(server, ctx, query, body):
     """GET /v1/ping — the API's OWN liveness (NOT the fleet health check).
 
-    The design reserves ``GET /v1/health`` for the fleet check backed by
-    ``verify.run_all()`` (A2), so the API's own liveness lives at ``/v1/ping``
-    to avoid the collision. Returns a small JSON object confirming the API is up.
+    The design reserves ``GET /v1/health`` for the fleet check, so the API's
+    own liveness lives at ``/v1/ping`` to avoid the collision. Since
+    t_7babf634 the split inside ``/v1/health`` is: ``GET /v1/health`` = the
+    last cached verify snapshot (cheap, pollable — served by
+    ``health_cache``, never runs a verify on the request thread), and
+    ``GET /v1/verify`` = run the fleet check now. ``/v1/ping`` answers neither
+    question; it only confirms the API process is up. Returns a small JSON
+    object.
     """
     return 200, {
         "ok": True,
@@ -668,6 +675,28 @@ class _ApiServer(http.server.ThreadingHTTPServer):
 
     daemon_threads = True
 
+    # Hard ceiling on simultaneous handler threads (t_c24521ef). launchd's
+    # default soft NOFILE was 256, so an unbounded ThreadingHTTPServer could
+    # hit EMFILE even with the idle timeout in place: every accepted socket
+    # is one FD. 128 leaves room for the listener, token/state files and the
+    # gateway sidecar while still admitting far more clients than the widgets
+    # ever open. Excess connections get an immediate 503 + close, never a
+    # thread and never a half-read request.
+    max_connections = 128
+
+    # The kernel's accept queue has to be at least as deep as the admission
+    # limit above, or that 503 is unreachable: socketserver's default is
+    # ``listen(5)``, so on the 6th simultaneous connection XNU finishes the
+    # handshake, finds the queue full, and RESETS the socket (ECONNRESET 54)
+    # before ``process_request`` ever sees it. The client gets a dead socket
+    # instead of a retryable 503. This is exactly the shape of a widget
+    # reload burst — the macOS menu bar plus a few dashboard panels hitting
+    # /v1/cluster/monitor at the same instant is already six — and it is why
+    # test_cluster_monitor_cache_is_single_flight failed ~30% of bursts under
+    # load (t_5d6ea1c4). Queue depth costs nothing an FD does: an unaccepted
+    # connection is not yet a handler thread and not yet an FD here.
+    request_queue_size = max_connections
+
     def __init__(self, server_address, handler_cls, context: ApiContext):
         # ThreadingHTTPServer defaults to AF_INET; an explicit IPv6 bind (::1)
         # must use the matching family or it fails with EAFNOSUPPORT.
@@ -675,6 +704,41 @@ class _ApiServer(http.server.ThreadingHTTPServer):
             self.address_family = socket.AF_INET6
         super().__init__(server_address, handler_cls)
         self.ctx = context
+        self._active_connections = 0
+        self._connection_lock = threading.Lock()
+
+    def process_request(self, request, client_address):
+        """Admit a connection only while below ``max_connections``."""
+        with self._connection_lock:
+            if self._active_connections >= self.max_connections:
+                admit = False
+            else:
+                self._active_connections += 1
+                admit = True
+        if not admit:
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\n"
+                    b"Content-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            # The thread was never started, so its finally below will not run.
+            with self._connection_lock:
+                self._active_connections -= 1
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._connection_lock:
+                self._active_connections -= 1
 
     def handle_error(self, request, client_address):
         """Do not print a stack trace when a client simply hung up.
@@ -707,6 +771,14 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
     # handshake parser rejects an "HTTP/1.0" reply, which BaseHTTPRequestHandler
     # emits by default. Our WS upgrade response already writes "HTTP/1.1 101".
     protocol_version = "HTTP/1.1"
+    # t_c24521ef: an idle keep-alive socket is still an FD. Without a timeout
+    # the API accumulated CLOSE_WAIT/idle connections until launchd's 256-FD
+    # soft limit produced EMFILE on every route. BaseHTTPRequestHandler's
+    # handle_one_request turns this socket timeout into close_connection, so a
+    # client that walks away is reclaimed instead of pinning a thread forever.
+    # WebSocket upgrades clear it in _dispatch_ws: their session is long-lived
+    # by design and the WS route sets its own peer-liveness timeout.
+    timeout = 15
     # Silence the default "logged to stderr" request line; we manage our own log.
     def log_message(self, format, *args):
         log.debug("(%s) %s", self.address_string(), format % args)
@@ -779,6 +851,11 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
                 merged.update(
                     {k: v for k, v in m.groupdict().items() if v is not None}
                 )
+                # The HTTP idle timeout must never cut a live WS session: the
+                # upgrade is a protocol switch, not a keep-alive request. The
+                # WS handler owns liveness from here (routes_ws sets its own
+                # peer timeout before the handshake).
+                self.connection.settimeout(None)
                 handler(self.server, self.ctx, merged, self)
                 return True
         # A WebSocket upgrade for a path we don't serve → reject before any
@@ -890,6 +967,17 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
 # Server orchestration (used by /v1/* tests and, later, the api_cli `start`)
 # ---------------------------------------------------------------------------
 
+# How long the cooperative stop may wait for a listener loop to return before it
+# gives up on that listener, says so loudly, and finishes the teardown anyway
+# (`_MultiServer.serve_forever`'s flag branch). It has to sit inside the 10 s
+# `hscc api stop` gives the pid before SIGKILLing it
+# (hscc_daemon/api_cli.py::_wait_for_pid_gone), because a SIGKILL skips the
+# teardown exactly like a hang does — the point of the bound is that the
+# `finally:` runs, and the sidecar teardown inside it is the reason that matters.
+# Tests pin this window; the healthy path never waits here at all.
+_SHUTDOWN_WAIT_SECONDS = 5.0
+
+
 class _MultiServer:
     """One process serving the SAME app on every bound address.
 
@@ -907,12 +995,52 @@ class _MultiServer:
         self.server_address = self.servers[0].server_address
         self._threads = []
         self._started = False
+        # Hosts a bounded stop had to abandon (empty = every loop came back).
+        # Read by the caller that owns the operator line, after serve_forever.
+        self.wedged_listeners = []
 
     @property
     def hosts(self) -> list[str]:
         return [s.server_address[0] for s in self.servers]
 
-    def serve_forever(self, poll_interval=0.5):
+    def serve_forever(self, poll_interval=0.5, stop_event=None):
+        """Join the listener loops until ``shutdown()`` or ``stop_event``.
+
+        ``stop_event`` is the caller's "a stop was requested" flag, and it
+        exists because ``serve_main`` installs its signal handlers BEFORE these
+        listeners are bound (t_6eff6258): a SIGTERM can therefore land before
+        this method is ever entered, and ``shutdown()`` is a no-op until
+        ``_started`` is set. Re-checking the flag in the join loop is what makes
+        a stop requested during startup still end the loops, instead of the
+        request being lost and the process sitting in an accept loop that
+        nobody asked to run.
+
+        The flag is POLLED, never awaited: this method asks it ``is_set()`` and
+        nothing else, which is the whole surface a caller needs. That matters
+        because the flag is set from a signal handler, which runs on the thread
+        this loop runs on — a ``threading.Event`` answers ``is_set()`` while
+        holding a lock ``set()`` also needs, so a stop landing here deadlocks
+        against its own thread (t_49f4c69b; ``api_server._StopFlag`` is the
+        lock-free answer here, and t_56552ecc puts the same shape in the
+        sibling plugin). Do not grow this surface to ``wait()`` / ``clear()``: a
+        test pins it to one ``is_set()``.
+
+        Returns True when every listener loop came back, False when the stop had
+        to abandon one (named in ``wedged_listeners``). The caller decides what to
+        say and what to exit with; this class only stops and reports.
+
+        THE BOUND, and why it is here: this flag branch is the ONLY thing that
+        stops a foreground serve (t_49f4c69b left the signal handler with no call
+        but the flag's ``set()``), and ``BaseServer.shutdown()`` waits for the
+        listener's own loop to return — so waiting on it here without a bound lets
+        one wedged loop (``service_actions()`` is the seam stdlib calls every pass)
+        hold ``serve_forever``, hold ``serve_main``'s ``finally:``, and orphan the
+        gateway sidecar holding this process's token. Measured before the bound was
+        put in: 0.09 s for a healthy listener, still blocked at 5.15 s with
+        ``service_actions`` wedged. The bound is deliberately NOT inside
+        ``shutdown()`` — that method's contract is "the loop has returned", and
+        ``server_close()`` is only safe to call afterwards because of it.
+        """
         self._started = True
         self._threads = [
             threading.Thread(target=s.serve_forever,
@@ -925,10 +1053,41 @@ class _MultiServer:
             thread.start()
         try:
             while any(t.is_alive() for t in self._threads):
+                if stop_event is not None and stop_event.is_set():
+                    # Same path a real shutdown() takes, just asked for by the
+                    # flag instead of by the caller's thread — bounded, because
+                    # this thread is the one the stop was asked to unblock.
+                    self.wedged_listeners = self._shutdown_bounded(
+                        _SHUTDOWN_WAIT_SECONDS)
+                    return not self.wedged_listeners
                 for thread in self._threads:
                     thread.join(0.5)
         except KeyboardInterrupt:  # pragma: no cover - terminal foreground path
             pass
+        return True
+
+    def _shutdown_bounded(self, timeout):
+        """Ask every listener to stop; give up after ``timeout`` seconds.
+
+        Returns the hosts whose loop had not returned. One waiter per listener, on
+        purpose: ``BaseServer.shutdown()`` blocks until THAT loop returns, so
+        looping the servers in order let a single wedged listener keep the healthy
+        ones from ever being asked to stop — and left the operator with no name to
+        debug. The give-up costs nothing an exit does not already pay: the abandoned
+        loop's socket closes when the process does.
+        """
+        waiters = {}
+        for server in self.servers:
+            waiter = threading.Thread(
+                target=server.shutdown, daemon=True,
+                name=f"hscc-api-stop-{server.server_address[0]}")
+            waiters[waiter] = server
+            waiter.start()
+        deadline = time.monotonic() + timeout
+        for waiter in waiters:
+            waiter.join(max(0.0, deadline - time.monotonic()))
+        return sorted(str(server.server_address[0])
+                      for waiter, server in waiters.items() if waiter.is_alive())
 
     def shutdown(self):
         # `BaseServer.shutdown()` blocks until serve_forever returns, so never
@@ -1079,6 +1238,7 @@ import routes_autodown  # noqa: E402,F401  (registers /v1/autodown/*)
 import routes_ops  # noqa: E402,F401  (registers /v1/{verify,daemon/status,triggers,escalate,profiles,cluster/up,cluster/down})
 import routes_bootstrap  # noqa: E402,F401  (registers /v1/projects/new/{plan,})
 import routes_kanban  # noqa: E402,F401  (registers /v1/kanban/{blocked,blocked/{id}/recover,stale})
+import routes_merge_queue  # noqa: E402,F401  (registers /v1/merge-queue — the local merge queue's read-only rows)
 import routes_mobile  # noqa: E402,F401  (registers /v1/mobile/summary — read-only per-board status counts for the iOS widget/Live Activity client)
 import routes_template  # noqa: E402,F401  (registers /v1/template/{list,status,preview/{name}})
 import routes_profile  # noqa: E402,F401  (registers /v1/profile/{list,install,export,export/{file}})
@@ -1091,6 +1251,7 @@ import routes_commands  # noqa: E402,F401  (registers /v1/commands — slash-com
 import routes_cron  # noqa: E402,F401  (registers /v1/cron/list — read-only scheduled-jobs roster)
 import routes_logs  # noqa: E402,F401  (registers /v1/logs — bounded redacted log tail)
 import routes_history  # noqa: E402,F401  (registers /v1/daemon/history — automated-action timeline)
+import routes_alerts  # noqa: E402,F401  (registers /v1/alerts — the operator alert feed behind hscc notify, card N1)
 
 # t_47f51a71: session-event wire contract — history read endpoint over the
 # per-project chat event store (the bridge's live WS half appends to the same
@@ -1156,6 +1317,71 @@ def _parse_serve_argv(argv):
     return ns.cmd, ns.bind, ns.tailscale, ns.port
 
 
+class _StopFlag:
+    """A "a stop was requested" flag that a signal handler may safely set.
+
+    Deliberately NOT a `threading.Event` (t_49f4c69b; t_56552ecc measured this
+    same shape in the sibling plugin's stop path). `Event._cond` holds a plain
+    non-reentrant `threading.Lock`, and `Event.set()` / `Event.is_set()` both
+    take it — while `_MultiServer.serve_forever` asks `is_set()` on every pass of
+    its join loop. A signal handler runs on the thread it interrupts, so a stop
+    landing during that poll has the handler waiting on a lock only that same
+    thread can release: it never returns, the flag is never set, the loops never
+    end and `serve_main`'s `finally:` — the gateway-sidecar teardown — never
+    runs. Measured on 3.14 (both signals, `..._is_the_hazard` in
+    tests/test_api_server_stop_signal.py reproduces it with no hscc code).
+
+    A plain attribute write/read holds nothing, so the handler and the loop
+    cannot deadlock each other. Duck-typed against the `stop_event` argument
+    `_MultiServer.serve_forever` takes, which only ever asks `is_set()`.
+    """
+    __slots__ = ("_seen",)
+
+    def __init__(self):
+        self._seen = False
+
+    def set(self):
+        self._seen = True
+
+    def is_set(self):
+        return self._seen
+
+
+#: Which signal asked for the stop, for the closing lines in `serve_main`'s
+#: `finally:`. A plain module write, because a signal handler may not take a lock
+#: or call anything (see `_on_term`) — so this cannot be a `threading.Event`, and
+#: it cannot be logged where it happens. None when the process ends for another
+#: reason (a refused bind, a crash).
+_last_signal = None
+
+
+def _unblock_stop_signals():
+    """Clear an inherited BLOCK on SIGTERM/SIGINT.
+
+    `signal.signal()` changes a signal's DISPOSITION; it does not clear the
+    calling thread's signal MASK. A mask is inherited across fork/exec —
+    `subprocess` restores ignored dispositions, never the mask — so a server
+    spawned by a process that runs with SIGINT (or SIGTERM) blocked starts with
+    the signal blocked. The handler is installed, the signal is delivered, and
+    it stays pending forever: the interpreter never dispatches the Python
+    handler, `serve_forever` never sees the flag, and the only way out is the
+    supervisor's SIGKILL, which skips this process's sidecar teardown.
+
+    Measured (t_7c2eb604): a leg run failed BOTH SIGINT arms and no SIGTERM arm
+    while a child spawned with SIGINT blocked reproduced it every time — no
+    handler line, sidecar alive. Clearing the mask here is what makes "SIGINT is
+    always honoured" independent of how the process was launched.
+
+    `pthread_sigmask` is POSIX-only; on a platform without it there is no
+    inherited pthread mask to clear.
+    """
+    try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK,
+                               {signal.SIGTERM, signal.SIGINT})
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 def serve_main(bind_override=None, port_override=None, *,
                tailscale=False, bind_overrides=None) -> int:
     """Bind + serve in the foreground; returns a process exit code.
@@ -1180,6 +1406,83 @@ def serve_main(bind_override=None, port_override=None, *,
     # ~/.hscc/logs/api.log / api.err.log, which is where to look.
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
+
+    global _last_signal
+    _last_signal = None            # this run answers no signal until one lands
+
+    # launchd stops the unit with SIGTERM. Without a handler the default action
+    # kills us before bridge.shutdown(), orphaning the supervised serve on
+    # 9119 with our token — so the next boot pays the stale-token heal.
+    #
+    # Registered HERE — before create_servers() resolves anything or binds —
+    # because "the port is up" is not "the process can be stopped": the kernel
+    # completes a TCP handshake off the listen backlog the instant listen()
+    # returns, so a caller that waits for the port and then signals can hit this
+    # process while it is still inside startup. launchd can stop the unit at any
+    # point after spawn regardless, so the handler has to cover the whole
+    # startup and not just the part after a socket exists. Ordering pinned by
+    # tests/test_api_server_entrypoint.py::TestStopHandlersInstallBeforeTheBind.
+    stopping = _StopFlag()         # "a stop was requested"; see serve_forever
+
+    def _on_term(signum, frame):
+        """Cooperative shutdown on SIGTERM/SIGINT: one attribute write, nothing else.
+
+        A signal handler runs ON THE THREAD it interrupts, so its body may not
+        take a lock or call anything: whatever it asks for may already be held by
+        the very thread it stopped, and then the handler never returns — which
+        loses the stop entirely (no flag set, no return from `serve_forever`, no
+        `finally:`, no sidecar teardown, and the supervisor escalates to a
+        SIGKILL that skips that teardown too). Both shapes this body used to have
+        fell into that trap:
+
+          * `print(f"hscc-api: signal {signum}, shutting down", flush=True)` —
+            a write through the stdout `TextIOWrapper`, whose lock the handler
+            takes. (Probed on this interpreter with the stop landing while the
+            same thread was inside a write: it came back, so this file does not
+            claim a measured hang for it. A handler still may not borrow a lock
+            from someone else's design — the line is on the `finally:` below,
+            where a cooperative stop always prints it.)
+          * `stopping.set()` on a `threading.Event`, plus
+            `threading.Thread(target=server.shutdown, daemon=True).start()` to
+            hand the blocking part elsewhere. `Event.set()` takes the event's
+            own non-reentrant lock — which `_MultiServer.serve_forever` is
+            holding on every pass it asks `is_set()`, the state
+            tests/test_api_server_stop_signal.py reproduces and hangs on both
+            signals at the base of this card. And starting a thread takes
+            threading's bookkeeping locks and then waits for the new thread to
+            report itself started, so the handler is no longer bounded by the
+            work it delegated (t_56552ecc measured that one three ways in the
+            sibling plugin).
+
+        What is left is the only thing that is safe here: record which signal
+        arrived (a plain module write) and set the flag (a plain attribute write
+        on a `__slots__` object). `_MultiServer.serve_forever` re-checks the flag
+        on every `poll_interval` pass and `serve_main` asks it before serving, so
+        the stop lands through the one `finally:` that owns the teardown — which
+        is also where the operator's lines about it now live.
+
+        `server.shutdown()` is deliberately not called from here, nor from a
+        helper thread: `BaseServer.shutdown()` waits for the serving loop to
+        return, and on this path the serving loop IS the interrupted thread. The
+        flag makes that loop come back on its own; a call that waits, in a stop
+        path, is how a stop becomes a hang.
+
+        tests/test_api_server_stop_signal.py pins this body to one call — the
+        flag's `set()` — so none of those doors can be reopened by accident.
+        """
+        global _last_signal
+        _last_signal = signum
+        stopping.set()
+
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+        signal.signal(signal.SIGINT, _on_term)
+    except (ValueError, OSError):
+        pass                      # not the main thread / not installable
+    # ...and a handler alone is not enough: a mask inherited from the spawner
+    # keeps the signal pending, so the handler would never be dispatched.
+    _unblock_stop_signals()
+
     if bind_overrides is None and bind_override is not None:
         bind_overrides = ([bind_override] if isinstance(bind_override, str)
                           else list(bind_override))
@@ -1236,39 +1539,66 @@ def serve_main(bind_override=None, port_override=None, *,
         log.warning("gateway sidecar startup skipped: %r", exc)
         bridge = None
 
-    # launchd stops the unit with SIGTERM. Without a handler the default action
-    # kills us before bridge.shutdown(), orphaning the supervised serve on
-    # 9119 with our token — so the next boot pays the stale-token heal.
-    import signal as _signal
-    import threading as _threading
-
-    def _on_term(signum, frame):
-        # server.shutdown() blocks until serve_forever() returns, so it runs on
-        # its own thread: calling it from the handler would deadlock against the
-        # accept loop it is trying to stop.
-        print(f"hscc-api: signal {signum}, shutting down", flush=True)
-        _threading.Thread(target=server.shutdown, daemon=True).start()
-
+    # The handlers that make this a clean stop were installed at the top of
+    # serve_main, before anything was bound — see the note there for why the
+    # ordering is the whole point (t_6eff6258).
+    stop_clean = True         # False once a bounded stop had to abandon a listener
     try:
-        _signal.signal(_signal.SIGTERM, _on_term)
-        _signal.signal(_signal.SIGINT, _on_term)
-    except (ValueError, OSError):
-        pass                      # not the main thread / not installable
-
-    try:
-        server.serve_forever()
-    except Exception as exc:
-        print(f"hscc-api: crashed: {exc}", file=sys.stderr)
-        return 1
+        if stopping.is_set():
+            # A stop was requested while the listeners were still coming up —
+            # the exact window the roster hit. Nothing was ever served, and the
+            # answer is still the clean path: fall through to the same finally:
+            # so the sidecar is torn down and the unit exits 0, instead of
+            # losing to the default action's 15 with the serve child alive.
+            print("hscc-api: stop requested during startup, not serving",
+                  flush=True)
+        else:
+            # Readiness contract (t_6eff6258): this is the LAST line startup
+            # prints before serve_forever(), so it appears only once the
+            # SIGTERM/SIGINT handlers are installed AND every listener is
+            # bound. Something waiting for THIS line — the entrypoint test, or a
+            # supervisor — is guaranteed a process that can already be stopped
+            # cleanly. A port probe is strictly earlier than here and therefore
+            # cannot carry that promise.
+            print("hscc-api: ready", flush=True)
+            try:
+                stop_clean = server.serve_forever(stop_event=stopping)
+            except Exception as exc:
+                print(f"hscc-api: crashed: {exc}", file=sys.stderr)
+                return 1
     finally:
+        # Both lines an operator reads about a stop live HERE, not in the
+        # handler. A cooperative stop always reaches this block; a handler that
+        # never returns from a lock it cannot release prints nothing at all, and
+        # the run then looks like a hang rather than a refused stop. (The shape
+        # this replaced printed the signal line from inside `_on_term`.)
+        if _last_signal is not None:
+            print(f"hscc-api: signal {_last_signal}, shutting down", flush=True)
         clear_api_state()
         if bridge is not None:
             try:
                 bridge.shutdown()
             except Exception:
                 pass
+        if not stop_clean:
+            # Loud, on stderr, and AFTER the teardown the bound just bought: an
+            # abandoned loop means something is wedged inside that listener
+            # (nothing in this plugin overrides service_actions today, so it is a
+            # bug elsewhere), and the operator needs its name to go find it.
+            wedged = ", ".join(getattr(server, "wedged_listeners", None) or [])
+            where = f" on {wedged}" if wedged else ""
+            print(f"hscc-api: WARNING: listener loop{where} did not stop within "
+                  f"{_SHUTDOWN_WAIT_SECONDS:g}s — abandoned so the teardown "
+                  f"above could run; its socket closes when this process exits. "
+                  f"Something is wedged inside that listener: the API stopped, "
+                  f"but it did not shut down cleanly.",
+                  file=sys.stderr, flush=True)
         print("hscc-api: stopped", flush=True)
-    return 0
+    # Non-zero ONLY for the abandoned stop: the supervisor has to be able to tell
+    # "stopped" from "stopped by giving up on a wedged loop". launchd's KeepAlive
+    # restarts on either code, and `hscc api stop` stops by bootout rather than by
+    # signalling, so this code changes no restart behaviour — it is a report.
+    return 0 if stop_clean else 1
 
 
 def main(argv=None) -> int:

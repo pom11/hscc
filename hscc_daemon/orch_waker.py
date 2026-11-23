@@ -86,11 +86,35 @@ DEFAULT_FAIL_THRESHOLD = 3
 #: ``backoff_s``, default 900 = 30 daemon ticks). The measured failure was an
 #: identical audit line every 30 s forever; one line per window instead.
 DEFAULT_BACKOFF_S = 900
+#: State key holding the per-board PANE-LESS SKIP bookkeeping
+#: ``{board: {"at": ts, "profile": name, "reason": str, "n": int}}``
+#: (card t_7b2d3dba). Same document and same reasoning as :data:`FAIL_STATE_KEY`:
+#: the stream stamp merges exactly :data:`_OWNED_KEYS`, so a skip recorded here
+#: survives the per-tick stamp and the log stays rate-limited to one line per
+#: window instead of one per 30 s tick.
+PANELESS_STATE_KEY = "paneless"
+#: The two reasons a nudge target can be confirmed unreachable (stable
+#: vocabulary — both go into the state document, the tick report and the stream
+#: message, so a doctor/verify row added later greps these, not prose).
+#: ``retired-orch-profile``: the profile's own ``SOUL.md`` carries
+#: ``main_orch.RETIRED_MARKER`` — hscc's migration retired it in place and the
+#: retirement text says outright "do not create, dispatch or claim work here".
+#: ``legacy-cluster-identity``: the target is one of ``main_orch``'s exported
+#: legacy cluster-wide identities on the board the main orchestrator now owns
+#: (the same retirement, recorded by identity rather than by SOUL text).
+REASON_RETIRED_PROFILE = "retired-orch-profile"
+REASON_LEGACY_IDENTITY = "legacy-cluster-identity"
 #: Longest tail of distinct event lines in one nudge before "+N more".
 MAX_LINES = 6
 #: Truncation budgets (stopgap-identical).
 REASON_MAX = 140
 TITLE_MAX = 70
+#: Bytes of a profile's ``SOUL.md`` scanned for the retirement marker
+#: (:func:`profile_is_retired`). The block the migration writes is a few hundred
+#: bytes and lands in the file's first lines, and every profile SOUL on this
+#: install is well under 100 KB — this is a per-tick read inside a 30 s loop, so
+#: it gets an explicit ceiling instead of "read the whole thing forever".
+RETIREMENT_SCAN_MAX = 262_144
 
 #: The event kinds an orchestrator must act on. Everything else (spawned,
 #: reclaimed, decomposed, comment, heartbeat, unknown future kinds) stays
@@ -125,13 +149,14 @@ DEFAULT_HERMES_HOME = "~/.hermes"
 
 _STATE_KEYS = ("last", "pending", "sent")
 #: The state keys the waker OWNS in the shared document: the stopgap scan keys
-#: plus its own failure bookkeeping (:data:`FAIL_STATE_KEY`) and the last-seen
-#: ``orch_map`` fingerprint (:data:`MAP_STATE_KEY`, t_f1122b7a). These — and
-#: ONLY these — are what :func:`_owned_state_keys` carries across the daemon's
+#: plus its own failure bookkeeping (:data:`FAIL_STATE_KEY`), the last-seen
+#: ``orch_map`` fingerprint (:data:`MAP_STATE_KEY`, t_f1122b7a) and the
+#: pane-less skip bookkeeping (:data:`PANELESS_STATE_KEY`, t_7b2d3dba). These —
+#: and ONLY these — are what :func:`_owned_state_keys` carries across the daemon's
 #: stream stamp, so the backoff counters can never be erased the way the stamp
 #: once erased ``last`` (t_fa9a2faf). Anything else in the document is foreign
 #: to the waker and is left alone.
-_OWNED_KEYS = _STATE_KEYS + (FAIL_STATE_KEY, MAP_STATE_KEY)
+_OWNED_KEYS = _STATE_KEYS + (FAIL_STATE_KEY, MAP_STATE_KEY, PANELESS_STATE_KEY)
 
 
 def _resolve(path) -> str:
@@ -150,13 +175,14 @@ def load_state(state_path=None) -> dict:
     state file can never cause a backlog flood. A *present but unparseable*
     file is logged, because silently resetting it would drop pending batches.
 
-    The waker's OWN extra keys (:data:`FAIL_STATE_KEY`, :data:`MAP_STATE_KEY`)
-    are validated here but never CREATED: a hand-edited or foreign value in one
-    of them is dropped rather than trusted, and an absent one stays absent so a
+    The waker's OWN extra keys (:data:`FAIL_STATE_KEY`, :data:`MAP_STATE_KEY`,
+    :data:`PANELESS_STATE_KEY`) are validated here but never CREATED: a
+    hand-edited or foreign value in one of them is dropped rather than trusted,
+    and an absent one stays absent so a
     healthy board's document stays exactly the stopgap's three keys
     (``test_state_file_is_exactly_the_stopgap_schema``). Read every use site
-    through :func:`fail_state` and the validated ``st.get(MAP_STATE_KEY)`` in
-    :func:`tick`.
+    through :func:`fail_state`, :func:`paneless_state` and the validated
+    ``st.get(MAP_STATE_KEY)`` in :func:`tick`.
     """
     path = _resolve(state_path or DEFAULT_STATE_PATH)
     try:
@@ -175,6 +201,8 @@ def load_state(state_path=None) -> dict:
             st[key] = {}
     if not isinstance(st.get(FAIL_STATE_KEY), dict):
         st.pop(FAIL_STATE_KEY, None)
+    if not isinstance(st.get(PANELESS_STATE_KEY), dict):
+        st.pop(PANELESS_STATE_KEY, None)
     if not isinstance(st.get(MAP_STATE_KEY), str):
         st.pop(MAP_STATE_KEY, None)
     return st
@@ -202,6 +230,38 @@ def fail_state(st: dict) -> dict:
         if isinstance(at, bool) or not isinstance(at, (int, float)):
             continue
         out[str(board)] = {"n": n, "at": float(at)}
+    return out
+
+
+def paneless_state(st: dict) -> dict:
+    """The validated per-board pane-less skip map from a loaded state document.
+
+    ``{board: {"at": ts, "profile": name, "reason": str, "n": int}}`` — ``at``
+    the moment this board's skip was last (re)announced, which is what keeps the
+    LOG line to one per ``backoff_s`` window instead of one per 30 s tick;
+    ``n`` the number of ticks that skip has covered, so an operator reading
+    ``hscc orch waker status`` sees how long the board has been inert, not just
+    that it is. Malformed entries are dropped rather than trusted, exactly as in
+    :func:`fail_state`: a record that cannot be parsed must never mute a board
+    and must never crash the loop.
+    """
+    out = {}
+    raw = st.get(PANELESS_STATE_KEY)
+    if not isinstance(raw, dict):
+        return out
+    for board, ent in raw.items():
+        if not isinstance(ent, dict):
+            continue
+        at, n = ent.get("at"), ent.get("n")
+        if isinstance(at, bool) or not isinstance(at, (int, float)):
+            continue
+        if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+            continue
+        out[str(board)] = {
+            "at": float(at), "n": n,
+            "profile": str(ent.get("profile") or ""),
+            "reason": str(ent.get("reason") or ""),
+        }
     return out
 
 
@@ -238,6 +298,46 @@ def backoff_seconds_left(ent, now, backoff_s=DEFAULT_BACKOFF_S,
     return left if left > 0 else 0.0
 
 
+def paneless_reason(pane_count, retired=False, legacy_identity=False):
+    """Why a nudge to this orchestrator target can NEVER land, or ``None``.
+
+    THE TWO-HALF RULE (t_7b2d3dba). A board is skipped only when BOTH hold:
+
+      * (A) a pane sweep that SUCCEEDED counted ZERO panes running the target
+        profile — measured, not assumed; and
+      * (B) no pane is EXPECTED for that profile, evidenced by hscc's OWN
+        retirement record: ``retired`` = the profile's ``SOUL.md`` carries
+        ``main_orch.RETIRED_MARKER`` (the migration retired it in place, and the
+        text it writes says outright "do not create, dispatch or claim work
+        here"); ``legacy_identity`` = the target is one of ``main_orch``'s
+        exported legacy cluster-wide identities on the board the main
+        orchestrator now owns.
+
+    Either half ALONE returns ``None`` — i.e. keep nudging — and that is the
+    point of the conjunction:
+
+      * (A) alone is the ordinary dead-pane case t_f1122b7a already owns: the
+        operator's own orchestrator pane, briefly gone. Retrying (bounded by the
+        backoff) is right, because when they reopen it the accumulated batch
+        must still go out. Silencing it would lose the wake.
+      * (B) alone would blind a nudge that still WORKS: a retired profile with a
+        pane open in tmux can be talked to, and a label must never switch off a
+        delivery that lands.
+
+    A FAILED sweep is not "zero panes": blindness is unknown and unknown never
+    skips. The caller enforces that (:func:`make_paneless_checker`); this
+    function takes a count and two booleans instead of doing the reading itself,
+    which is what makes the verdict testable with no tmux in the process at all.
+    """
+    if pane_count != 0:
+        return None
+    if retired:
+        return REASON_RETIRED_PROFILE
+    if legacy_identity:
+        return REASON_LEGACY_IDENTITY
+    return None
+
+
 def _stream_state_path() -> str:
     """The daemon stream-state file this stream writes its stamp into.
 
@@ -254,11 +354,13 @@ def _owned_state_keys(state_path=None) -> dict:
     ``{}`` when the file is absent, unreadable or not an object — the stamp
     then lands alone, which is what it would have been anyway.
 
-    The two keys beyond the stopgap's three are the waker's own bookkeeping
-    (t_f1122b7a) and they MUST ride the merge: the per-board failure counters
-    and the ``orch_map`` fingerprint live in the same document the stream stamp
-    rewrites every tick, so dropping them here would silently disarm the dead-pane
-    backoff the same way the pre-t_fa9a2faf stamp silently disarmed the batching.
+    The keys beyond the stopgap's three are the waker's own bookkeeping
+    (t_f1122b7a, t_7b2d3dba) and they MUST ride the merge: the per-board failure
+    counters, the ``orch_map`` fingerprint and the pane-less skip records all
+    live in the same document the stream stamp rewrites every tick, so dropping
+    any of them here would silently disarm the mechanism it exists for — the
+    dead-pane backoff the same way the pre-t_fa9a2faf stamp silently disarmed
+    the batching.
     """
     try:
         with open(_resolve(state_path or DEFAULT_STATE_PATH)) as f:
@@ -270,6 +372,8 @@ def _owned_state_keys(state_path=None) -> dict:
     out = {k: doc[k] for k in _STATE_KEYS if isinstance(doc.get(k), dict)}
     if isinstance(doc.get(FAIL_STATE_KEY), dict):
         out[FAIL_STATE_KEY] = doc[FAIL_STATE_KEY]
+    if isinstance(doc.get(PANELESS_STATE_KEY), dict):
+        out[PANELESS_STATE_KEY] = doc[PANELESS_STATE_KEY]
     if isinstance(doc.get(MAP_STATE_KEY), str):
         out[MAP_STATE_KEY] = doc[MAP_STATE_KEY]
     return out
@@ -977,7 +1081,8 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
          state_path=None, boards_dir=None, hermes_home=None,
          warned=None, debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S,
          report=None, orch_map=None, fail_threshold=DEFAULT_FAIL_THRESHOLD,
-         backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None, wake_claim=None):
+         backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None, wake_claim=None,
+         paneless=None):
     """One waker pass: scan every board, batch/debounce/rate-limit, decide.
 
     Applies and PERSISTS the state file (the only side effect); returns the
@@ -1055,6 +1160,19 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
                            comment in the loop); released on a refused send.
                            Injectable so tests own the answer without a Hermes
                            that has §3.1 installed.
+      * ``paneless``       — ``(board, target) -> reason | None``: the
+                           pane-expectation verdict for this board's nudge target
+                           (t_7b2d3dba). A truthy ``reason`` means the target has
+                           CONFIRMED zero panes AND no pane is expected for it —
+                           hscc's own retirement record says so — so the nudge can
+                           never land and the board is SKIPPED: ``pending`` is
+                           drained, no inject, no audit line, no wake claim, no
+                           decision. ``None`` (including the default, and
+                           including every "cannot tell") leaves the board on the
+                           existing retry/backoff path. Consulted LAST, after
+                           every other delivery gate and before the claim is
+                           taken — see the block comment in the loop.
+                           :func:`make_paneless_checker` builds the real one.
     """
     if now is None:
         import time
@@ -1068,6 +1186,7 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
         report["unevaluable"] = False
         report.pop("backoff", None)
         report.pop("suppressed", None)
+        report.pop("paneless", None)
     suppressed: list = []
     if boards is None:
         enum = board_enumeration(boards_dir, hermes_home)
@@ -1109,6 +1228,10 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
                      "failure counter(s)", len(fails))
         fails = {}
     backoff_report = []
+    # Pane-less skips (t_7b2d3dba), read through the same validator as the
+    # failure counters: a malformed record must never mute a board.
+    skip_state = paneless_state(st)
+    paneless_report = []
 
     decisions = []
     for b in sorted(targets):
@@ -1211,6 +1334,51 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
                 {"board": b, "msg": build_message(b, pend),
                  "lines": list(dict.fromkeys(p[1] for p in pend))}, ok=None))
             continue
+        # ── the pane-expectation gate (t_7b2d3dba) ────────────────────────
+        # Everything above says "this board owes a nudge and it is due". This
+        # asks the one remaining question — could it LAND? A target with
+        # CONFIRMED zero panes that hscc has retired is one that can never
+        # answer: that is exactly the state ``general`` reached (138
+        # byte-identical ``no_panes`` audit lines, batch never draining), and it
+        # happened because ``resolve_orch`` approves ``<board>-orch`` on
+        # directory existence alone, while ``main_orch`` documents that the
+        # retired cluster-wide identity is deliberately left on disk.
+        #
+        # Placement IS the contract: after every delivery gate (paused, dedupe,
+        # dead-pane backoff, debounce, min-gap, inject-wired) and BEFORE the wake
+        # claim is taken. A claim held by a waker that will not speak mutes the
+        # gateway notifier for ``lease_s`` — the dropped-wake-dressed-as-dedupe
+        # this module already refuses elsewhere — so this path writes nothing at
+        # all: no board read, no audit line, no claim, no decision. The ONLY
+        # effect is the drain, plus one log line per ``backoff_s`` window and the
+        # per-tick entry the stream stamp publishes.
+        reason = paneless(b, target) if paneless is not None else None
+        if reason:
+            prev = skip_state.get(b) or {}
+            # `at` is when the skip was last ANNOUNCED, not when it started: the
+            # window keeps the LOG line off the 30 s metronome while `n` still
+            # counts every tick it covered, so `status` can tell a board that has
+            # been inert for a day from one that went inert this minute.
+            announce = (not prev) or (now - float(prev.get("at", now)) >= backoff_s)
+            n = int(prev.get("n", 0)) + 1
+            at = now if announce else float(prev.get("at", now))
+            skip_state[b] = {"at": at, "n": n, "profile": str(target),
+                             "reason": str(reason)}
+            if announce:
+                LOG.warning("orch-waker %s -> %s: no pane and none expected (%s) "
+                            "— nudge skipped, %d pending line(s) drained "
+                            "(no audit line, no wake claim)",
+                            b, target, reason, len(pend))
+            # The drain is what "pending never accumulates" MEANS: the watermark
+            # in st["last"] already advanced above, so these exact events are
+            # never re-examined — and because the verdict is re-evaluated every
+            # tick, the moment a real pane appears the NEXT event nudges normally
+            # (with no flood of the drained history, which is the point).
+            st["pending"].pop(b, None)
+            paneless_report.append({"board": b, "profile": str(target),
+                                    "reason": str(reason), "ticks": n,
+                                    "since": at})
+            continue
         # ── take the claim, immediately before the keystroke ──────────────
         # After EVERY gate (debounce, min-gap, dead-pane backoff) and before
         # `inject`, so a claim is only ever held by a waker that is about to
@@ -1261,6 +1429,10 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
             st["sent"][b] = now
             st["pending"].pop(b, None)
             fails.pop(b, None)      # a delivery clears the board's counter
+            # A delivered nudge is PROOF the pane is there: the skip record goes
+            # with it, so if the board ever goes pane-less again it announces on
+            # its own first skip instead of hiding behind a stale window.
+            skip_state.pop(b, None)
         else:
             n = (fails.get(b) or {}).get("n", 0) + 1
             fails[b] = {"n": n, "at": now}
@@ -1278,6 +1450,13 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
         st[FAIL_STATE_KEY] = fails
     else:
         st.pop(FAIL_STATE_KEY, None)
+    # Written ONLY while non-empty, so a board nobody is skipping leaves the
+    # state document exactly the stopgap's three keys (the W1 takeover promise
+    # that `test_state_file_is_exactly_the_stopgap_schema` pins).
+    if skip_state:
+        st[PANELESS_STATE_KEY] = skip_state
+    else:
+        st.pop(PANELESS_STATE_KEY, None)
     # The map fingerprint is persisted only when a map is actually configured,
     # so the default (no map) state document stays the stopgap's three keys.
     if isinstance(orch_map, dict) and orch_map:
@@ -1286,6 +1465,13 @@ def tick(now=None, boards=None, paused=(), has_orch=None, inject=None,
         st.pop(MAP_STATE_KEY, None)
     if backoff_report and report is not None:
         report["backoff"] = backoff_report
+    if paneless_report and report is not None:
+        # Fail-LOUD, the same rule as `suppressed` above: a waker that stops
+        # nudging a board forever is indistinguishable from a healthy quiet one
+        # unless the fact leaves the module. The daemon stamps it on the stream
+        # and the stream message names it, so `hscc verify`/`hscc doctor` see a
+        # board being skipped rather than a `steady` that hides it.
+        report["paneless"] = paneless_report
     if suppressed and report is not None:
         # Fail-LOUD, the t_fa9a2faf rule: a dedupe that swallowed EVERY event
         # would look exactly like a healthy quiet board in the logs, so the
@@ -1385,6 +1571,202 @@ def resolve_orch(board: str, profiles_dir=None, hermes_home=None,
         return mapped
     name = orch_name(board)
     return name if profile_exists(name, profiles_dir, hermes_home) else None
+
+
+#: Verbatim copy of ``main_orch.RETIRED_MARKER``, used ONLY when the resolver
+#: itself cannot be imported (see :func:`_retired_marker`). Same posture as
+#: :func:`orch_name`'s fallback: the rule is reproduced exactly so the fallback
+#: cannot drift, and it is a fallback — the resolver stays the source of truth.
+_RETIRED_MARKER_FALLBACK = "retired \u2014 use"
+
+
+def _load_main_orch():
+    """Import ``hscc-roles/main_orch.py`` (the one identity resolver), or None.
+
+    The sibling-dir rule is the one ``load_repl_inject`` uses for ``hscc-api``
+    and ``main_cli``/``main_wakeups`` use for this same module: ``hscc-roles``
+    sits beside ``hscc_daemon`` in the repo AND in the deployed
+    ``~/.hermes/plugins`` layout, so one rule covers both.
+
+    Unlike those two callers this loader NEVER raises and never returns a
+    half-resolved module: the waker only *reads* an identity here (it never
+    launches a pane with it), so a missing resolver must degrade to "cannot
+    tell" — which :func:`paneless_reason` turns into "keep nudging", never into
+    a skipped board and never into an exception in the middle of a tick. The
+    ``sys.path`` entry is removed again on failure, as in ``load_repl_inject``.
+    """
+    try:
+        import main_orch  # noqa: F401  (already importable)
+        return main_orch
+    except ImportError:
+        pass
+    roles_dir = str(Path(__file__).resolve().parent.parent / "hscc-roles")
+    added = None
+    if os.path.isdir(roles_dir) and roles_dir not in sys.path:
+        sys.path.insert(0, roles_dir)
+        added = 0
+    try:
+        import main_orch  # noqa: F401
+        return main_orch
+    except ImportError:
+        return None
+    finally:
+        if added is not None and added < len(sys.path) and sys.path[added] == roles_dir:
+            sys.path.pop(added)
+
+
+def _retired_marker() -> str:
+    """hscc's retirement marker — the string the migration writes and greps."""
+    mod = _load_main_orch()
+    marker = getattr(mod, "RETIRED_MARKER", None) if mod is not None else None
+    return marker if isinstance(marker, str) and marker else _RETIRED_MARKER_FALLBACK
+
+
+def profile_is_retired(name: str, profiles_dir=None, hermes_home=None) -> bool:
+    """Did hscc's OWN migration retire this profile in place?
+
+    ``resolve_orch`` can only test that a profile DIRECTORY exists, and
+    :mod:`hscc-roles.main_orch` documents that a retired cluster-wide identity is
+    deliberately LEFT on disk — the resolver's own docstring says the legacy
+    catch-all profile stays "on disk (retired, never deleted)". Directory
+    existence is therefore not evidence that anyone is home; the retirement block
+    written into the profile's ``SOUL.md`` is, and it is written by hscc itself.
+
+    Read exactly the way ``migrate_main`` reads it — the marker against
+    CASEFOLDED text — so the waker and the migration can never disagree about
+    what "retired" means. Never raises: a missing or unreadable ``SOUL.md`` is
+    NOT a retirement (unknown keeps the board nudging), because this answer is
+    only ever allowed to *remove* a delivery.
+    """
+    if not name:
+        return False
+    home = _resolve(hermes_home or DEFAULT_HERMES_HOME)
+    pdir = _resolve(profiles_dir) if profiles_dir else os.path.join(home, "profiles")
+    soul = os.path.join(pdir, str(name), "SOUL.md")
+    try:
+        with open(soul, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(RETIREMENT_SCAN_MAX)
+    except OSError:
+        return False
+    return _retired_marker() in text.casefold()
+
+
+def legacy_cluster_identity(profile: str, board: str, hscc_dir=None) -> bool:
+    """Is ``profile`` the retired cluster-wide identity of the board ``board``?
+
+    The second, identity-shaped half of "no pane is expected": the main
+    orchestrator's board is served by ``main_orch.main_profile()`` (default
+    ``general``), and the cluster-wide identities that design REPLACED — the
+    resolver's legacy catch-all profile (``main_orch.legacy_general_profile()``)
+    and its legacy role (``main_orch.LEGACY_ORCHESTRATOR_ROLE``) — are kept on
+    disk but are never panned and never dispatched. A board that resolves to
+    one of those (because the profile directory still exists, and
+    ``resolve_orch`` stops at existence) has no pane to nudge and never will
+    have one.
+
+    The names are never spelled here — the resolver owns them, per its own
+    docstring ("A function, not a bare constant reference, so modules that
+    migrate the legacy profile never spell the old name into new code"). A
+    missing resolver or an unreadable main-orchestrator document answers False:
+    unknown never skips.
+    """
+    if not profile or not board:
+        return False
+    mod = _load_main_orch()
+    if mod is None:
+        return False
+    try:
+        legacy = {str(mod.legacy_general_profile()),
+                  str(mod.LEGACY_ORCHESTRATOR_ROLE)}
+        main_board = str(mod.main_board(hscc_dir))
+    except Exception as e:  # noqa: BLE001 — unknown never skips a board
+        LOG.debug("orch-waker: main-orchestrator identity unreadable (%s)", e)
+        return False
+    return str(profile) in legacy and str(board) == main_board
+
+
+def make_paneless_checker(profiles_dir=None, hermes_home=None, repl=None,
+                          hscc_dir=None):
+    """Build the ``tick(paneless=...)`` seam: ``(board, profile) -> reason|None``.
+
+    The wiring half of :func:`paneless_reason`. Cost discipline matters — this
+    runs inside a 30 s daemon loop over every board:
+
+      * the pane sweep happens ONCE per checker instance, and ``run_tick``
+        builds one instance per tick, so the tmux budget is one
+        ``hermes_panes()`` per scan pass, never one per board;
+      * the sweep is asked lazily, and the core only asks when a batch has
+        already cleared every other delivery gate — a quiet board pays nothing;
+      * a profile's ``SOUL.md`` is read only once the sweep has CONFIRMED no
+        pane for it, and the answer is cached per instance, so healthy boards
+        never touch a profile file at all;
+      * the identity answer is cached per ``(board, profile)`` — the pair the
+        verdict is about. A board-keyed cache would let one profile borrow
+        another's "this is the retired cluster identity" answer, which silences
+        a lane that was never retired (pinned by
+        ``test_the_identity_verdict_never_leaks_between_profiles_of_one_board``).
+
+    Blindness is sticky and never skips: no ``repl`` module, or a sweep that
+    raised (no socket, or the ambiguous two-servers refusal ``repl_inject``
+    refuses to guess between) means "unknown", and unknown keeps the existing
+    retry path — the same fail-open posture as every other read in this module.
+    """
+    cache: dict = {"panes": None, "blind": None}
+    retired_cache: dict = {}
+    #: Keyed by the PAIR this seam answers for. ``check(board, profile)`` is
+    #: public (``tick(paneless=...)``) and ``legacy_cluster_identity`` reads BOTH
+    #: halves, so a board-keyed cache would hand a second profile of the same
+    #: board the first profile's identity verdict — i.e. SKIP a live lane because
+    #: some other name on that board is the retired cluster identity, and
+    #: attribute the skip to a retirement record that is not about it.
+    legacy_cache: dict = {}
+
+    def _panes_by_profile():
+        if cache["panes"] is not None or cache["blind"] is not None:
+            return cache["panes"], cache["blind"]
+        module = repl if repl is not None else load_repl_inject()
+        if module is None:
+            cache["blind"] = "repl_inject not importable"
+            LOG.info("orch-waker: pane discovery unavailable (%s) — every board "
+                     "stays nudgeable", cache["blind"])
+        else:
+            try:
+                panes = module.hermes_panes() or []
+            except Exception as e:  # noqa: BLE001 — unknown, never "zero panes"
+                cache["blind"] = f"pane discovery: {type(e).__name__}: {e}"
+                LOG.info("orch-waker: pane discovery failed (%s) — every board "
+                         "stays nudgeable", cache["blind"])
+            else:
+                counts: dict = {}
+                for p in panes:
+                    prof = str((p or {}).get("profile") or "")
+                    counts[prof] = counts.get(prof, 0) + 1
+                cache["panes"] = counts
+        return cache["panes"], cache["blind"]
+
+    def check(board, profile):
+        if not profile:
+            return None
+        panes, blind = _panes_by_profile()
+        if blind:
+            return None
+        count = int(panes.get(str(profile), 0))
+        if count:
+            return None                      # (A) fails: there IS a pane
+        name = str(profile)
+        retired = retired_cache.get(name)
+        if retired is None:
+            retired = retired_cache[name] = profile_is_retired(
+                name, profiles_dir, hermes_home)
+        if not retired:
+            key = (str(board), name)
+            if key not in legacy_cache:
+                legacy_cache[key] = legacy_cluster_identity(name, board, hscc_dir)
+            if not legacy_cache[key]:
+                return None                  # (B) fails: a pane IS expected
+        return paneless_reason(count, retired=retired,
+                               legacy_identity=not retired)
+    return check
 
 
 def read_paused(paused_path=None) -> set:
@@ -1556,6 +1938,10 @@ DEFAULT_CONFIG_PATH = "~/.hscc/orch_waker.json"
 #:                        named profile maps it in the config file himself.
 #:   ``fail_threshold`` — consecutive failed attempts that arm the backoff.
 #:   ``backoff_s``      — seconds the board stays skipped once armed.
+#:   ``skip_boards``    — slugs the waker never nudges (a finished project whose
+#:                        ``<board>-orch`` profile still exists but has no pane).
+#:                        Treated exactly like a paused board, without pausing
+#:                        its cards or holding ``auto_decompose`` fleet-wide.
 CONFIG_DEFAULTS = {
     "enabled": True,      # default ON (W3 card) — see the fail-open note above
     "debounce_s": DEBOUNCE_S,
@@ -1564,6 +1950,7 @@ CONFIG_DEFAULTS = {
     "orch_map": {},
     "fail_threshold": DEFAULT_FAIL_THRESHOLD,
     "backoff_s": DEFAULT_BACKOFF_S,
+    "skip_boards": [],
 }
 
 #: Hard floors for the numeric knobs. Zero/negative would turn the debounce
@@ -1625,6 +2012,13 @@ def config_path(path=None) -> str:
     return _resolve(path or DEFAULT_CONFIG_PATH)
 
 
+def _coerce_skip_boards(value) -> list:
+    """A sorted list of board slugs, or ``[]``; non-string entries dropped."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return sorted({b.strip() for b in value if isinstance(b, str) and b.strip()})
+
+
 def load_config(path=None) -> dict:
     """The waker's config file merged over defaults (always a COMPLETE dict).
 
@@ -1645,6 +2039,7 @@ def load_config(path=None) -> dict:
     """
     cfg = dict(CONFIG_DEFAULTS)
     cfg["orch_map"] = {}
+    cfg["skip_boards"] = []
     file = config_path(path)
     try:
         with open(file) as f:
@@ -1664,6 +2059,7 @@ def load_config(path=None) -> dict:
                 "backoff_s"):
         cfg[key] = _coerce_knob(key, doc.get(key, CONFIG_DEFAULTS[key]))
     cfg["orch_map"] = _coerce_orch_map(doc.get("orch_map"))
+    cfg["skip_boards"] = _coerce_skip_boards(doc.get("skip_boards"))
     return cfg
 
 
@@ -1696,6 +2092,7 @@ def set_enabled(enabled: bool, path=None) -> dict:
     # `orch_map` is a mutable default: give the document its own dict so this
     # writer can never mutate CONFIG_DEFAULTS through it (t_f1122b7a knob).
     merged["orch_map"] = {}
+    merged["skip_boards"] = []
     merged.update({k: v for k, v in doc.items() if k in CONFIG_DEFAULTS})
     merged["enabled"] = bool(enabled)
     doc.update(merged)
@@ -1763,7 +2160,7 @@ def effective_scan_interval(cfg=None, path=None) -> int:
 # ── W3: the daemon-loop entry + the status surface ──────────────────────────
 
 def _tick_message(nudged: int, failed: int, decided: int, backoff=(),
-                  suppressed: int = 0) -> str:
+                  suppressed: int = 0, paneless=()) -> str:
     """The stream stamp's human ``message`` for a scan tick.
 
     The pre-existing shape is preserved verbatim (``"N nudged, M failed, K
@@ -1775,11 +2172,25 @@ def _tick_message(nudged: int, failed: int, decided: int, backoff=(),
     Same argument for ``suppressed`` (t_ff520296): wakes this tick withheld
     because the gateway notifier had already delivered that exact event are
     named here, so "steady" can never hide a dedupe that is eating events.
+
+    And the same again for ``paneless`` (t_7b2d3dba): boards whose nudge was
+    dropped because their orchestrator target has no pane and none is expected.
+    That state is PERMANENT by construction — the whole point of the fix is that
+    it stops retrying — so if it were not in this message the stream would read
+    plain ``steady`` forever on a board nobody is ever waking again. The reason
+    is printed with the board because "no pane" and "retired identity" are
+    different things for the operator to act on.
     """
     base = (f"{nudged} nudged, {failed} failed, {decided} decided" if decided
             else "steady")
     if suppressed:
         base += f" — {suppressed} wake(s) suppressed as gateway-delivered"
+    if paneless:
+        names = ", ".join(
+            f"{e.get('board')} ({e.get('profile')}: {e.get('reason')})"
+            for e in paneless[:3])
+        more = f" +{len(paneless) - 3} more" if len(paneless) > 3 else ""
+        base += f" — nudge skipped, no pane expected: {names}{more}"
     if backoff:
         names = ", ".join(f"{e.get('board')} ({e.get('retry_in_s')}s)"
                           for e in backoff[:3])
@@ -1844,9 +2255,19 @@ def waker_status(now=None, config_path=None, state_path=None,
             "pending": len(st["pending"].get(b) or []),
         }
     last_tick = stream.get("last_tick")
+    # t_7b2d3dba: which boards the waker has STOPPED nudging, and why. The
+    # stream message carries the same fact for the human surfaces; this is the
+    # machine-readable half, so a doctor row or a `--json` reader can name the
+    # board and its reason without parsing prose. Empty when nothing is skipped
+    # — a healthy waker's status looks exactly as it did before this key existed.
+    skipped = [{
+        "board": b, "profile": ent["profile"], "reason": ent["reason"],
+        "ticks": ent["n"], "since": ent["at"],
+    } for b, ent in sorted(paneless_state(st).items())]
     return {
         "enabled": bool(cfg["enabled"]),
         "config": cfg,
+        "paneless_skip": skipped,
         "stream": {
             "name": STREAM_NAME,
             "interval_s": stream_cadence(),
@@ -1864,7 +2285,8 @@ def waker_status(now=None, config_path=None, state_path=None,
 
 def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
                profiles_dir=None, hermes_home=None, boards_dir=None,
-               audit_path=None, inject=None, read=None, write=None) -> dict:
+               audit_path=None, inject=None, read=None, write=None,
+               hscc_dir=None) -> dict:
     """One supervised daemon tick: read config -> (scan | skip) -> stamp stream.
 
     The body of :func:`check_orch_waker` below — i.e. what the ``orch_waker``
@@ -1934,7 +2356,8 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
             report=report,
             debounce_s=cfg["debounce_s"], min_gap_s=cfg["min_gap_s"],
             orch_map=cfg["orch_map"], fail_threshold=cfg["fail_threshold"],
-            backoff_s=cfg["backoff_s"])
+            backoff_s=cfg["backoff_s"], skip_boards=cfg["skip_boards"],
+            hscc_dir=hscc_dir)
         if report.get("unevaluable"):
             entry.update(ok=False, last_scan=now,
                          boards_unevaluable=True,
@@ -1949,11 +2372,18 @@ def waker_tick(now=None, config_path=None, state_path=None, paused_path=None,
         # logged — a dedupe that ate everything must show up as a big number
         # here rather than as a suspiciously quiet "steady".
         suppressed = len(report.get("suppressed") or [])
+        # t_7b2d3dba: the boards whose nudge this tick SKIPPED because their
+        # orchestrator target has no pane and hscc's own retirement record says
+        # none is expected. Stamped for the same reason as `suppressed` — a waker
+        # that has stopped speaking to a board must never be able to stamp a bare
+        # `steady`, or `verify`/`doctor` would certify it healthy forever.
+        paneless = report.get("paneless") or []
         entry.update(ok=True, decisions=len(decisions), nudged=nudged,
                      delivery_failed=failed, last_scan=now,
                      backoff=backoff, suppressed=suppressed,
+                     paneless=paneless,
                      message=_tick_message(nudged, failed, len(decisions),
-                                           backoff, suppressed))
+                                           backoff, suppressed, paneless))
         return entry
     except Exception as e:  # noqa: BLE001 — the stream must survive anything
         LOG.exception("orch-waker: daemon tick failed")
@@ -2078,9 +2508,106 @@ def _daemon_predates_build(pid_file=None, build_file=None) -> bool:
     return started < built
 
 
+def _waker_files(root) -> tuple:
+    """The two artefacts that prove the waker lives at ``root``.
+
+    ``(config file, stream stamp)`` — exactly what this module's OWN writers
+    create at a root: :func:`set_enabled` (and the CLI) write
+    ``<root>/orch_waker.json``, the leaf of :data:`DEFAULT_CONFIG_PATH`, and the
+    daemon's tick stamps ``<root>/state/orch_waker.json`` through
+    ``state.write_state``. The daemon pid file is deliberately NOT one of them:
+    it belongs to ``daemon_ops``, not to the waker, and counting it would let a
+    stray pid file certify a root the waker has never written to — which is
+    precisely how :func:`doctor_check`'s fatal branch could fire.
+    """
+    return (os.path.join(root, os.path.basename(DEFAULT_CONFIG_PATH)),
+            os.path.join(root, "state", f"{STREAM_NAME}.json"))
+
+
+def _root_holds_waker(root) -> bool:
+    """Has ``root`` EVER held a waker artefact?
+
+    Not a verdict — the only question it answers is "has anything of this
+    subject ever been written here", and it exists so the redirect guard can
+    tell a root where the waker was never set up (absence is the honest answer)
+    apart from a root that was never a waker root at all (absence is an
+    artefact of the caller's read). One ``isfile`` per artefact, no reads.
+    """
+    return any(os.path.isfile(p) for p in _waker_files(root))
+
+
+def _canonical_root() -> str:
+    """The root the waker's OWN writers resolve to: HOME-derived, no environment.
+
+    ONE derivation, used for both sides of the guard in
+    :func:`_honour_waker_root`, so the canonical side and the redirected side
+    are always the same shape (the t_adb66608 pattern in
+    ``cron_watchers._dirs``). It consults no ``HSCC_DIR`` — a per-process
+    variable cannot name the root of state whose writers (the daemon, the CLI)
+    never see it.
+    """
+    return os.path.dirname(config_path())
+
+
+def _honour_waker_root(hscc_dir):
+    """Decide which root this read may use, and say so when the ask is refused.
+
+    Returns ``(root_or_None, note)``. A root named by the caller is obeyed
+    exactly — that is t_e9b0f048's seam, ONE caller threading the SAME root
+    through both sides of one call — UNLESS it has never held a single artefact
+    of the waker while the canonical root holds one. Such a root has never been a
+    waker root at all; obeying it would report "never ticked" (and fatal RED, once
+    a pid file happens to sit there) about a waker that stamped seconds ago. Then
+    the read moves to the canonical root and ``note`` carries a WARN naming both,
+    so the row describes reality instead of the empty directory it was aimed at
+    (t_be690204, the same failure t_adb66608 closed for the watcher ledger).
+
+    With no ``hscc_dir`` — what the doctor's row does now — it returns
+    ``(None, "")`` and the plain HOME-bound read happens. The ``realpath``
+    compare comes first so the production default (``HSCC_DIR`` left at
+    bootstrap.sh's ``$HOME/.hscc``) costs no extra stat at all.
+    """
+    if not hscc_dir:
+        return None, ""
+    asked = _resolve(hscc_dir)
+    canon = _canonical_root()
+    if (os.path.realpath(asked) == os.path.realpath(canon)
+            or _root_holds_waker(asked)
+            or not _root_holds_waker(canon)):
+        return asked, ""
+    return canon, (
+        f"WARN: {asked} holds no orch-waker artefact (no "
+        f"{os.path.basename(DEFAULT_CONFIG_PATH)}, no state/{STREAM_NAME}.json) "
+        f"but {canon} does — HSCC_DIR is not an orch-waker root relocation "
+        f"(every writer here resolves from HOME), so this row reads the waker "
+        f"at {canon} instead of calling it absent (t_be690204)")
+
+
 def doctor_check(now=None, config_path=None, state_dir=None,
                  stream_state=None, _daemon_running=None,
                  hscc_dir=None, _predates_build=None) -> dict:
+    """Doctor verdict: is the built-in waker alive and doing its job?
+
+    The public half is the redirect policy (:func:`_honour_waker_root`); the
+    verdict branches themselves live in :func:`_doctor_check` and are unchanged
+    by this card. Splitting it this way keeps every verdict string byte-identical
+    (the branches are pinned elsewhere) while making the one rule here auditable
+    in one function: **the read happens at the root the writers can reach, and a
+    refused redirect is reported, not obeyed silently.**
+    """
+    root, note = _honour_waker_root(hscc_dir)
+    res = _doctor_check(now=now, config_path=config_path, state_dir=state_dir,
+                        stream_state=stream_state,
+                        _daemon_running=_daemon_running, hscc_dir=root,
+                        _predates_build=_predates_build)
+    if note:
+        res = dict(res, detail=f"{note}; {res['detail']}")
+    return res
+
+
+def _doctor_check(now=None, config_path=None, state_dir=None,
+                  stream_state=None, _daemon_running=None,
+                  hscc_dir=None, _predates_build=None) -> dict:
     """Doctor verdict: is the built-in waker alive and doing its job?
 
     * ``disabled``                -> ok, detail says ``disabled`` (the operator
@@ -2102,14 +2629,23 @@ def doctor_check(now=None, config_path=None, state_dir=None,
     daemon ticks and it never touches a board DB. ``stream_state=`` injects the
     stream entry and ``_daemon_running=`` the liveness probe (tests); otherwise
     they read ``<state_dir>/orch_waker.json`` / ``<root>/daemon.pid``.
-    ``hscc_dir=`` (the ``doctor_notifier_mask`` convention — run_doctor passes
-    ``os.environ.get("HSCC_DIR")``) relocates the WHOLE ``~/.hscc`` root for
-    this read: config, stream state and the daemon pid file all resolve under
-    it. That is what keeps a sandboxed bootstrap (HSCC_DIR = tmp, HOME = the
-    operator's real one — bootstrap.sh never fakes HOME) from reading the
-    OPERATOR's live daemon.pid while looking at the sandbox's missing stream
-    state and firing the fatal verdict over someone else's machine. Without
-    the env var every path is the plain ``~/.hscc`` default.
+    ``hscc_dir=`` relocates the WHOLE ``~/.hscc`` root for this read (config,
+    stream state and the daemon pid file together, so one call cannot mix
+    roots). It is t_e9b0f048's CALLER-THREADED seam and nothing more: pass it
+    only when the SAME root was threaded through this subject's writers too.
+    It is no longer fed by the environment — ``run_doctor`` hands this row no
+    root at all (``FEATURE_CHECK_ROWS`` declares ``row_kwargs=()``;
+    t_be690204), because every writer here resolves from ``$HOME``
+    (:data:`DEFAULT_CONFIG_PATH`, the stream stamp through ``state.STATE_DIR``,
+    :data:`DAEMON_PID_PATH`) and none of them reads ``HSCC_DIR``. The old
+    justification — a sandboxed bootstrap must not read the OPERATOR's
+    ``daemon.pid`` — is exactly what t_adb66608 rejected for the watcher
+    ledger: a relocated root nothing can write to is not a sandbox, it is an
+    empty directory, and the row answered "the daemon is not running" about a
+    daemon that had ticked seconds ago (and RED once a pid file sat there — both
+    measured, t_be690204). :func:`_honour_waker_root` is what enforces that; a
+    root that owns its own waker artefacts is still obeyed exactly. Without the
+    env var every path is the plain ``~/.hscc`` default.
     ``_predates_build=`` injects the upgrade-race probe (tests; the real one
     is :func:`_daemon_predates_build`, which needs NO injection because the
     pid file it stats is the same file the default liveness probe read).
@@ -2121,9 +2657,13 @@ def doctor_check(now=None, config_path=None, state_dir=None,
         now = _real_time()
     pid_file = None
     if hscc_dir:
+        # The root here is already the guard's verdict (see doctor_check): the
+        # caller's own root, or the canonical one when that root has never held
+        # a waker artefact. Everything below resolves under that ONE root.
         root = _resolve(hscc_dir)
+        config_leaf = os.path.basename(DEFAULT_CONFIG_PATH)
         if config_path is None:
-            config_path = os.path.join(root, "orch_waker.json")
+            config_path = os.path.join(root, config_leaf)
         if state_dir is None:
             state_dir = os.path.join(root, "state")
         pid_file = os.path.join(root, "daemon.pid")
@@ -2231,7 +2771,8 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
              audit_path=None, warned=None, report=None,
              debounce_s=DEBOUNCE_S, min_gap_s=MIN_GAP_S,
              orch_map=None, fail_threshold=DEFAULT_FAIL_THRESHOLD,
-             backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None):
+             backoff_s=DEFAULT_BACKOFF_S, wake_ledger=None, skip_boards=(),
+             paneless=None, hscc_dir=None):
     """One waker pass wired end to end: scan -> decide -> inject -> audit.
 
     The public entry (W3 calls it every ~30 s from the daemon loop). Defaults
@@ -2254,27 +2795,47 @@ def run_tick(now=None, boards=None, state_path=None, paused_path=None,
     A swallowed exception means the scan told us nothing at all, so an
     injected ``report`` is marked unevaluable here too — a failure must never
     be reported as a healthy empty pass.
+
+    ``paneless`` / ``hscc_dir`` (t_7b2d3dba) are the pane-expectation gate and
+    the root ``main_orch`` reads for the main orchestrator's identity. Both are
+    defaulted here, and the default checker is built ONLY when this call also
+    owns its delivery (``inject is None``) — see the comment at the wiring.
     """
     try:
         def _resolve(board):
             return resolve_orch(board, profiles_dir, hermes_home, orch_map)
 
+        # The pane-expectation verdict is wired ONLY when this tick also owns its
+        # delivery, because the checker reads tmux through the very same ``repl``
+        # module delivery reads (and would otherwise sweep a live tmux server on
+        # behalf of a caller that replaced delivery and never asked for a sweep).
+        # A caller that brings its own ``inject`` owns its own answer; if it also
+        # wants the gate it passes ``paneless=``. Leaving the gate off for those
+        # callers keeps every pre-t_7b2d3dba call site behaving exactly as before.
+        own_delivery = inject is None
+        if own_delivery:
+            inject = make_inject(repl=repl, mode=mode, profiles_dir=profiles_dir,
+                                 hermes_home=hermes_home, audit_path=audit_path,
+                                 orch_map=orch_map)
+            if paneless is None:
+                paneless = make_paneless_checker(profiles_dir=profiles_dir,
+                                                 hermes_home=hermes_home,
+                                                 repl=repl, hscc_dir=hscc_dir)
+
         return tick(
             now=now,
             boards=boards,
-            paused=read_paused(paused_path),
+            paused=read_paused(paused_path) | set(skip_boards or ()),
             has_orch=has_orch if has_orch is not None else _resolve,
-            inject=inject if inject is not None else make_inject(
-                repl=repl, mode=mode, profiles_dir=profiles_dir,
-                hermes_home=hermes_home, audit_path=audit_path,
-                orch_map=orch_map),
+            inject=inject,
             state_path=state_path, boards_dir=boards_dir,
             hermes_home=hermes_home,
             warned=_WARNED_ONCE if warned is None else warned,
             report=report,
             debounce_s=debounce_s, min_gap_s=min_gap_s,
             orch_map=orch_map, fail_threshold=fail_threshold,
-            backoff_s=backoff_s, wake_ledger=wake_ledger)
+            backoff_s=backoff_s, wake_ledger=wake_ledger,
+            paneless=paneless)
     except Exception:  # noqa: BLE001 — the daemon loop must survive anything
         LOG.exception("orch-waker: tick failed — will retry next tick")
         if report is not None:

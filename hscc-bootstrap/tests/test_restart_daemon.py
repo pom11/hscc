@@ -32,6 +32,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -883,11 +884,30 @@ def test_import_package_stub_succeeds_with_pythonpath(tmp_path):
     cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
 
     # sanity: bare path, no PYTHONPATH -> ModuleNotFoundError (reproduces bug)
+    #
+    # HERMETIC (t_d9f2af76): argv0 was the literal "python3" — a PATH lookup, so
+    # which interpreter answered was a property of the machine, not of this
+    # checkout. That is the class that had leg hscc-cluster red on the runner and
+    # green at home (t_bb057914); the ban lives in
+    # scripts/hermetic_spawn_guard.py and is swept by this leg's
+    # tests/test_hermetic_subprocess_spawn.py. sys.executable is the interpreter
+    # running this suite, and the stub's `import stublib` cannot resolve under it
+    # either — stublib exists only in tmp_path, one level ABOVE the script dir,
+    # and sys.path[0] carries only the script dir — so this arm still reproduces
+    # the failure for the right reason, on every host.
+    #
+    # PYTHONPATH is dropped rather than inherited: "no PYTHONPATH" is the
+    # precondition this arm claims, and {**os.environ, ...} made it true only
+    # because the ambient env happened not to set it.
+    bare_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    bare_env.update({
+        "STUB_CALLS": str(tmp_path / "calls.txt"),
+        "STUB_PID_FILE": str(tmp_path / "daemon.pid"),
+        "STUB_LAST_PID": str(tmp_path / "last.pid"),
+    })
     bare = subprocess.run(
-        ["python3", str(cli), "start"],
-        env={**os.environ, "STUB_CALLS": str(tmp_path / "calls.txt"),
-             "STUB_PID_FILE": str(tmp_path / "daemon.pid"),
-             "STUB_LAST_PID": str(tmp_path / "last.pid")},
+        [sys.executable, str(cli), "start"],
+        env=bare_env,
         capture_output=True, text=True,
     )
     assert "ModuleNotFoundError" in bare.stderr

@@ -86,6 +86,15 @@ def test_suite_never_writes_live_hscc(tmp_path):
     _plant(ws, "update-check.json",
            '{"checked_at": "2026-01-01T00:00:00+00:00", '
            '"latest_tag": "v0.0.1"}\n')
+    # node_pauses.json (t_28caea71): the durable node-pause overlay. Planted
+    # with a live-looking pause so the manifest diff catches BOTH leak shapes —
+    # a test that writes the overlay to the real root, and one that overwrites
+    # (or clears) a pause the operator actually has in force.
+    _plant(ws, "node_pauses.json",
+           '{"pauses": {"192.0.2.10": {"reason": "planted", '
+           '"since": "2026-01-01T00:00:00+00:00", "until": null, '
+           '"units": ["planted-unit"], "span_nodes": ["192.0.2.10"], '
+           '"stopped": true}}}\n')
     # serving.json + profile config.yaml — added (t_2985e00b) because
     # serving.update_orchestrator_followers() rewrites orchestrator-tracking
     # profile config.yaml files. The sandbox must plant those so a regression
@@ -119,6 +128,25 @@ def test_suite_never_writes_live_hscc(tmp_path):
         # the sandbox so a regression (e.g. someone rebinds DAEMON_LOCK to a
         # literal ~/.hscc path) shows up as a new planted-tree file.
         "test_daemon_singleton.py",
+        # t_28caea71: the node-pause overlay is a NEW durable file under
+        # ~/.hscc. Its own tests are the only code that writes it, so they are
+        # the ones that must run against the planted tree — a test that dropped
+        # its `directory=` seam would rewrite the planted pause and trip the
+        # manifest diff below.
+        "test_node_pauses.py",
+        # t_af9901e2: the wake path READS that overlay through node_pauses'
+        # `directory=` seam. These tests write pauses of their own, so they
+        # belong in the same sandbox — a wake test that lost its
+        # `pauses_directory=` argument would read (and a CLI-style test could
+        # write) the operator's real pause record.
+        "test_autodown_paused_wake.py",
+        # t_411401a0: the CLI-side twin of that wake seam. ``_cmd_wake`` starts
+        # with ``record_activity("cli")`` — a WRITE of autodown.json — and the
+        # all-paused branch reads the config back for the machine view, so this
+        # is exactly the CLI-style test the note above means: if its
+        # ``AUTODOWN_FILE`` seal were ever dropped, the planted tree is what
+        # catches the rewrite of the operator's own state.
+        "test_autodown_cli_paused_wake.py",
     ]
     paths = [os.path.join(tests_dir, t) for t in targets]
 

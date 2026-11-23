@@ -14,16 +14,31 @@ Exit codes:
     0  every swept route answered with parseable JSON
     1  a route the app calls did not answer (unreachable / 5xx / bad body)
     2  preconditions missing — no API host or token, i.e. the API is not up
-    3  the sweep COULD NOT RUN (no client source to derive routes from, or no
-       renderer available). Distinct from 1 on purpose: "I could not look" is
-       not "I looked and it was dead", and ``hscc verify`` maps the two to
-       different rows — 1 is red, 3 is unverified (t_ef36fe71).
+    3  the sweep COULD NOT RUN TO THE END (no client source to derive routes
+       from, no renderer available, or its own total budget ran out before
+       every route was called). Distinct from 1 on purpose: "I could not look"
+       is not "I looked and it was dead", and ``hscc verify`` maps the two to
+       different rows — 1 is red, 3 is unverified (t_ef36fe71, budget
+       extension t_f439c923). A budget-limited run still prints the full
+       report: which routes answered, and which were never called.
 
 A 400 from a route that REQUIRES a parameter is expected and is NOT a failure —
 the client supplies it; a bare sweep call does not.
 
 Only GETs are swept. Mutating POSTs are listed as not covered rather than fired,
-so the gap is explicit instead of silently missing.
+so the gap is explicit instead of silently missing. The same rule covers a GET
+whose handler IS the fleet smoke test: ``NOT_SWEPT`` below names it, and the
+sweep reports it covered-but-not-exercised instead of firing it. A route that
+legitimately needs longer than the blanket probe budget gets one of its own
+(``HEAVY_ROUTES``) rather than a permanent false red.
+
+Per-route caps are not a bound on the SWEEP: 34 routes at ``-m 30`` plus
+``/v1/health`` at ``-m 120`` is ~19 minutes of worst case, and the parent that
+runs this file — ``check_api_routes`` through ``verify._capture`` — allows 120 s
+of wall clock in total. So the sweep also caps its OWN total (``SWEEP_BUDGET``),
+stops probing when it is spent, and still prints the report, naming every route
+it never reached instead of letting the parent kill it mid-run and throw the
+whole thing away (t_f439c923).
 """
 
 import json
@@ -32,6 +47,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from urllib.parse import urlencode
 
 # ── Standalone-import bootstrap (t_ef36fe71) ────────────────────────────────
@@ -77,6 +93,101 @@ NEEDS_PARAM = {
     "/v1/memory": {"profile": "hscc-orch"},
     "/v1/logs": {"source": "daemon", "limit": "1"},
 }
+
+# ── Probe budgets and never-fired routes (DATA, not a special-case `if`) ────
+# The sweep proves routes ANSWER. It must not run the fleet smoke test.
+#
+# Blanket curl `-m` for every route HEAVY_ROUTES does not name.
+PROBE_TIMEOUT = 30
+
+# Routes whose handler legitimately needs longer than the blanket budget:
+# route -> its own curl `-m`, in seconds.
+#
+# /v1/health runs one inline `hscc verify` when it has no cached snapshot to
+# serve — measured 64.4 s on a healthy fleet (t_81713661) — so the blanket 30 s
+# cap gave up mid-request and the row reported `000` for a route that was
+# answering: a gate that false-flags a healthy API. With the health snapshot
+# cache in place the cold path is the exception, so 120 s is a fallback for that
+# first call rather than the normal one. Every other route keeps PROBE_TIMEOUT
+# on purpose: a route that turns slow for a reason nobody predicted is a finding
+# to look at, not something to quietly hand a longer leash.
+HEAVY_ROUTES = {"/v1/health": 120}
+
+# Routes the sweep must never fire, with the note that reports the gap.
+#
+# /v1/verify's handler IS `hscc_daemon.verify.run_all()` — the very check that
+# shells out to this sweep. Probing it from inside `hscc verify` therefore starts
+# a nested full verify per hit, each doing real chat round-trips against the
+# operator's GPU units, and each of those sweeps probes /v1/verify again: a
+# branching-factor-2 chain of fleet smoke tests behind one reachability check.
+# Reachability is proven by the routes that answer cheaply; it is never proven
+# by firing the most expensive operation in the system.
+#
+# A skipped route still gets a row — the same shape a POST-only route gets — so
+# the gap stays visible in the report instead of the route silently vanishing.
+NOT_SWEPT = {
+    "/v1/verify": ("route exists; verify-triggered, "
+                   "not swept from inside verify"),
+}
+
+# What a skipped row reports for `status`. No request was made, so no HTTP code
+# may be claimed; deliberately not a number, so it can never be read as one.
+NOT_SWEPT_STATUS = "skip"
+
+# ── The budget that WRAPS the per-route caps (t_f439c923) ───────────────────
+# PROBE_TIMEOUT / HEAVY_ROUTES bound ONE request. Nothing bounded the SWEEP.
+# The client names 34 literal GETs this file calls: 33 × 30 s + 120 s is 1110 s
+# of worst case, while the parent that runs it — ``check_api_routes`` through
+# ``verify._capture`` — kills the subprocess after 120 s (its
+# ``timeout = timeout or 120`` default). Python then kills the sweep mid-loop:
+# no ``--json`` arrives, and the row can only read
+# ``unverified: api route sweep did not produce a route report (exit -9)`` —
+# every route that HAD answered is thrown away with it, and the operator cannot
+# see which one was slow.
+#
+# So the sweep now bounds its own total wall clock and stops politely: it prints
+# the report it has, names every route it never reached, and exits 3
+# (unverified — nothing was observed about those routes, so neither a green nor
+# a red is available).
+#
+# The arithmetic is one place, and it is DATA:
+PARENT_BUDGET = 120        # verify._capture's outer subprocess timeout. Pinned
+                           # against verify.py's own default by
+                           # test_sweep_budget_fits_inside_the_parents_budget.
+STARTUP_RESERVE = 40       # what must fit BEFORE the first probe: interpreter
+                           # start + imports (`rich` rides in through
+                           # cli_theme), api_base()'s `hscc api status` fallback
+                           # (itself capped at 30 s), the Swift parse, printing
+                           # the report.
+SWEEP_BUDGET = int(os.environ.get(  # probes only; env knob per the
+    "HSCC_SWEEP_BUDGET_SECONDS",   # HSCC_NAS_PROBE_TIMEOUT precedent
+    PARENT_BUDGET - STARTUP_RESERVE))
+
+# A probe with less than this left cannot produce anything but a timeout, so it
+# is not started: the gap is named instead. Keeps `-m 0` (curl: no limit at all)
+# unreachable.
+MIN_PROBE_SECONDS = 1
+
+# curl's exit code for "operation timed out" (`-m` fired). The sweep needs it
+# apart from a connection failure: a route cut off at a budget the SWEEP chose
+# has proved nothing, while a route cut off at its own cap has.
+CURL_TIMED_OUT = 28
+
+# What a route the budget never reached reports for `status`. Non-numeric for
+# the same reason as NOT_SWEPT_STATUS: no request went out, so no HTTP code may
+# be claimed.
+NOT_PROBED_STATUS = "unprobed"
+
+# Suffixes whose handler MUTATES the fleet. The Swift client's own naming
+# convention: a route ending in /stop, /up or /down is POST-only, so a bare GET
+# at it answers 405 at best and the probe learns nothing a read path cares
+# about. Excluding them up front beats firing and reading the 405 afterwards.
+#
+# It lives HERE rather than in each consumer because it already had two copies:
+# this file's `gets` filter and `scripts/perf_measure.py`'s own route list, and
+# the second one drifted (t_b0c302b8). A consumer that needs the rule imports
+# this constant instead of restating the tuple.
+MUTATION_SUFFIXES = ("/stop", "/up", "/down")
 
 
 def api_base():
@@ -137,6 +248,20 @@ def _bail(code, reason):
     return code
 
 
+def _gap_row(route, note):
+    """A row for a route the sweep did NOT call, with the reason named.
+
+    Same six keys in the same order as a probed row — the consumer (verify's
+    ``api_routes`` row) must never special-case a route. ``ok`` is True because
+    nothing here says the route is dead: an uneaten budget proves nothing about
+    the route, and a FALSE RED is exactly what this file was rewritten to stop
+    producing. The completeness guard is the exit code (3, not 0) and the
+    ``not_probed`` list in the payload, not this flag.
+    """
+    return {"route": route, "status": NOT_PROBED_STATUS, "seconds": 0.0,
+            "parses": True, "ok": True, "note": note}
+
+
 def sweep():
     base, tok = api_base(), token()
     if not base or not tok:
@@ -151,14 +276,21 @@ def sweep():
         return _bail(3, "cannot sweep: no iOS client source to derive routes "
                         "from (%s: %s)" % (CLIENT, exc.strerror or exc))
 
-    gets = [r for r in literal if not r.endswith(("/stop", "/up", "/down"))]
-    if not gets:
+    gets = [r for r in literal if not r.endswith(MUTATION_SUFFIXES)]
+    # A route in NOT_SWEPT is reported, never called, so it must not count as
+    # coverage either: a client source whose only literal GET were /v1/verify
+    # would otherwise "sweep" nothing and still print every route answering.
+    probed = [r for r in gets if r not in NOT_SWEPT]
+    if not probed:
         # The client source parsed but yielded no GET route to call. Reporting
         # "every route the app calls answers" over an empty list would be a
         # FALSE GREEN — the mirror image of the false red this card fixes (a
         # renamed or emptied client file would make the row pass forever).
-        return _bail(3, "cannot sweep: %s yielded no literal GET routes to call"
-                          % CLIENT)
+        detail = ("" if not gets else
+                  " (its only literal GETs are routes this sweep never fires: %s)"
+                  % ", ".join(gets))
+        return _bail(3, "cannot sweep: %s yielded no literal GET routes to call%s"
+                          % (CLIENT, detail))
 
     if shutil.which("curl") is None:
         # The sweep speaks HTTP through curl. Without it NOTHING was observed,
@@ -169,15 +301,55 @@ def sweep():
                           % os.environ.get("PATH"))
 
     rows, failures = [], []
+    # The wall clock starts HERE, not at import: whatever the sweep spent
+    # getting this far (interpreter start, api_base()'s `hscc api status`
+    # fallback, the Swift parse) is charged against STARTUP_RESERVE; only the
+    # probes are charged against SWEEP_BUDGET.
+    started = time.monotonic()
     for route in gets:
+        if route in NOT_SWEPT:
+            # Covered, not exercised — the report shape the sweep already uses
+            # for a POST-only route, so the gap is a named row rather than a
+            # route that quietly disappeared from the list. `ok` is True because
+            # nothing here says the route is dead; the note says what was NOT
+            # proven. No request went out, so `status` claims no HTTP code.
+            rows.append({"route": route, "status": NOT_SWEPT_STATUS,
+                         "seconds": 0.0, "parses": True, "ok": True,
+                         "note": NOT_SWEPT[route]})
+            continue
+        # Budget check FIRST: a probe started with nothing left can only burn
+        # wall clock and produce a timeout that says nothing about the route.
+        left = SWEEP_BUDGET - (time.monotonic() - started)
+        if left < MIN_PROBE_SECONDS:
+            rows.append(_gap_row(
+                route, "not probed: the sweep's %d s total budget ran out "
+                       "before it" % SWEEP_BUDGET))
+            continue
+        # Never ask for more than the route's own cap, and never more than the
+        # sweep has left. The second clause is what makes the total bounded.
+        own_cap = HEAVY_ROUTES.get(route, PROBE_TIMEOUT)
+        cap = max(MIN_PROBE_SECONDS, min(own_cap, int(left)))
+        shrunk = cap < own_cap
+
         url = base + route
         params = NEEDS_PARAM.get(route)
         if params:
             url += "?" + urlencode(params)
         proc = subprocess.run(
-            ["curl", "-s", "-m", "30", "-w", "\n%{http_code} %{time_total}",
+            ["curl", "-s", "-m", str(cap),
+             "-w", "\n%{http_code} %{time_total}",
              "-H", "Authorization: Bearer " + tok, url],
             capture_output=True, text=True)
+        # A route cut off at a budget the SWEEP chose proved nothing: it may
+        # have answered one second later. That is a named gap, never a dead
+        # route. Cut off at its OWN cap (shrunk False) it is the finding it
+        # always was, and the failure path below still fires.
+        if shrunk and proc.returncode == CURL_TIMED_OUT:
+            rows.append(_gap_row(
+                route, "not probed: cut off at the sweep's %d s budget after "
+                       "%d s of this route's %d s cap"
+                       % (SWEEP_BUDGET, cap, own_cap)))
+            continue
         parts = proc.stdout.rsplit("\n", 1)
         body = parts[0] if len(parts) == 2 else ""
         code, elapsed = (parts[-1].split() + ["000", "0"])[:2]
@@ -257,9 +429,17 @@ def render_human(rows, failures, dynamic, theme_name=None):
         print("cannot render: hscc_daemon.cli_theme unavailable")
         return
 
+    # ``rows`` also carries the routes this sweep refuses to fire AND the ones
+    # its budget never reached; the panel says what was actually called, so
+    # neither can inflate the coverage count the operator reads at the top of
+    # the table.
+    gaps = [r["route"] for r in rows
+            if r.get("status") == NOT_PROBED_STATUS]
+    swept = sum(1 for r in rows
+                if r.get("status") not in (NOT_SWEPT_STATUS, NOT_PROBED_STATUS))
     console.print(theme.make_panel(
         "api route sweep",
-        "Sweeping %d literal GET routes the app calls" % len(rows)))
+        "Sweeping %d literal GET routes the app calls" % swept))
 
     table = theme.make_table("api route sweep")
     table.add_column("result", no_wrap=True)
@@ -273,6 +453,17 @@ def render_human(rows, failures, dynamic, theme_name=None):
             glyph = "ok"
         elif r["status"] == "405":
             mark = "post"
+            glyph = "label"
+        elif r["status"] == NOT_SWEPT_STATUS:
+            # Not called, not failed: same neutral label a POST-only route gets.
+            # Without this branch a skipped route would print as FAIL, which is
+            # a false alarm of exactly the kind this file exists to prevent.
+            mark = "skip"
+            glyph = "label"
+        elif r["status"] == NOT_PROBED_STATUS:
+            # Same rule for a route the budget never reached: it was not called,
+            # so it cannot be reported dead. The note column says why.
+            mark = "gap"
             glyph = "label"
         else:
             mark = "FAIL"
@@ -292,12 +483,35 @@ def render_human(rows, failures, dynamic, theme_name=None):
 
     console.print("")
     console.print("Mutating POSTs are deliberately NOT fired by this sweep.")
+    if swept != len(rows):
+        console.print("Some rows above were not called either: `skip` rows are "
+                      "routes that would run the fleet smoke test from inside "
+                      "it, `gap` rows are routes the sweep's %d s budget never "
+                      "reached — the note column says which." % SWEEP_BUDGET)
     if failures:
         console.print(theme.make_status_panel(
             "%d ROUTE(S) FAILED: %s\n"
             "A route the app calls that does not answer means that screen is "
             "dead." % (len(failures), ", ".join(theme.esc(f) for f in failures)),
             status="error", title="failures"))
+        if gaps:
+            # Named here as well as in the table: the operator skims the panel,
+            # and a dead route must not hide the fact that the sweep also
+            # stopped early.
+            console.print(theme.make_status_panel(
+                "%d route(s) were never called — the %d s budget ran out: %s"
+                % (len(gaps), SWEEP_BUDGET,
+                   ", ".join(theme.esc(g) for g in gaps)),
+                status="warn", title="not probed"))
+    elif gaps:
+        # Deliberately NOT the "all routes answered" panel: nothing was proven
+        # about these routes, so the sweep says so instead of going green.
+        console.print(theme.make_status_panel(
+            "NOT VERIFIED: the sweep stopped at its %d s total budget and %d "
+            "route(s) were never called: %s\n"
+            "Nothing is known about those routes — this is not a pass."
+            % (SWEEP_BUDGET, len(gaps), ", ".join(theme.esc(g) for g in gaps)),
+            status="warn", title="result"))
     else:
         console.print(theme.make_status_panel(
             "All swept routes answered with parseable JSON.",
@@ -323,15 +537,37 @@ def main():
         # not run). Already printed its reason; do not touch the renderers.
         return result
     rows, failures, dynamic = result
+    # A NOT_PROBED_STATUS row is a route the sweep never called — its own wall
+    # clock ran out. That is NOT a green sweep: "every route the app calls
+    # answers" over a report with holes is precisely the false green this file
+    # already refuses for an emptied client source. Nor is it a red: nothing was
+    # observed about those routes. Exit 3 is the exit verify already maps to
+    # UNVERIFIED, so the row says what is true and keeps the report.
+    gaps = [r["route"] for r in rows if r.get("status") == NOT_PROBED_STATUS]
+    # A dead route outranks an unprobed one: if something did fail, that is the
+    # finding, and the report still names the routes never reached.
+    verdict = 1 if failures else (3 if gaps else 0)
 
     # ``--theme`` is only for the human palette; strip it before the --json
     # check so it can never leak into the machine path or argv handling.
     _, theme_name = _strip_theme(sys.argv[1:])
 
     if "--json" in sys.argv:
-        print(json.dumps({"routes": rows, "failures": failures,
-                          "not_swept_dynamic": dynamic}, indent=2))
-        return 1 if failures else 0
+        payload = {"routes": rows, "failures": failures,
+                   "not_swept_dynamic": dynamic,
+                   "not_probed": gaps,
+                   "budget": {"sweep_seconds": SWEEP_BUDGET,
+                              "parent_seconds": PARENT_BUDGET,
+                              "exhausted": bool(gaps)}}
+        if gaps:
+            # verify's `_sweep_reason` reads exactly this pair on a 2/3 exit, so
+            # the operator's row names the routes instead of printing `{`.
+            payload["could_not_run"] = True
+            payload["error"] = ("sweep stopped at its %d s total budget; %d "
+                                "route(s) were never called: %s"
+                                % (SWEEP_BUDGET, len(gaps), ", ".join(gaps)))
+        print(json.dumps(payload, indent=2))
+        return verdict
 
     # Machine path above is theme-free and always works. The human view is the
     # only thing that needs cli_theme/rich, so a missing renderer degrades the
@@ -344,7 +580,7 @@ def main():
               "--json for the machine view." % sys.executable)
         return 3
     render_human(rows, failures, dynamic, theme_name)
-    return 1 if failures else 0
+    return verdict
 
 
 if __name__ == "__main__":

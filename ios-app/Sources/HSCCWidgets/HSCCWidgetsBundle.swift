@@ -6,7 +6,7 @@ import WidgetKit
 ///
 /// Hosted by the `HSCCWidgets` app-extension target on iOS and the
 /// `HSCCMacWidgets` target on macOS. Both targets compile THIS file and the
-/// six widgets below by path; only the family lists and the rendering-mode
+/// nine widgets below by path; only the family lists and the rendering-mode
 /// adapter differ, under `#if os(...)` in those files.
 ///
 /// Families:
@@ -28,18 +28,22 @@ import WidgetKit
 ///   * systemSmall/Medium/Large + the three accessory families — Board Status:
 ///                     todo/ready/running/blocked/done for ONE board, picked in
 ///                     the widget's own configuration sheet (t_6d8731ab).
+///   * systemSmall/Medium/Large + the three accessory families — Needs Me: the
+///                     main orchestrator's unacknowledged alert-feed rows, with
+///                     level, title, body first line and age (card R3).
+///   * systemSmall/Medium/Large + the three accessory families — Merge Queue:
+///                     the local queue's FIFO rows, live stages, ages and last
+///                     results, exactly the `hscc kanban monitor` table (MQ5).
 ///
 /// Data comes from READ-ONLY GETs against the HSCC API using the same
 /// App-Group credentials as the app. State changes are minutes-scale, so the
 /// timeline refreshes sparingly (well within the widget refresh budget).
 @main
 struct HSCCWidgetsBundle: WidgetBundle {
+    // The widget list is GENERATED from ios-app/widgets/*.json into
+    // HSCCWidgetList.generated.swift. Adding a widget edits its own manifest,
+    // not this shared bundle body.
     var body: some Widget {
-        ClusterWidget()
-        MonitorWidget()
-        CardsRunningWidget()
-        KanbanMonitorWidget()
-        ProjectsWidget()
-        BoardStatusWidget()
+        HSCCWidgetList().body
     }
 }

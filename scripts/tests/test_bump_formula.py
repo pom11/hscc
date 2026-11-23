@@ -118,7 +118,8 @@ def formula_text(version="2.12.0", release_sha=OLD_SHA):
     return _TEMPLATE.format(version=version, release_sha=release_sha, pypi_sha=PYPI_SHA)
 
 
-def make_tarball(path: Path, version: str) -> Path:
+def make_tarball(path: Path, version: str,
+                 requirements: str = "rich>=13,<16\n") -> Path:
     """A real gzip tarball shaped like GitHub's archive: hscc-<version>/ at root.
 
     Byte-deterministic (gzip mtime zeroed, entries mtime 0) so a fixture digest
@@ -126,7 +127,7 @@ def make_tarball(path: Path, version: str) -> Path:
     """
     root = f"hscc-{version}"
     payload = {f"{root}/VERSION": version + "\n",
-               f"{root}/requirements.txt": "rich>=13,<16\n",
+               f"{root}/requirements.txt": requirements,
                f"{root}/README.md": "hscc\n"}
     with open(path, "wb") as raw, \
             gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz, \
@@ -201,15 +202,17 @@ def served(tmp_path, monkeypatch):
             self.calls: list[str] = []
             self.error = None
 
-        def install(self, version, *, version_file=None):
+        def install(self, version, *, version_file=None, requirements="rich>=13,<16\n"):
             path = tmp_path / f"v{version}.tar.gz"
-            make_tarball(path, version if version_file is None else version_file)
+            make_tarball(path, version if version_file is None else version_file,
+                         requirements=requirements)
             self.tarball = path
             return path
 
-        def digest(self, version, *, version_file=None):
+        def digest(self, version, *, version_file=None, requirements="rich>=13,<16\n"):
             """The digest the served archive for ``version`` really has."""
-            return sha256_of(self.install(version, version_file=version_file))
+            return sha256_of(self.install(version, version_file=version_file,
+                                          requirements=requirements))
 
         def fetch(self, url, dest, timeout=180.0):
             self.calls.append(url)
@@ -287,6 +290,31 @@ def test_rewrite_is_a_noop_when_everything_already_matches():
     text = formula_text("2.13.0", NEW_SHA)
     new, changes = bf.rewrite_formula(text, "2.13.0", NEW_SHA)
     assert new == text and changes == []
+
+
+def test_no_release_only_resource_closures_are_known():
+    """The generic mechanism stays, but no requirement adds formula blocks."""
+    assert bf.extra_resources_for("rich>=13,<16\npsutil>=5.9\n") == []
+    assert bf.extra_resources_for("# comment\nsome-future-dep>=1\n") == []
+
+
+def test_inserted_resource_names_are_audit_clean():
+    """`brew audit --strict` requires a resource name to match the PyPI package
+    name with `.`/`_` read as `-`; the SOT spelling `ruamel.yaml` is what turned
+    the tap audit red (t_10df1a54). The url keeps the sdist's real filename."""
+    entry = {"name": "ruamel.yaml",
+             "url": "https://files.pythonhosted.org/packages/aa/bb/"
+                    "ruamel.yaml-0.18.16.tar.gz",
+             "sha256": "a" * 64}
+    assert bf._render_resource(entry).splitlines()[0] == '  resource "ruamel-yaml" do'
+
+    new, added = bf.rewrite_formula(formula_text(), "2.13.0", NEW_SHA,
+                                    extra_resources=[entry])
+    assert '  resource "ruamel-yaml" do' in new
+    assert '  resource "ruamel.yaml" do' not in new
+    assert "ruamel.yaml-0.18.16.tar.gz" in new
+    inserted = [change for change in added if change[1] == ""]
+    assert inserted and 'resource "ruamel-yaml" do' in inserted[0][2]
 
 
 @pytest.mark.parametrize("bad", ["", "deadbeef", "Z" * 64, "1" * 63, "1" * 65,

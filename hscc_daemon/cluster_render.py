@@ -15,12 +15,16 @@ it, mirroring ``_emit``'s ``1 if result has an ``error`` key`` contract.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from rich.console import Console
 
 from hscc_daemon import cli_theme as theme
 from hscc_daemon.cli_theme import esc
+
+#: Microseconds, as ``datetime.isoformat()`` writes them, for display trimming.
+_FRACTIONAL_SECONDS = re.compile(r"\.\d+")
 
 
 # ── shared helpers ─────────────────────────────────────────────────────────
@@ -48,6 +52,179 @@ def _object_error(result: dict) -> str | None:
     return result.get("error") if isinstance(result, dict) else None
 
 
+# ── node-pause overlay: a parked node reads PAUSED, never down ────────────
+#
+# WHY THE RENDERER READS AN OVERLAY AT ALL. ``hscc node pause`` stops a node's
+# units through sparkrun and records the intent in ``~/.hscc/node_pauses.json``
+# (hscc_daemon/node_pauses.py, #560). Every read path downstream of that stop —
+# sparkrun's status parse, the proxy's route table — then sees what a crash
+# sees: no container, no answering engine. So the fleet views rendered a
+# deliberate act as a fault: the parked machine sat in ``idle hosts`` with no
+# reason attached, and (when the proxy still listed its stale route) the serving
+# table spelled its model ``down``. The repair loops already skip parked nodes
+# (watchdog auto-heal, keepalive, ``cluster up``, autoscale, the heal breaker);
+# this is the same overlay on the VISIBILITY side, so the fleet reads the same
+# way everywhere. The API edge got its twin projection in t_824b617f.
+#
+# WHY THE OVERLAY IS READ PER RENDER, NOT CACHED. It is one small local JSON
+# file, and a pause or resume must be visible on the NEXT invocation rather than
+# whenever a cache expires. Nothing here writes it — this module reads the
+# overlay and nothing else, exactly as the overlay module writes only itself.
+#
+# WHY ``paused`` AND ``down`` CANNOT COLLIDE. A parked row keeps whatever
+# diagnostic the frame carried (the error text, the idle listing) and gains the
+# pause wording; a consumer that derives a fault from a missing sample must ask
+# the pause overlay first, which is what these two renderers now do.
+#
+#: The word a parked node reads in the human fleet view. The API's machine
+#: value for the same idea is ``PAUSE_STATUS`` in ``hscc-api/routes_cluster.py``
+#: (t_824b617f) — the same literal, on purpose. This module cannot import it:
+#: ``hscc-api`` imports ``hscc_daemon``, so that edge would be a cycle, and the
+#: hyphenated dir is not an importable package name. The pairing is pinned from
+#: the source text by ``tests/test_cluster_status_pause_render.py`` instead, so
+#: the two surfaces cannot drift into two spellings of one state.
+PAUSE_STATUS = "paused"
+
+
+def _backing_node_pauses(directory=None) -> dict:
+    """The durable node-pause overlay as ``{host: entry}`` — the test seam.
+
+    A module-level function so a test can patch it wholesale (the role
+    ``_backing_*`` plays on the API routes) while every normal read goes
+    through :func:`node_pauses.list_pauses`, the overlay's own normalising
+    reader. ``directory`` is threaded through rather than read from an
+    environment variable because that module's documented test seam is an
+    explicit root: an env-var root is per-process, so it is not a root the CLI
+    that WROTE the overlay can ever have had (the root-split class). With
+    ``directory=None`` it resolves HOME's ``~/.hscc`` — the root the CLI writes.
+    """
+    from hscc_daemon import node_pauses
+    return node_pauses.list_pauses(directory)
+
+
+def _node_key(value) -> str | None:
+    """A comparable node identity, or ``None`` when this value names none.
+
+    Trim + case-fold only — no address normalisation, no hostname-suffix
+    stripping. The overlay is keyed by the host string the operator passed to
+    ``hscc node pause``, which is the same string sparkrun and the proxy use.
+    Guessing that ``node-3`` means a particular IP would invent a paused node on
+    a machine nobody parked, which is a worse lie than an untagged row.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed.casefold() if trimmed else None
+
+
+def pause_overlay(directory=None) -> dict:
+    """``{node: {"reason": str, "since": str | None}}`` for parked nodes.
+
+    Span-aware, because a tensor-parallel unit is parked as a whole: the machines
+    named only in ``span_nodes`` are just as out of service as the keyed host, and
+    painting them down (or merely idle) faults the operator's own action twice.
+    That is :func:`node_pauses.covering`'s rule; this is its projection. A host's
+    OWN record wins over a span record that happens to name it — the operator's
+    own reason is the truthful one to show.
+
+    Fails open to ``{}``. An unreadable overlay is already ``{"pauses": {}}``
+    inside :func:`node_pauses.load`, and the only thing left that could raise is
+    the import; a status screen must never go down because the overlay could not
+    be parsed — the overlay WARNs about itself.
+    """
+    try:
+        pauses = _backing_node_pauses(directory)
+    except Exception:  # noqa: BLE001 - a display tag is never worth a traceback
+        return {}
+    overlay: dict = {}
+    if not isinstance(pauses, dict):
+        return overlay
+    for host, entry in pauses.items():
+        if not isinstance(entry, dict):
+            continue
+        row = {"reason": entry.get("reason") if isinstance(entry.get("reason"), str) else "",
+               "since": entry.get("since") if isinstance(entry.get("since"), str) else None}
+        keyed = _node_key(host)
+        if keyed:
+            overlay[keyed] = dict(row)
+        for node in entry.get("span_nodes") or []:
+            spanned = _node_key(node)
+            if spanned:
+                overlay.setdefault(spanned, dict(row))
+    return overlay
+
+
+def pause_display(reason, since) -> str:
+    """``paused (reason, since 2026-…T…+00:00)`` — the whole human cell.
+
+    Degrades rather than invents: no reason drops the parenthetical's first
+    half, no ``since`` drops its second, neither leaves the bare word. An
+    empty reason is what the overlay stores when the operator gave none
+    (``node_pauses`` normalises it to ``""``), so it is the common case, not an
+    error. The ``since`` stamp is the overlay's own ISO string with the
+    fractional seconds trimmed — never reformatted into a local timezone,
+    because this screen has no clock to convert with and a wrong-looking
+    timestamp is worse than a verbose one.
+    """
+    bits = []
+    if isinstance(reason, str) and reason.strip():
+        bits.append(reason.strip())
+    if isinstance(since, str) and since.strip():
+        # Fractional seconds only. `isoformat()` writes microseconds when the
+        # writer had any, and the whole point of the stamp is that a human can
+        # read it; the offset must survive, because chopping it would silently
+        # turn "+00:00" into a naive local-looking time.
+        stamp = _FRACTIONAL_SECONDS.sub("", since.strip())
+        bits.append(f"since {stamp}")
+    text = PAUSE_STATUS
+    if bits:
+        text += f" ({', '.join(bits)})"
+    return text
+
+
+def pause_for_node(overlay, node):
+    """The paused display for ``node`` if ``overlay`` holds it, else ``None``.
+
+    The single place the CLI side asks "is THIS row's machine parked", so the
+    identity rule (trim + case-fold, nothing clever) lives once rather than per
+    renderer — a second spelling is how one surface calls a machine paused and
+    another calls it down. Returns the finished display string, never a dict,
+    because the caller wants a cell and not a decision of its own.
+    """
+    if not overlay:
+        return None
+    key = _node_key(node)
+    fields = overlay.get(key) if key else None
+    if not isinstance(fields, dict):
+        return None
+    return pause_display(fields.get("reason"), fields.get("since"))
+
+
+def pause_lines(overlay: dict) -> list[str]:
+    """One escaped, marked-up line per parked node: ``<node>  paused (…)``.
+
+    Every node the overlay holds gets a line, including one the frame never
+    listed: sparkrun does not report a machine whose workloads are stopped, and
+    an unlisted node is exactly the one an operator must not conclude is
+    healthy. A parked node that IS in the idle list therefore appears twice —
+    once in sparkrun's own words (it genuinely is idle) and once in HSCC's
+    (it is idle *because the operator parked it*, with the reason and the
+    timestamp). Sorted by node so two invocations render identically.
+
+    ``warn`` not ``error``: a parked node is out of service by deliberate
+    choice, and colouring it red is the exact misreading this seam exists to
+    remove. It is not ``dim`` either — a machine off the fleet is worth the
+    operator's eye.
+    """
+    lines = []
+    for node in sorted(overlay):
+        fields = overlay[node]
+        lines.append(f"{esc(node)}  [warn]"
+                     f"{esc(pause_display(fields.get('reason'),
+                                          fields.get('since')))}[/warn]")
+    return lines
+
+
 def _emit_error_panel(console: Console, title: str, result: dict) -> int:
     """Render a uniform red error panel; exit code is always 1."""
     msg = result.get("error", "command failed")
@@ -61,8 +238,16 @@ def _emit_error_panel(console: Console, title: str, result: dict) -> int:
 
 # ── cluster ────────────────────────────────────────────────────────────────
 
-def render_cluster_status(console: Console, result: dict) -> int:
-    """Running workloads + idle hosts -> a workload Table + a summary Panel."""
+def render_cluster_status(console: Console, result: dict, pauses=None) -> int:
+    """Running workloads + idle hosts -> a workload Table + a summary Panel.
+
+    ``pauses`` is the pause overlay (:func:`pause_overlay`'s shape) and exists as
+    the injection seam for tests and for a caller that already read the overlay;
+    ``None`` — the production path — reads it from the root the CLI writes. The
+    pre-existing lines are byte-identical when the overlay is empty, which is
+    what lets the existing pins on this screen stay untouched: the pause block is
+    ADDITIVE, so a fleet with no parked node renders exactly as before.
+    """
     err = _object_error(result)
     if err is not None:
         return _emit_error_panel(console, "cluster status", result)
@@ -91,6 +276,10 @@ def render_cluster_status(console: Console, result: dict) -> int:
              f"[label]idle hosts[/label]   {len(idle)}"]
     if idle:
         lines.append("[dim]" + esc(", ".join(str(h) for h in idle)) + "[/dim]")
+    overlay = pause_overlay() if pauses is None else pauses
+    if overlay:
+        lines.append(f"[label]node pauses[/label]  {len(overlay)}")
+        lines.extend(pause_lines(overlay))
     console.print(theme.make_panel("cluster summary", "\n".join(lines)))
     return 0
 
@@ -148,7 +337,8 @@ def render_monitor(console: Console, result: dict) -> int:
         finally:
             poller.close()
         console.print(cluster_live.render(data, rows, None, poller.proxy_error,
-                                          snapshot=True, width=console.width))
+                                          snapshot=True, width=console.width,
+                                          pauses=pause_overlay()))
         return 0
     if isinstance(data, dict):
         table = theme.make_table("cluster monitor")

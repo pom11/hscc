@@ -18,6 +18,7 @@ Backup-then-overwrite: an existing runtime script is copied to
 re-applied on the dest since the source mode may not survive all copy paths.
 """
 
+import argparse
 import os
 import shutil
 from datetime import datetime
@@ -83,12 +84,17 @@ def install_scripts(repo_root, scripts_dir, *, backup=True, ts=None):
 
 if __name__ == "__main__":
     import json
-    import sys
+
+    ap = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="Copy the watchdog shell scripts into the runtime scripts dir.")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="overwrite without preserving deployed scripts first")
+    ns = ap.parse_args()
 
     boot_dir = Path(__file__).resolve().parent
     repo_root = os.environ.get("REPO_ROOT") or str(boot_dir.parent)
     scripts_dir = os.environ.get("SCRIPTS") or os.path.expanduser("~/.hermes/scripts")
-    no_backup = "--no-backup" in sys.argv
 
-    result = install_scripts(repo_root, scripts_dir, backup=not no_backup)
+    result = install_scripts(repo_root, scripts_dir, backup=not ns.no_backup)
     print(json.dumps(result, indent=2))

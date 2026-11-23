@@ -647,3 +647,17 @@ def test_profile_flag_reads_launch_argv_without_chat_rule():
 def test_profile_flag_re_is_the_single_compiled_pattern():
     """The pattern tmux_chat used to copy: one compiled object, exported."""
     assert repl_inject.PROFILE_FLAG_RE.pattern == r"(?:^|\s)(?:-p|--profile)[ =](\S+)"
+
+
+def test_managed_launcher_argv_literal_resolves_its_profile():
+    """Hermes's managed launcher hides the argv in a Python list literal
+    (``sys.argv = ['…/hermes', '-p', 'general', 'chat']``). A pane started that
+    way by ``hscc main start`` was invisible to inject, the waker and the main
+    wake-ups (2026-11-21)."""
+    line = ("/x/python3 -I -c import sys, runpy; sys.path.insert(0, '/x/hermes-agent'); "
+            "sys.argv = ['/x/venv/bin/hermes', '-p', 'general', 'chat']; runpy.run_path(sys.argv[0])")
+    assert repl_inject.pane_chat_command([line])[0] == "general"
+    gateway = "/x/python3 -I -c sys.argv = ['/x/hermes', '-p', 'general', 'gateway', 'run', 'chat']"
+    assert repl_inject.pane_chat_command([gateway]) is None
+    broken = "/x/python3 -I -c sys.argv = ['/x/hermes', '-p', open('f')]"
+    assert repl_inject.pane_chat_command([broken]) is None

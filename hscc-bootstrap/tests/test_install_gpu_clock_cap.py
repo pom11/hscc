@@ -166,6 +166,35 @@ def test_parse_hosts_splits_bootstrap_csv():
     assert gc.parse_hosts(["--hosts", "192.0.2.1", "192.0.2.2"]) == [NODE, OTHER]
 
 
+def test_cli_help_unknown_noargs_never_touch_the_fleet(monkeypatch, capsys):
+    def forbidden(*_a, **_k):
+        pytest.fail("CLI reached the fleet before parsing was settled")
+
+    monkeypatch.setattr(gc, "_default_ssh_factory", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        gc.main(["--help"])
+    assert exc.value.code == 0 and "usage:" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        gc.main(["--typo"])
+    assert exc.value.code == 2 and "usage:" in capsys.readouterr().err
+    assert gc.main([]) == 2 and "usage:" in capsys.readouterr().out
+
+
+def test_cli_defaults_to_dry_run(monkeypatch, capsys):
+    seen = {}
+
+    def fake_fleet(hosts, **kw):
+        seen.update(kw)
+        return {"ok": True, "dry_run": kw.get("dry_run"), "nodes": [],
+                "capped": [], "failed": [], "skipped": []}
+
+    monkeypatch.setattr(gc, "cap_fleet", fake_fleet)
+    assert gc.main(["--hosts", NODE]) == 0
+    assert seen["dry_run"] is True and seen["uninstall"] is False
+    assert gc.main(["--apply", "--hosts", NODE]) == 0
+    assert seen["dry_run"] is False
+
+
 def test_notifier_mask_cli_splits_bootstrap_csv(monkeypatch):
     """Regression: bootstrap passes ONE comma-joined --hosts arg to the notifier stage."""
     import install_notifier_mask as nm

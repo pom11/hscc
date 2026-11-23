@@ -157,7 +157,7 @@ DESCRIPTIONS = [
     "Commit-time address-guard posture for that checkout",
     "Fleet activity — completions & tool usage over N days (default 7)",
     "Show autoscale decision from current queue depth (read-only)",
-    "Show pending failure escalations (dry-run, no mutations)",
+    "Preview escalations — POST /v1/escalate mutates",
     "Project-portfolio commands: standup verify doctor ...",
     "HSCC HTTP API server: start stop status (external apps)",
     "Board hygiene: blocked (show/recover), stale (list/archive)",
@@ -226,9 +226,10 @@ class TestMainHelpLayout:
                        "hscc help advanced",
                        "Docs: ~/dev/hscc/README.md", "Theme:"):
             assert marker in out, f"section/footer marker lost: {marker}"
-        # start-daemon itself is the ADVANCED surface's content, not the
-        # main help's — the main help only points at `hscc help advanced`.
-        assert "start-daemon" not in out
+        # start-daemon is a dispatched TOP_LEVEL_COMMAND, so the primary help
+        # names it too (t_88d896f3); `hscc help advanced` still documents the
+        # service-manager entry point.
+        assert "start-daemon" in out
 
 
 # ---------------------------------------------------------------------------

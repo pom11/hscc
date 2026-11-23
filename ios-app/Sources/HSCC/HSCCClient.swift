@@ -26,6 +26,11 @@ struct HSCCClient {
     private let port: Int
     private let token: String
     private let session: URLSession
+    /// Background push registration talks to EVERY saved cluster, not just the
+    /// active one; its failures must not repaint the connection banner with a
+    /// non-active endpoint's state. Foreground/ordinary clients keep the
+    /// default `true`.
+    private let monitorsConnection: Bool
 
     /// The session a caller gets when it passes none: always `.shared`.
     /// (The debug fixture session that a capture launch used to swap in is
@@ -37,19 +42,23 @@ struct HSCCClient {
     /// Build a client for one saved cluster. `fallbacks` are tried, in order,
     /// only when a transport attempt fails (see `HostFailover`).
     init(host: String, fallbacks: [String] = [], port: Int, token: String,
-         session: URLSession = HSCCClient.defaultSession()) {
+         session: URLSession = HSCCClient.defaultSession(),
+         monitorsConnection: Bool = true) {
         self.hosts = HostFailover.orderedHosts(primary: host, fallbacks: fallbacks)
         self.port = port
         self.token = token
         self.session = session
+        self.monitorsConnection = monitorsConnection
     }
 
     /// Build from the shared settings read, so app/extension clients share the
     /// exact same address list and the same failover order.
     init(config: APIConfig,
-         session: URLSession = HSCCClient.defaultSession()) {
+         session: URLSession = HSCCClient.defaultSession(),
+         monitorsConnection: Bool = true) {
         self.init(host: config.host, fallbacks: config.fallbackHosts,
-                  port: config.port, token: config.token, session: session)
+                  port: config.port, token: config.token, session: session,
+                  monitorsConnection: monitorsConnection)
     }
 
     // MARK: - URL building (host + port, no hardcoded tailnet address)
@@ -141,11 +150,15 @@ struct HSCCClient {
         }
         switch outcome {
         case .success(let pair, let host):
-            ConnectionMonitor.shared.requestSucceeded(host: host)
+            if monitorsConnection {
+                ConnectionMonitor.shared.requestSucceeded(host: host)
+            }
             return (pair.0, pair.1, host)
-        case .failed(let lastError):
+        case .failed(let lastError, _):
             // Every address failed the TRANSPORT: one honest unreachable alarm.
-            ConnectionMonitor.shared.requestFailed()
+            if monitorsConnection {
+                ConnectionMonitor.shared.requestFailed()
+            }
             if let error = lastError as? HSCCError, error == .invalidURL {
                 throw error
             }

@@ -7,7 +7,7 @@ domain: cluster resource management, automatic cleanup
 
 # HSCC Model Idle Monitor
 
-> **STALE / PAUSED (historical).** The idle monitor lived in the `hscc-agent-coordinator` plugin, archived 2026-06-08. The cron job is **PAUSED 2026-06-08** (`381ef65e40f5`): it keys off the now-stale `~/.hscc/agents.json` + absent `lifecycle.json` and would reap native-provisioned worker vLLMs as "orphan". Do not resume it without porting the daemon's BRIDGE_FILE guard first. Current teardown is owned by the gateway dispatcher + `hscc_daemon` keep-alive. This doc is kept for history only.
+> **STALE / PAUSED (historical).** The idle monitor lived in the `hscc-agent-coordinator` plugin, archived 2026-06-08. The cron job is **PAUSED 2026-06-08** (`381ef65e40f5`): it keys off the now-stale `~/.hscc/agents.json` + absent `lifecycle.json` and would reap native-provisioned worker vLLMs as "orphan". Do not resume it without porting the daemon's BRIDGE_FILE guard first. Current teardown is owned by the gateway dispatcher + `hscc_daemon` keep-alive. The modern idle mechanism is **`hscc autodown`** — and per operator policy it stays OFF (read it with `hscc autodown status` / the `autodown_status` tool; never arm it). This doc is kept for history only.
 
 Background **Hermes cron job** that periodically scans running sparkrun containers and automatically shuts down model instances that have been idle (no active agent) for a configured timeout period.
 

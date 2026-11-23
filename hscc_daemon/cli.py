@@ -875,21 +875,20 @@ def cmd_triggers():
         ))
 
 
-def cmd_notify(msg):
-    """Send a manual notification."""
-    from .desktop import send_macos_notification
-    from .state import now_iso
+def cmd_notify(argv):
+    """Post, list or acknowledge HSCC feed entries (``hscc notify``).
 
-    console = _console()
+    The verb is the CLI face of ``/v1/alerts`` (see
+    :mod:`hscc_daemon.notify_cli`), not a direct desktop notification: the
+    feed is the durable record, and auth/dedupe/rate-limiting live in the one
+    place every producer shares. A bare string is treated as the legacy
+    one-argument message form; ``list`` and ``ack`` are subcommands.
+    """
+    from . import notify_cli
 
-    ts = now_iso()
-    title = f"HSCC Manual: {ts[:19]}"
-    console.print(f"Sending notification: {title}")
-    ok = send_macos_notification(title, msg, priority="normal")
-    console.print(make_status_panel(
-        f"Notification {'sent' if ok else 'failed'}",
-        status="ok" if ok else "error", title="notify",
-    ))
+    if isinstance(argv, str):
+        argv = [argv]
+    return notify_cli.main(list(argv or []))
 
 
 def cmd_heal(node=None, reason="", status_only=False):
@@ -904,13 +903,16 @@ def cmd_heal(node=None, reason="", status_only=False):
 
     if status_only:
         rows = []
-        for k, v in sorted(heal_breaker._load().items()):
-            if k.startswith("_") or not isinstance(v, list):
-                continue
-            remaining = heal_breaker.suspended(k)
-            rows.append(f"  {k:<16} {len(v)} action(s) in window  "
-                        + (f"SUSPENDED {int(remaining)}s more" if remaining > 0
-                           else "healing allowed"))
+        # One read behind the CLI and the `heal_status` agent tool (t_14b86753):
+        # `snapshot()` counts only strikes still inside the window and shares
+        # its suspension arithmetic with `suspended()`. Reading `_load()`
+        # directly here would print aged-out entries as if they still counted.
+        for row in heal_breaker.snapshot()["nodes"]:
+            remaining = row["suspended_s"]
+            rows.append(
+                f"  {row['node']:<16} {row['strikes']} action(s) in window  "
+                + (f"SUSPENDED {int(remaining)}s more" if remaining > 0
+                   else "healing allowed"))
         console.print(make_status_panel(
             "\n".join(rows) if rows
             else "No heal strikes recorded — all nodes healing normally.",

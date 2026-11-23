@@ -11,6 +11,7 @@
 #   Sources/HSCC/Models.swift
 #   Sources/Shared/SharedModels.swift
 #   Sources/Shared/SharedStore.swift
+#   Sources/Shared/WidgetSurfaceKind.generated.swift
 #   Sources/HSCC/APIError.swift
 # The only non-model shim (ThemeStub.swift — a UI design token, not a model)
 # exists because SharedModels.swift references Theme.Semantic.* colors, which on
@@ -41,17 +42,55 @@ real_models=(
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
   Sources/Shared/SharedStore.swift
+  Sources/Shared/WidgetSurfaceKind.generated.swift
   Sources/HSCC/APIError.swift
   # The monitor view-model (t_61ed3f5e): the parity checks below run THIS
   # file's formatters against goldens generated from hscc_daemon/cluster_live.py,
   # so the harness has to compile the real thing, not a copy of it.
   Sources/Shared/ClusterMonitorViewModel.swift
+  # The systemSmall grid (t_9e110d88): Foundation-only by design, so the tile
+  # the small widget draws is executable here — the same bytes the view renders,
+  # no simulator. Its SwiftUI half lives in ClusterSmallGridView.swift and is
+  # covered structurally by widget_style_check.sh / cluster_widget_check.sh.
+  Sources/HSCCWidgets/ClusterSmallGrid.swift
+  # The large/XL table layout (t_9e64d9d9): which columns and rows the two
+  # biggest monitor surfaces draw, and the six fields only they print. Layout
+  # lives outside the view files so this harness can RUN it. It names
+  # `FleetSurface` and `FleetFormat.dash`, so the file that owns them is
+  # compiled here too — a harness that skipped a dependency would either not
+  # compile or, worse, test a copy of the rule.
+  Sources/Shared/ClusterNodeTally.swift
+  Sources/Shared/ClusterMonitorTables.swift
+  # The alert-feed projection ("Needs me", card R3): the decode gate runs the
+  # same newest-first order, unacknowledged filter, age and body-first-line
+  # rules the widget and the macOS dropdown draw.
+  Sources/Shared/NeedsMeReading.swift
+  # The merge-queue projection (card MQ5): the decode gate runs the same
+  # route→surface projection the widget and the macOS dropdown draw, and
+  # compares its CLI-shaped cells against a golden generated from
+  # `hscc_daemon/kanban_live.py::merge_queue_table`.
+  Sources/Shared/MergeQueueReading.swift
+  # The history series model (t_2681d3de): the tile's GPU% trend is built from
+  # ClusterHistorySeriesSet + the pixel-column downsampler, both Foundation-only,
+  # so the join, the reduction and the extremes-preserving property are executed
+  # here against the committed tier-1/tier-2 fixtures rather than asserted in
+  # prose by the SwiftUI gate.
+  Sources/Shared/ClusterHistorySeries.swift
 )
 harness=(
   scripts/model_decode_check/ThemeStub.swift
   # Declarations only (Swift forbids top-level statements outside main.swift),
   # so the monitor parity checks live here and main.swift calls them.
   scripts/model_decode_check/monitor_parity.swift
+  scripts/model_decode_check/cluster_small_grid.swift
+  scripts/model_decode_check/monitor_tables.swift
+  # The apps 1.4.4 node-label rule (last IP octet) and the octet order, in their
+  # own file for the same reason: main.swift is append-only and collides.
+  scripts/model_decode_check/node_label.swift
+  # Per-widget decode blocks: one file per widget + the generated call roster.
+  # A widget card adds its own file and manifest; main.swift is not edited.
+  scripts/model_decode_check/widgets.generated.swift
+  scripts/model_decode_check/widgets/*.swift
   scripts/model_decode_check/main.swift
 )
 

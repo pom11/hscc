@@ -47,8 +47,14 @@ guard let response = monitor, let fleet = FleetProjection(projecting: response) 
 }
 
 expect(group, "4 hosts listed, 4 up", fleet.tally.nodesUp == 4 && fleet.tally.nodesTotal == 4)
-expect(group, "nodes keep route order and display labels",
-       fleet.nodes.map { $0.label } == ["node-1", "node-2", "node-3", "node-4"])
+// Octet order and octet labels (apps 1.4.4): the fixture's hosts are .11-.14
+// in frame order, so this leg would still pass on frame order — the discriminating
+// order case (9 / 10 / 100) is executed in model_decode_check's node_label.swift.
+// What THIS leg proves is that the rows every surface draws are labelled by
+// octet, hostname notwithstanding.
+expect(group, "nodes come in octet order labelled by last octet, hostname notwithstanding",
+       fleet.nodes.map { $0.label } == ["11", "12", "13", "14"]
+        && fleet.nodes.map { $0.reportedName } == ["node-1", "node-2", "node-3", "node-4"])
 expect(group, "the serving table names 2 models",
        fleet.serving.models == 2 && fleet.serving.modelNames == ["model-a", "model-b"])
 expect(group, "the CLI total Gen t/s is the sum of serving[].gen_tps",
@@ -95,13 +101,13 @@ let medium = fleet.text(for: .medium)
 expect("medium", "headline + models/jobs/throughput",
        medium.headline == "4/4 up" && medium.detail == "2 models · 2 jobs · 12.3 t/s")
 expect("medium", "four compact node rows", medium.rows.count == 4)
-expect("medium", "row 1 is node-1 / model-a / up / GPU 0% / 63°C",
-       medium.rows[0].title == "node-1 · model-a"
+expect("medium", "row 1 is 11 / model-a / up / GPU 0% / 63°C",
+       medium.rows[0].title == "11 · model-a"
         && medium.rows[0].detail == "up · GPU 0% · 63°C")
 
 let large = fleet.text(for: .large)
 expect("large", "full row adds CPU temp + run/wait",
-       large.rows[2].title == "node-3 · model-b"
+       large.rows[2].title == "13 · model-b"
         && large.rows[2].detail == "up · GPU 96% · 78°C · CPU 87°C · run 3 · wait 0")
 
 let inline = fleet.text(for: .inline)
@@ -116,7 +122,29 @@ let rect = fleet.text(for: .rectangular)
 expect("rectangular", "two-line tally + detail",
        rect.headline == "4/4 up" && rect.detail == "2 models · 2 jobs · 12.3 t/s")
 expect("rectangular", "first node row is present, compact",
-       rect.rows.first?.title == "node-1 · model-a")
+       rect.rows.first?.title == "11 · model-a")
+
+// ---------------------------------------------------------------------------
+// 2b — L2 Lock Screen families (2026-11-20 operator pick). The accessory
+// bodies draw these values, so they are executed here without a simulator.
+// ---------------------------------------------------------------------------
+
+let l2Entry = ClusterEntry(date: .now, fleet: fleet, configured: true, paused: false)
+let l2 = l2Entry.c1
+// The label is the octet; the hostname is still the name the node reported,
+// which is exactly why ClusterC1Node keeps both — a VoiceOver user and the
+// large tile's tooltip should not lose the name because the tile got smaller.
+expect("l2", "the hottest C1 node is 13 at its GPU reading (78 °C), named node-3",
+       l2.hottestNode?.label == "13" && l2.hottestNode?.hostname == "node-3"
+        && l2.hottestNode?.tempC == 78)
+expect("l2", "the circular gauge fills inside the 0...90 °C contract",
+       l2.hottestGaugeValue == 78)
+expect("l2", "the rectangular header is CLUSTER · N TOK/S",
+       l2.rectangularHeadline == "CLUSTER · 12 TOK/S")
+expect("l2", "the rectangular row carries four node temperatures",
+       l2.rectangularTemps == ["63°", "63°", "78°", "74°"])
+expect("l2", "the inline line is the tally + tok/s",
+       l2.inlineL2 == "4/4 up · 12 tok/s")
 
 // The entry's gate states and failure/age footer.
 let timedOut = ClusterEntry(date: .now, fleet: nil, failure: .timeout(seconds: 8),
@@ -330,9 +358,576 @@ expect(tableGroup, "no host list is nil, not an empty table",
 expect(tableGroup, "the gallery sample carries the CLI table",
        ClusterEntry.placeholder.cliHostRows?.count == 4)
 
+// ---------------------------------------------------------------------------
+// 7 — the Lock Screen's four numbers: projected by `ClusterLockScreen` from the
+// CLI view-model and worded by its one copy rule (t_314a3811). Executed here so
+// the ring's bounds and the two reductions (a MEAN percentage, a SUMMED wattage)
+// are measured, not asserted in prose.
+// ---------------------------------------------------------------------------
+
+let lockGroup = "lock-screen"
+guard let lock = CLILockScreenMetrics(response) else {
+    print("FATAL: the committed fixture did not project to Lock Screen metrics")
+    exit(2)
+}
+
+expect(lockGroup, "the hottest reading anywhere is node 13's CPU at 87.1 C, and says whose",
+       lock.hottest?.celsius == 87.1 && lock.hottest?.sensor == .cpu
+        && lock.hottest?.host == "13")
+expect(lockGroup, "it scans BOTH sensors — no GPU here is that hot (max 78 C)",
+       lock.hottest?.cell == "87.1 C"
+        && (ClusterMonitorViewModel.project(response)?.hostRows.compactMap { $0.gpuTempC }
+             .max() ?? 0) == 78)
+expect(lockGroup, "its text IS the view-model's CPU Temp cell for that host",
+       lock.hottest?.cell == ClusterMonitorViewModel.project(response)?.hostRows[2].cpuTemp)
+expect(lockGroup, "87.1 C is past the view-model's warn mark but not its critical one",
+       lock.hottest?.level == .warn)
+expect(lockGroup, "GPU load is a MEAN, not a sum (0+0+96+96 over 4 hosts = 48%)",
+       lock.gpuUtil?.rule == .mean && abs((lock.gpuUtil?.value ?? -1) - 48.0) < 0.001)
+expect(lockGroup, "watts ARE summed (26.44 + 28.00 + 71.06 + 69.42 = 194.92 W)",
+       lock.gpuPower?.rule == .sum && abs((lock.gpuPower?.value ?? -1) - 194.92) < 0.01)
+expect(lockGroup, "every host reported both, so neither number is partial",
+       lock.gpuUtil?.isPartial == false && lock.gpuPower?.isPartial == false)
+expect(lockGroup, "running/waiting come from the CLI's total rows (5 run, 0 wait)",
+       lock.running == 5 && lock.waiting == 0)
+expect(lockGroup, "over the 4 live backends the totals are made of",
+       lock.backendsReporting == 4)
+expect(lockGroup, "with every backend answering, none is reported down",
+       lock.backendsDown == 0 && lock.servingReported)
+expect(lockGroup, "and the read covers all 4 listed hosts", lock.hostCount == 4)
+
+let lockInline = CLILockScreenCopy.text(for: .inline, lock)
+expect(lockGroup, "inline is one honest line: the hottest temperature + the queue",
+       lockInline?.headline == "87.1 C · 5 run")
+expect(lockGroup, "and it stays short enough for a Lock Screen line",
+       (lockInline?.headline.count ?? 99) <= 24)
+
+let lockRing = CLILockScreenCopy.text(for: .circular, lock)
+expect(lockGroup, "the ring's primary metric is the GPU load", lockRing?.headline == "48%")
+expect(lockGroup, "its secondary is what that load costs", lockRing?.detail == "195 W")
+expect(lockGroup, "both fit the ring's character bounds",
+       (lockRing?.headline.count ?? 99) <= CLILockScreenCopy.ringValueLimit
+        && (lockRing?.detail?.count ?? 99) <= CLILockScreenCopy.ringCaptionLimit)
+expect(lockGroup, "the coverage marker never enters the ring (it would clip)",
+       !(lockRing?.headline ?? "").contains("/") && !(lockRing?.detail ?? "").contains("/"))
+expect(lockGroup, "the ring's label says avg, because its number is a mean",
+       CLILockScreenCopy.gaugeLabel.contains("avg"))
+
+let lockRect = CLILockScreenCopy.text(for: .rectangular, lock)
+expect(lockGroup, "the row carries all three host metrics with their units",
+       lockRect?.headline == "87.1 C · GPU avg 48% · 195 W")
+expect(lockGroup, "then the whole queue and how many hosts it covers",
+       lockRect?.detail == "5 run · 0 wait · 4 hosts")
+
+let lockVoice = CLILockScreenCopy.voice(lock)
+expect(lockGroup, "the voice sentence names all four numbers",
+       lockVoice.contains("87.1 degrees C") && lockVoice.contains("48%")
+        && lockVoice.contains("195 W") && lockVoice.contains("5 running, 0 waiting"))
+expect(lockGroup, "it says the GPU number is a mean over the reporting hosts",
+       lockVoice.contains("average over 4 of 4 hosts"))
+expect(lockGroup, "and it says the thermal verdict, which no accessory may colour",
+       lockVoice.contains("warn"))
+expect(lockGroup, "a Home Screen family gets no copy from this file at all",
+       CLILockScreenCopy.text(for: .large, lock) == nil
+        && CLILockScreenCopy.text(for: .medium, lock) == nil)
+
+// The entry, not only the copy: what the ring fills to and what is read out.
+let lockEntry = ClusterEntry(date: .now, fleet: fleet, configured: true,
+                             paused: false, lockScreen: lock)
+expect(lockGroup, "the ring fills to the measured percentage",
+       lockEntry.lockScreenGaugeValue == 48.0)
+expect(lockGroup, "and every family reads the same voice sentence",
+       lockEntry.lockScreenVoice == lockVoice)
+expect(lockGroup, "the gate states still win over any metric",
+       ClusterEntry(date: .now, fleet: fleet, configured: false, paused: false,
+                    lockScreen: lock).text(for: .inline).headline == "Set up in HSCC"
+        && ClusterEntry(date: .now, fleet: fleet, configured: true, paused: true,
+                        lockScreen: lock).text(for: .circular).headline == "Paused")
+expect(lockGroup, "a failed read with no metrics falls back to the reason, never dashes",
+       timedOut.text(for: .inline).headline == "Timed out"
+        && timedOut.lockScreenVoice == nil)
+
+// A read where only one of three listed hosts reported: the denominators have to
+// show, because a partial sum is too small and a partial mean can be too high.
+func metricSample(_ hostname: String, gpu: String? = nil, gpuTemp: String? = nil,
+                  cpuTemp: String? = nil, powerW: String? = nil) -> MonitorSample {
+    MonitorSample(hostname: hostname, uptime_sec: nil, cpu_usage_pct: nil,
+                  mem_used_pct: nil, mem_total_mb: nil, mem_used_mb: nil,
+                  gpu_name: nil, gpu_util_pct: gpu, gpu_mem_used_pct: nil,
+                  cpu_temp_c: cpuTemp, gpu_temp_c: gpuTemp, cpu_load_1m: nil,
+                  gpu_power_w: powerW)
+}
+let partialHosts = MonitorResponse(
+    json: MonitorPayload(timestamp: nil, hosts: [
+        MonitorNode(host: "192.0.2.11", error: nil,
+                    sample: metricSample("node-1", gpu: "50", gpuTemp: "70", powerW: "100"),
+                    used_slots: nil, free_slots: nil, workloads: nil),
+        MonitorNode(host: "192.0.2.12", error: "collect failed", sample: nil,
+                    used_slots: nil, free_slots: nil, workloads: nil),
+        MonitorNode(host: "192.0.2.13", error: nil, sample: metricSample("node-3"),
+                    used_slots: nil, free_slots: nil, workloads: nil),
+    ]), serving: nil, serving_error: nil, serving_proxy_error: nil, speak: "")
+let part = CLILockScreenMetrics(partialHosts)
+expect(lockGroup, "a host that reported nothing stays in the denominator",
+       part?.gpuUtil?.hostsReporting == 1 && part?.gpuUtil?.hostsListed == 3)
+expect(lockGroup, "so the GPU load says 1/3 rather than reading as the fleet's",
+       part.map { CLILockScreenCopy.gpuToken($0) } == "GPU avg 50% 1/3")
+expect(lockGroup, "and a partial sum of watts says 1/3 too",
+       part.map { CLILockScreenCopy.wattsToken($0) } == "100 W 1/3")
+expect(lockGroup, "the temperature is still the one host that measured it, by octet",
+       part?.hottest?.cell == "70 C" && part?.hottest?.host == "11")
+expect(lockGroup, "an unanswered serving poll is a dash, never a 0 queue",
+       part?.running == nil && part?.waiting == nil
+        && part.map { CLILockScreenCopy.queueHeadline($0) } == "— run")
+expect(lockGroup, "and the ring still fits its bounds with the marker removed",
+       part.map { CLILockScreenCopy.text(for: .circular, $0)?.headline ?? "" } == "50%")
+
+let nothingHosts = MonitorResponse(
+    json: MonitorPayload(timestamp: nil, hosts: [
+        MonitorNode(host: "192.0.2.11", error: "collect failed", sample: nil,
+                    used_slots: nil, free_slots: nil, workloads: nil),
+    ]), serving: nil, serving_error: nil, serving_proxy_error: nil, speak: "")
+let none = CLILockScreenMetrics(nothingHosts)
+expect(lockGroup, "a read with no temp, no GPU, no watts and no queue has nothing",
+       none == nil || none!.hasNothing)
+expect(lockGroup, "and the entry keeps its own copy instead of a row of dashes",
+       ClusterEntry(date: .now, fleet: nil, failure: .timeout(seconds: 8),
+                    configured: true, paused: false,
+                    lockScreen: none).text(for: .rectangular).headline == "Timed out")
+expect(lockGroup, "the sample entry draws the same four numbers as its own rows",
+       ClusterEntry.placeholder.lockScreen?.hostCount
+        == ClusterEntry.placeholder.fleet?.tally.nodesTotal)
+
+// ---------------------------------------------------------------------------
+// C1 Health line (2026-11-20 redesign): the new model, from the same fixture.
+// ---------------------------------------------------------------------------
+let c1EntryWithFailure = ClusterEntry(date: .now, fleet: nil,
+                                      failure: .timeout(seconds: 8),
+                                      configured: true, paused: false,
+                                      dataAt: nil, refreshMinutes: 15)
+
+let c1Entry = ClusterEntry(date: .now, fleet: fleet, configured: true, paused: false,
+                           dataAt: Date(timeIntervalSince1970: 1_788_468_629),
+                           refreshMinutes: 15)
+let c1 = c1Entry.c1
+expect("c1", "all four nodes up reads as one calm word",
+       c1.headline == "All up" && c1.tally == "4/4")
+expect("c1", "the hero throughput is the serving total",
+       c1.tokText == "12 tok/s" && c1.tokPerSec.map { abs($0 - 12.3) < 0.001 } == true)
+expect("c1", "the hottest node is the max GPU temperature",
+       c1.hottestC == 78 && c1.hottestText == "Hottest 78°")
+expect("c1", "nodes come in octet order labelled by octet and carry power / tok/s",
+       c1.nodes.map { $0.label } == ["11", "12", "13", "14"]
+        && c1.nodes.map { $0.hostname } == ["node-1", "node-2", "node-3", "node-4"]
+        && c1.nodes[2].powerW == 71.06 && c1.nodes[2].genTps == 3.1)
+// Idle fleet: live backends, nothing running, no rate in the serving rows. The
+// approved C1 reads "0 tok/s", never "— tok/s" (2026-11-20 operator review).
+let idleRows = (response.serving ?? []).map { row in
+    ServingRow(node: row.node, port: row.port, model: row.model, routes: row.routes,
+               running: 0, waiting: 0, kv: row.kv, gen_tps: nil, prompt_tps: nil,
+               prompt_total: row.prompt_total, gen_total: row.gen_total, error: row.error)
+}
+let idleEntry = ClusterEntry(date: .now,
+                             fleet: FleetProjection(projecting: MonitorResponse(
+                                 json: response.json, serving: idleRows, serving_error: nil,
+                                 serving_proxy_error: nil, speak: "")),
+                             configured: true, paused: false)
+expect("c1", "an idle fleet with live backends reads 0 tok/s, not a dash",
+       idleEntry.c1.tokPerSec == 0 && idleEntry.c1.tokText == "0 tok/s"
+        && idleEntry.c1.rectangularHeadline == "CLUSTER · 0 TOK/S")
+let unservedEntry = ClusterEntry(date: .now,
+                             fleet: FleetProjection(projecting: MonitorResponse(
+                                 json: response.json, serving: nil, serving_error: nil,
+                                 serving_proxy_error: nil, speak: "")),
+                             configured: true, paused: false)
+expect("c1", "no serving answer at all stays unknown",
+       unservedEntry.c1.tokPerSec == nil && unservedEntry.c1.tokText == "— tok/s")
+expect("c1", "the footer counts each model once per serving node",
+       c1.modelLine == "model-a ×2 · model-b ×2")
+expect("c1", "no daemon read renders as unknown, never as OK",
+       c1.daemonText == "daemon —")
+var oneDownHosts = Array(response.nodes.prefix(3))
+oneDownHosts.append(MonitorNode(host: "192.0.2.14", error: "collect failed", sample: nil,
+                                used_slots: nil, free_slots: nil, workloads: nil))
+let threeUp = ClusterEntry(date: .now,
+                           fleet: FleetProjection(projecting: MonitorResponse(
+                               json: MonitorPayload(timestamp: nil, hosts: oneDownHosts),
+                               serving: response.serving, serving_error: nil,
+                               serving_proxy_error: nil, speak: "")),
+                           configured: true, paused: false)
+expect("c1", "a missing node reads as a partial tally, not all up",
+       threeUp.c1.headline == "3/4 up")
+let downEntry = ClusterEntry(date: .now,
+                             fleet: FleetProjection(projecting: MonitorResponse(
+                                 json: MonitorPayload(timestamp: nil, hosts: [
+                                     MonitorNode(host: "192.0.2.11", error: "collect failed",
+                                                 sample: nil, used_slots: nil, free_slots: nil,
+                                                 workloads: nil),
+                                 ]), serving: nil, serving_error: nil,
+                                 serving_proxy_error: nil, speak: "")),
+                             configured: true, paused: false)
+expect("c1", "no answering node reads as Down", downEntry.c1.headline == "Down")
+expect("c1", "a failed monitor read is offline and dimmed",
+       c1EntryWithFailure.c1.failed && c1EntryWithFailure.c1.stale.isOffline
+        && c1EntryWithFailure.c1.stale.isDimmed)
+
+// ---------------------------------------------------------------------------
+// 8 — the pause overlay (t_824b617f / t_983f177e): a parked node is a choice,
+//     not a fault, and it must read as one on every family.
+//
+// The fixture is the committed up-state capture with three rows changed:
+// .011 parked with an error it keeps (the overlay refuses to delete a real
+// diagnostic) plus a reason and a since; .012 parked with an empty reason and a
+// null since; .013 genuinely down and untagged. The top-level paused_nodes set
+// names .011 again (a de-duplication case) and .099, a span partner the frame
+// never listed at all.
+// ---------------------------------------------------------------------------
+
+let pauseGroup = "pause"
+let pauseData = requireData("v1_cluster_monitor_paused.json")
+guard let pausedResponse = try? JSONDecoder().decode(MonitorResponse.self, from: pauseData),
+      let pausedFleet = FleetProjection(projecting: pausedResponse) else {
+    print("FATAL: the committed v1_cluster_monitor_paused.json did not decode + project")
+    exit(2)
+}
+
+/// The instant every age assertion is measured against: exactly 3 h after the
+/// fixture's paused_since, whose epoch (2026-11-21T10:00:00+00:00) is written
+/// here as a number on purpose. Deriving now from FleetFormat's own parser
+/// would make the parse self-verifying, and a parser that reads the wrong
+/// instant would then agree with itself.
+let pauseNow = Date(timeIntervalSince1970: 1795255200 + 3 * 3600)
+
+func row(_ fleet: FleetProjection, _ index: Int) -> FleetNodeLine? {
+    fleet.nodes.indices.contains(index) ? fleet.nodes[index] : nil
+}
+
+let pNodes = pausedFleet.nodes
+// The card's inheritance proof, in one line: these are t_3c0b54b6's parked
+// rows, and they read the SAME label path as every other row — a node paused
+// by IP with no sample and no hostname is labelled by its octet like a live one,
+// and the rows that DO report a hostname are labelled by octet too (1.4.4
+// inverted that preference). No paused-row code of its own to update.
+expect(pauseGroup, "fixture shape: 4 rows in octet order, every one labelled by octet",
+       pNodes.map { $0.label } == ["11", "12", "13", "14"])
+
+// --- the decode, both halves. Declaring a wire key WITHOUT a property default
+// is what makes these load-bearing: `let status: String? = nil` compiles, is
+// silently never decoded, and every tile would draw a bare up/down forever.
+expect(pauseGroup, "top-level paused_nodes decodes as 2 entries",
+       pausedResponse.paused_nodes?.count == 2)
+expect(pauseGroup, "a tagged row carries all three contract keys",
+       pausedResponse.json?.hosts.first?.status == PauseContract.status
+       && pausedResponse.json?.hosts.first?.paused_reason == "training run"
+       && pausedResponse.json?.hosts.first?.paused_since == "2026-11-21T10:00:00+00:00")
+expect(pauseGroup, "an untagged row keeps status nil (nil means not parked)",
+       pNodes.indices.contains(2) && row(pausedFleet, 2)?.isPaused == false)
+expect(pauseGroup, "the pause literal and key list have one owner",
+       PauseContract.status == "paused"
+       && PauseContract.rowKeys == ["status", "paused_reason", "paused_since"])
+// The trap the parent card named: `workloads[].containers[].status` is a
+// DIFFERENT key with a different owner, and a container that happens to report
+// "paused" must not park the node. The model declares no container keys at all,
+// so the only way this can fire is the row-level tag.
+let containerPaused = """
+{"json":{"hosts":[{"host":"192.0.2.20","error":null,"sample":null,"used_slots":null,\
+"free_slots":null,"workloads":[{"workload_id":"w1",\
+"containers":[{"name":"c","status":"paused"}]}]}]},"speak":""}
+"""
+let containerPausedResponse = try? JSONDecoder().decode(MonitorResponse.self,
+                                                        from: Data(containerPaused.utf8))
+expect(pauseGroup, "a CONTAINER status of paused is not a node pause (different key)",
+       containerPausedResponse?.json?.hosts.first?.isPaused == false
+       && containerPausedResponse?.json?.hosts.first?.status == nil
+       && FleetProjection(projecting: containerPausedResponse)?.tally.nodesPaused == 0)
+expect(pauseGroup, "the row-level tag is read even while its container says Up",
+       pausedResponse.json?.hosts.first?.status == "paused"
+       && pausedResponse.json?.hosts.first?.isPaused == true)
+
+// --- the per-node word. This is the card's deliverable: paused, not down.
+expect(pauseGroup, "parked with reason and since reads paused (reason, since)",
+       row(pausedFleet, 0).map { FleetFormat.status($0, now: pauseNow) }
+       == "paused (training run, 3h ago)")
+expect(pauseGroup, "parked with an empty reason and a null since reads bare paused",
+       row(pausedFleet, 1).map { FleetFormat.status($0, now: pauseNow) } == "paused")
+expect(pauseGroup, "an untagged errored row still reads down",
+       row(pausedFleet, 2).map { FleetFormat.status($0, now: pauseNow) } == "down")
+expect(pauseGroup, "an answering row still reads up",
+       row(pausedFleet, 3).map { FleetFormat.status($0, now: pauseNow) } == "up")
+expect(pauseGroup, "a parked row is paused even though it carries an error",
+       row(pausedFleet, 0)?.isPaused == true && row(pausedFleet, 0)?.isUp == false)
+expect(pauseGroup, "no parked row ever draws the word down",
+       pausedFleet.text(for: .large, now: pauseNow).rows.prefix(2)
+           .allSatisfy { $0.detail?.contains("paused") == true
+                          && $0.detail?.contains("down") == false })
+
+// --- the tally: the parked set leaves the down count and gets its own.
+expect(pauseGroup, "nodesDown subtracts the parked row that errored (only 13)",
+       pausedFleet.tally.nodesDown == 1 && pausedFleet.tally.downLabels == ["13"])
+expect(pauseGroup, "nodesPaused counts tagged rows PLUS the node the frame omitted",
+       pausedFleet.tally.nodesPaused == 3)
+expect(pauseGroup, "nodesUp and nodesTotal stay the route's own numbers",
+       pausedFleet.tally.nodesUp == 2 && pausedFleet.tally.nodesTotal == 4)
+expect(pauseGroup, "pausedLabels are octet labels, never the pause record's host string",
+       pausedFleet.tally.pausedLabels == ["11", "12", "99"])
+expect(pauseGroup, "no parked label appears in downLabels",
+       Set(pausedFleet.tally.pausedLabels).isDisjoint(with: pausedFleet.tally.downLabels))
+
+// --- the parked list: two halves of the payload, one entry per machine.
+expect(pauseGroup, "the parked list de-duplicates a node tagged AND named top-level",
+       pausedFleet.paused.count == 3
+       && pausedFleet.paused.filter { $0.key == "192.0.2.11" }.count == 1)
+expect(pauseGroup, "the node the frame never listed is still in the parked list",
+       pausedFleet.paused.last?.label == "99"
+       && pausedFleet.paused.last?.reason == "maintenance window")
+expect(pauseGroup, "the top-level entry keeps the frame row's label when both exist",
+       pausedFleet.paused.first?.label == "11")
+expect(pauseGroup, "the parked list draws no address anywhere (§7)",
+       pausedFleet.paused.allSatisfy { !$0.label.contains("192.0.2.") })
+
+// --- the LOCK SCREEN's backend tally: the same reduction, one layer down.
+//
+// The node tally above takes the parked row out of `nodesDown`; the lock
+// screen's sentence has to do the SAME for the ENGINES, or a machine the
+// operator parked with `hscc node pause` keeps alarming as `1 backend down` on
+// the one surface they read before opening the app. `CLIMonitorServingRow.isDown`
+// stays `error != nil` — the CLI keeps a parked row's error, prints its verdict
+// in the Model cell, and the committed parity golden pins that `down` byte — so
+// the split belongs in `CLILockScreenMetrics`, and these legs are the proof it
+// happens there and ONLY there.
+//
+// The committed capture's three backends all ANSWER, and a parked box whose
+// engine is up has nothing to hide (`serving_table` consults the overlay only
+// inside its `if r.get("error")` branch), so the errored-on-a-parked-machine row
+// is planted here on TEST-NET-1 hosts — the same shape the dropdown gate plants
+// for its Model cell. One ANSWERING backend rides along on purpose: a payload
+// with no live backend prints `— run` and no backend clause at all (§6 rule 1),
+// which would make every clause below vacuous.
+let lockBackendGroup = "lock-backend"
+
+/// The one backend that answers, on the one host that answers: without it every
+/// clause below would be a dash and the leg would prove nothing.
+let lockAnsweringHost = MonitorNode(host: "192.0.2.12", error: nil,
+                                    sample: MonitorSample(hostname: "node-2"),
+                                    workloads: nil)
+
+/// A machine whose engine stopped answering — parked when `tagged`, a real
+/// fault otherwise. Same host shape both ways, so the ONLY difference a leg
+/// reads is the pause overlay's tag.
+func lockEngineHost(_ address: String, tagged: Bool) -> MonitorNode {
+    MonitorNode(host: address, error: "collect failed", sample: nil, workloads: nil,
+                status: tagged ? PauseContract.status : nil,
+                paused_reason: tagged ? "training run" : nil,
+                paused_since: tagged ? "2026-11-21T10:00:00+00:00" : nil)
+}
+
+/// One lock-screen read: `running`/`waiting` on one answering backend, plus one
+/// dead backend per entry of `tagged` (true = the machine is parked).
+func lockBackendPayload(tagged: [Bool], running: Int, waiting: Int) -> MonitorResponse {
+    var hosts = [lockAnsweringHost]
+    var serving = [ServingRow(node: "192.0.2.12", port: "8001", model: "org/model-a",
+                              routes: nil, running: running, waiting: waiting, kv: nil,
+                              gen_tps: nil, prompt_tps: nil, prompt_total: nil,
+                              gen_total: nil, error: nil)]
+    for (offset, isTagged) in tagged.enumerated() {
+        let address = "192.0.2.\(20 + offset)"
+        hosts.append(lockEngineHost(address, tagged: isTagged))
+        serving.append(ServingRow(node: address, port: "8002", model: "org/model-b",
+                                  routes: nil, running: nil, waiting: nil, kv: nil,
+                                  gen_tps: nil, prompt_tps: nil, prompt_total: nil,
+                                  gen_total: nil, error: "engine unreachable"))
+    }
+    return MonitorResponse(json: MonitorPayload(timestamp: nil, hosts: hosts),
+                           serving: serving, speak: "")
+}
+
+// The fixture first, because it is the capture the route actually sent: its
+// parked box .012 has a backend that ANSWERS, and a parked box whose engine is
+// up is not a paused backend under the CLI's rule either.
+let lockFixtureCase = CLILockScreenMetrics(pausedResponse)
+expect(lockBackendGroup, "the paused fixture's 3 backends answer: neither count moves",
+       lockFixtureCase?.backendsDown == 0 && lockFixtureCase?.backendsPaused == 0
+        && lockFixtureCase?.backendsReporting == 3)
+expect(lockBackendGroup, "a parked box whose engine answers is not a paused backend either",
+       ClusterMonitorViewModel.project(pausedResponse, now: pauseNow)?.backendRows
+           .allSatisfy { !$0.isPaused } == true)
+
+// The bug this card is about: the engine is stopped AND the machine is parked.
+if let parkedBackend = CLILockScreenMetrics(lockBackendPayload(tagged: [true],
+                                                               running: 1, waiting: 0)) {
+    expect(lockBackendGroup, "a parked machine's stopped engine leaves backendsDown",
+           parkedBackend.backendsDown == 0)
+    expect(lockBackendGroup, "and lands in backendsPaused instead",
+           parkedBackend.backendsPaused == 1)
+    expect(lockBackendGroup, "the queue still covers the one backend that answered",
+           parkedBackend.backendsReporting == 1 && parkedBackend.running == 1)
+    expect(lockBackendGroup, "the rectangular line states the pause, never a fault",
+           CLILockScreenCopy.queueToken(parkedBackend) == "1 run · 0 wait · 1 backend paused")
+    expect(lockBackendGroup, "and no down byte survives that sentence",
+           !CLILockScreenCopy.queueToken(parkedBackend).contains("down"))
+    expect(lockBackendGroup, "the voice sentence names the pause, not the fault",
+           CLILockScreenCopy.voice(parkedBackend).contains("1 backend paused")
+            && !CLILockScreenCopy.voice(parkedBackend).contains("down"))
+} else {
+    expect(lockBackendGroup, "the parked-backend payload projects", false)
+}
+// With nothing queued, the paused clause is the WHOLE inline line — the branch
+// that used to read `1 backend down` at 07:00 for a machine nobody is running.
+if let parkedIdle = CLILockScreenMetrics(lockBackendPayload(tagged: [true],
+                                                            running: 0, waiting: 0)) {
+    expect(lockBackendGroup, "an empty queue on a parked engine headlines the pause",
+           CLILockScreenCopy.queueHeadline(parkedIdle) == "1 backend paused")
+    expect(lockBackendGroup, "the inline line carries exactly that verdict",
+           CLILockScreenCopy.text(for: .inline, parkedIdle)?.headline
+            == "— C · 1 backend paused")
+    expect(lockBackendGroup, "a parked engine is never called idle",
+           CLILockScreenCopy.queueHeadline(parkedIdle) != "idle")
+} else {
+    expect(lockBackendGroup, "the parked-idle payload projects", false)
+}
+
+// THE CONTROL. The same row shape on a machine nobody parked is the committed
+// sentence byte for byte — the reason the parent card left `isDown` alone.
+if let controlBackend = CLILockScreenMetrics(lockBackendPayload(tagged: [false],
+                                                                running: 1, waiting: 0)) {
+    expect(lockBackendGroup, "CONTROL: an untagged errored backend is still counted down",
+           controlBackend.backendsDown == 1 && controlBackend.backendsPaused == 0)
+    expect(lockBackendGroup, "CONTROL: its rectangular line is the committed bytes",
+           CLILockScreenCopy.queueToken(controlBackend) == "1 run · 0 wait · 1 backend down")
+    expect(lockBackendGroup, "CONTROL: its voice clause is the committed bytes",
+           CLILockScreenCopy.voice(controlBackend).contains(", 1 backend down"))
+} else {
+    expect(lockBackendGroup, "the control payload projects", false)
+}
+if let controlIdle = CLILockScreenMetrics(lockBackendPayload(tagged: [false],
+                                                             running: 0, waiting: 0)) {
+    expect(lockBackendGroup, "CONTROL: its headline is the committed bytes",
+           CLILockScreenCopy.queueHeadline(controlIdle) == "1 backend down")
+} else {
+    expect(lockBackendGroup, "the control-idle payload projects", false)
+}
+
+// Both at once: the two counts stay separate, and a real fault outranks a
+// deliberate stop wherever only one word fits. The headline half needs an EMPTY
+// queue — a live `running` answer outranks BOTH clauses (the CLI's own order:
+// work being turned away, then work running, then why nothing is running), so a
+// busy payload would never reach the branch this leg is about.
+let lockBothPayload = lockBackendPayload(tagged: [true, false], running: 1, waiting: 0)
+if let bothBackends = CLILockScreenMetrics(lockBothPayload) {
+    expect(lockBackendGroup, "a parked AND a faulting engine are two separate counts",
+           bothBackends.backendsDown == 1 && bothBackends.backendsPaused == 1)
+    expect(lockBackendGroup, "and no errored row is counted twice",
+           bothBackends.backendsDown + bothBackends.backendsPaused == 2)
+    expect(lockBackendGroup, "the rectangular line states both, fault first",
+           CLILockScreenCopy.queueToken(bothBackends)
+            == "1 run · 0 wait · 1 backend down · 1 backend paused")
+    expect(lockBackendGroup, "the two tallies agree: the parked machine is down nowhere",
+           FleetProjection(projecting: lockBothPayload)?.tally.nodesDown == 1
+            && FleetProjection(projecting: lockBothPayload)?.tally.nodesPaused == 1
+            && bothBackends.backendsPaused == 1)
+} else {
+    expect(lockBackendGroup, "the both-backends payload projects", false)
+}
+if let bothIdle = CLILockScreenMetrics(lockBackendPayload(tagged: [true, false],
+                                                          running: 0, waiting: 0)) {
+    expect(lockBackendGroup, "with nothing queued the fault outranks the choice",
+           CLILockScreenCopy.queueHeadline(bothIdle) == "1 backend down")
+    expect(lockBackendGroup, "and only the fault reaches the inline line",
+           CLILockScreenCopy.text(for: .inline, bothIdle)?.headline == "— C · 1 backend down")
+} else {
+    expect(lockBackendGroup, "the both-idle payload projects", false)
+}
+// The phrase has ONE owner: the verdict word this file speaks IS the shared
+// `FleetFormat.pausedWord`, and the expectation is composed THROUGH it — a
+// second phrase invented here (a state the route never sent) fails this leg by
+// name, the same way the label legs compare through the shared label path.
+expect(lockBackendGroup, "the paused clause speaks the shared verdict word, not a new one",
+       CLILockScreenMetrics(lockBackendPayload(tagged: [true], running: 0, waiting: 0))
+        .map { CLILockScreenCopy.queueToken($0) }
+        == "0 run · 0 wait · 1 backend " + FleetFormat.pausedWord)
+
+// --- the alert styling is gone, both the per-node heat and the headline.
+expect(pauseGroup, "a parked node's heat is unknown, never hot",
+       row(pausedFleet, 0).map { ClusterMetricHeat.node($0) } == .unknown)
+expect(pauseGroup, "a genuinely down node keeps the hot verdict",
+       row(pausedFleet, 2).map { ClusterMetricHeat.node($0) } == .hot)
+
+func entryFor(_ hosts: [MonitorNode]) -> ClusterEntry {
+    ClusterEntry(date: pauseNow,
+                 fleet: FleetProjection(projecting: MonitorResponse(
+                     json: MonitorPayload(timestamp: nil, hosts: hosts),
+                     speak: "")),
+                 configured: true, paused: false)
+}
+func c1For(_ hosts: [MonitorNode]) -> ClusterC1 { entryFor(hosts).c1 }
+
+let parkedOnly = MonitorNode(host: "192.0.2.11", error: "collect failed", sample: nil,
+                             status: PauseContract.status, paused_reason: "training run",
+                             paused_since: "2026-11-21T10:00:00+00:00")
+let liveUp = MonitorNode(host: "192.0.2.12", error: nil,
+                         sample: MonitorSample(hostname: "node-2"),
+                         workloads: nil)
+expect(pauseGroup, "one parked and one answering node is calm, not warm",
+       entryFor([parkedOnly, liveUp]).heat == .calm)
+expect(pauseGroup, "a fleet with nothing but parked nodes is not Down",
+       c1For([parkedOnly]).headline == ClusterC1.pausedHeadline)
+expect(pauseGroup, "a fleet with nothing but parked nodes is not an alarm colour",
+       entryFor([parkedOnly]).heat == .unknown)
+expect(pauseGroup, "the headline judges only the non-parked frame (1/2 up)",
+       c1For([parkedOnly, row0Down(), liveUp]).headline == "1/2 up")
+expect(pauseGroup, "an all-answering fleet still reads All up",
+       c1For([liveUp]).headline == "All up" && c1For([liveUp]).tally == "1/1")
+
+func row0Down() -> MonitorNode {
+    MonitorNode(host: "192.0.2.13", error: "ssh timeout", sample: nil, workloads: nil)
+}
+
+// --- the ISO-8601 reader, against every shape the route can send.
+// `datetime.isoformat()` is second precision with an offset; a record written
+// from a float timestamp carries microseconds; a Z suffix is the same instant.
+let isoGroup = "pause-iso"
+func since(_ raw: String?, _ offset: TimeInterval) -> String? {
+    FleetFormat.sinceText(raw, now: Date(timeIntervalSince1970: 1795255200 + offset))
+}
+expect(isoGroup, "second precision with an offset", since("2026-11-21T10:00:00+00:00", 3 * 3600) == "3h ago")
+expect(isoGroup, "microsecond precision", since("2026-11-21T10:00:00.123456+00:00", 3 * 3600) == "3h ago")
+expect(isoGroup, "three hours minus a fraction is 3h ago, never 2h ago",
+       since("2026-11-21T10:00:00+00:00", 3 * 3600 - 0.4) == "3h ago")
+expect(isoGroup, "two hours fifty-nine minutes is 2h ago — it has not been three",
+       since("2026-11-21T10:00:00+00:00", 3 * 3600 - 61) == "2h ago")
+expect(isoGroup, "59 minutes is minutes, 60 is an hour",
+       since("2026-11-21T10:00:00+00:00", 59 * 60) == "59m ago"
+       && since("2026-11-21T10:00:00+00:00", 60 * 60) == "1h ago"
+       && since("2026-11-21T10:00:00+00:00", 24 * 3600) == "1d ago")
+expect(isoGroup, "a Z suffix is the same instant", since("2026-11-21T10:00:00Z", 45 * 60) == "45m ago")
+expect(isoGroup, "under a minute is just now", since("2026-11-21T10:00:00+00:00", 20) == "just now")
+expect(isoGroup, "a future since is just now, never a negative age",
+       since("2026-11-21T10:00:00+00:00", -3600) == "just now")
+expect(isoGroup, "two days is days", since("2026-11-21T10:00:00+00:00", 49 * 3600) == "2d ago")
+expect(isoGroup, "unparseable text is drawn verbatim, never dropped",
+       since("sometime last tuesday", 3600) == "sometime last tuesday")
+expect(isoGroup, "nil since is nil, which draws a bare paused", since(nil, 3600) == nil)
+expect(isoGroup, "an empty since is nil", since("   ", 3600) == nil)
+expect(isoGroup, "the copy degrades to the shorter truth",
+       FleetFormat.paused(reason: "training run", since: nil) == "paused (training run)"
+       && FleetFormat.paused(reason: nil, since: "2026-11-21T10:00:00+00:00", now: pauseNow) == "paused (3h ago)"
+       && FleetFormat.paused(reason: "", since: nil) == "paused")
+expect(isoGroup, "the identity rule is trim and case-fold only, like the server's",
+       PauseContract.nodeKey("  Node-3 ") == "node-3"
+       && PauseContract.nodeKey("192.0.2.13") == "192.0.2.13")
+// The word drawn and the value read are written by two different owners — the
+// display copy must not silently follow a server rename — so the one thing that
+// must never drift is that they still AGREE. A drift here is the widget
+// rendering a word the route never sent.
+expect(isoGroup, "the display word and the wire value still agree",
+       FleetFormat.pausedWord == PauseContract.status)
+
 print("")
 if failures.isEmpty {
-    print("CLUSTER WIDGET CHECK PASSED — \(checks) checks: fixture rows, every family's lines, nil-is-not-zero, redaction")
+    // Only the shell owns the gate's PASSED verdict: this binary sees the
+    // executed checks alone and cannot know whether the structural proofs
+    // above it failed, so it must never print a whole-gate claim.
+    print("executed proofs passed — \(checks) checks: fixture rows, every family's lines, nil-is-not-zero, redaction")
     exit(0)
 }
 print("FAILURES: \(failures.count) of \(checks)")

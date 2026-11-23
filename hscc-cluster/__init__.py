@@ -9,6 +9,12 @@ from . import discovery
 from . import fleet
 from . import template_tools
 from . import orch_message
+from . import autodown_tools as adt
+from . import heal_tools as hlt
+from . import main_status as mst
+from . import merge_queue_tools as mqt
+from . import node_pause_tools as npt
+from . import doctor_tools as dt
 
 
 def _stringify(handler):
@@ -37,6 +43,62 @@ _READ_TOOLS = [
      "Live cluster topology map (orchestrator/workers/NAS, source); probe=true for VRAM/power/health."),
     ("nas_status", S.NAS_STATUS_SCHEMA, discovery.nas_status, "🗄️",
      "NAS health: discovery's NAS node + a single mount probe (no fan-out)."),
+    ("node_paused", npt.NODE_PAUSED_SCHEMA, npt.node_paused, "🅿️",
+     "Which nodes are paused, with the units stopped, reason, since and "
+     "until. Read-only: reads the pause overlay, never the fleet."),
+    # Idle autodown (t_c036808c): the READ half of `hscc autodown`. The write
+    # half stays CLI-only — arming or disarming fleet power is operator scope,
+    # so there is no autodown_enable/disable/wake/cancel tool to add here.
+    ("autodown_status", adt.AUTODOWN_STATUS_SCHEMA, adt.autodown_status, "💤",
+     "Idle autodown state: armed or not, the idle window, state (up/down/"
+     "waking) reconciled against the live serving layer, last activity, and "
+     "which interlock (kanban work, PR/CI, watchdog block) is holding a "
+     "teardown off. Read-only: same payload as `hscc autodown status --json`; "
+     "it never arms, disarms, wakes or cancels anything."),
+    # Local merge queue (t_96134d32): the READ half of `hscc merge-queue`. The
+    # write half stays CLI-only — the queue force-pushes and squash-merges, so
+    # an agent-writable merge door is a self-merge path (audit D8). There is no
+    # merge_queue_add/remove/pause/resume/enable/disable tool to add here.
+    ("merge_queue_status", mqt.MERGE_QUEUE_STATUS_SCHEMA,
+     mqt.merge_queue_status, "🚦",
+     "Per-project local merge-queue state: enabled (or why it is off — no "
+     "repo / no GitHub remote / no gates), paused, queue depth and entries, "
+     "waiting (non-green head), the in-flight PR and the last outcome. "
+     "Read-only: same payload as `hscc merge-queue status --json`; it never "
+     "enqueues, drops, pauses, enables or lands anything."),
+    # The preflight doctor (t_7f570861): the READ half of `hscc-bootstrap/
+    # doctor.py` — every check as data (name, ok, one-line cause). The repair
+    # half stays CLI-only: `--fix` rewrites the operator's config.yaml through
+    # enable_plugins.enable, so there is no doctor_fix tool to add here (audit
+    # §12.2 D11: the route was refused because doctor reads this host; the
+    # read-only tool runs on this host and stands).
+    ("doctor", dt.DOCTOR_SCHEMA, dt.doctor_findings, "🧾",
+     "Every HSCC doctor check as structured findings: check name, ok, and the "
+     "one-line cause (plus the fix text as advice, and which fatal checks "
+     "failed). Read-only: the same verdict as the operator's `doctor.py --json`, "
+     "read live from host/daemon/API state — it never repairs, and `--fix` "
+     "stays CLI-only."),
+    # Heal breaker (t_14b86753, audit D4): the READ half of `hscc heal-status`.
+    # `heal-clear` stays CLI-only — re-arming the daemon's repair paths is an
+    # operator decision after investigating the hardware, not a per-turn agent
+    # call. The handler reads the same `heal_breaker` module the daemon writes.
+    ("heal_status", hlt.HEAL_STATUS_SCHEMA, hlt.heal_status, "🩹",
+     "Per-node heal-breaker strikes: how many actions landed in the rolling "
+     "window, how old they are, whether the daemon is refusing to heal that "
+     "node right now and for how long. Read-only: the ledger "
+     "`hscc heal-status` prints, as numbers. It never clears strikes — "
+     "`hscc heal-clear <node>` stays an operator CLI verb."),
+    # Main orchestrator (t_c920b0ca): the READ half of `hscc main`. `start`
+    # spawns/re-attaches the operator's pane and `wakeups` rewrites the daemon's
+    # wake schedule, so both stay CLI/operator-only. The identity always comes
+    # from the one resolver (hscc-roles/main_orch.py), never a hard-coded name.
+    ("main_status", mst.MAIN_STATUS_SCHEMA, mst.main_status, "👑",
+     "The configured main orchestrator and its live shape: name/profile/board "
+     "from the one resolver, the tmux pane and busy/idle state from the same "
+     "discovery `hscc main status` uses, plus the daemon waker's enabled/"
+     "freshness/board state. Read-only: same payload as `hscc main status "
+     "--json`; it never starts, re-attaches or renames the main orchestrator, "
+     "and never edits its wake schedule."),
 ]
 
 _OPS_TOOLS = [
@@ -46,6 +108,21 @@ _OPS_TOOLS = [
      "Stop a model on a node. GUARDED: confirm=true to execute."),
     ("model_health", S.MODEL_HEALTH_SCHEMA, ops.model_health, "❤️",
      "Check a node's vLLM endpoint health."),
+    # Node pause (t_c28f4f14): the agent half of `hscc node pause|resume`.
+    # These call the unified CLI's own verb functions — there is no second
+    # implementation to fall out of step, and no path by which an agent can
+    # mutate something the CLI would refuse (the #478 dry-run rule is the
+    # CLI's, not a convention these entries restate).
+    ("node_pause", npt.NODE_PAUSE_SCHEMA, npt.node_pause, "⏸️",
+     "Park one node: stop its sparkrun units and record a durable pause the "
+     "heal paths skip. GUARDED: confirm=true to execute; without confirm "
+     "returns the plan (every unit + every node it would touch). Refuses a "
+     "node serving the orchestrator model unless force=true, and a "
+     "multi-node unit unless span=true."),
+    ("node_resume", npt.NODE_RESUME_SCHEMA, npt.node_resume, "▶️",
+     "Restart the units a node pause recorded (sparkrun --ensure, same recipe "
+     "and flags), then clear the pause and that node's heal strikes. GUARDED: "
+     "confirm=true to execute; without confirm returns the commands."),
 ]
 
 _DEBUG_TOOLS = [
@@ -65,7 +142,10 @@ _HEAL_TOOLS = [
     ("repair_nas_export", S.REPAIR_NAS_EXPORT_SCHEMA, heal.repair_nas_export, "🛠️",
      "Re-publish QNAP NFS exports (backup first). HIGH-RISK. GUARDED: confirm=true."),
     ("reap_orphans", S.REAP_ORPHANS_SCHEMA, heal.reap_orphans, "🧹",
-     "Stop sparkrun containers not in serving.json. GUARDED: confirm=true."),
+     "Stop sparkrun containers not in serving.json. GUARDED: confirm=true, and "
+     "REFUSED outright when serving.json is absent/unparseable/unit-less or does "
+     "not name the orphan's node (stale copy = live workload; force=true to "
+     "override the guard only)."),
 ]
 
 
@@ -92,22 +172,36 @@ _TEMPLATE_TOOLS = [
 
 
 #: Orchestrator-to-orchestrator messaging (t_a15f3047). Queue-only by design:
-#: the tool never interrupts a running turn and refuses anything but a
-#: `*-orch` sender and a `*-orch` target. See orch_message.py for the rules.
+#: it never interrupts a running turn. Each end must be a `*-orch` profile or
+#: the configured main orchestrator; `default` and worker profiles are refused.
+#: orch_message.py owns the guard logic — this comment only names the toolset.
 _ORCH_TOOLS = [
     ("orch_message", orch_message.ORCH_MESSAGE_SCHEMA, orch_message.orch_message, "✉️",
      "Nudge another orchestrator profile (queue-only, signed '[from <you>]', "
-     "audited). Both ends must be *-orch; never interrupts a running turn; "
-     "rate-limited per pair per hour."),
+     "audited). Either end may be a *-orch profile or the configured main "
+     "orchestrator; workers and 'default' are refused. Rate-limited per pair "
+     "per hour. Not `hscc orch inject` (types into a "
+     "live pane), not `/orch-restart` (restarts the orchestrator vLLM), not "
+     "the `POST /v1/orchestrator/chat` route (one chat turn, by job id)."),
 ]
 
 
 def register(ctx) -> None:
-    for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
-                                                 + _HEAL_TOOLS + _FLEET_TOOLS
-                                                 + _TEMPLATE_TOOLS + _ORCH_TOOLS):
-        ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
-                          handler=_stringify(handler), emoji=emoji, description=desc)
+    # R3/D-B gate (t_e98c6ad4, docs/audits/2026-11-23-main-only-surface.md §6):
+    # the cluster TOOL catalog registers only where the home resolves to <main>
+    # — R3 tightened D-B so the operator/gateway root home gets the wedge
+    # VERBS (hscc-commands) but no tool catalog for a model chatting there.
+    # Every other home still loads this plugin, because the
+    # hooks below are worker/dispatcher-lane (audit §3.2) — the [budget] note,
+    # the per-profile tool ledger and the kanban completion/blocked observers.
+    # Hermes has no hooks-vs-tools split (audit §7 G-1), so the split is made
+    # here; hooks always register.
+    if orch_message.cluster_tools_allowed(ctx):
+        for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
+                                                     + _HEAL_TOOLS + _FLEET_TOOLS
+                                                     + _TEMPLATE_TOOLS + _ORCH_TOOLS):
+            ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
+                              handler=_stringify(handler), emoji=emoji, description=desc)
     # WS4: on kanban re-dispatch, post an idempotent-resume note so the worker
     # continues from prior branch state instead of redoing finished work.
     if hasattr(ctx, "register_hook"):

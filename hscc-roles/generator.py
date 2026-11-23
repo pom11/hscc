@@ -32,6 +32,7 @@ except ImportError:
     USE_NATIVE_API = False
 
 import rolelib
+import main_orch
 
 # Worker role profiles must serve from the WORKER pool, not inherit the root
 # config (which points at the orchestrator node). We point them at the sparkrun
@@ -464,12 +465,24 @@ def _worker_compaction(existing_compression=None):
     }}
     return out
 
+#: The one-line cluster rule every NON-MAIN SOUL carries (operator ruling R4,
+#: 2026-11-23). It says who may act; it deliberately says nothing about what any
+#: config contains, because the enforcement lives in the bootstrap/skills cards
+#: and a present-tense config claim would go stale the moment they move.
+CLUSTER_ACTIONS_RULE = (
+    "cluster actions go through the main orchestrator (board card or orch message)")
+
 _WORKER_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** role on a worker GPU node of the cluster, "
     "executing a single kanban task in your own git worktree. The task "
     "lifecycle (claim, heartbeat, complete or block-for-review) is provided to "
     "you at runtime — follow it exactly.\n"
+    "\n"
+    "## Cluster actions\n\n"
+    "Fleet rule: " + CLUSTER_ACTIONS_RULE + ". The cluster surface is not "
+    "yours; fleet facts come to you through the hscc routes and the CLI read "
+    "surface, never through a cluster toolset.\n"
     "\n"
     "## Stay small — commit slices, hand off early\n\n"
     "Every model call re-reads your whole conversation. At 20K tokens a call "
@@ -495,15 +508,151 @@ _WORKER_OPS = (
 _ORCH_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** on the gateway node. You route work through the "
-    "native kanban board and hold sole authority over the physical cluster.\n"
+    "native kanban board; " + CLUSTER_ACTIONS_RULE + ".\n"
+)
+
+# Anti-churn rules (operator 2026-11-19). ONE block, appended to both the main
+# orchestrator's and every per-project orchestrator's SOUL: both stalled or
+# looped overnight by sitting on ready merges, opening meta/rebase/duplicate
+# cards, and completing cards whose PRs were still open. It is defined once
+# here and referenced by the two ops blocks below, so the rules text has a
+# single source of truth; `compose_soul` emits it exactly once per SOUL and
+# `_carry_operator_sections` keeps any operator-appended section after it.
+_ANTI_CHURN_RULES = (
+    "## Anti-churn rules (operator 2026-11-19)\n\n"
+    "These rules are the work contract for every orchestrator. They exist to "
+    "stop the two failures seen overnight: idling while merges are ready, and "
+    "turning one piece of work into a pile of meta cards. They apply before "
+    "any card is created or moved.\n"
+    "\n"
+    "1. **Done means merged.** A card is complete only when its PR is merged "
+    "on main (or closed as superseded with the commit that supersedes it). "
+    "Never complete a card whose PR is open.\n"
+    "2. **The merge queue lands green PRs.** When the project has the merge "
+    "queue enabled, review the diff and enqueue the PR with `hscc merge-queue "
+    "add <project> <pr>`; never rebase or merge by hand. Otherwise **you land "
+    "the work**: when a worker hands back a green PR, review and merge it "
+    "yourself in the same turn; rebases of your own open PRs are yours to do, "
+    "not new cards.\n"
+    "3. **At most 2 cards in flight on the same area** (same files/module/"
+    "widget family); serialize the rest; merge before starting the next one "
+    "in that area.\n"
+    "4. **Small findings stay in the PR.** Wording, docs, measurements, labels "
+    "and \"gate about the gate\" go in a PR comment or a line in the PR body, "
+    "NOT a new card. A new card is only for a real defect: broken behaviour, "
+    "a red gate on main, a security hole, a risk to live state or a release "
+    "blocker. Before creating any card, check that no open card or PR already "
+    "covers it.\n"
+    "5. **Don't wait on the operator** except for a LIVE publish (the main "
+    "orchestrator: and nothing else; project orchestrators: also anything the "
+    "project's own rules reserve for the operator). If unsure, pick the safe "
+    "default, do it, and say what you chose. Never sit idle with ready "
+    "merges.\n"
+    "6. **Always pass the board explicitly** on every kanban call.\n"
+)
+
+# The ONE main orchestrator (design 2026-11-19): the board duties of the old
+# general catch-all and the cluster authority of the old `orchestrator` role
+# merged into one SOUL. It is the only profile allowed to answer "what is
+# happening" for the whole cluster, and the only one whose authority spans
+# every board, orchestrator and the physical machine.
+_MAIN_OPS = (
+    "## Operational\n\n"
+    "You run as the **{name}** on the gateway node. You are the ONE main "
+    "orchestrator: the old general catch-all's board duties and the "
+    "`orchestrator` role's cluster authority merged into one profile. You "
+    "route work through your own `{name}` kanban board and hold sole authority "
+    "over the physical cluster. You do NOT do project work yourself — that "
+    "belongs on a project board, with that project's orchestrator and workers.\n"
+    "\n"
+    "## Answer from live state\n\n"
+    "When the operator asks \"what is happening\" — on the cluster, a project, "
+    "a card or an orchestrator — check live state FIRST and never answer from "
+    "memory alone:\n"
+    "- boards and cards (your `{name}` board and each project board);\n"
+    "- orchestrator panes (`hscc orch inject --dry-run` to probe, and tailing "
+    "the pane);\n"
+    "- open PRs and their checks;\n"
+    "- `hscc status` and `hscc doctor`;\n"
+    "- the proxy.\n"
+    "Then answer in a few short, plain sentences. If a probe is unavailable, "
+    "say so instead of guessing.\n"
+    "\n"
+    "## Standing watch\n\n"
+    "Keep standing watch cards on your own `{name}` board, one per active "
+    "project or orchestrator with work in flight. Park them so the dispatcher "
+    "never hands them to a worker — create them `blocked` with a `watch` "
+    "reason. On every wake-up, work them: stuck or failing cards, wedged "
+    "panes, drift into meta/side cards, duplicate cards, and cards completed "
+    "while their PR is not on main. Comment what you checked on the watch "
+    "card; close it when the watched work is merged.\n"
+    "\n"
+    "## Authority\n\n"
+    "Everything except a LIVE publish. On your own you may: start/stop/restart "
+    "models, pause/resume boards, create/steer/block/complete cards on any "
+    "board, steer/interrupt/restart other orchestrators, review and merge PRs "
+    "once the gates are green and you have read the diff yourself, change "
+    "hscc/cluster settings, run node recovery, and do releases end to end — "
+    "changelog fold, tag, GitHub release, tap bump, app builds, and the "
+    "post-release CLI upgrade + bootstrap of the gateway's hscc CLI with the "
+    "post-bootstrap checks (profiles YAML-compare, kanban caps, autodown "
+    "status).\n"
+    "\n"
+    "The ONE action that waits: a LIVE publish of a project. It needs the "
+    "operator's OK first — record it with `hscc notify` and wait. The operator "
+    "sees it with `hscc notify list` or by asking you; when the operator is in "
+    "your conversation, tell them directly. Use `hscc notify` whenever they "
+    "must act or know: a LIVE publish waiting for approval, something broken "
+    "you could not fix, or a release you shipped (FYI, low priority).\n"
+    "\n"
+    "## Talking to orchestrators\n\n"
+    "Nudge another orchestrator with the `orch_message` tool — the agent "
+    "path: queue-only (never an interrupt), rate-limited, auto-signed and "
+    "audited. It takes an orchestrator at either end — a `<project>-orch` "
+    "peer or the configured main orchestrator (you) — and refuses a worker "
+    "or `default`. `hscc orch inject` stays the CLI verb: `--dry-run` to "
+    "probe which pane a name resolves to, and the fallback when the tool is "
+    "not on this profile. Steer when the orchestrator is busy; plain when it "
+    "is idle. Send in English. Talk to other orchestrators only through "
+    "those two and the board tools — no `~/bin` scripts and no side "
+    "channels. A nudge is not a work order: work belongs on a card on the "
+    "right board.\n"
+    "\n"
+    "## Standing rules\n\n"
+    "- Autodown stays exactly as the operator set it — never enable or change "
+    "it.\n"
+    "- Never install built apps on the gateway host.\n"
+    "- The repo is public: no real IPs, hostnames, tenant ids, tokens, team "
+    "ids, device tokens, secrets or private card titles in any file or "
+    "fixture.\n"
+    "- No attribution lines — no Co-Authored-By, no \"Generated with\".\n"
+    "- No destructive git or `rm -r` without the operator.\n"
+    "- Fleet access only through sparkrun/hscc, never raw docker/ssh.\n"
+    "\n"
+) + _ANTI_CHURN_RULES
+
+# The legacy cluster-wide role is RETIRED (design 2026-11-19): the main
+# orchestrator owns its authority. Its SOUL must say so plainly and must not
+# claim work, so `generate` can never re-mint a competing authority.
+_RETIRED_OPS = (
+    "## Operational\n\n"
+    "You run as the **{name}** on the gateway node, but this profile is\n"
+    "**retired — use the main orchestrator** listed in the Retired section\n"
+    "above. You no longer hold authority over the physical cluster, a board or\n"
+    "any orchestrator. Do not claim work, create cards or change settings here;\n"
+    "if invoked, say plainly that this profile is retired and point to the main\n"
+    "orchestrator.\n"
 )
 
 _PROJECT_ORCH_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** on the gateway node. You route that project's "
     "work through its kanban board and hold sole authority over that board, "
-    "but you do NOT hold authority over the physical cluster (only the "
-    "cluster-wide `orchestrator` role does).\n"
+    "but you do NOT hold authority over the physical cluster.\n"
+    "\n"
+    "Fleet rule: " + CLUSTER_ACTIONS_RULE + ". The cluster surface is not "
+    "yours; fleet facts come to you through the hscc routes and the CLI read "
+    "surface, never through a cluster toolset.\n"
     "\n"
     "## How you manage work\n\n"
     "1. **Sub-atomic cards.** One card = one small change a reviewer can check "
@@ -572,28 +721,55 @@ _PROJECT_ORCH_OPS = (
     "changes.\n"
     "10. **Stop and report** when you need the operator. Production / LIVE "
     "actions are the operator's alone.\n"
-    "11. **`orch_message` is a nudge, not a work order.** Orchestrators nudge "
-    "each other with the `orch_message` tool (\"look at t_xxx on <board>, it's "
-    "done/needs you\"), never by commenting on DONE cards. Work itself always "
-    "goes on a CARD on the right board (`--board` explicit); `orch_message` is "
-    "the nudge, not the work order.\n"
-)
+    "11. **Nudges go through the main orchestrator.** A peer nudge (\"look at "
+    "t_xxx on <board>, it's done/needs you\") is not yours to send: the main "
+    "orchestrator holds that channel, so ask it to pass the nudge on. Never "
+    "comment on DONE cards. Work itself always goes on a CARD on the right "
+    "board (`--board` explicit); a nudge is not the work order.\n"
+    "12. **Verify a PR before you card against it — a card about a PR is stale "
+    "in minutes.** Before creating a card whose verb is `close`, `merge`, "
+    "`rebase` or `port` against a PR number, run `gh pr view <N> --repo "
+    "<owner>/<repo> --json state,closedAt,mergedAt,mergeable,headRefOid` and "
+    "`git ls-remote origin refs/heads/<head-branch>` (an empty result means the "
+    "branch is already gone), and paste that raw verdict into the card body "
+    "with the time you read it. If the read shows the work already happened, "
+    "**do not create the card** — say so instead. Cards naming a PR's next "
+    "step are historical by claim time on a repo where the operator merges "
+    "continuously, and the worker burns its whole run rediscovering that. "
+    "State verdicts and the check that proves them, never a SHA of `main`: "
+    "SHAs go stale, a method does not.\n"
+    "\n"
+) + _ANTI_CHURN_RULES
+
+
+def _is_main_orchestrator(name):
+    """Is ``name`` the ONE main orchestrator (the bootstrap-stored name)?"""
+    try:
+        return name == main_orch.main_profile()
+    except Exception:  # pragma: no cover - resolver is pure, defensive only
+        return False
 
 
 def _is_orchestrator(name):
-    """The orchestrator family: the cluster-wide `orchestrator` plus any
-    per-project `<project>-orch` profile. They are NOT kanban workers."""
-    return name == "orchestrator" or name.endswith("-orch")
+    """The orchestrator family: the legacy cluster-wide role, the main
+    orchestrator, plus any per-project ``<project>-orch`` profile. They are NOT
+    kanban workers."""
+    return (name == main_orch.LEGACY_ORCHESTRATOR_ROLE
+            or _is_main_orchestrator(name)
+            or name.endswith("-orch"))
 
 
 def _is_project_orchestrator(name):
-    """A PER-PROJECT orchestrator (`<project>-orch`), not the cluster-wide one.
+    """A PER-PROJECT orchestrator (`<project>-orch`), not a cluster-wide one.
 
-    The cluster-wide `orchestrator` deliberately keeps the root config and is
-    never repointed. Per-project orchestrators are separate profiles that must
-    carry their own model block to be invocable directly.
+    The legacy cluster-wide role and the main orchestrator deliberately keep
+    the root config and are never repointed. Per-project orchestrators are
+    separate profiles that must carry their own model block to be invocable
+    directly.
     """
-    return name != "orchestrator" and name.endswith("-orch")
+    return (name != main_orch.LEGACY_ORCHESTRATOR_ROLE
+            and not _is_main_orchestrator(name)
+            and name.endswith("-orch"))
 
 
 def compose_soul(spec, base_identity):
@@ -601,23 +777,29 @@ def compose_soul(spec, base_identity):
 
     Orchestrators get an operational block that does NOT describe worktree
     execution (they are not workers); all other roles get the worker block.
-    The cluster-wide `orchestrator` is the only one with authority over the
-    physical cluster; per-project `<project>-orch` scopes that authority to its
-    own board.
+    The main orchestrator is the ONE profile with authority over the physical
+    cluster; per-project `<project>-orch` scopes that authority to its own
+    board, and the legacy cluster-wide role is retired in the main's favour.
     """
     name = spec["name"]
-    if name == "orchestrator":
-        ops = _ORCH_OPS
+    retired = None
+    if name == main_orch.LEGACY_ORCHESTRATOR_ROLE:
+        ops = _RETIRED_OPS
+        retired = main_orch.retirement_block()
+    elif _is_main_orchestrator(name):
+        ops = _MAIN_OPS
     elif _is_orchestrator(name):
         ops = _PROJECT_ORCH_OPS
     else:
         ops = _WORKER_OPS
-    return (
+    soul = (
         f"{base_identity.rstrip()}\n\n"
         f"## Role: {name}\n\n"
         f"{spec['identity'].rstrip()}\n\n"
-        f"{ops.format(name=name)}"
     )
+    if retired:
+        soul += f"{retired}\n"
+    return soul + ops.format(name=name)
 
 
 def _short_desc(spec):
@@ -873,6 +1055,45 @@ def _write_profile_config(path, config, existing_text):
     return _write_if_changed(path, target)
 
 
+def set_kanban_auto_subscribe(pdir, enabled, *, dry_run=False):
+    """Set ``kanban.auto_subscribe_on_create`` in ONE profile config.
+
+    The writer half of ``orch_subscribe`` (t_31c8b258): a pane-backed
+    orchestrator's wake path is its pane + the hscc orch-waker, so Hermes must
+    not auto-create a gateway ``notify+wake`` sub for it. The existing
+    profile document is read whole and written through the same
+    preserve-every-key + Hermes-round-trip writers ``generate_profile`` uses,
+    so comments, key order and foreign keys survive.
+
+    Only an existing, parseable mapping is touched: a missing config or one
+    whose ``kanban`` value is not a mapping is reported and skipped, never
+    created or replaced. Returns ``{action, changed, config_path}`` where
+    ``action`` is ``written`` / ``unchanged`` / ``would-write`` /
+    ``missing-config`` / ``unparseable-config`` / ``unexpected-kanban-shape``.
+    """
+    pdir = os.path.expanduser(str(pdir))
+    path = os.path.join(pdir, "config.yaml")
+    existing, text = _read_config_file(pdir)
+    if existing is None:
+        action = "missing-config" if text is None else "unparseable-config"
+        return {"action": action, "changed": False, "config_path": path}
+    kanban = existing.get("kanban")
+    if kanban is None:
+        kanban = {}
+    elif not isinstance(kanban, dict):
+        return {"action": "unexpected-kanban-shape", "changed": False,
+                "config_path": path}
+    if kanban.get("auto_subscribe_on_create") is bool(enabled):
+        return {"action": "unchanged", "changed": False, "config_path": path}
+    if dry_run:
+        return {"action": "would-write", "changed": False, "config_path": path}
+    config = dict(existing)
+    config["kanban"] = {**kanban, "auto_subscribe_on_create": bool(enabled)}
+    changed = _write_profile_config(path, config, text)
+    return {"action": "written" if changed else "unchanged",
+            "changed": changed, "config_path": path}
+
+
 def _write_if_changed(path, content):
     """Write content only if it differs from what's on disk. Returns changed?"""
     if os.path.exists(path):
@@ -887,6 +1108,42 @@ def _write_if_changed(path, content):
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return True
+
+
+_ENABLE_PLUGINS_MOD = None          # loaded once; see _seed_plugin_tier
+
+
+def _seed_plugin_tier(pdir):
+    """Seed this profile's explicit ``plugins.enabled`` (R5, card t_e98c6ad4).
+
+    A profile created AFTER the last bootstrap has no ``plugins`` key, and
+    ``_migrate_to_21`` fills a key-less config with every manifest-bearing dir
+    under ``$HERMES_HOME/plugins/`` — for a worker that means the whole cluster
+    surface appearing in a home that must only hold hooks. The tier is NOT
+    decided here: ``hscc-bootstrap/enable_plugins.py`` asks
+    ``hscc-roles/main_orch`` (the single owner; ruling D-A forbids a second
+    resolver and any hard-coded main profile name) what this home may load.
+
+    Best-effort on purpose — generating a profile must not fail because a
+    sibling package could not be loaded — and it reports through the return
+    value so ``generate_profile``'s ``changed`` answer stays truthful.
+    """
+    global _ENABLE_PLUGINS_MOD
+    try:
+        if _ENABLE_PLUGINS_MOD is None:
+            import importlib.util
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "hscc-bootstrap", "enable_plugins.py")
+            spec = importlib.util.spec_from_file_location("_hscc_enable_plugins",
+                                                          path)
+            if spec is None or spec.loader is None:
+                return False
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _ENABLE_PLUGINS_MOD = mod
+        return bool(_ENABLE_PLUGINS_MOD.ensure_plugins_tier_for_home(pdir))
+    except Exception:
+        return False                 # never break a profile generation for this
 
 
 def generate_profile(spec, base_identity):
@@ -979,9 +1236,10 @@ def generate_profile(spec, base_identity):
     if delegation:
         config["delegation"] = delegation
     # Worker roles serve from the load-balanced worker proxy so their work runs
-    # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
-    # config (its own gateway-node model) and is never repointed; per-project
-    # orchestrators (<project>-orch) likewise keep the gateway-node model.
+    # on worker GPUs, not the orchestrator. The legacy cluster-wide role and the
+    # main orchestrator keep the root config (their own gateway-node model) and
+    # are never repointed; per-project orchestrators (<project>-orch) likewise
+    # keep the gateway-node model.
     if _is_project_orchestrator(name):
         # Per-project orchestrators (<project>-orch) need an EXPLICIT model
         # block. They were previously lumped in with the cluster-wide
@@ -1000,17 +1258,19 @@ def generate_profile(spec, base_identity):
         # project orche went null for ~84 min and wedged at the ratio floor).
         config["model"] = _strong_model_block()
         config["compression"] = _compression_block(existing_compression)
-    elif name == "orchestrator":
-        # Cluster-wide `orchestrator`: keeps the gateway-node strong model (root
-        # config) and is never repointed at the worker proxy. It must ALSO get
-        # the compaction compression block (threshold + threshold_tokens) merged
-        # over its existing block — it was the ONE profile the v1.14.2 fix
-        # (t_f2c2dbb5) missed, so a regeneration rewrote config.yaml without a
-        # compression block and then enable_plugins._ensure_compaction re-added
-        # a threshold-only block -> threshold_tokens came back null (2026-08-28
-        # incident) and the session reverted to the 196608 ratio floor. Emitting
-        # it here (through the SAME _compression_block) preserves an operator's
-        # threshold_tokens and never raises a lower value.
+    elif (name == main_orch.LEGACY_ORCHESTRATOR_ROLE
+          or _is_main_orchestrator(name)):
+        # Legacy cluster-wide role / main orchestrator: keeps the gateway-node
+        # strong model (root config) and is never repointed at the worker proxy.
+        # It must ALSO get the compaction compression block (threshold +
+        # threshold_tokens) merged over its existing block — it was the ONE
+        # profile the v1.14.2 fix (t_f2c2dbb5) missed, so a regeneration rewrote
+        # config.yaml without a compression block and then
+        # enable_plugins._ensure_compaction re-added a threshold-only block ->
+        # threshold_tokens came back null (2026-08-28 incident) and the session
+        # reverted to the 196608 ratio floor. Emitting it here (through the SAME
+        # _compression_block) preserves an operator's threshold_tokens and never
+        # raises a lower value.
         config["model"] = _strong_model_block()
         config["compression"] = _compression_block(existing_compression)
     elif not _is_orchestrator(name):
@@ -1067,6 +1327,15 @@ def generate_profile(spec, base_identity):
         merge_preserving(existing_root, config),
         existing_text,
     )
+
+    # 3b. Seed this home's explicit plugins.enabled (R5, card t_e98c6ad4).
+    # Runs AFTER the config write so the tier sees the file as it now stands,
+    # and it is the only writer of that key: the generator itself never touches
+    # `plugins`, and merge_preserving above would have kept anything already
+    # there. A home that leaves this function with no `plugins` key is one
+    # _migrate_to_21 pass away from loading every plugin dir it contains.
+    if _seed_plugin_tier(pdir):
+        changed = True
 
     # 4. Write profile.yaml via native API (routing_description → description)
     routing_desc = _short_desc(spec)  # routing_description from spec (WS2)

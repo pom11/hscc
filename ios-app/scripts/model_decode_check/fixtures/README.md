@@ -162,7 +162,7 @@ in the same commit — struct, fixture and `main.swift` block always move togeth
 
 ## Widget / Live Activity payload additions (t_595a5fee, 2026-11-17)
 
-`SharedModels.swift` narrowed to the five datasets of
+`SharedModels.swift` narrowed to the widget datasets of
 `docs/WIDGET_DATA_CONTRACT.md` §3, and `main.swift` now decodes those types too.
 Eight fixtures, provenance stated per file because the repo's rule is that a
 fixture is a capture unless labelled otherwise:
@@ -216,6 +216,16 @@ fixture is a capture unless labelled otherwise:
     queue-depth derivation (`ready` + `todo`) and §5.3's oldest-first row order
     were exercised by nothing at all.
 
+## Needs me alert feed (card R3, 2026-11-19)
+
+- `v1_alerts.json` — **shape-faithful, placeholder text only**. `GET /v1/alerts`
+  is the operator's private alert feed, so this fixture is not a live capture;
+  its keys, `alerts[]` object shape, envelope counters and `...Z` timestamps are
+  read off `hscc-api/routes_alerts.py` + `hscc_daemon/alerts.py::_public`, and
+  every title/body/key is an example string. It includes one acknowledged row so
+  the projection's unacknowledged filter is exercised, and two body lines so the
+  large family's first-line reduction is exercised rather than assumed.
+
 ## Stored-shape additions (t_438aa6ce, 2026-11-17)
 
 §7 binds what the App Group container may hold, so the subject here is a *stored*
@@ -230,3 +240,56 @@ blob rather than a route response.
   an upgraded build refuses the legacy blob outright (`load()` returns nil) instead
   of reading an address back out of the container. That rejection *is* the migration
   behaviour, so it is asserted rather than argued.
+
+## Cluster-history additions (t_b6512c2e, 2026-11-19)
+
+The fixtures for `GET /v1/cluster/history`, and none of them are captures
+nor hand-typed shapes: `scripts/make_cluster_history_fixture.py` fills a store
+through the recorder's own write path (`MetricsRecorder.tick`, which rolls tiers
+1 and 2 with its own `rollup`), pins the route's clock seam, and calls
+`routes_cluster.handle_cluster_history`. The JSON committed here is what the
+handler returned. Sanitisation is one key — `store.path` is rewritten to
+`/Users/example/.hscc/metrics/history.db`, because the generator's temp dir would
+otherwise be machine-specific — and `ClusterHistoryStore` declares no `path`, so
+the model can never carry a server filesystem location into the App Group. The
+hosts are TEST-NET-1 `192.0.2.10`/`.11` by construction.
+`scripts/cluster_history_metric_vocabulary.py` re-checks every key in these files
+against `hscc_daemon/metrics_history.py`'s own column tuples.
+
+- `v1_cluster_history_6h.json` — tier 1 (1-minute averages, the three `*_max`
+  peak columns present). It carries the two paths the chart depends on:
+  `192.0.2.11` reported no GPU in any tick, so its `gpu_temp_c`/`gpu_power_w` are
+  `null` and stay `null` rather than becoming `0`, and the engine rows hold `kv`
+  as vLLM's raw 0-1 fraction. One measured surprise worth keeping: the store's
+  columns are sqlite `REAL`, so `run`/`wait` are on the wire as `2.0`/`1.0`. That
+  is the recorder's schema and not a typo, and it means the model's `Int?` holds
+  only because `JSONDecoder` converts an integral number losslessly — the gate
+  now pins that conversion instead of trusting it.
+- `v1_cluster_history_7d.json` — tier 2 (5-minute averages) from the same store,
+  so the two tiers differ in resolution and in which columns carry data.
+- `v1_cluster_history_6h_engine_only.json` — `?metrics=gen_tps,run`: the host
+  series is *excluded* (`hosts_included: false`) rather than silently empty, and
+  each projected row keeps only its identity plus the requested columns.
+- `v1_cluster_history_15m.json` — tier 0 as the deployed topology answers it: the
+  2 s ring lives in the daemon process, so `store.tier0_resident` is false, both
+  series are empty, and `note`/`speak` say why. A chart must draw that as a gap
+  with a reason, never as a flat line at zero. Branch on `source`
+  (`recorder_ring_absent` here) for the decision and read `note` for the sentence.
+- `v1_cluster_history_tier_axis.json` — `?tier=1&since=&until=` (t_b611b56e), the
+  second request axis: an explicit span instead of a preset anchored to `now`.
+  `axis` is `tier`, `window` is the derived label `"600s"` and deliberately not a
+  preset name, and `since`/`until` are the pair the server served *after* clamping
+  to the tier's retention — so a surface draws the span it was given rather than
+  the one it asked for.
+
+`store.tier0_resident` is a **tier-0 measurement only**, so read the reason for an
+empty history answer from `note` (or `speak`), never from that flag. The route asks
+the recorder seam — `tier0_resident = points is not None` — inside its tier-0 branch
+and nowhere else (`hscc-api/routes_cluster.py`, since PR #417 / `d6a2d64e`), because
+the 2 s ring is memory in the daemon process and a durable-window read cannot see it.
+The key is on the wire at every tier, but at tiers 1-2 its value is `null`: a tier the
+route never read cannot report residency. That is why the tier-1 and tier-2 fixtures
+above say `null` and the tier-0 one says `false` — measured from one generator in one
+process, not chosen per file. Before PR #417 the flag defaulted to `True`, so all
+three durable fixtures claimed a residency nothing had checked; a fixture that says
+`true` at tier 1 or 2 is a regression, not a value to restore.

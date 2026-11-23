@@ -1,4 +1,4 @@
-HSCC — Hermes Spark Cluster Control   v2.15.11
+HSCC — Hermes Spark Cluster Control   v2.17.3
 Turn a DGX Spark GPU cluster into a self-running fleet of AI agents.
 Usage:  hscc <command> [args]        hscc help <command>   for details
 Daemon control
@@ -9,6 +9,7 @@ Daemon control
   uninstall            Remove the service and stop the daemon
   plist                Print the launchd plist (no install)
   log                  Show the daemon log output
+  start-daemon         Foreground daemon loop (used by launchd)
 
 Health & monitoring
   check [stream]       Run one check cycle now (default: all)
@@ -25,8 +26,11 @@ Health & monitoring
       Aggregate vLLM throughput + queue depth across the fleet
   autoscale
       Show autoscale decision from current queue depth (read-only)
-  escalate
-      Show pending failure escalations (dry-run, no mutations)
+  escalate             Preview escalations — POST /v1/escalate mutates
+  heal-clear <node>
+      Clear one node's heal-breaker strikes (mutates; not /heal)
+  heal-status
+      List heal-breaker strikes per node (read-only; not /heal)
 
 Cluster & templates
   cluster status       Running workloads + idle hosts
@@ -54,13 +58,23 @@ Cluster & templates
   autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
   kanban <cmd>
       Board hygiene: blocked (show/recover), stale (list/archive)
+  merge-queue <cmd>
+      Local merge queue: status list add remove pause resume enable disable
   cards monitor [--live] One live panel per running card, streaming its worker
-  orch inject <p> "<msg>" Inject into a running Hermes REPL pane (tmux)
+  main start|status|wakeups Main orchestrator pane and daemon wake-up schedule
+  orch inject <p> "<msg>"
+      Inject into a running Hermes REPL pane (tmux; not orch_message)
   orch waker status|enable|disable
       The built-in orchestrator waker (daemon-resident)
+  node pause <host> [flags] Park one node; it asks before anything stops
 
 Utility
-  notify <message>     Send a desktop notification
+  notify <title> <body> | list | ack <id>
+      Post, read or acknowledge an HSCC alert-feed entry
+                       flags: --level info|action|critical --key <dedupe-key>
+      --node <host> (a paused node's alert is refused at the feed)
+                       list: --since <id> --limit <n>; all: --json
+                       requires the API: hscc api start
   bootstrap [flags]
       Run the HSCC installer from any layout (repo, plugins, brew)
                        flags pass through: --yes --dry-run --force --no-backup

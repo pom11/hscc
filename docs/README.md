@@ -32,7 +32,7 @@ backtick-quoted index entry here:
 Find a file by what it is: [Reference](#reference) · [Roadmap &
 handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigations--top-level-audits)
 · [design/](#design) · [ops/](#ops) · [template-examples/](#template-examples) ·
-[verification/](#verification) · [audits/](#audits).
+[verification/](#verification) · [reports/](#reports) · [audits/](#audits).
 
 ## Reference
 
@@ -76,6 +76,12 @@ handoffs](#roadmap--handoffs) · [Investigations & top-level audits](#investigat
 
 ## design/
 
+- `docs/design/node-pause-auto-resume-t_110adc1a.md` — decision trail for the daemon ending an expired node pause on schedule: why the tick body lives with the executor and the cadence in the loop's table, why the schedule is the overlay file read per tick instead of an in-memory timer, why the pass clears a pause only after the units are back (and never via the overlay's bulk expiry helper), and why it calls the shared resume policy rather than the verb's output. Three of those deliberately contradict the card's prose, and the file says which and why. **live** companion to `docs/ops/node-pause.md`.
+- `docs/design/2026-11-20-widget-redesign.md` — operator picks for the apps 1.4 widget consolidation (5 widgets, native look): the design contract every later widget card builds against, landing pick-by-pick — Cluster C1 + the Monitor/Cluster Graph retirement (PR #487), Boards B3 + the Board Status/Projects retirement (PR #492). **live**
+- `docs/design/2026-11-20-widget-redesign-mock.html` — clickable mock companion to that spec (one band per widget type at real sizes, with the sticky pick bar). **live** companion.
+- `docs/design/2026-11-20-carplay-mock.html` — clickable mock for the CarPlay scene (card W5g of the same spec): six designs (A–F) drawn on a real 800×480 pt CarPlay canvas with sample data, each with template/shows/actions/updates/why and a sticky pick bar. The operator picked design C "Rows with gauges" (2026-11-20); the spec's **CarPlay** section cites this file as the shipped scene's visual reference (built in PR #509). **live** companion.
+- `docs/design/2026-11-19-main-orchestrator-design.md` — design for the ONE main orchestrator (named at bootstrap, default `general`): its own board is the kanban default, cluster authority except LIVE publish, daemon-owned wake-ups, `hscc orch inject` to project orchestrators, `hscc notify` alert feed (`list`/`ack`; push dropped 2026-11-19). **live** (built as cards M1–M10).
+- `docs/design/2026-11-19-merge-queue-design.md` — design for the daemon-owned local merge queue (MQ1): per-repo FIFO of green PRs in its own worktree, atomic ledger, rebase → gates → force-with-lease → squash merge, conflicts/red gates handed back to the card's worker. **live**
 - `docs/design/2026-10-15-template-declarations.md` — spec: template-declared `endpoints:`, `proxy:` and caps ("the template is the declaration, apply is the writer"). **live** — and the doc's own **2026-10-19 addendum** supersedes its §2.3/§6.2 details (nested `gateways.litellm.router_settings` read order, engine file moved to `src/sparkrun/plugins/litellm/engine.py`, blessed defaults).
 - `docs/design/media-serving.md` — media workstream M0 design: image/video model servers on the Sparks behind the `:4000` proxy (runtime per model, OpenAI facade contract, LiteLLM registration, template `kind`, VRAM co-tenancy, NAS staging, LAN-only boundary). **proposed** — depends on the support matrix of PR #117 (`docs/design/media-serving-support-matrix.md`, branch `wt/t_165c208f`).
 - `docs/design/2026-09-30-project-session-continuity.md` — design: project session continuity across surfaces (Approach 1); verified live in `docs/audits/session-continuity-verify-2026-09-30.md`. **live**
@@ -105,6 +111,18 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   (`provider: openai` + proxy `base_url`, model id sent verbatim) and `video_gen`
   via the fleet's `openai_compat` plugin — plus the revert. Client-side companion
   to `docs/design/media-serving.md`; no fleet action lives here. **live**
+- `docs/ops/node-pause.md` — the node-pause overlay's operator surface: `hscc node
+  pause|resume|paused` (the plan, then the `y/N` question that replaced `--apply`,
+  with `--yes` for scripts and `--dry-run` to look; the every-model-runs-alone
+  eligibility rule, `--force` / `--until`, refusal strings quoted from the code),
+  what a
+  pause leaves byte-identical (templates, `serving.json`, the applied-template
+  record, kanban caps, autodown, proxy config), which loops skip a parked node
+  (watchdog auto-heal, the heal breaker, autoscale, the autodown wake,
+  `hscc_daemon/health.py`'s keepalive and proxy repair paths, and `hscc cluster up`
+  with the post-boot, recovery and API paths that call it), why there is no
+  `--include-paused`, the span rules, the orchestrator-model refusal, and how the
+  daemon keeps a past `--until` as a timer. **live**
 - `docs/ops/orch-waker.md` — the built-in orchestrator waker: the eight wake-worthy
   events, batch/debounce/rate rules, skip rules, `~/.hscc/orch_waker.json` config,
   `hscc orch waker status|enable|disable` verbs, state + audit schemas, the doctor
@@ -128,6 +146,10 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
 
 - `docs/verification/WS3-verification.md` — verification record: native 0.17 profile API (workstream 3). **record**
 
+## reports/
+
+- `docs/reports/t_23bf61f3-ci-pytest-leg.md` — final state of the card that put the 12-leg pytest roster in CI (`pytest-legs`): push/PR leg selection, per-leg matrix, venv cache, the advisory/enforce switch, and the measured wall times. **record** (t_23bf61f3)
+
 ## audits/
 
 Working directory of per-card audit/incident reports. The **live** ones below
@@ -137,6 +159,8 @@ docs/audits/`) rather than reading them blind.
 
 ### Live references
 
+- `docs/audits/2026-11-23-agent-surface.md` — agent-surface coverage matrix (t_4c12ff7f): every `hscc` CLI verb × the 26 `hscc-cluster` agent tools × the 12 `hscc-commands` slash commands × the 96 API routes × the bundled skill that documents it, each cell marked MISSING / STALE / INTENTIONALLY CLI-ONLY; per-tool state sources (`serving.json`, `applied_template.json`, `node_pauses.json`, `cluster.json`, daemon state files) and who else writes each; and what `hscc bootstrap` installs from where, with its UPDATE-vs-SKIP semantics measured. Findings F1–F13 + operator decisions D1–D11. **live** — the gate doc for the 2.17.4 tools/skills/profile/doctor/QA cards.
+- `docs/audits/2026-11-23-main-only-surface.md` — the main-only cluster surface, measured against the real Hermes loader: how `plugins.enabled` actually resolves **per home** (no root→profile overlay; the dispatcher injects `HERMES_HOME=<profile dir>`, so 0/52 profile configs enable any plugin and the cluster tools are already absent for workers, project orchs *and* the main orchestrator profile), the six `hscc-cluster` hooks as a 6th surface with the process each one fires in (all six worker-lane, and a disabled plugin keeps neither tools nor hooks), the `_migrate_to_21` grandfather that is one migration away from granting all 52 profiles the full surface, the SOUL/skill text that still promises the tools (`install_soul.py:75-100` → 1 of 53 deployed SOULs), the concrete per-profile YAML, and four hermes-side asks. **live** — the gate doc for the main-only-surface cards (t_e98c6ad4, t_b52e70ba, t_c3a29c37, t_caf98114, t_035b1b0b). (t_1700dfc8)
 - `docs/audits/README_REVIEW_2026-10-15.md` — repo-wide README audit (t_6e1e8443): measurements, per-file verdicts, the R1–R7 target-state spec this docs wave executes from. **live**
 - `docs/audits/CLI_HELP_2026-10-15.md` — CLI help-surface audit: canonical command inventory + REAL EXAMPLE DATA renders (post-F1 forms). The F-lane landed via PR #57; this doc remains the reference for quoted CLI output. **live**
 - `docs/audits/SPARKRUN_041_COMPAT_2026-10-20.md` — sparkrun v0.4.0 → v0.4.1 compat record: deployed topology (fork branch `feat/proxy-least-in-flight-041` @ `1aaa6479`, checkout `~/dev/sparkrun-041-verify`, venv `.venv-sparkrun-041`), live verification, rollback line (`-040` @ `~/dev/sparkrun-live`). **live** — THE current sparkrun topology pointer (supersedes the 0.4.0-era statements in `docs/audits/SPARKRUN_040_COMPAT_2026-10-19.md`)
@@ -146,6 +170,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/PROXY_RELAUNCH_NOOP_2026-10-18.md` — proxy :4000 outage while the 5-min relaunch loop no-opped: root cause + fix. **live** incident record.
 - `docs/audits/2026-11-05_stream-silence-incident.md` — fleet-wide stream silence with every health check green: **verdict NOT LOCATED** — all four card layers refuted on evidence; primary suspect is established-flow loss on the gateway en0 DHCP/T1 lease clock (899 s marks, 11/11 bursts land +11…+54 s before a mark), clock confidence ~75%, packet mechanism unproven; repro recipe explicitly NOT validated. **live** — supersedes the earlier "located" framing; §9 is the ready-to-card LEFT list. (t_22b546e3)
 - `docs/audits/2026-11-06-hermes-0.23-compat.md` — Hermes v0.23.0 compatibility verdict + cutover checklist: Python 3.14 runtime rebuild recipe (uv-managed 3.14, optional-package freeze diff), config migrations 32 → 52 and the values they reset, and the post-cutover verify list. **live** — the v0.23.0 upgrade authority. (t_c73f4871)
+- `docs/audits/2026-11-22-proxy-connection-error.md` — proxy `:4000` outage 2026-11-22, every completion 500 `Connection error` while `/v1/models` stayed 200: investigation only, no fixes applied. Establishes the corrected window (21:58–22:55 local, not 22:10), that the check-blindness is **by construction** (`check_proxy` never probes a completion, `health.py:1113`; `proxy_stall`'s through-proxy probe must **succeed** to alarm, `proxy_stall.py:247-255`), that repair verification can never pass under a `uvx` launcher (tracked wrapper PID ≠ `lsof` listener — reproduced live on a healthy proxy), and that the same predicate arms `_reap_orphan_proxy_listener` to SIGKILL a healthy proxy. Rules **out** macOS Local Network/errno 65 on unified-log evidence, and records that the `--restart` that fixed the outage truncated the only litellm-side evidence. §6 lists six atomic fix cards; §7 is the LEFT list. **live** incident record. (t_f54f735a)
 - `docs/audits/DEPBUMP_GUARD_2026-10-16.md` — dep-bump fork-branch guard + `router_settings` drift check (t_39d7c915). Guard design **live**; the 0.3.10 fork-branch names it cites are the rollback line since the 0.4.0 cutover — see `docs/audits/SPARKRUN_040_COMPAT_2026-10-19.md`.
 - `docs/audits/address-guard-binary-policy-t_3e6d3db7.md` — the address guard's binary policy (what counts as a real address, placeholder ranges `10.0.0.x` / `100.64.0.1`). **live**
 - `docs/audits/commit-time-address-guard-t_ec2c2f95.md` — commit-time address-guard hook: mechanism + bypass rules. **live**
@@ -221,6 +246,11 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/board-pin-t_b014c2b8.md` — audit + decision record for `hscc_daemon/board_pin.py`: measured proof that `HERMES_KANBAN_DB` outranks an explicit `board=` inside a worker/delegation fence, every board-opening surface in this repo with `file:line`, which are guarded as reads vs refused as writes, and the (unfiled) upstream issue draft. **live**
 - `docs/audits/board-pin-pause-t_70c97264.md` — the pause half of the same fork hazard: `kanban_pause` shells out to `hermes kanban` with the inherited environment too, and its `_hold` (reclaim/block) plus `resume`'s unblock are WRITES under a worker pin — the decision table (scrub the read's child env / refuse the write before anything spawns, per board) and why `enforce`'s stream goes red instead of reporting "nothing to hold". **live**
 - `docs/audits/orch-waker-import-leak_t_2be3b04e.md` — root cause of the order-dependent wake-ledger failures: `autodown._load_kanban_db_or_default` leaves a planted `<tmp>/hermes-agent` at `sys.path[0]`, so the next file re-imports a fake `hermes_cli` and board enumeration silently shrinks to one board. Per-test `hermes_cli` import isolation in `hscc_daemon/tests/conftest.py`. **live**
+- `docs/audits/daemon-alone-run-order-dependence_t_572b4856.md` — the *other* half of that leak: hermes' REAL tree reaching a test process and surviving a closed import window, so the same `importorskip` answers one way alone and another way in-leg. Per-file alone-vs-in-leg enumeration for `hscc_daemon`, the refuted `sys.path` hypothesis, the symmetric per-test cache restore, and what the stamp may and may not claim. (t_572b4856)
+- `docs/audits/kanban-registry-hermeticity_t_c11f0d88.md` — the third host-state leak in that family, this one on the flightdeck PROJECT registry: `hscc kanban stale` narrows to registered boards, so one test's fake `hscc` board cleared the filter only because the operator has an `hscc` project — green on the laptop, `IndexError` on a registry-less runner, advisory-green in CI. Measured leg-wide (1 failure in 4100 daemon tests), the pin + fence + out-of-process poisoned-registry guard that replaced it, and the M2/M3 probes that show the guard fires on a state the file's own run still calls green. **live**
+- `docs/audits/support/t_572b4856/alone_sweep.sh` — the sweep that audit is built on: run a leg once through the canonical runner, then every one of its test files alone with the same argv and the same env scrub, and diff. Takes the interpreter, so one command proves it on both.
+- `docs/audits/support/t_572b4856/diff_alone_vs_leg.py` — the diff half of that sweep: per-nodeid status from junit **and** per-site skip reason from `-rs`, because a skip whose reason text changed is a different answer even when the counts match. Exit 1 = at least one file answers differently alone than in-leg.
+- `docs/audits/support/t_572b4856/resid_probe.py` — the pytest plugin that named the residue in that audit: it logs every `sys.path` mutation touching hermes' real tree and every first import of a hermes name with the opener's stack, then prints what is still resident at session end. `sys.path` empty + modules resident is what separates a leaked window from a leaked module cache.
 - `docs/audits/board-pin-fork-t_8616f2a5.md` — the fork half of the same hazard: the dispatcher-wedge board-state gate reads board state through `hermes kanban` in a subprocess, where `board_pin`'s in-process scrub cannot reach, so the gate must hand the child an environment instead — the decision table (scrub the read / refuse the probe when the runner cannot be handed one) and what it deliberately leaves to `t_dad0da32` and `t_70c97264`. **live**
 - `docs/audits/STOPGAP_REACHABILITY_t_3367cb04.md` — is the wake-dedupe stopgap deletable yet? Measured verdict: **no**. Deleting `gateway_wake_cursors` / `gateway_already_delivered` at `ae162a7f` turns 7 of `test_orch_waker_dedupe.py`'s tests red, 4 of them an actual doubled wake, because neither the deployed Hermes (`045881137d`) nor upstream `origin/main` has §3.1's `kanban_wake_claims` — the claim channel suppresses nothing and the cursor ledger is the only evidence channel. Carries the ordered deletion predicate, the two invariants a cleanup must not "simplify" away (a claim the same emitter holds is fan-out; one-claim-one-wake holds only while a claim means one destination), and the merge state that makes the cross-emitter dedupe not-yet-live. Tripwire: `hscc_daemon/tests/test_orch_waker_stopgap_load_bearing.py`. **live** (t_3367cb04)
 - `docs/audits/wedge-default-board-pin-t_dad0da32.md` — decision record for the residual left by the card above: `dispatcher_wedge` rebuilt `multi` from the *slug* (`board != "default"`), so `default` was the one board the pin guard could not see; why (a) "default is a real board" was chosen over refusing, and why `multi` is read from autodown's enumeration instead of `bool(board)`. **live**
@@ -317,6 +347,7 @@ Audit notes (`*_audit.md`) ship with their e2e verify scripts (`*_verify_e2e.py`
 ### test environment: the thin sibling interpreter (record)
 
 - `docs/audits/sibling-interpreter-hermes-gap_t_02c98915.md` — why 21 hermes-integration tests hard-failed under the sanctioned `p313` sibling interpreter (it is a thin pytest env with no `ruamel`/`hermes_state`), the 21-test roster, the measured rejection of dep-stuffing the sibling env, and the capability-probe skip posture now written into `scripts/run_tests.sh`. **record** (t_02c98915)
+- `docs/audits/require-real-hermes-lazy-sibling-seam_t_ace3c8d5.md` — measured-clean follow-up to the same predicate weakness: the five `require_real_hermes`-gated files were swept file-alone on the CI-faithful thin venv, `p313` and canonical (0 errors; on thin the gate does **not** skip — the gated tests run) and an `sys.addaudithook` import-attempt counter shows they never enter hermes' `connect()` at all, while a control that does enter it dies at `kanban_db_connect.py:766` on thin. Records why (`list_boards()` never connects; `orch_waker` opens its own read-only URIs), the `HERMES_DELEGATED_CHILD_CONTEXT` fencing posture that masks this seam, and two instruments that produced fake zeros before the audit hook. **record** (t_ace3c8d5)
 
 ### Test-suite leg strategy (live)
 

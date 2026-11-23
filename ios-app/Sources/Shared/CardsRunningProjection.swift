@@ -55,6 +55,11 @@ struct CardsRunningRow: Codable, Equatable, Identifiable {
     /// a minute, and storing whole minutes would round that to `0m` — a number
     /// the CLI never shows.
     let ageSeconds: Int?
+    /// Seconds since the worker's last heartbeat (`hb_s`). nil = the route did
+    /// not send one; the R3 heartbeat dot then draws the unknown state instead
+    /// of claiming the worker is alive. Optional so a snapshot written before
+    /// this field existed still decodes.
+    let heartbeatSeconds: Int?
 
     /// Board-qualified, because the same card id on two boards is two rows and
     /// a `ForEach` id must not collide.
@@ -64,21 +69,23 @@ struct CardsRunningRow: Codable, Equatable, Identifiable {
     var ageMinutes: Int? { ageSeconds.map { $0 / 60 } }
 
     init(board: String?, cardID: String, title: String?, worker: String?,
-         status: String?, ageSeconds: Int?) {
+         status: String?, ageSeconds: Int?, heartbeatSeconds: Int? = nil) {
         self.board = board
         self.cardID = cardID
         self.title = title
         self.worker = worker
         self.status = status
         self.ageSeconds = ageSeconds
+        self.heartbeatSeconds = heartbeatSeconds
     }
 
     /// Convenience for previews/tests that speak in minutes. Whole minutes only:
     /// a fixture that needs `30s` uses the seconds initializer.
     init(board: String?, cardID: String, title: String?, worker: String?,
-         status: String?, ageMinutes: Int?) {
+         status: String?, ageMinutes: Int?, heartbeatSeconds: Int? = nil) {
         self.init(board: board, cardID: cardID, title: title, worker: worker,
-                  status: status, ageSeconds: ageMinutes.map { $0 * 60 })
+                  status: status, ageSeconds: ageMinutes.map { $0 * 60 },
+                  heartbeatSeconds: heartbeatSeconds)
     }
 
     /// Project one wire row. `worker` is the CLI's `worker` column when the
@@ -92,6 +99,7 @@ struct CardsRunningRow: Codable, Equatable, Identifiable {
         worker = task.worker ?? task.assignee
         status = task.status
         ageSeconds = Self.ageSeconds(task: task, now: now)
+        heartbeatSeconds = task.hb_s.map { max(0, Int($0)) }
     }
 
     /// Seconds of run time, from the fields `hscc cards monitor` prints.
@@ -143,6 +151,33 @@ struct CardsRunningRow: Codable, Equatable, Identifiable {
             return String(format: "%dh%02dm", seconds / 3600, (seconds % 3600) / 60)
         }
         return String(format: "%dd%dh", seconds / 86400, (seconds % 86400) / 3600)
+    }
+
+    /// The R3 hero clock: `32m` / `1h 05m` / `2h 07m`. Hours gain a space so
+    /// the large type reads as two units rather than an id.
+    var heroAgeText: String {
+        guard let seconds = ageSeconds else { return "—" }
+        if seconds < 3600 { return ageText }
+        if seconds < 86400 {
+            return String(format: "%dh %02dm", seconds / 3600, (seconds % 3600) / 60)
+        }
+        return String(format: "%dd %dh", seconds / 86400, (seconds % 86400) / 3600)
+    }
+
+    /// The R3 heartbeat line. Nil is drawn as `beat —`, never as a fresh beat.
+    var heartbeatText: String {
+        guard let seconds = heartbeatSeconds else { return "beat —" }
+        if seconds < 60 { return "beat \(seconds)s" }
+        if seconds < 300 { return "beat \(seconds / 60)m" }
+        if seconds < 3600 { return "beat \(seconds / 60)m" }
+        return "beat \(seconds / 3600)h"
+    }
+
+    /// Green under five minutes, orange once the heartbeat is older. nil (the
+    /// route sent no `hb_s`) has no state colour at all.
+    var heartbeatIsFresh: Bool? {
+        guard let seconds = heartbeatSeconds else { return nil }
+        return seconds < 300
     }
 
     static func truncate(_ value: String, max: Int) -> String {

@@ -41,11 +41,13 @@ CHECK_DIR="$SELF_DIR/widget_view_dispatch"
 # `surfaces.count == 4`).
 MANIFEST=(
   widgetCluster
-  widgetBoardStatus
   widgetKanbanMonitor
   widgetCardsRunning
-  widgetProjects
-  widgetMonitor
+  widgetNeedsMe
+  # Appended, not inserted: the list stays the order the surfaces ran in, and a
+  # new surface joins at the end so two cards adding one cannot fight over the
+  # middle of the array.
+  widgetMergeQueue
 )
 
 # One xcrun call for the whole run instead of one per surface, so a machine
@@ -94,20 +96,21 @@ done
 MAC_SPEC="../macos-app/project.yml"
 if [ -f "$MAC_SPEC" ] && grep -q '^  HSCCMacWidgets:' "$MAC_SPEC"; then
   mac_missing=0
-  for f in Sources/HSCCWidgets/*.swift; do
-    if ! grep -qF -- "- path: ../ios-app/$f" "$MAC_SPEC"; then
-      echo "  FAIL: macOS target does not compile $f — a desktop surface would be a second copy"
-      mac_missing=1
-    fi
-  done
-  for shared in Sources/Shared/SharedStore.swift Sources/Shared/WidgetDataClient.swift \
-                Sources/HSCC/Views/Theme.swift; do
+  # The whole widget directory is one computed source entry, so every widget
+  # file on disk (including a newly added one) is compiled by the desktop
+  # target without editing macos-app/project.yml.
+  if ! grep -qF -- "- path: ../ios-app/Sources/HSCCWidgets" "$MAC_SPEC"; then
+    echo "  FAIL: macOS target does not compile ../ios-app/Sources/HSCCWidgets — a desktop surface would be a second copy"
+    mac_missing=1
+  fi
+  for shared in Sources/Shared/SharedStore.swift Sources/Shared/WidgetSurfaceKind.generated.swift \
+                Sources/Shared/WidgetDataClient.swift Sources/HSCC/Views/Theme.swift; do
     if ! grep -qF -- "- path: ../ios-app/$shared" "$MAC_SPEC"; then
       echo "  FAIL: macOS target does not compile $shared — the desktop widget would have a second data path"
       mac_missing=1
     fi
   done
-  [ "$mac_missing" -eq 0 ] && echo "  ok: HSCCMacWidgets reuses all six widget surfaces + the shared store/client/style by path"
+  [ "$mac_missing" -eq 0 ] && echo "  ok: HSCCMacWidgets reuses every widget surface + the shared store/client/style by path"
   [ "$mac_missing" -eq 0 ] || overall=1
 else
   echo "  FAIL: $MAC_SPEC has no HSCCMacWidgets target — the macOS desktop widgets are missing"

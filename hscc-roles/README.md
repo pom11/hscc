@@ -3,7 +3,7 @@
 The role framework. Each role is a spec file (`roles/<name>.yaml`); a generator
 builds it into a Hermes profile with a **layered SOUL** (shared base character +
 role disposition + thin operational facts) and the full Hermes toolset **minus
-cluster control** — only the orchestrator can change cluster shape.
+cluster control** — only the main orchestrator can change cluster shape.
 
 ## When you touch it
 
@@ -22,11 +22,11 @@ hscc.py list                # roles + whether a profile exists, then the spec
                             # has no spec)
 hscc.py validate            # validate every role spec (load + required fields)
 hscc.py autonomy [on|off]   # the ~/.hscc/autonomy master flag
-hscc.py orch <project|general> [--registry P] [--hermes-home DIR]
+hscc.py orch <project|main-name> [--registry P] [--hermes-home DIR]
                             # ensure a project's orchestrator profile exists
 hscc.py orch-all [--registry P] [--hermes-home DIR]
                             # ensure an orchestrator for EVERY registry
-                            # project + the `general` catch-all (idempotent, bulk)
+                            # project + the ONE main orchestrator (idempotent, bulk)
 hscc.py orch-sync [--dry-run] [--only A,B] [--skills-source DIR] [--json]
                   [--hermes-home DIR]
                             # re-render every live <project>-orch SOUL + add the
@@ -90,11 +90,15 @@ Conventions (do not invent alternatives):
 - orchestrator profile: `<project>-orch`   (e.g. `ecofire-app-orch`)
 - long-lived session:   `<project>`         (`hermes -p <P>-orch chat --continue <P>`)
 - board:                the project's existing board from the registry
-- catch-all:            `general` → `general-orch` / `general` / `default`
-                        (repo=None, not repo-scoped) — the DEFAULT when no
-                        project is specified.
+- main orchestrator:    the name stored at bootstrap (default `general`),
+                        used as its profile, session and board slug (repo=None)
+                        — the DEFAULT when no project is specified. The
+                        legacy catch-all (`general-orch` / `general` /
+                        `default`) still resolves when named explicitly.
 
-Two importable entry points (the HSCC API imports these):
+Importable entry points (the HSCC API imports these):
+- `main_orch.main_name()` / `main_profile()` / `main_board()` → the ONE main
+  orchestrator stored at bootstrap (default `general`); no hardcoded profile.
 - `orchestrators.resolve_orchestrator(project=None, path=None)` →
   `{"project","profile","session","board","repo-or-None"}`; raises
   `UnknownProjectError` for an unknown project.
@@ -110,9 +114,23 @@ Provision one with `hscc.py orch <project>`; provision the whole registry at
 once with `hscc.py orch-all` (bootstrap calls it during install). Verify the
 result with `hscc.py provision-check`.
 
+### Migrating an existing install (`migrate_main.py`)
+
+The main orchestrator replaces both legacy identities, and nothing is deleted:
+`orch-all` creates the main profile when it is missing, copies the legacy
+catch-all's `memories/` and `sessions/` into it (per file, only where the
+destination has no such path — the main profile always wins and the source is
+never moved or deleted), and marks both the legacy catch-all and the legacy
+cluster-wide role retired in their SOULs ("retired — use `<main>`"). `generate`
+stamps the legacy cluster-wide role retired on every run, so a regeneration can
+never re-mint a competing authority. The step is idempotent: a second run is a
+byte-identical no-op. Config files are never rewritten by the migration; the
+generator's existing YAML merge keeps every operator key.
+
 ## Roster (`roles/`)
 
-A full org (27 specs): orchestrator, architect, coder, **reviewer**, qa;
+A full org (27 specs): orchestrator (retired legacy profile), architect, coder,
+**reviewer**, qa;
 backend/frontend/devops/security/data engineers; ml-engineer, ml-researcher,
 data-scientist; **ios-engineer**, **ecofire-bc-engineer**,
 **ecofire-pontaje-engineer**; product-manager, technical-writer, ux-designer;
@@ -188,9 +206,9 @@ re-stamps every generated profile and rewrites live profile state — is an
 operator action the check deliberately never takes.
 
 Orchestrator-family SOULs are excluded by design: `orchestrators.py` stamps a
-per-project orch with the name of the SHARED spec it passes (`general-orch`
-legitimately carries `## Role: orchestrator`), so judging it by dir name would
-red-flag a layout that is correct by construction.
+per-project orch with the name of the SHARED spec it passes (the legacy
+catch-all legitimately carries `## Role: orchestrator`), so judging it by dir
+name would red-flag a layout that is correct by construction.
 
 ## How to test / Links
 

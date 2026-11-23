@@ -9,6 +9,10 @@ import datetime
 
 from .daemon_ops import log
 from . import serving
+# t_4ecbd9d0: the durable node-pause overlay. Stdlib-only and imports nothing
+# from this package at module level (its daemon_ops import is lazy inside
+# _warn), so this cannot join the health<->lifecycle cycle.
+from . import node_pauses
 from .state import now_iso, read_state
 from .util import run_cmd
 
@@ -181,6 +185,69 @@ VLLM_SERVE_VERIFY_INTERVAL_S = float(os.environ.get("HSCC_VLLM_SERVE_VERIFY_INTE
 WATCHDOG_VERIFY_ALARM_AFTER = int(os.environ.get("HSCC_WATCHDOG_VERIFY_ALARM_AFTER", "2"))
 
 
+# ── Node-pause overlay skip (t_4ecbd9d0) ───────────────────────────────────
+#
+# WHY THE WATCHDOG HAS TO ASK THE OVERLAY
+#
+# `hscc node pause` parks one node on purpose (first real use: giving a worker
+# GPU to a training run) and touches no cluster setting — so from the
+# watchdog's seat the serving layer simply stops answering, which is exactly
+# what a real fault looks like. Without this seam the 30 s tick would
+# (a) append a failure entry to WATCHDOG_BLOCK_FILE, (b) after three such ticks
+# latch PIPELINE BLOCKED and send a critical desktop notification for a node the
+# operator deliberately parked, and (c) call restart_vllm() — relaunching the
+# parked model on top of whatever is now using that GPU. (c) is the one that
+# destroys someone's training run, and it is also the reason the guard sits in
+# TWO places: pipeline_watchdog is not the only caller of restart_vllm —
+# trigger.fire_trigger_action (trigger.py) calls restart_vllm_fn() straight
+# from the 15 s trigger loop, so a watchdog-only guard would leave that door
+# open.
+#
+# ASK `covering`, NEVER `paused`
+#
+# node_pauses.paused(host) is host-keyed: a pause issued against one node of a
+# tensor-parallel span lists the rest of the span only in that record's
+# span_nodes. A seam that asked paused() would happily relaunch the *other*
+# node of the unit the operator stopped as one thing. covering(host) follows
+# span_nodes, which is what the parent module's docstring pins for every skip
+# seam; test_span_sibling_node_pause_skips_the_heal is this file's half of that
+# pin and goes red the moment someone swaps covering() for paused().
+#
+# WHICH NODE — and why this is not "skip the watchdog whenever anything is
+# paused"
+#
+# The only node this pass can heal is serving.PRIMARY_NODE — the node
+# restart_vllm() stops and relaunches. That is the node we ask about. A pause
+# somewhere else in the fleet must NOT disarm the breaker: a gateway that dies
+# for a real reason while an unrelated node is parked still has to latch and
+# still has to page. Over-suppression would be the same class of bug as the
+# fail-open liveness checks this package keeps removing.
+#
+# FAIL-OPEN DIRECTION
+#
+# node_pauses.load() returns "no pauses" (loudly WARNed) for a missing,
+# unreadable or malformed overlay, and this seam inherits that: a broken
+# overlay file must never become a reason the fleet stops healing itself. The
+# fail-open half is pinned here so a later "harden it" edit cannot quietly
+# invert it, and the WARN itself is node_pauses' own contract.
+def _pause_covering_heal_target(directory=None):
+    """The pause entry that parks the node this pass heals, or ``None``.
+
+    ``directory`` is the node_pauses overlay-root seam — the only relocation
+    seam that module has, and the reason this takes a parameter instead of
+    reading an env var: the daemon (reader) and the CLI (writer) are different
+    processes, so a root that is threaded through is a root both sides can
+    agree on. ``None`` means the default ``~/.hscc``.
+    """
+    return node_pauses.covering(serving.PRIMARY_NODE, directory=directory)
+
+
+def _pause_label(entry):
+    """``" (reason)"`` for a pause entry, "" when it carries no reason."""
+    reason = (entry or {}).get("reason") or ""
+    return f" ({reason})" if reason else ""
+
+
 def _registered_serving_unit(node, port):
     """The serving.json unit owning (node, port), or None when unregistered.
 
@@ -282,12 +349,22 @@ def _record_launch_verdict(block, verified, now_wall=None):
     return False, streak >= WATCHDOG_VERIFY_ALARM_AFTER
 
 
-def restart_vllm(verify_fn=None):
-    """Restart vLLM via sparkrun — TARGET'd stop, refuse cluster-up-owned
-    units, abort on stop failure, verify the launch before calling it success.
+def restart_vllm(verify_fn=None, pause_directory=None):
+    """Restart vLLM via sparkrun — never a paused node, TARGET'd stop, refuse
+    cluster-up-owned units, abort on stop failure, verify the launch before
+    calling it success.
 
     t_b72dce57 (the 2026-10-18 01:38 race) rewrote this function's contract;
     every rule below was separately violated in production:
+
+      0. A node the operator parked with ``hscc node pause`` is NEVER
+         relaunched (t_4ecbd9d0). This rule is checked here, at the single
+         mutating relaunch surface, and NOT only in the watchdog, because
+         restart_vllm has a second, independent caller —
+         ``trigger.fire_trigger_action`` (trigger.py) calls it straight from
+         the 15 s trigger loop. Guarding only the watchdog would leave that
+         caller free to resurrect a paused unit, which is the one outcome the
+         pause feature exists to make impossible.
 
       1. The heal lease (heal_lease.py — the SAME durable single-flight lease
          the proxy relaunch deferred on at 01:38:34) is consulted FIRST: while
@@ -306,12 +383,35 @@ def restart_vllm(verify_fn=None):
          only means the container was created (rule 4).
 
     ``verify_fn(node, port, timeout)`` is injectable for tests/sandboxes.
+    ``pause_directory`` is the node_pauses overlay-root seam for rule 0 — the
+    same ``directory=`` seam every other node_pauses read takes, so a sandbox
+    can point the guard at a temp overlay instead of the operator's
+    ``~/.hscc/node_pauses.json``. ``None`` is the default root.
     """
     from . import heal_lease
     from .serving import VLLM_START_CMD
 
     result = {"ok": False, "output": "", "deferred": False, "refused": False,
-              "stop_failed": False, "verified": None, "registered_unit": None}
+              "paused": False, "stop_failed": False, "verified": None,
+              "registered_unit": None}
+
+    node = serving.PRIMARY_NODE
+
+    # Rule 0 — the pause overlay, read BEFORE the lease and before anything
+    # that could touch a unit: a skip must not even take a heal lease, because
+    # taking one advertises "a repair is in flight" to every other repair path
+    # for a repair we have decided not to perform. The read itself can only
+    # fail OPEN (node_pauses returns "no pauses" and WARNs on a bad file), so
+    # a corrupt overlay never freezes the fleet's ability to heal itself.
+    pause = _pause_covering_heal_target(pause_directory)
+    if pause is not None:
+        msg = (f"vLLM restart skipped: {node} is paused{_pause_label(pause)} — "
+               f"a paused node is not a fault and is never relaunched behind "
+               f"the operator's back (no lease taken, no stop issued, no "
+               f"launch)")
+        log(f"Restarting vLLM via sparkrun: {msg}", "WARN")
+        result.update(paused=True, output=msg)
+        return result
 
     # Rule 1 — the heal lease. Held => log the deferral, touch nothing.
     held = heal_lease.read_lease()
@@ -322,7 +422,6 @@ def restart_vllm(verify_fn=None):
         result.update(deferred=True, output=msg)
         return result
 
-    node = serving.PRIMARY_NODE
     port = serving.VLLM_PORT
 
     # Rules 2+3 resolve the stop target: the unit's recipe (same source as
@@ -336,7 +435,17 @@ def restart_vllm(verify_fn=None):
     except (IndexError, TypeError):
         recipe = ""
     unit = _registered_serving_unit(node, port)
-    stop_cmd = serving.vllm_stop_cmd(node=node, recipe=recipe, port=None)
+    # The stop mirrors VLLM_START_CMD — the exact argv this restart launches —
+    # rather than re-deriving a target by hand (t_8ad06a53). sparkrun's `stop`
+    # matches a workload by the INTENT HASH it recomputes from the recipe plus
+    # --port/--served-model-name/--tp, so a stop that omits a flag the launch
+    # passed matches NOTHING and answers "No running workload matches intent
+    # …"; rule 3 then aborts the restart (and the pause verb, which shares the
+    # builder, used to call that failure a stop). The flags are read back out of
+    # the start argv, so start and stop cannot drift apart here either.
+    stop_cmd = serving.vllm_stop_cmd(
+        node=node, recipe=recipe,
+        **serving.stop_flags_from_run_argv(VLLM_START_CMD))
 
     if unit is not None:
         msg = (f"vLLM restart refused: {node}:{port} is registered unit "
@@ -467,7 +576,8 @@ def dgx_verdict_serving_ok():
 
 
 def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
-                      restart_vllm_fn=None, send_macos_notification_fn=None):
+                      restart_vllm_fn=None, send_macos_notification_fn=None,
+                      pause_directory=None):
     """Watchdog cycle — one per watchdog tick (cadence =
     ``PERIODIC_INTERVALS["watchdog"]``, the SOT since GAP-B-6): check
     DGX+gateway, auto-restart vLLM, block on 3 failures.
@@ -481,6 +591,11 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
     for the full reason, including why the dgx STATE FILE was not used instead
     (its ``ok`` is ``publish_ok``, a different value from the ``serving_ok``
     this cycle consumes).
+
+    ``pause_directory`` (t_4ecbd9d0) is the node_pauses overlay-root seam this
+    cycle consults before it decides anything is broken. ``None`` — what the
+    daemon loop and ``hscc check`` pass — is the real ``~/.hscc``, where the
+    CLI writes the pause.
     """
     from .health import check_gateway
     from .desktop import send_macos_notification
@@ -492,7 +607,13 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
     if not check_gateway_fn:
         check_gateway_fn = check_gateway
     if not restart_vllm_fn:
-        restart_vllm_fn = restart_vllm
+        # Thread the overlay root into the real relaunch surface as well: a
+        # sandbox that pointed the seam at a temp overlay must not end up with
+        # a skip decided against the temp file and a relaunch that then reads
+        # the DEFAULT root (t_4ecbd9d0).
+        def _restart_with_pause_seam():
+            return restart_vllm(pause_directory=pause_directory)
+        restart_vllm_fn = _restart_with_pause_seam
     if not send_macos_notification_fn:
         send_macos_notification_fn = send_macos_notification
 
@@ -659,6 +780,63 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
         log("Watchdog: pipeline healthy")
         return True
 
+    # ── Node-pause skip (t_4ecbd9d0) — the seam, placed HERE on purpose ────
+    #
+    # Everything below this line is the fault machinery: append a failure entry
+    # to WATCHDOG_BLOCK_FILE (the breaker's memory), escalate at 3-in-10min to
+    # PIPELINE BLOCKED with a critical desktop notification, and stop+relaunch
+    # the unit. A node the operator parked with `hscc node pause` must reach
+    # none of it, so the skip sits BEFORE the failure entry is appended. The
+    # intentional-autodown path below gets away with appending and then not
+    # saving the entry; that works only because it has no later save in the
+    # same tick. Here the entry must never exist at all: "no heal strike
+    # recorded" is about the block file, and a strike that lives in the tick's
+    # own dict is one bad `save_watchdog_block` away from being real.
+    #
+    # This is also why the guard is not merely "restart_vllm refuses": a
+    # refusal inside the restart returns to the code above, which would still
+    # count the tick as a fault and page the operator for a parked node. Both
+    # guards exist and they cover different mistakes — this one covers the
+    # bookkeeping, restart_vllm's rule 0 covers any caller that never came
+    # through here (trigger.py).
+    #
+    # The stamp keeps the stream truthful (`ok: False` — the serving layer
+    # really is not answering) and says WHY, in the shape the intentional
+    # markers already use: the writer records reality plus its own reason
+    # marker, and the READER (verify's rows, `hscc status`) decides whether to
+    # excuse it. Those reader keys are published here so they are decided once:
+    # `paused` (True), `paused_node`, `paused_reason`, `paused_since`. What
+    # this tick does NOT do is notify — "paused" is not a fault, so it is not
+    # allowed to page anyone or to latch the breaker.
+    pause = _pause_covering_heal_target(pause_directory)
+    if pause is not None:
+        node = serving.PRIMARY_NODE
+        log(f"Watchdog: {node} is paused{_pause_label(pause)} — skipping "
+            f"auto-heal, not counting this tick as a fault (no heal strike, "
+            f"no restart, no alert)", "WARN")
+        write_state("watchdog", {
+            "ok": False,
+            "blocked": False,
+            "dgx": dgx_ok,
+            "gateway": gw_ok,
+            "auto_restart": False,
+            "auto_restart_skipped": "node_paused",
+            "paused": True,
+            "paused_node": node,
+            "paused_reason": pause.get("reason") or "",
+            "paused_since": pause.get("since"),
+            "last_check": now_iso(),
+            "auto_restart_count": block.get("auto_restart_count", 0),
+            "message": (f"Node {node} paused{_pause_label(pause)} — auto-heal "
+                        f"skipped; serving layer down by design, not counted "
+                        f"as a fault"),
+        })
+        # False, not True: this return value's documented contract is "healthy
+        # only when BOTH legs passed", and both legs did not. The stream says
+        # what the pause means; the bool says the pipeline is not serving —
+        # which is also what `hscc check watchdog` must print.
+        return False
+
     # Failure detected. If a restart is still within its load-grace window, the
     # model is legitimately loading — don't count this toward the breaker.
     cooldown_until = block.get("restart_cooldown_until")
@@ -798,8 +976,16 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
         refused = bool(restart_result.get("refused"))
         deferred_by_restart = bool(restart_result.get("deferred"))
         stop_failed = bool(restart_result.get("stop_failed"))
+        # Rule 0 can fire even on this path: the tick's own skip decision and
+        # restart_vllm's read are two reads, and the operator is allowed to
+        # pause the node in between. That is a legitimate narrow race, and the
+        # outcome it must produce is "paused" — a no-launch outcome, exactly
+        # like a refusal or a deferral: no launch happened, so nothing may be
+        # folded into the hollow-launch streak and nothing may page.
+        paused_by_restart = bool(restart_result.get("paused"))
         outcome = ("success" if restart_ok else
                    "deferred" if deferred_by_restart else
+                   "paused" if paused_by_restart else
                    "refused" if refused else
                    "stop-failed" if stop_failed else "hollow" if
                    restart_result.get("verified") is False else "failed")
@@ -815,7 +1001,8 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
                 + datetime.timedelta(minutes=VLLM_LOAD_GRACE_MINUTES)
             ).isoformat()
             verified = True
-        if not (deferred_by_restart or refused or stop_failed):
+        if not (deferred_by_restart or refused or stop_failed or
+                paused_by_restart):
             # A launch happened (success or hollow/failed) — fold the verdict
             # in and decide whether the hollow-launch alarm must fire.
             verified, alarm = _record_launch_verdict(block, restart_ok)
@@ -838,7 +1025,7 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
             "message": (f"Auto-restart #{count}: success" if restart_ok
                         else f"Auto-restart attempt: {outcome}"),
         })
-        if not deferred_by_restart and not refused:
+        if not deferred_by_restart and not refused and not paused_by_restart:
             # A real attempt happened: log + notify its REAL outcome — a
             # hollow launch is never logged "success", and a streak of them
             # escalates to the critical alarm (rule 4).

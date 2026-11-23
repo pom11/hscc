@@ -42,8 +42,8 @@ settings:
     # it survives every regenerate. A team picked in the Xcode UI is lost on the
     # next `xcodegen generate`.
     DEVELOPMENT_TEAM: ${HSCC_DEVELOPMENT_TEAM}
-    MARKETING_VERSION: "1.2.0"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "1.4.4"
+    CURRENT_PROJECT_VERSION: "9"
     SWIFT_VERSION: "5.9"
     SWIFT_EMIT_LOC_STRINGS: YES
     # Same derivation as the iOS spec: one prefix moves the bundle id and the
@@ -85,8 +85,23 @@ targets:
       - path: Sources/HSCCMac/MenuBarLabel.swift
       - path: Sources/HSCCMac/DashboardMonitor.swift
       - path: Sources/HSCCMac/DashboardView.swift
+      # The dropdown's two CLI surfaces (t_f5fdc6b2): `DashboardFleetReading` is
+      # the Foundation-only projection layer (no SwiftUI, no `Color`, so a
+      # harness can compile and RUN the bytes the dropdown runs, exactly like
+      # `cluster_widget_check.sh` does for the iOS tile), and
+      # `DashboardFleetSection` is the view that draws it. Neither formats a
+      # number: both re-expose `ClusterMonitorViewModel`'s CLI-parity cells.
+      - path: Sources/HSCCMac/DashboardFleetReading.swift
+      - path: Sources/HSCCMac/DashboardFleetSection.swift
+      # The "graphs" section of the dropdown (t_be4e1a48): per-node history
+      # over the canonical /v1/cluster/history, projected by the shared chart
+      # layer. An extension of DashboardView, so it rides the app target.
+      - path: Sources/HSCCMac/DashboardGraphsView.swift
       - path: Sources/HSCCMac/MacPreferences.swift
       - path: Sources/HSCCMac/MacSettingsView.swift
+      # No alert-feed files: the 2026-11-19 operator decision removed every
+      # notification path from the apps, so the Mac polls no feed and posts
+      # nothing through UserNotifications.
       # Sparkle 2 (t_2a1e5913): one SPUStandardUpdaterController owns daily
       # automatic checks, the manual menu/Settings check and the update badge.
       # App target only — the widget extension never updates itself.
@@ -100,7 +115,15 @@ targets:
       # copies: one decoder, one App Group store, one failover loop.
       - path: ../ios-app/Sources/Shared/SharedModels.swift
       - path: ../ios-app/Sources/Shared/SharedStore.swift
+      - path: ../ios-app/Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
+      # The alert-feed projection ("Needs me", card R3): the same Foundation-only
+      # order/filter/age rules the iOS widget draws, so the dropdown and the
+      # desktop tile cannot disagree.
+      - path: ../ios-app/Sources/Shared/NeedsMeReading.swift
+      # The merge queue's wire types, CLI cells and snapshot (MQ5): the dropdown
+      # draws the same rows/cells the widget extension does.
+      - path: ../ios-app/Sources/Shared/MergeQueueReading.swift
       # "Test connection" here runs the same per-address probe as iOS: one row
       # per saved address, one overall line, one last-working update.
       - path: ../ios-app/Sources/Shared/ConnectionAddressProbe.swift
@@ -109,6 +132,40 @@ targets:
       # as the CLI formats it, so the menu bar app draws the same strings the
       # iOS widgets draw and the terminal prints (t_61ed3f5e). Foundation-only.
       - path: ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
+      # The widget grid's own Foundation-only column reading, reused BY PATH
+      # rather than restated in macos-app: the dropdown draws the same four CLI
+      # host columns the `systemSmall` tile draws (GPU%, GPU Temp, CPU Temp, GPU
+      # Power), resolved by the same CLI column NAME, so a rename degrades both
+      # surfaces to `-` together instead of silently mislabelling one of them.
+      # It is the data half of the tile — no SwiftUI, no `WidgetKit`.
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGrid.swift
+      # The history chart layer (t_b6512c2e): the requestable metric set and the
+      # pixel reduction that preserves every column's min and max. Shared with
+      # iOS so the desktop draws the same series from the same bytes.
+      - path: ../ios-app/Sources/Shared/ClusterHistorySeries.swift
+      # The graph chart layer (t_f4551339) and the marks themselves, compiled
+      # into the MENU BAR APP as well as the widget extension: the dropdown's
+      # graphs section (t_be4e1a48) draws `ClusterGraphMarks`, the same Swift
+      # Charts view the Cluster Graph tile draws, rather than a macOS copy of it.
+      # `GraphWidgetEntry.swift` comes along because the marks' file draws its
+      # entry type; `WidgetRendering.swift` because that entry's chrome does.
+      # `widget_parity_check.sh` refuses a spec that drops the marks or their
+      # projection, because the dropdown would then draw numbers with no chart
+      # while both build gates stayed green.
+      - path: ../ios-app/Sources/Shared/ClusterGraphReading.swift
+      - path: ../ios-app/Sources/HSCCWidgets/WidgetRendering.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetMetrics.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetEntry.swift
+      - path: ../ios-app/Sources/HSCCWidgets/GraphWidgetViews.swift
+      # The status colour rule the marks ask for (`ClusterMetricLevel.color`)
+      # lives with the small-grid tile view, and the marks refuse to grow a
+      # second one — so that view comes along. The cell model behind it
+      # (`ClusterSmallGrid.swift`) is already listed above, listed ONCE on
+      # purpose: swiftc refuses a source file named twice in one module.
+      - path: ../ios-app/Sources/HSCCWidgets/ClusterSmallGridView.swift
+      # The large / extra-large table layout (t_9e64d9d9), same file the iOS
+      # widget target compiles. Foundation-only.
+      - path: ../ios-app/Sources/Shared/ClusterMonitorTables.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system, so the menu bar app and the iOS widgets share
       # the black + #FF5722 palette and spacing rather than growing a second.
@@ -124,6 +181,7 @@ targets:
       - path: ../ios-app/Sources/HSCC/WidgetSettingsStore.swift
       - path: ../ios-app/Sources/HSCC/Views/WidgetAppearanceView.swift
       - path: ../ios-app/Sources/HSCC/Views/WidgetSurfaceLabels.swift
+      - path: ../ios-app/Sources/HSCC/Views/WidgetSurfaceLabels.generated.swift
       # SettingsStore clears the shared last-known read cache on a cluster
       # switch. Foundation-only.
       - path: ../ios-app/Sources/HSCC/StateCache.swift
@@ -189,7 +247,7 @@ targets:
   #
   # Every widget file is the iOS extension's own source, referenced BY PATH.
   # There is no duplicated view, provider, entity query or configuration
-  # intent: the same six widgets ship on both platforms, and the few places
+  # intent: the same seven widgets ship on both platforms, and the few places
   # where WidgetKit differs (the accessory families do not exist on macOS)
   # are `#if os(iOS)` inside those files, not a second copy here.
   #
@@ -201,36 +259,67 @@ targets:
     platform: macOS
     deploymentTarget: "14.0"
     sources:
-      # The shared @main WidgetBundle: Cluster, Monitor, Cards Running,
-      # Kanban Monitor, Projects and Board Status.
-      - path: ../ios-app/Sources/HSCCWidgets/HSCCWidgetsBundle.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetMetrics.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ClusterWidgetViews.swift
+      - path: ../ios-app/Sources/HSCCWidgets
+      # The shared @main WidgetBundle: Cluster, Cards Running, Boards
+      # (the Kanban Monitor kind), Needs Me and Merge Queue.
       # The `systemMedium` CLI host table (t_2d1c12dc), reused BY PATH exactly
       # like the widget that draws it: the desktop's medium tile is the same
       # nine CLI columns, not a macOS re-implementation of them.
-      - path: ../ios-app/Sources/HSCCWidgets/CLIMonitorTableReading.swift
-      - path: ../ios-app/Sources/HSCCWidgets/CLIMonitorHostTableView.swift
-      - path: ../ios-app/Sources/HSCCWidgets/MonitorWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/MonitorViews.swift
-      - path: ../ios-app/Sources/HSCCWidgets/ProjectsWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/CardsRunningWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/KanbanMonitorWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/BoardStatusWidget.swift
-      - path: ../ios-app/Sources/HSCCWidgets/BoardStatusReading.swift
+      # The systemSmall grid (t_9e110d88). Both halves are needed here: the tile's
+      # Foundation-only cell model (also compiled into the decode harness) and the
+      # SwiftUI view that draws it, which `ClusterWidgetViews.swift` and
+      # `MonitorViews.swift` both reference.
+      # The host / serving tables and the XL detail block (t_9e64d9d9), the same
+      # file the iOS widget target compiles.
+      # The main orchestrator's alert feed ("Needs me", card R3), the same file
+      # the iOS widget extension compiles.
+      # The local merge queue (MQ5): the same file the iOS widget extension
+      # compiles, so the desktop tile draws the CLI's rows and cells.
+      # The history graph widget (t_f4551339). REQUIRED here, not optional: this
+      # target compiles `HSCCWidgetsBundle.swift` by path, and that bundle declares
+      # `ClusterGraphWidget()`, so leaving these four out is a "cannot find
+      # ClusterGraphWidget in scope" failure on the macOS gate rather than a
+      # missing tile. `ClusterGraphReading.swift` is the Foundation-only half the
+      # shared marks project (no WidgetKit, so the macOS swiftc harnesses can
+      # execute it too); `GraphWidgetViews.swift` holds `ClusterGraphMarks`, which
+      # takes an explicit pixel width and axis label count precisely so the
+      # menu-bar dropdown (t_be4e1a48) can embed it at 360 pt instead of wrapping a
+      # copy. Nothing in these files declares a second history read: the fetch is
+      # `WidgetDataClient.clusterHistory` = `GET /v1/cluster/history`.
+      - path: ../ios-app/Sources/Shared/ClusterGraphReading.swift
       # The one rendering-mode adapter (fullColor / accented / vibrant), shared
       # with the iOS extension rather than reimplemented for macOS.
-      - path: ../ios-app/Sources/HSCCWidgets/WidgetRendering.swift
       # One data path: the same App Group store and WidgetDataClient (GET-only,
       # multi-address failover) the iOS widget and the menu bar app use.
       - path: ../ios-app/Sources/Shared/SharedModels.swift
       - path: ../ios-app/Sources/Shared/SharedStore.swift
+      - path: ../ios-app/Sources/Shared/WidgetSurfaceKind.generated.swift
       - path: ../ios-app/Sources/Shared/WidgetDataClient.swift
+      - path: ../ios-app/Sources/Shared/NeedsMeReading.swift
+      # The client's `mergeQueue()` names `MergeQueueLite` (MQ5); the widget
+      # extension draws the same projection.
+      - path: ../ios-app/Sources/Shared/MergeQueueReading.swift
       - path: ../ios-app/Sources/Shared/ClusterNodeTally.swift
       # The monitor view-model (t_61ed3f5e): the widget cards draw the CLI's
       # own host and serving cells rather than re-deriving units and rounding.
       - path: ../ios-app/Sources/Shared/ClusterMonitorViewModel.swift
+      # The history chart layer (t_b6512c2e): the metric set a history surface
+      # may request, and the reduction that keeps every pixel column's min and
+      # max, so a desktop sparkline cannot draw a peak the data never had.
+      - path: ../ios-app/Sources/Shared/ClusterHistorySeries.swift
+      # The large / extra-large table layout (t_9e64d9d9), same file the iOS
+      # widget target compiles. Foundation-only.
+      - path: ../ios-app/Sources/Shared/ClusterMonitorTables.swift
+      # The history-trend projection (t_5ae8cfcf, re-pointed at the canonical
+      # route by t_0c99b017): the iOS widget target compiles it, so the desktop
+      # target compiles it too. Foundation-only, and the rule it owns — a metric
+      # the route did not report stays a gap and never becomes 0.0 — is the same
+      # rule the desktop tiles are held to, so leaving it out would give one
+      # platform a chart rule the other cannot reach.
+      - path: ../ios-app/Sources/Shared/ClusterHistoryTrend.swift
+      # The Lock Screen's four numbers + the one copy rule its three families
+      # share (t_314a3811), so the desktop extension words them identically.
+      - path: ../ios-app/Sources/Shared/ClusterLockScreen.swift
       - path: ../ios-app/Sources/Shared/CardsRunningProjection.swift
       # The one design system + WidgetStyle SwiftUI bridge.
       - path: ../ios-app/Sources/HSCC/Views/Theme.swift

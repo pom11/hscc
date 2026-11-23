@@ -28,7 +28,8 @@ signature, so that is the population: a worker is who actually runs under a
 role identity. Orchestrator-family SOULs (the cluster-wide ``orchestrator`` and
 any ``<project>-orch``) are deliberately EXCLUDED — ``orchestrators.py`` mints
 those dynamically and stamps them with the spec name of whatever shared spec it
-passes (e.g. ``general-orch`` carries ``## Role: orchestrator``), so a dir-name
+passes (e.g. the legacy general catch-all carries ``## Role: orchestrator``),
+so a dir-name
 comparison would red-flag a layout that is correct by construction. A dir with
 no worker signature is reported in the scanned count's summary, not judged.
 
@@ -165,7 +166,7 @@ def base_headings(base_path: Optional[str] = None) -> List[str]:
 
 
 def ops_headings() -> List[str]:
-    """The `## ` headings of the three operational blocks generator can pick.
+    """The `## ` headings of the operational blocks generator can pick.
 
     Read from generator itself rather than hardcoded: if a fourth ops block or a
     renamed ops heading lands there, this check follows automatically instead of
@@ -174,7 +175,8 @@ def ops_headings() -> List[str]:
     import generator
     out: List[str] = []
     for block in (generator._WORKER_OPS, generator._ORCH_OPS,
-                  generator._PROJECT_ORCH_OPS):
+                  generator._PROJECT_ORCH_OPS, generator._MAIN_OPS,
+                  generator._RETIRED_OPS):
         for h in _headings(block.format(name="x")):
             if h not in out:
                 out.append(h)

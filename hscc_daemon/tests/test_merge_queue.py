@@ -1,0 +1,2971 @@
+"""MQ1: local merge queue — clean merge, conflict handback, red gate,
+restart recovery and pause.
+
+Every test builds a throwaway bare origin + clone under ``tmp_path`` and
+injects the ``gh`` runner, so no test touches a real repository or network.
+"""
+
+import contextlib
+import json
+import os
+import sqlite3
+import subprocess
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from hscc_daemon import merge_queue as mq
+
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+def _git(cwd, *args):
+    proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                          text=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _repo_pair(tmp_path, *, shared=False, base="main"):
+    """Bare origin + a clone with ``base`` and one PR branch pushed."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True,
+                   capture_output=True, text=True)
+
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "init", "-b", base, str(seed)], check=True,
+                   capture_output=True, text=True)
+    _git(seed, "config", "user.email", "test@example.invalid")
+    _git(seed, "config", "user.name", "Test")
+    (seed / "README.md").write_text("base\n")
+    (seed / "shared.txt").write_text("one\ntwo\nthree\n")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-m", "base")
+    _git(seed, "remote", "add", "origin", str(origin))
+    _git(seed, "push", "-u", "origin", base)
+    _git(origin, "symbolic-ref", "HEAD", f"refs/heads/{base}")
+
+    clone = tmp_path / "project"
+    subprocess.run(["git", "clone", str(origin), str(clone)], check=True,
+                   capture_output=True, text=True)
+    _git(clone, "config", "user.email", "test@example.invalid")
+    _git(clone, "config", "user.name", "Test")
+
+    branch = "wt/t_card"
+    _git(clone, "checkout", "-b", branch)
+    if shared:
+        (clone / "shared.txt").write_text("one\nbranch\nthree\n")
+    else:
+        (clone / "topic.txt").write_text("branch change\n")
+    _git(clone, "add", ".")
+    _git(clone, "commit", "-m", "branch change")
+    _git(clone, "push", "-u", "origin", branch)
+    head = _git(clone, "rev-parse", "HEAD")
+
+    # Advance the base so the PR must actually rebase.
+    _git(clone, "checkout", base)
+    if shared:
+        (clone / "shared.txt").write_text("one\nmain\nthree\n")
+    else:
+        (clone / "main-only.txt").write_text("main moved\n")
+    _git(clone, "add", ".")
+    _git(clone, "commit", "-m", "main moves")
+    _git(clone, "push", "origin", base)
+    _git(clone, "checkout", branch)
+    return {"origin": origin, "repo": clone, "branch": branch, "head": head,
+            "base": base}
+
+
+def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
+              base_branch=None, timeout_s=None):
+    path = tmp_path / "registry.yaml"
+    mq_cfg = {}
+    if enabled is not None:
+        mq_cfg["enabled"] = enabled
+    if gates is not None:
+        mq_cfg["gates"] = gates
+    if base_branch is not None:
+        mq_cfg["base_branch"] = base_branch
+    if timeout_s is not None:
+        mq_cfg["timeout_s"] = timeout_s
+    body = {
+        "projects": [{
+            "name": name,
+            "repo": str(repo),
+            **({"merge_queue": mq_cfg} if mq_cfg else {}),
+        }]
+    }
+    try:
+        import yaml
+        path.write_text(yaml.safe_dump(body, sort_keys=False))
+    except ImportError:  # pragma: no cover - the daemon's deps carry yaml
+        lines = ["projects:", f"- name: {name}", f"  repo: {repo}",
+                 "  merge_queue:"]
+        if enabled is not None:
+            lines.append(f"    enabled: {'true' if enabled else 'false'}")
+        if gates is not None:
+            lines.append("    gates: [" + ", ".join(
+                f'"{g}"' for g in gates) + "]")
+        if timeout_s is not None:
+            lines.append(f"    timeout_s: {timeout_s}")
+        path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def _registry_multi(tmp_path, rows):
+    """Registry with several project rows (e.g. two names on one repo)."""
+    path = tmp_path / "registry-multi.yaml"
+    body = {"projects": [
+        {"name": name, "repo": str(repo),
+         "merge_queue": {"enabled": True, "gates": ["true"]}}
+        for name, repo in rows]}
+    import yaml
+    path.write_text(yaml.safe_dump(body, sort_keys=False))
+    return str(path)
+
+
+def _new_branch(repo, name, base="main"):
+    """A second PR branch off ``base``, pushed to origin; returns its head."""
+    _git(repo, "checkout", base)
+    _git(repo, "checkout", "-b", name)
+    (repo / f"{name.replace('/', '_')}.txt").write_text(f"{name}\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", name)
+    _git(repo, "push", "-u", "origin", name)
+    head = _git(repo, "rev-parse", "HEAD")
+    return head
+
+
+class FakeGh:
+    """Injectable ``gh`` runner: per-PR view + merge/comment capture.
+
+    ``views`` optionally supplies per-PR view overrides consumed in order, so a
+    test can change the answer after the queue's force-push.
+    ``required_checks`` is the answer to the branch-protection probe: a list
+    means required checks exist, ``None`` means the endpoint 404s (no checks).
+    """
+
+    def __init__(self, heads, *, views=None, required_checks=None):
+        self.heads = heads          # pr -> {headRefName, headRefOid}
+        self.views = {pr: list(seq) for pr, seq in (views or {}).items()}
+        self.required_checks = required_checks
+        self.calls = []
+        self.merged = []
+        self.merge_calls = []
+        self.comments = []
+
+    def _view(self, pr, cwd=None):
+        info = dict(self.heads[pr])
+        info.setdefault("baseRefName", "main")
+        info.setdefault("isCrossRepository", False)
+        info.update({
+            "number": pr,
+            "state": "MERGED" if pr in self.merged else "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "url": f"https://github.com/example/repo/pull/{pr}",
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "status": "COMPLETED",
+                 "conclusion": "SUCCESS"},
+            ],
+            "mergeCommit": ({"oid": f"squash-{pr}"}
+                            if pr in self.merged else None),
+        })
+        # A real `gh pr view` sees the remote branch, so mirror a successful
+        # queue push from the clone's remote-tracking ref (this is what makes
+        # the post-push head check meaningful in these fixtures).
+        if cwd and info.get("headRefName"):
+            proc = subprocess.run(
+                ["git", "-C", str(cwd), "rev-parse", "--verify", "--quiet",
+                 f"refs/remotes/origin/{info['headRefName']}"],
+                capture_output=True, text=True)
+            if proc.returncode == 0 and proc.stdout.strip():
+                info["headRefOid"] = proc.stdout.strip()
+        if self.views.get(pr):
+            info.update(self.views[pr].pop(0))
+        return info
+
+    def __call__(self, argv, cwd=None, **kwargs):
+        argv = list(argv)
+        self.calls.append(argv)
+        if argv[:3] == ["gh", "pr", "view"]:
+            pr = int(argv[3])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(
+                self._view(pr, cwd=cwd)), stderr="")
+        if argv[:3] == ["gh", "pr", "merge"]:
+            self.merged.append(int(argv[3]))
+            self.merge_calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[:3] == ["gh", "pr", "comment"]:
+            self.comments.append(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[:2] == ["gh", "api"] and "required_status_checks" in argv[2]:
+            if self.required_checks is None:
+                return SimpleNamespace(
+                    returncode=1, stdout="",
+                    stderr="gh: Not Found (HTTP 404)")
+            body = {"contexts": list(self.required_checks), "checks": []}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(body),
+                                   stderr="")
+        raise AssertionError(f"unexpected gh call: {argv}")
+
+
+def _state(tmp_path):
+    return str(tmp_path / "merge-queue-state.json")
+
+
+def _no_runner(argv, **kwargs):
+    raise AssertionError(f"runner should not have been called: {argv}")
+
+
+# ── clean merge ────────────────────────────────────────────────────────────
+
+def test_clean_rebase_gates_push_and_squash_merge(tmp_path):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, card="t_card", assignee="worker",
+                    path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [7]
+    # The PR branch on origin now carries the rebased commit on top of main.
+    origin = pair["origin"]
+    branch_files = _git(origin, "show", f"refs/heads/{pair['branch']}:topic.txt")
+    assert branch_files == "branch change"
+    assert _git(origin, "rev-list", "--count",
+                f"main..refs/heads/{pair['branch']}") == "1"
+
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["in_flight"] is None
+    assert ps["last"]["result"] == "merged"
+    assert ps["last"]["sha"] == "squash-7"
+    # The worktree is the queue's own, under ~/.hscc-style root.
+    assert (tmp_path / "queue" / "alpha" / ".git").exists()
+
+
+def test_merge_passes_the_pushed_head_to_match_head_commit(tmp_path):
+    """F5: the merge must be pinned to the SHA the queue just pushed."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    pushed = mq.load_state(_state(tmp_path))["projects"]["alpha"]["last"][
+        "pushed_sha"]
+    merge_call = gh.merge_calls[0]
+    assert "--match-head-commit" in merge_call
+    assert merge_call[merge_call.index("--match-head-commit") + 1] == pushed
+    assert len(pushed) == 40
+
+
+def test_post_push_re_read_does_not_merge_a_non_green_head(tmp_path):
+    """F5: checks reset by the force-push must stop the merge, not be ignored.
+
+    The pushed head's CI is PENDING, not failed: the claim must stay in flight
+    at ``ci-pending`` (not fall into a wait list that only drains on an empty
+    queue) and a later tick merges that exact pushed SHA once it is green.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {3: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={3: [{}, {
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "status": "IN_PROGRESS",
+                 "conclusion": None}],
+        }]})
+    mq.add_to_queue("alpha", 3, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "ci-pending", result
+    assert gh.merged == []
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == []
+    assert [e["pr"] for e in ps["waiting"]] == []
+    assert ps["in_flight"]["stage"] == "ci-pending"
+    pushed = _git(pair["origin"], "rev-parse", f"refs/heads/{pair['branch']}")
+    assert ps["in_flight"]["pushed_sha"] == pushed
+    assert [r["state"] for r in mq.view(
+        state_path=_state(tmp_path), registry_path=registry)["rows"]] == [
+            "ci-pending"]
+
+    # Next tick: CI on the pushed head is green. Re-check in place and merge
+    # that SHA; nothing was re-rebased or re-gated.
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [3]
+    assert gh.merge_calls[0][-1] == pushed
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"] is None and ps["queue"] == [] \
+        and ps["waiting"] == []
+
+
+def test_post_push_re_read_does_not_merge_a_changed_head(tmp_path):
+    """F5: merge only the exact head the queue pushed and re-read."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {4: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={4: [{}, {"headRefOid": "c" * 40}]})
+    mq.add_to_queue("alpha", 4, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "waiting", result
+    assert gh.merged == []
+    doc = mq.load_state(_state(tmp_path))
+    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == []
+    assert [e["pr"] for e in doc["projects"]["alpha"]["waiting"]] == [4]
+
+
+@pytest.mark.parametrize("required,expected_merge", [
+    (["ci"], False),
+    (None, True),
+])
+def test_empty_rollup_after_push_follows_the_required_checks_answer(
+        tmp_path, required, expected_merge):
+    """F5: empty after a push is green only when the repo requires no checks."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {5: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={5: [{}, {"statusCheckRollup": []}]},
+        required_checks=required)
+    mq.add_to_queue("alpha", 5, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    if expected_merge:
+        assert result["processed"][0]["result"] == "merged", result
+        assert gh.merged == [5]
+    else:
+        # Empty rollup with required checks is "not reported yet": hold the
+        # pushed head's claim instead of confusing it with a red gate.
+        assert result["processed"][0]["result"] == "ci-pending", result
+        assert gh.merged == []
+
+
+def test_one_pr_per_project_per_tick_is_fifo(tmp_path):
+    pair = _repo_pair(tmp_path)
+    # Second branch off main.
+    _git(pair["repo"], "checkout", "main")
+    _git(pair["repo"], "checkout", "-b", "wt/t_second")
+    (pair["repo"] / "second.txt").write_text("second\n")
+    _git(pair["repo"], "add", ".")
+    _git(pair["repo"], "commit", "-m", "second")
+    _git(pair["repo"], "push", "-u", "origin", "wt/t_second")
+    second_head = _git(pair["repo"], "rev-parse", "HEAD")
+
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        8: {"headRefName": "wt/t_second", "headRefOid": second_head},
+    })
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    mq.add_to_queue("alpha", 8, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run)
+
+    assert [p["pr"] for p in result["processed"]] == [7]
+    assert gh.merged == [7]
+    doc = mq.load_state(_state(tmp_path))
+    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == [8]
+
+
+# ── conflict -> resolve handback ───────────────────────────────────────────
+
+def test_conflict_comments_pr_and_hands_card_back(tmp_path):
+    pair = _repo_pair(tmp_path, shared=True)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    handed = []
+    mq.add_to_queue("alpha", 9, card="t_conflict", assignee="worker",
+                    path=_state(tmp_path))
+
+    result = mq.tick(
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        handback=lambda card, assignee, msg: handed.append(
+            (card, assignee, msg)) or True)
+
+    assert result["processed"][0]["result"] == "conflict", result
+    assert "shared.txt" in result["processed"][0]["conflicted"]
+    assert handed and handed[0][0] == "t_conflict"
+    assert "shared.txt" in handed[0][2]
+    # MQ3: the handback is a resolve step for the card's OWN branch.
+    assert "git rebase origin/main" in handed[0][2]
+    assert f"git push --force-with-lease origin {pair['branch']}" in handed[0][2]
+    assert "Never force-push main or any other branch" in handed[0][2]
+    assert gh.comments and "conflicted" in " ".join(gh.comments[0])
+    doc = mq.load_state(_state(tmp_path))
+    assert doc["projects"]["alpha"]["queue"] == []
+    assert doc["projects"]["alpha"]["last"]["result"] == "conflict"
+    # aborted cleanly: no rebase left in progress in the queue worktree
+    wt = tmp_path / "queue" / "alpha"
+    assert not (wt / ".git" / "rebase-merge").exists()
+    assert not (wt / ".git" / "rebase-apply").exists()
+
+
+def test_resolve_instructions_name_the_card_branch():
+    """The push target is the branch recorded on the PR, else the card's own."""
+    named = mq.resolve_instructions("feature/recorded")
+    assert "git rebase origin/main" in named
+    assert "git push --force-with-lease origin feature/recorded" in named
+    fallback = mq.resolve_instructions(None)
+    assert "the branch recorded on your card" in fallback
+
+
+# ── red gate -> resolve handback ───────────────────────────────────────────
+
+def test_red_gate_comments_tail_and_hands_card_back(tmp_path):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["sh -c 'echo BOOM >&2; exit 7'"])
+    gh = FakeGh({11: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    handed = []
+    mq.add_to_queue("alpha", 11, card="t_red", assignee="worker",
+                    path=_state(tmp_path))
+
+    result = mq.tick(
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        handback=lambda card, assignee, msg: handed.append(
+            (card, assignee, msg)) or True)
+
+    assert result["processed"][0]["result"] == "red-gate", result
+    assert "exit 7" in result["processed"][0]["gate"]
+    assert handed and "BOOM" in handed[0][2]
+    assert "BOOM" in " ".join(gh.comments[0])
+    # The red-gate handback carries the same own-branch resolve step.
+    assert "git rebase origin/main" in handed[0][2]
+    assert f"git push --force-with-lease origin {pair['branch']}" in handed[0][2]
+    # Nothing was pushed or merged.
+    assert gh.merged == []
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") == pair["head"]
+
+
+# ── a gate that runs out of budget ─────────────────────────────────────────
+#
+# The queue used to conflate "the gate never answered" with "the gate said
+# no": one `(False, output)` tuple served both, so a slow queue recorded
+# `red-gate`, dropped the PR out of the queue and told the author to fix code
+# that was never shown to be broken.  Measured on main, the PR #360 and #460
+# handbacks both end in the literal line `timeout after 1800s` and neither is
+# a test failure.  These cases pin the split.  No case here runs a real gate:
+# `mq.subprocess` — the only thing `_run_gate` shells through — is replaced by
+# a namespace carrying `run` plus the real `TimeoutExpired` class, so a fake
+# timeout is the only answer the leg can get and no repo or socket is touched
+# by the gate path.
+
+class _FakeGateProc:
+    """The slice of ``subprocess.Popen`` that ``_run_gate`` actually touches.
+
+    Deliberately *not* a real process: a gate test must never run a real suite,
+    and a fake whose ``pid`` belongs to no OS process is also the proof that
+    ``_kill_gate_group`` cannot crash the tick when its kill lands on ESRCH.
+    """
+
+    def __init__(self, *, returncode=0, stdout="", stderr="",
+                 timeout=None, pid=None):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self._timeout = timeout
+        self.pid = pid
+        self.killed = False
+        #: Every `timeout=` the leg was actually given.  Recorded rather than
+        #: consumed: the budget is passed to `communicate()`, not to `Popen`, so
+        #: the recorded kwargs cannot show that a timed-out leg was told where
+        #: its budget was — and a leg with no budget is the bug this file exists.
+        self.budgets = []
+
+    def communicate(self, timeout=None):
+        self.budgets.append(timeout)
+        if self._timeout is not None:
+            raise self._timeout
+        return self.stdout, self.stderr
+
+    def kill(self):
+        self.killed = True
+
+
+def _fake_subprocess(*, popem):
+    """Stand-in for the module ``_run_gate`` shells through.
+
+    Returns ``(fake_module, calls)``: ``calls`` is a mutable list that receives
+    one entry per ``Popen`` — ``(argv, kwargs)`` — which is how a test reads the
+    argv the gate *built* instead of guessing at it, and how it reaches the proc
+    that ``_run_gate`` handed to ``_kill_gate_group``.
+    """
+    calls = []
+
+    def popem_factory(argv, **kwargs):
+        proc = popem(argv, kwargs)
+        calls.append((argv, kwargs, proc))
+        return proc
+
+    fake = SimpleNamespace(Popen=popem_factory, PIPE=subprocess.PIPE,
+                           TimeoutExpired=subprocess.TimeoutExpired)
+    return fake, calls
+
+
+def _timeout_popem(stdout=b"", stderr=b"", *, pid=None):
+    """A gate that never answers, carrying ``stdout``/``stderr`` as the OS does.
+
+    The attributes are assigned after construction because that is exactly what
+    CPython's ``Popen._communicate`` does on the timeout path — it attaches the
+    partial output as ``.stdout``/``.stderr``.  Asserting through the real
+    attribute path is the point: the old code threw these values away here.
+    """
+    def build(argv, kwargs):
+        exc = subprocess.TimeoutExpired(
+            cmd=argv, timeout=kwargs.get("timeout") or 0)
+        exc.stdout = stdout
+        exc.stderr = stderr
+        return _FakeGateProc(timeout=exc, pid=pid)
+    return build
+
+
+def _exit_popem(code, stderr="", stdout=""):
+    def build(argv, kwargs):
+        return _FakeGateProc(returncode=code, stdout=stdout, stderr=stderr)
+    return build
+
+
+def _tick_that_timed_out(tmp_path, monkeypatch, *, pr, card):
+    """One tick whose single gate leg exhausts a 42 s budget."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["sh -c 'sleep 999'"], timeout_s=42)
+    gh = FakeGh({pr: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    handed = []
+    mq.add_to_queue("alpha", pr, card=card, assignee="worker",
+                    path=_state(tmp_path))
+    fake, _calls = _fake_subprocess(popem=_timeout_popem())
+    monkeypatch.setattr(mq, "subprocess", fake)
+    result = mq.tick(
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        handback=lambda card_, assignee, msg: handed.append(
+            (card_, assignee, msg)) or True)
+    return result, pair, gh, handed, registry
+
+
+def test_run_gate_returns_a_tri_state_verdict_not_a_bool(tmp_path,
+                                                         monkeypatch):
+    """The budget is a THIRD answer, not a flavour of failure."""
+    worktree = str(tmp_path)
+
+    fake, _calls = _fake_subprocess(popem=_timeout_popem())
+    monkeypatch.setattr(mq, "subprocess", fake)
+    verdict, output = mq._run_gate("sh -c 'sleep 999'", worktree, 42)
+    assert verdict == "timeout", verdict
+    assert "timeout after 42s" in output, output
+
+    fake, _calls = _fake_subprocess(popem=_exit_popem(0))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    assert mq._run_gate("true", worktree, 42)[0] == "pass"
+
+    fake, _calls = _fake_subprocess(popem=_exit_popem(7, "BOOM"))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    verdict, output = mq._run_gate("sh -c 'exit 7'", worktree, 42)
+    assert verdict == "fail", verdict
+    assert "BOOM" in output, output
+
+
+# ── gate process handling: QoS, the orphan, and the evidence ───────────────
+#
+# Three measured failures of the same ~15 lines, all fixed inside _run_gate:
+#   1. the gate inherited the daemon launchd job's `ProcessType => Background`
+#      and every one of the 12 pytest legs was scheduled as background work —
+#      measured 3.34x slower on ONE leg in the SAME worktree (144.9 s vs
+#      484.7 s warm), which is what exhausted a budget the suite itself fits
+#      into with 39% to spare;
+#   2. the timeout killed the `sh` but not the process group, so the gate's
+#      pytest outlived its own budget and the next attempt ran against it;
+#   3. `TimeoutExpired.stdout` arrives as `bytes` and was discarded by an
+#      `isinstance(..., str)` test, so a timeout handback measured as
+#      `['', '', 'timeout after 1800s']` and was indistinguishable from a
+#      failure by anyone reading the PR comment.
+# Every case below injects a fake gate runner and asserts on a *recorded* value:
+# no wall-clock measurement (flaky on a shared host), no real repo, no network.
+
+def _gate_argv(monkeypatch, *, popem, command="bash scripts/run_tests.sh",
+               worktree="/nonexistent-worktree", timeout=42):
+    """Run one fake gate leg and hand back the argv it was launched with.
+
+    Only the *process* is faked; the leg still runs through the real
+    ``_run_gate``, so what a test reads is the argv production built rather than
+    one the test assembled for itself.  The cwd is never opened: a fake
+    ``Popen`` does not validate it, which is how these cases stay off the repo.
+    """
+    fake, calls = _fake_subprocess(popem=popem)
+    monkeypatch.setattr(mq, "subprocess", fake)
+    mq._run_gate(command, worktree, timeout)
+    return calls
+
+
+def test_run_gate_builds_the_qos_mechanism_into_its_argv(tmp_path,
+                                                         monkeypatch):
+    """The QoS fix must be visible in the argv, not in a stopwatch.
+
+    Asserted on the constructed argv because a wall-clock assertion on a shared
+    host measures whatever else is running, and would then be deleted the first
+    time it flaked — taking the guard with it.
+    """
+    command = "sh -c 'sleep 999'"
+    calls = _gate_argv(monkeypatch, popem=_exit_popem(0), command=command)
+
+    assert len(calls) == 1, calls
+    argv, kwargs = calls[0][0], calls[0][1]
+    # The operator's gate string arrives as ONE argument to a shell, whatever
+    # sits in front of it.  This is the invariant the QoS prefix must not break.
+    assert argv[-3:] == [mq.GATE_SHELL, "-c", command], argv
+    if mq._gate_qos_prefix():
+        prefix = list(mq._gate_qos_prefix())
+        assert argv[:len(prefix)] == prefix, argv
+        assert "taskpolicy" in argv[0], argv
+        assert mq.GATE_QOS_POLICY_CLASS in argv, argv
+    else:
+        # Fail-safe host (no taskpolicy): the gate keeps its pre-fix behaviour.
+        # Prefixing a program that does not exist would exit 127 and record
+        # `red-gate` against a PR whose code was never compiled.
+        assert argv == [mq.GATE_SHELL, "-c", command], argv
+    # NOT shell=True: with a list argv, POSIX `shell=True` runs
+    # `/bin/sh -c argv[0] argv[1] ...`, so the QoS program alone would be the
+    # command and `-c utility /bin/sh -c <gate>` would become the shell's $0/$1/
+    # $2 — a bare `taskpolicy`, exit 64, `red-gate` on every PR.  See
+    # :func:`test_the_gate_argv_actually_runs_the_operators_command`, which execs
+    # the argv for real rather than trusting its shape.
+    assert kwargs.get("shell") is False, kwargs
+    # The gate string survives as exactly ONE argv element — never split across
+    # several, which is what silently swallowed it before.  (It is also the LAST
+    # element; `argv.index("-c")` would find taskpolicy's own `-c`, not the
+    # shell's, so it is not a way to locate the shell here.)
+    assert argv[-1] == command, argv
+    assert argv.count(command) == 1, argv
+
+
+def test_the_gate_argv_actually_runs_the_operators_command(tmp_path):
+    """The argv must be EXECUTED, not only inspected.
+
+    This is the case the shape assertions cannot stand in for.  A fake ``Popen``
+    records whatever argv it is handed and can never notice that a list argv with
+    ``shell=True`` means "exec argv[0], hand the rest to the shell as $0/$1/$2":
+    that build satisfied every shape assertion and then exited **64** for real,
+    because the command the OS ran was a bare `taskpolicy`.  Through the queue
+    that is a `red-gate` on every PR on the Mac, against code that was never
+    compiled — the exact false-red this card exists to avoid.
+
+    So this case runs the argv `_run_gate` builds, unchanged, for real.  No fake
+    is injected and the production path (argv, `shell=False`, the new session)
+    is what is under test.  The gate here is a `printf` in a throwaway tmp dir,
+    not the suite: no repo, no network, no daemon, milliseconds — and no
+    wall-clock claim, so it cannot flake on a busy host.
+    """
+    command = "printf alpha; printf ' %s' beta && printf ' %s' gamma"
+    verdict, output = mq._run_gate(command, str(tmp_path), 60)
+
+    assert verdict == "pass", (verdict, output)
+    # A shell ran the WHOLE string: two commands, a `&&` and a quoted format
+    # argument all survived the argv construction intact.
+    assert "alpha beta gamma" in output, output
+
+
+def test_the_qos_prefix_names_a_program_that_can_actually_be_executed():
+    """A prefix pointing at nothing would exit 127 and read as a red gate."""
+    prefix = list(mq._gate_qos_prefix())
+    if not prefix:
+        # Fail-safe host (no taskpolicy, or non-macOS): nothing to exec, which
+        # is exactly why the gate is left alone rather than prefixed.
+        assert prefix == []
+        return
+    program = prefix[0]
+    assert os.path.isabs(program), program
+    assert os.path.exists(program) and os.access(program, os.X_OK), program
+    # `-c <class>` is taskpolicy's own contract; if the flag or the class name
+    # drifts, the tool prints its usage and exits 64 — a red gate, not a no-op.
+    assert prefix[1:] == ["-c", mq.GATE_QOS_POLICY_CLASS], prefix
+
+
+def test_run_gate_starts_its_gate_in_its_own_session(tmp_path, monkeypatch):
+    """Without a new session there is no group to kill, so item 2 is a no-op."""
+    calls = _gate_argv(monkeypatch, popem=_exit_popem(0))
+
+    assert calls[0][1].get("start_new_session") is True, calls[0][1]
+
+
+def test_an_unconfigured_timeout_s_still_gates_on_the_3600s_default(tmp_path,
+                                                                    monkeypatch):
+    """A registry that says nothing about the budget still gets 3600 s.
+
+    The default lives in `process_entry` (`cfg.get("timeout_s") or
+    DEFAULT_GATE_TIMEOUT_S`), *above* `_run_gate`, so it is pinned through a real
+    tick whose injected runner records the budget it was handed.  Two halves
+    matter: the queue must still pass 3600 down, and the leg must actually be
+    told it — a gate started with no budget is a gate that can run forever.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["bash scripts/run_tests.sh"])  # no timeout_s
+    import yaml
+    declared = yaml.safe_load(open(registry))["projects"][0]["merge_queue"]
+    assert "timeout_s" not in declared, declared
+    gh = FakeGh({21: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 21, path=_state(tmp_path))
+    fake, calls = _fake_subprocess(popem=_timeout_popem(pid=1))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg", lambda pgid, sig: None)
+
+    result = mq.tick(state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run, handback=lambda *args: True)
+
+    row = result["processed"][0]
+    assert row["result"] == "gate-timeout", row
+    assert row["timeout_s"] == 3600, row
+    assert mq.DEFAULT_GATE_TIMEOUT_S == 3600, mq.DEFAULT_GATE_TIMEOUT_S
+    budgets = calls[0][2].budgets
+    # The leg was told where its budget was.  The second, budget-less call is
+    # the reaping `communicate()` after the SIGKILL — it must not carry one.
+    assert budgets[0] == mq.DEFAULT_GATE_TIMEOUT_S, budgets
+    assert len(budgets) == 2 and budgets[1] is None, budgets
+
+
+def test_gate_qos_prefix_fails_safe_without_taskpolicy(monkeypatch):
+    """A host without the tool gets no prefix — a false red costs more."""
+    monkeypatch.setattr(mq, "_GATE_QOS_PREFIX_CACHE", None)
+    monkeypatch.setattr(mq, "TASKPOLICY_PATH", "/nonexistent/taskpolicy")
+
+    assert mq._gate_qos_prefix() == ()
+
+
+def test_gate_qos_prefix_asks_for_the_measured_class(monkeypatch):
+    """Positive arm: with the tool present the gate does ask for elevation."""
+    monkeypatch.setattr(mq, "_GATE_QOS_PREFIX_CACHE", None)
+    monkeypatch.setattr(mq, "TASKPOLICY_PATH", __file__)  # any real file
+
+    prefix = mq._gate_qos_prefix()
+    assert prefix[0] == __file__, prefix
+    assert "-c" in prefix and mq.GATE_QOS_POLICY_CLASS in prefix, prefix
+    # The prefix is a prefix, never a shell rewrite of the gate itself.
+    assert all(" " not in part or part == prefix[0] for part in prefix), prefix
+
+
+def test_gate_timeout_kills_the_whole_process_group_and_still_requeues(
+        tmp_path, monkeypatch):
+    """No leg may survive its own budget, and the kill must not be load-bearing.
+
+    Asserted on the *recorded* process group ``os.killpg`` was aimed at — not on
+    a sleep.  The recorded pid is the gate's own pid, which is only equal to its
+    process-group id because the leg runs `start_new_session=True`; killing that
+    pgid reaches the pytest the shell spawned, which is the orphan that poisoned
+    the next attempt.
+    """
+    killed = []
+    fake, calls = _fake_subprocess(popem=_timeout_popem(pid=424242))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg",
+                        lambda pgid, sig: killed.append((pgid, sig)))
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert len(killed) == 1, killed
+    pgid, sig = killed[0]
+    assert pgid == 424242, "must target the gate's own group, not its parent"
+    assert sig == mq.signal.SIGKILL, sig
+    # And the process group the kill aimed at is the one the leg was started in.
+    assert calls[0][1].get("start_new_session") is True, calls[0][1]
+    assert calls[0][2].killed is True, "the shell itself must be reaped too"
+    # The kill is cleanup, never the thing that ends the leg: the verdict, the
+    # budget and the tail are what the caller requeues on.
+    assert verdict == "timeout", verdict
+    assert "timeout after 42s" in output, output
+
+
+def test_gate_timeout_returns_its_verdict_even_when_the_kill_cannot_land(
+        tmp_path, monkeypatch):
+    """A kill that cannot land may not eat the verdict that saves the PR.
+
+    Two real shapes: the group already gone (`ESRCH`), and a fake/absent pid.
+    Both used to be hypothetical; an escaping exception here would take the
+    daemon's whole tick down instead of handing the PR back.
+    """
+    def exploding_killpg(pgid, sig):
+        raise ProcessLookupError(3, "No such process")
+
+    fake, calls = _fake_subprocess(popem=_timeout_popem(pid=999999))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg", exploding_killpg)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+    assert verdict == "timeout", verdict
+    assert "timeout after 42s" in output, output
+    assert calls[0][2].killed is True
+
+    # No pid at all: still a timeout, still a requeue, still no escape.
+    fake, calls = _fake_subprocess(popem=_timeout_popem(pid=None))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    hit = []
+    monkeypatch.setattr(mq.os, "killpg",
+                        lambda pgid, sig: hit.append(pgid))
+
+    verdict, _output = mq._run_gate("bash scripts/run_tests.sh",
+                                    str(tmp_path), 42)
+    assert verdict == "timeout", verdict
+    assert hit == [], "no pid means no group to aim at, not a blind kill"
+
+
+def test_gate_timeout_handback_carries_bytes_evidence(tmp_path, monkeypatch):
+    """A timeout must be readable as a timeout, with real last lines.
+
+    This is the `['', '', 'timeout after 1800s']` case: `TimeoutExpired.stdout`
+    is `bytes`, and the old `isinstance(..., str)` test turned real output into
+    an empty handback, so nobody could tell a timeout from a failure.
+    """
+    fake, _calls = _fake_subprocess(
+        popem=_timeout_popem(stdout=b"real tail line",
+                             stderr=b"FAILED hscc_daemon/tests/test_x.py"))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg", lambda pgid, sig: None)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "timeout", verdict
+    assert "real tail line" in output, output
+    assert "FAILED hscc_daemon/tests/test_x.py" in output, output
+    assert "timeout after 42s" in output, output
+
+
+def test_gate_timeout_handback_survives_a_truncated_multibyte_tail(
+        tmp_path, monkeypatch):
+    """One half-written character at the kill point may not eat the whole tail."""
+    fake, _calls = _fake_subprocess(
+        popem=_timeout_popem(stdout=b"leg 7 ok\xe2\x80"))  # cut mid-em-dash
+    monkeypatch.setattr(mq, "subprocess", fake)
+    monkeypatch.setattr(mq.os, "killpg", lambda pgid, sig: None)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "timeout", verdict
+    assert "leg 7 ok" in output, output
+
+
+def test_run_gate_reports_a_gate_that_could_not_be_started(tmp_path, monkeypatch):
+    """An un-startable gate is a real failure, not a budget problem.
+
+    A `timeout` verdict requeues and retries, so mislabelling this as a timeout
+    would turn a broken gate into a PR that never lands and never explains why.
+    """
+    def raiser(argv, kwargs):
+        raise OSError(2, "No such file or directory")
+
+    fake, _calls = _fake_subprocess(popem=raiser)
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "fail", verdict
+    assert "could not run gate" in output, output
+
+
+def test_gate_timeout_is_not_a_red_gate_and_keeps_the_pr(tmp_path,
+                                                         monkeypatch):
+    """A budget exhaustion is non-terminal: back to the wait list, not gone."""
+    result, pair, gh, _handed, _registry_path = _tick_that_timed_out(
+        tmp_path, monkeypatch, pr=31, card="t_slow")
+
+    row = result["processed"][0]
+    assert row["result"] == "gate-timeout", result
+    assert row["timeout_s"] == 42, row
+    assert "sleep 999" in row["gate"], row
+
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert [e["pr"] for e in ps["waiting"]] == [31], ps
+    assert ps["queue"] == []
+    assert ps["in_flight"] is None
+    assert ps["last"]["result"] == "gate-timeout", ps["last"]
+    # Nothing recorded anywhere may read as a test failure.
+    assert "red-gate" not in json.dumps(doc), doc
+    # And nothing was pushed or merged on the way out.
+    assert gh.merged == []
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") == pair["head"]
+
+
+def test_gate_timeout_handback_names_the_budget_and_blames_nobody(
+        tmp_path, monkeypatch):
+    """The author must be told it is a budget, not a broken PR."""
+    _result, _pair, gh, handed, _registry_path = _tick_that_timed_out(
+        tmp_path, monkeypatch, pr=32, card="t_slow2")
+
+    assert handed, "a handed-back gate must still say something"
+    card, assignee, body = handed[0]
+    assert (card, assignee) == ("t_slow2", "worker"), handed
+    assert "42s" in body, body
+    assert "NOT a test failure" in body, body
+    assert "will look again" in body, body
+    # The resolve/force-push script belongs to a gate that actually said no.
+    assert "Resolve it as this card's worker" not in body, body
+    assert "force-with-lease" not in body, body
+    assert "git rebase origin/main" not in body, body
+    # The PR comment carries the same words, not the old "gate failed" text.
+    comment = " ".join(gh.comments[0])
+    assert "NOT a test failure" in comment, comment
+    assert "gate failed" not in comment, comment
+
+
+def test_a_real_red_gate_still_drops_the_entry(tmp_path, monkeypatch):
+    """Must not regress: a genuine non-zero gate is still terminal."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["sh -c 'exit 7'"],
+                         timeout_s=42)
+    gh = FakeGh({33: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 33, card="t_red_drop", path=_state(tmp_path))
+    fake, _calls = _fake_subprocess(popem=_exit_popem(7, "BOOM"))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "red-gate", result
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    # Dropped, not requeued: `waiting` stays empty, which is exactly what the
+    # timeout case above must NOT do.
+    assert ps["queue"] == [] and ps["waiting"] == []
+    assert ps["in_flight"] is None
+    assert ps["last"]["result"] == "red-gate", ps["last"]
+    assert gh.merged == []
+
+
+# ── the failing TEST NAME must survive the tail ────────────────────────────
+#
+# Measured on main 2026-11-23: PR #673 came back `red-gate` and its handback
+# named no test at all.  It was not a truncated write — the CLI comment path
+# stores what it is given (`--max-len` is opt-in and the queue never passes it)
+# — it was `_tail(text, 40)`: `scripts/run_tests.sh` runs 12 legs and the failed
+# leg's pytest short summary (`FAILED path::test - reason`) sits ~60 lines above
+# the end of the run, because the legs that ran *after* it plus the trailing
+# stderr noise the API appends push it out of the window.  The most the author
+# and the orchestrator could read was `✗ hscc-api (pytest exit 1)`, which says a
+# leg went red but not which test — so flake-vs-real needed a manual
+# `gh pr checks` plus an Actions crawl of a 22-minute log.
+#
+# The digest below is taken from the FULL output and leads the handback; the
+# tail itself is untouched, so a green gate's output is byte-identical.
+
+#: The line the 40-line tail lost, spelled exactly as pytest prints it.
+_FAILED_TEST = ("FAILED hscc-api/tests/test_ws_relay.py::"
+                "test_writer_restarts_after_kill - assert 0 == 1")
+
+#: The only line in the old handback that hinted anything was red.
+_RED_LEG_ROW = "  ✗ hscc-api (pytest exit 1)"
+
+
+def _multi_leg_gate_output():
+    """`run_tests.sh`-shaped output whose failure is NOT in the last 40 lines.
+
+    The distance is the whole bug: every line after `_FAILED_TEST` is filler the
+    tail window kept, and there are >40 of them ON PURPOSE, so this case fails
+    without the digest instead of passing by luck of a short suite.
+    """
+    rows = ["━━━ hscc_daemon ━━━", "................ [100%]",
+            "649 passed, 5 skipped in 1358.65s (0:22:38)",
+            "━━━ hscc-api ━━━", "....F.... [ 42%]",
+            "========== short test summary info ==========", _FAILED_TEST,
+            "1 failed, 412 passed in 300.12s"]
+    for leg in ("memori_byodb", "scripts", ".github/scripts",
+                "comfyui-sparkrun"):
+        rows.append(f"━━━ {leg} ━━━")
+        rows += [f"......... {leg} progress {i} [ 50%]" for i in range(13)]
+        rows.append("134 passed in 40.54s")
+    rows += ["", "━━━ Summary ━━━", "  ✓ hscc_daemon", _RED_LEG_ROW,
+             "  ✓ comfyui-sparkrun", "FAILURES ABOVE"]
+    return "\n".join(rows)
+
+
+#: The stderr that ran_tests.sh's consumers append after stdout, which lands
+#: *behind* every pytest line in the combined tail (the concatenation in
+#: `_run_gate` puts stderr last).
+_GATE_STDERR_NOISE = "\n".join(
+    f"client 127.0.0.1 disconnected mid-request (BrokenPipeError)"
+    for _ in range(5))
+
+
+def test_a_failing_legs_test_line_survives_the_40_line_tail(tmp_path,
+                                                            monkeypatch):
+    """A red leg's `FAILED path::test` must reach the handback, verbatim.
+
+    PR #673 is the case: the tail window held the later legs' dots and the
+    summary block, so the comment proved the suite was red and nothing else.
+    """
+    fake, _calls = _fake_subprocess(
+        popem=_exit_popem(7, stderr=_GATE_STDERR_NOISE,
+                          stdout=_multi_leg_gate_output()))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "fail", verdict
+    assert _FAILED_TEST in output, output
+    assert _RED_LEG_ROW.strip() in output, output
+    # The tail is still there: the digest is added, never substituted.
+    assert "FAILURES ABOVE" in output, output
+    assert output.index(_FAILED_TEST) < output.index("FAILURES ABOVE"), output
+
+
+def test_a_green_gate_hands_back_the_plain_tail_unchanged(tmp_path,
+                                                          monkeypatch):
+    """Nothing may shift for a leg that passed — the digest is for failures.
+
+    Pinning byte-equality here is what keeps the fix from quietly reformatting
+    every green run's evidence (and from scanning 12 green legs for markers).
+    """
+    text = "━━━ scripts ━━━\n......... [100%]\n649 passed in 1358.65s\n"
+    fake, _calls = _fake_subprocess(popem=_exit_popem(0, stdout=text))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "pass", verdict
+    assert output == mq._tail(text), repr(output)
+
+
+def test_failure_lines_are_verbatim_deduped_and_capped():
+    """The digest is the gate's own lines, capped — not a rewrite, not a dump.
+
+    Capping is what makes it safe to read the FULL output: a branch whose
+    fixture blew up can print hundreds of `FAILED` rows, and a card comment is
+    not a log file.
+    """
+    many = "\n".join(
+        [f"FAILED tests/test_a.py::test_{i} - boom {i}"
+         for i in range(mq.MAX_FAILURE_LINES + 5)]
+        # A duplicate short-summary line (same line twice) must appear once.
+        + ["FAILED tests/test_a.py::test_0 - boom 0",
+           # Noise the matchers must NOT pick up: a progress line, a mention
+           # mid-line, and a `✗` that is not a red-leg row.
+           "FAILED is what the fixture text mentions inline",
+           "........ [ 50%]", "  ✓ hscc-daemon", ""]
+        + [f"  ✗ leg-{i} (pytest exit 1)" for i in range(3)]
+        + ["3 failed, 900 passed in 12.3s"])
+
+    lines = mq._failure_lines(many)
+
+    # The rows naming the leg lead, and the cap may never cost them their place:
+    # `scripts/run_tests.sh` prints them LAST, so a cap that respected print order
+    # would drop the one line saying WHICH leg went red first.
+    assert lines[0] == "✗ leg-0 (pytest exit 1)", lines[0]
+    assert "✗ leg-2 (pytest exit 1)" in lines, lines
+    assert "3 failed, 900 passed in 12.3s" in lines, lines
+    # Then the failing tests, in the order pytest printed them, de-duplicated.
+    assert lines.index("FAILED tests/test_a.py::test_0 - boom 0") < \
+        lines.index("FAILED tests/test_a.py::test_1 - boom 1"), lines
+    assert lines.count("FAILED tests/test_a.py::test_0 - boom 0") == 1, lines
+    assert "........ [ 50%]" not in lines, lines
+    assert "FAILED is what the fixture text mentions inline" not in lines, lines
+    assert "  ✓ hscc-daemon" not in lines, lines
+    # Capped, and the cap says how many it hid rather than silently cutting.
+    shown = [ln for ln in lines if not ln.startswith("…")]
+    assert len(shown) <= mq.MAX_FAILURE_LINES, len(shown)
+    assert "FAILED tests/test_a.py::test_24 - boom 24" not in lines, lines
+    assert any("more failure line(s) not shown" in ln for ln in lines), lines
+
+
+def test_a_long_failure_line_is_capped_not_dropped():
+    """A 2 KB failure reason may not eat the comment; the test id is the point."""
+    long_line = "FAILED tests/test_ws.py::test_long - " + "x" * 5000
+
+    lines = mq._failure_lines(long_line)
+
+    assert len(lines) == 1, lines
+    assert len(lines[0]) <= mq.MAX_FAILURE_LINE_CHARS, len(lines[0])
+    assert lines[0].startswith("FAILED tests/test_ws.py::test_long"), lines[0]
+
+
+def test_the_red_gate_handback_names_the_test_the_leg_and_the_attempt(
+        tmp_path, monkeypatch):
+    """The card comment alone must be enough to decide re-queue vs fix.
+
+    This is the deliverable: leg name, attempt, and the verbatim `FAILED`
+    lines, on the card — so the driver never has to open the Actions log to
+    tell a flake from a real break.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["bash scripts/run_tests.sh"], timeout_s=42)
+    gh = FakeGh({34: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    handed = []
+    mq.add_to_queue("alpha", 34, card="t_red_named", assignee="worker",
+                    path=_state(tmp_path))
+    fake, _calls = _fake_subprocess(
+        popem=_exit_popem(1, stderr=_GATE_STDERR_NOISE,
+                          stdout=_multi_leg_gate_output()))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    result = mq.tick(
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        handback=lambda card, assignee, msg: handed.append(
+            (card, assignee, msg)) or True)
+
+    assert result["processed"][0]["result"] == "red-gate", result
+    card, assignee, body = handed[0]
+    assert (card, assignee) == ("t_red_named", "worker"), handed
+    assert _FAILED_TEST in body, body
+    assert _RED_LEG_ROW.strip() in body, body
+    # The attempt is 1-based: `attempts` counts retries already spent, so a
+    # first-pass bounce reads `Attempt: 1`, never `Attempt: 0`.
+    assert "Attempt: 1" in body, body
+    # Evidence leads: the failing line is above the resolve boilerplate.
+    assert body.index(_FAILED_TEST) < body.index(
+        "Resolve it as this card's worker"), body
+    # The PR comment is the same text, not a thinner copy.
+    comment = " ".join(gh.comments[0])
+    assert _FAILED_TEST in comment, comment
+
+
+def test_a_real_gate_run_carries_its_failure_lines(tmp_path):
+    """The fake-Popen proof, replayed through a gate the OS actually ran.
+
+    A fake `Popen` hands back exactly the strings the test wrote, so on its own
+    it cannot show that the real `communicate()` output reaches the digest
+    through the real argv.  This runs a `sh` that prints the same 12-leg shape
+    and exits 1: milliseconds, no repo, no network, no wall-clock claim.
+    """
+    script = tmp_path / "fake_gate.sh"
+    script.write_text("#!/bin/sh\ncat <<'HSCCEOF'\n"
+                      f"{_multi_leg_gate_output()}\n"
+                      "HSCCEOF\n"
+                      "printf 'client disconnected (BrokenPipeError)\\n' >&2\n"
+                      "exit 1\n")
+
+    verdict, output = mq._run_gate(f"sh '{script}'", str(tmp_path), 60)
+
+    assert verdict == "fail", (verdict, output)
+    assert _FAILED_TEST in output, output
+    assert _RED_LEG_ROW.strip() in output, output
+
+
+def test_a_timed_out_gate_stamps_the_timeout_stage_on_the_health_stream(
+        tmp_path, monkeypatch):
+    """``hscc verify`` reads the stream, so the stream must not keep saying
+    ``gating`` (or worse, ``merging``) for a PR the queue has handed back.
+
+    The stage is stamped while the claim is still held, so the health stream and
+    the ledger agree at that moment; the requeue that follows is what makes the
+    row render ``waiting``.  Without the stamp a timed-out PR looks like a PR
+    still being merged until the daemon's next check writes the tick verdict.
+    """
+    _result, _pair, _gh, _handed, _registry = _tick_that_timed_out(
+        tmp_path, monkeypatch, pr=35, card="t_slow4")
+
+    stamp = _require_stream(tmp_path)
+    flight = stamp.get("in_flight") or {}
+    assert flight.get("stage") == "timeout", stamp
+    assert flight.get("pr") == 35, stamp
+    assert flight.get("stage") in mq.MERGE_QUEUE_STATES
+
+
+def test_outcome_state_maps_a_gate_timeout_to_waiting():
+    """The read model may never call a timeout a failure to go fix."""
+    assert mq.outcome_state("gate-timeout") == "waiting"
+    assert "timeout" in mq.MERGE_QUEUE_STATES
+    # A real failure still lands where the author can act on it.
+    assert mq.outcome_state("red-gate") == "resolve"
+    assert mq.outcome_state("merged") == "merged"
+    assert mq.outcome_state("nonsense") == "failed"
+
+
+def test_view_shows_a_timed_out_pr_as_waiting(tmp_path, monkeypatch):
+    """`status` / GET /v1/merge-queue must not render it resolve or failed."""
+    _result, _pair, _gh, _handed, registry = _tick_that_timed_out(
+        tmp_path, monkeypatch, pr=34, card="t_slow3")
+
+    seen = mq.view(state_path=_state(tmp_path), registry_path=registry)
+    project_rows = seen["projects"]["alpha"]["rows"]
+    rows = [r for r in project_rows if r.get("pr") == 34]
+    assert len(rows) == 1, project_rows
+    row = rows[0]
+    assert row["state"] == "waiting", row
+    assert row["state"] in mq.MERGE_QUEUE_STATES
+    assert row["last_result"] == "gate-timeout", row
+    assert "sleep 999" in str(row["detail"]), row
+    # Nowhere in the whole view does this PR surface as a failure to go fix.
+    assert [r["state"] for r in seen["rows"] if r.get("pr") == 34] == ["waiting"]
+    assert seen["waiting"] == 1 and seen["queued"] == 0, seen["waiting"]
+
+
+# ── restart mid-run ────────────────────────────────────────────────────────
+
+def test_restart_mid_run_recovers_in_flight_to_the_queue_head(tmp_path):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    mq.add_to_queue("alpha", 13, card="t_restart", path=_state(tmp_path))
+
+    # Simulate the daemon dying after claiming the entry: it is persisted as
+    # in_flight, the queue is empty, and the process is gone.
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    ps["in_flight"] = ps["queue"].pop(0)
+    mq.save_state(doc, _state(tmp_path))
+
+    gh = FakeGh({13: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run)
+
+    assert result["recovered"] == ["alpha"]
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [13]
+    doc = mq.load_state(_state(tmp_path))
+    assert doc["projects"]["alpha"]["in_flight"] is None
+    assert doc["projects"]["alpha"]["queue"] == []
+
+
+# ── pause ──────────────────────────────────────────────────────────────────
+
+def test_pause_leaves_the_queue_untouched(tmp_path):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    mq.add_to_queue("alpha", 17, path=_state(tmp_path))
+    mq.set_paused("alpha", True, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry,
+                     gh_runner=_no_runner, git_runner=_no_runner)
+
+    assert result["processed"] == []
+    assert result["projects"]["alpha"]["paused"] is True
+    doc = mq.load_state(_state(tmp_path))
+    assert [e["pr"] for e in doc["projects"]["alpha"]["queue"]] == [17]
+    assert not (tmp_path / "queue" / "alpha").exists()
+
+
+# ── remove/pause/disable during a run (F4) ─────────────────────────────────
+
+def test_remove_during_gate_cancels_before_push_and_never_merges(
+        tmp_path, monkeypatch):
+    """F4: a removed PR must not be force-pushed or merged."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, card="t_removed", path=_state(tmp_path))
+
+    def gate(command, worktree, timeout_s):
+        mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "removed", result
+    assert gh.merged == []
+    # Nothing was pushed: origin still has the original PR head.
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") == pair["head"]
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["in_flight"] is None
+
+
+@pytest.mark.parametrize("action,expected", [
+    ("pause", "paused"),
+    ("disable", "disabled"),
+])
+def test_pause_or_disable_during_gate_stops_before_push_and_keeps_entry(
+        tmp_path, monkeypatch, action, expected):
+    """F4: pause/disable stop the run; the queue entry survives."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({8: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 8, card="t_hold", path=_state(tmp_path))
+
+    def gate(command, worktree, timeout_s):
+        if action == "pause":
+            mq.set_paused("alpha", True, path=_state(tmp_path))
+        else:
+            mq.set_enabled("alpha", False, path=_state(tmp_path))
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == expected, result
+    assert gh.merged == []
+    assert _git(pair["origin"], "rev-parse",
+                f"refs/heads/{pair['branch']}") == pair["head"]
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert [e["pr"] for e in ps["queue"]] == [8]
+    assert ps["paused"] is (action == "pause")
+
+
+# ── readiness gate ─────────────────────────────────────────────────────────
+
+def test_auto_enqueue_picks_a_ready_card_when_the_queue_is_empty(tmp_path):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({21: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+
+    def source(cfg, gh_runner=None):
+        return [{"pr": 21, "card": "t_auto", "assignee": "worker"}]
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run, auto_source=source)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [21]
+    doc = mq.load_state(_state(tmp_path))
+    assert doc["projects"]["alpha"]["last"]["card"] == "t_auto"
+
+
+def test_pr_ready_requires_open_non_draft_mergeable_green():
+    base = {"state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
+            "statusCheckRollup": []}
+    assert mq._pr_ready(base)
+    assert not mq._pr_ready({**base, "isDraft": True})
+    assert not mq._pr_ready({**base, "mergeable": "CONFLICTING"})
+    assert not mq._pr_ready({**base, "statusCheckRollup": [
+        {"__typename": "CheckRun", "status": "IN_PROGRESS",
+         "conclusion": None}]})
+    assert not mq._pr_ready({**base, "statusCheckRollup": [
+        {"state": "FAILURE"}]})
+    assert not mq._pr_ready({**base, "reviewDecision": "CHANGES_REQUESTED"})
+
+
+def test_empty_rollup_is_green_only_when_no_required_checks():
+    """F5: an empty rollup is not green merely because nothing was reported."""
+    empty = {"state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
+             "statusCheckRollup": []}
+    assert mq._pr_ready(empty, required_checks=False)
+    assert not mq._pr_ready(empty, required_checks=True)
+    # Unknown (could not ask GitHub) is not positive evidence of "no checks".
+    assert not mq._pr_ready(empty, required_checks=None)
+    assert mq._checks_green([], required_checks=False)
+    assert not mq._checks_green([], required_checks=True)
+
+
+def test_default_hscc_gates_add_build_check_for_app_changes(tmp_path):
+    cfg = {"name": "hscc"}
+    calls = []
+
+    def fake_git(argv, cwd=None, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="ios-app/Foo.swift\n",
+                               stderr="")
+
+    gates = mq._resolve_gates(cfg, str(tmp_path), fake_git)
+    assert gates[0] == "python3 scripts/address_guard.py --tracked"
+    assert "bash scripts/run_tests.sh" in gates
+    assert "bash ios-app/scripts/build_check.sh" in gates
+    assert "bash macos-app/scripts/build_check.sh" not in gates
+
+
+# ── local gate narrowing (t_0763da12) ──────────────────────────────────────
+
+LOCAL_LEG_ROSTER = ("hscc-bootstrap", "hscc_daemon", "hscc-api", "scripts",
+                    ".github/scripts")
+
+
+def _write_leg_roster(worktree, legs=LOCAL_LEG_ROSTER):
+    """The worktree the queue reads its leg roster from."""
+    path = worktree / "scripts" / "run_tests.sh"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("DIRS=(" + " ".join(legs) + ")\n", encoding="utf-8")
+    return path
+
+
+def _diff_git(*paths):
+    """A fake git runner whose diff is exactly ``paths`` (hermetic)."""
+    def fake_git(argv, cwd=None, **kwargs):
+        assert argv[:3] == ["git", "diff", "--name-only"], argv
+        return SimpleNamespace(returncode=0,
+                               stdout="\n".join(paths) + "\n", stderr="")
+
+    return fake_git
+
+
+def test_local_gate_runs_only_the_touched_leg(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git("hscc_daemon/merge_queue.py",
+                  "hscc_daemon/tests/test_merge_queue.py",
+                  "changelog.d/t_0763da12.md"))
+
+    assert gates[0] == "python3 scripts/address_guard.py --tracked"
+    assert gates[1] == 'HSCC_TEST_LEGS="hscc_daemon" bash scripts/run_tests.sh'
+    assert len(gates) == 2
+
+
+def test_local_gate_runs_every_touched_leg_in_roster_order(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git("hscc-api/x.py", "hscc_daemon/y.py", "scripts/tests/z.py"))
+
+    assert gates[1] == ('HSCC_TEST_LEGS="hscc_daemon hscc-api scripts" '
+                        'bash scripts/run_tests.sh')
+
+
+@pytest.mark.parametrize("shared", [
+    "scripts/run_tests.sh",
+    "conftest.py",
+    ".github/workflows/pytest-legs.yml",
+    "scripts/changelog_fragments.py",
+])
+def test_shared_file_change_falls_back_to_the_full_suite(tmp_path, shared):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("hscc_daemon/x.py", shared))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+def test_more_than_three_legs_falls_back_to_the_full_suite(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git(*[f"{leg}/x.py" for leg in LOCAL_LEG_ROSTER]))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+def test_a_diff_outside_every_leg_falls_back_to_the_full_suite(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("docs/readme.md"))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+# ── read-only view (kanban monitor + GET /v1/merge-queue) ──────────────────
+
+def test_view_rows_carry_position_state_branch_age_and_last_result(tmp_path):
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, card="t_a", branch="wt/t_a", path=state)
+    mq.add_to_queue("alpha", 8, card="t_b", branch="wt/t_b", path=state)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    flight = ps["queue"].pop()          # PR 8 is now the claim, not queued
+    flight.update({"stage": "gating",
+                   "enqueued_at": "2026-11-19T00:00:00+00:00"})
+    ps["in_flight"] = flight
+    ps["last"] = {"pr": 9, "card": "t_c", "branch": "wt/t_c",
+                  "result": "conflict", "at": "2026-11-19T01:00:00+00:00",
+                  "conflicted": ["shared.txt"]}
+    mq.save_state(doc, state)
+
+    data = mq.view(state_path=state, registry_path=str(tmp_path / "none.yaml"),
+                   now=1_800_000_000)
+    rows = data["rows"]
+    assert [(r["position"], r["pr"], r["state"]) for r in rows] == [
+        (1, 7, "queued"), (None, 8, "gating"), (None, 9, "resolve")]
+    assert [r["branch"] for r in rows] == ["wt/t_a", "wt/t_b", "wt/t_c"]
+    assert rows[0]["age_s"] is not None
+    assert rows[1]["age_s"] is not None
+    assert rows[2]["last_result"] == "conflict"
+    assert rows[2]["detail"] == "shared.txt"
+    assert data["queued"] == 1 and data["count"] == 3
+    # One map for the review queue's per-card column.
+    assert mq.card_states(state_path=state, now=1_800_000_000)["t_b"]["state"] \
+        == "gating"
+
+
+def test_view_shows_the_live_gating_stage_while_the_gate_runs(tmp_path,
+                                                               monkeypatch):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["false"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, card="t_card", assignee="worker",
+                    path=_state(tmp_path))
+    seen = {}
+
+    def gate(command, worktree, timeout_s):
+        seen.update(mq.view(state_path=_state(tmp_path),
+                            registry_path=registry))
+        return "fail", "gate exploded"
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "red-gate"
+    assert [r["state"] for r in seen["rows"]] == ["gating"]
+    after = mq.view(state_path=_state(tmp_path), registry_path=registry)
+    assert [r["state"] for r in after["rows"]] == ["resolve"]
+    assert after["rows"][0]["detail"] == "false"
+
+
+def test_view_board_filter_keeps_only_that_projects_queue(tmp_path):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], name="alpha")
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    mq.add_to_queue("beta", 8, path=_state(tmp_path))
+
+    assert [r["project"] for r in mq.view(
+        state_path=_state(tmp_path), registry_path=registry)["rows"]] == [
+            "alpha", "beta"]
+    filtered = mq.view(state_path=_state(tmp_path), registry_path=registry,
+                       board="not-alpha")
+    assert filtered["rows"] == []
+
+
+# ── the production runner (no injected runner) ─────────────────────────────
+
+def test_default_runner_drives_real_git_in_a_temp_repo(tmp_path):
+    """F1: the real default runner must work, not only injected runners."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "README.md").write_text("base\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+
+    proc = mq._git(["rev-parse", "--is-inside-work-tree"], str(repo),
+                   mq._default_runner)
+
+    assert proc is not None
+    assert proc.returncode == 0, proc.stderr
+    assert isinstance(proc.stdout, str)
+    assert proc.stdout.strip() == "true"
+
+
+# ── auto-enqueue repo identity ─────────────────────────────────────────────
+
+def _board_with_cards(tmp_path, cards):
+    """A minimal kanban DB behind the read-only board seam.
+
+    A card is ``(id, body)`` or ``(id, body, status)``; the default status is
+    ``ready``.
+    """
+    path = tmp_path / "kanban.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, assignee TEXT, body TEXT, "
+        "status TEXT)")
+    conn.execute(
+        "CREATE TABLE task_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "task_id TEXT, body TEXT)")
+    for card in cards:
+        card_id, body = card[0], card[1]
+        status = card[2] if len(card) > 2 else "ready"
+        conn.execute(
+            "INSERT INTO tasks VALUES (?, 'worker', ?, ?)",
+            (card_id, body, status))
+    conn.commit()
+    conn.close()
+
+    class FakeKanban:
+        def connect_closing(self, board=None):
+            db = sqlite3.connect(path)
+            db.row_factory = sqlite3.Row
+            return contextlib.closing(db)
+
+    return FakeKanban()
+
+
+def _board_seam(monkeypatch, kb):
+    from hscc_daemon import autodown
+    monkeypatch.setattr(autodown, "_load_kanban_db_or_default", lambda: kb)
+    monkeypatch.setattr(autodown, "_enum_board_names",
+                        lambda *a, **k: (["alpha"], False))
+
+
+def test_auto_enqueue_ignores_a_pr_url_from_another_repo(tmp_path,
+                                                        monkeypatch):
+    """F2: a card linking another repo's #42 must not enqueue this repo's #42."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_foreign", "see https://github.com/other/repo/pull/42")]))
+    gh = FakeGh({42: {"headRefName": "wt/t_foreign",
+                      "headRefOid": "a" * 40}})
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+
+    assert mq._discover_ready_cards(cfg, gh_runner=gh) == []
+    assert gh.calls == []
+
+
+def test_auto_enqueue_accepts_a_pr_url_from_the_projects_origin(tmp_path,
+                                                               monkeypatch):
+    """The same URL on the project's own origin (ssh, mixed case) is accepted."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin", "git@github.com:Pom11/Alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_own", "https://github.com/pom11/alpha/pull/42")]))
+    gh = FakeGh({42: {"headRefName": "wt/t_own", "headRefOid": "b" * 40}})
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+
+    ready = mq._discover_ready_cards(cfg, gh_runner=gh)
+
+    assert ready == [{"pr": 42, "card": "t_own", "assignee": "worker",
+                      "branch": "wt/t_own"}]
+
+
+def test_auto_enqueue_only_accepts_running_ready_or_review_cards(
+        tmp_path, monkeypatch):
+    """F10: blocked/scheduled/todo cards are not mergeable work."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    cards = []
+    heads = {}
+    for pr, (card, status) in enumerate([
+            ("t_blocked", "blocked"), ("t_scheduled", "scheduled"),
+            ("t_todo", "todo"), ("t_running", "running"),
+            ("t_ready", "ready"), ("t_review", "review")], start=61):
+        cards.append(
+            (card, f"https://github.com/pom11/alpha/pull/{pr}", status))
+        heads[pr] = {"headRefName": f"wt/{card}", "headRefOid": "d" * 40}
+    _board_seam(monkeypatch, _board_with_cards(tmp_path, cards))
+    gh = FakeGh(heads)
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+
+    ready = mq._discover_ready_cards(cfg, gh_runner=gh)
+
+    assert {row["card"] for row in ready} == {
+        "t_running", "t_ready", "t_review"}
+
+
+def test_auto_enqueue_respects_changes_requested_review(tmp_path, monkeypatch):
+    """F10: a PR whose review was rejected is not auto-enqueued."""
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(tmp_path, [
+        ("t_changes", "https://github.com/pom11/alpha/pull/71", "review"),
+        ("t_approved", "https://github.com/pom11/alpha/pull/72", "review"),
+    ]))
+    gh = FakeGh({
+        71: {"headRefName": "wt/t_changes", "headRefOid": "e" * 40,
+             "reviewDecision": "CHANGES_REQUESTED"},
+        72: {"headRefName": "wt/t_approved", "headRefOid": "f" * 40,
+             "reviewDecision": "APPROVED"},
+    })
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+
+    ready = mq._discover_ready_cards(cfg, gh_runner=gh)
+
+    assert [row["pr"] for row in ready] == [72]
+    assert "reviewDecision" in mq._PR_JSON_FIELDS
+
+
+# ── fresh base before every entry (F3) ─────────────────────────────────────
+
+def test_every_entry_fetches_current_base_before_rebasing(tmp_path):
+    """A PR merged between two entries must be in the second entry's base."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    assert mq.tick(state_path=_state(tmp_path),
+                   root=str(tmp_path / "queue"), registry_path=registry,
+                   gh_runner=gh, git_runner=subprocess.run
+                   )["processed"][0]["result"] == "merged"
+
+    # Someone lands another PR on the base while the queue worktree exists,
+    # from a SECOND clone: a push from this clone would refresh its own
+    # remote-tracking ref and hide the staleness.
+    repo = pair["repo"]
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", str(pair["origin"]), str(other)],
+                   check=True, capture_output=True, text=True)
+    _git(other, "config", "user.email", "test@example.invalid")
+    _git(other, "config", "user.name", "Test")
+    (other / "landed-between-entries.txt").write_text("new base\n")
+    _git(other, "add", ".")
+    _git(other, "commit", "-m", "landed between entries")
+    _git(other, "push", "origin", "main")
+    new_main = _git(other, "rev-parse", "HEAD")
+
+    # The existing queue worktree must fetch on every entry, not only when it
+    # is first created.
+    worktree = tmp_path / "queue" / "alpha"
+    assert _git(worktree, "rev-parse", "origin/main") != new_main
+    mq.ensure_worktree({"name": "alpha", "repo": str(repo)},
+                       root=str(tmp_path / "queue"),
+                       git_runner=subprocess.run)
+    assert _git(worktree, "rev-parse", "origin/main") == new_main
+
+    _git(repo, "checkout", "main")
+    _git(repo, "merge", "--ff-only", "origin/main")
+    second_head = _new_branch(repo, "wt/t_second")
+    gh2 = FakeGh({8: {"headRefName": "wt/t_second",
+                      "headRefOid": second_head}})
+    mq.add_to_queue("alpha", 8, path=_state(tmp_path))
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh2, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    # The pushed branch is based on the CURRENT origin/main, not the commit
+    # the queue worktree was created from.
+    assert _git(pair["origin"], "merge-base", "--is-ancestor", new_main,
+                "refs/heads/wt/t_second") == ""
+    assert _git(worktree, "rev-parse", "origin/main") == new_main
+
+
+# ── default branch detection, not hard-coded origin/main (F8) ──────────────
+
+def test_master_default_branch_is_detected_and_used(tmp_path):
+    pair = _repo_pair(tmp_path, base="master")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"],
+                     "baseRefName": "master"}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [7]
+    assert _git(pair["origin"], "rev-list", "--count",
+                f"master..refs/heads/{pair['branch']}") == "1"
+
+
+# ── baseRefName is enforced, or configured explicitly (F6) ─────────────────
+
+def test_non_default_base_pr_is_refused_once_and_not_re_enqueued(
+        tmp_path, monkeypatch):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"],
+                     "baseRefName": "release"}})
+    mq.add_to_queue("alpha", 9, card="t_wrong_base", path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "refused", result
+    assert gh.merged == []
+    assert gh.comments and "release" in " ".join(gh.comments[0])
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["in_flight"] is None
+    assert ps["last"]["result"] == "refused"
+    assert "release" in ps["last"]["error"]
+
+    # Auto-enqueue skips it too, so the tick cannot re-add it every pass.
+    repo = tmp_path / "repo-foreign-origin"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_wrong_base",
+                    "https://github.com/pom11/alpha/pull/9")]))
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha",
+           "base_branch": "main"}
+    assert mq._discover_ready_cards(cfg, gh_runner=gh) == []
+
+
+def test_configured_base_branch_is_rebased_onto(tmp_path):
+    pair = _repo_pair(tmp_path)
+    repo = pair["repo"]
+    _git(repo, "checkout", "main")
+    release_tip = _git(repo, "rev-parse", "main")
+    _git(repo, "checkout", "-b", "release")
+    _git(repo, "push", "-u", "origin", "release")
+
+    _git(repo, "checkout", "main")
+    (repo / "main-after-release.txt").write_text("main moved again\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "main after release")
+    _git(repo, "push", "origin", "main")
+    main_tip = _git(repo, "rev-parse", "main")
+
+    _git(repo, "checkout", "-b", "wt/t_release", "release")
+    (repo / "release-topic.txt").write_text("release topic\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "release topic")
+    _git(repo, "push", "-u", "origin", "wt/t_release")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "fetch", "origin")
+
+    registry = _registry(tmp_path, repo, gates=["true"],
+                         base_branch="release")
+    gh = FakeGh({5: {"headRefName": "wt/t_release", "headRefOid": head,
+                     "baseRefName": "release"}})
+    mq.add_to_queue("alpha", 5, path=_state(tmp_path))
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    branch_ref = "refs/heads/wt/t_release"
+    assert _git(pair["origin"], "merge-base", "--is-ancestor", release_tip,
+                branch_ref) == ""
+    # Before the fix the PR was rebased onto main, making main its base.
+    proc = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", main_tip, branch_ref],
+        cwd=str(pair["origin"]), capture_output=True, text=True)
+    assert proc.returncode != 0, "PR was rebased onto main, not release"
+
+
+# ── fork PRs are refused, not retried (F15) ────────────────────────────────
+
+def test_fork_pr_is_refused_with_clear_reason_and_not_retried(
+        tmp_path, monkeypatch):
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({12: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"],
+                      "isCrossRepository": True}})
+    mq.add_to_queue("alpha", 12, card="t_fork", path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "refused", result
+    assert gh.merged == []
+    assert gh.comments and "fork" in " ".join(gh.comments[0])
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["in_flight"] is None
+    assert ps["last"]["result"] == "refused"
+
+    # Discovery skips it too: no retry loop through auto-enqueue.
+    repo = tmp_path / "repo-fork"
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True,
+                   capture_output=True, text=True)
+    _git(repo, "remote", "add", "origin",
+         "https://github.com/pom11/alpha.git")
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_fork", "https://github.com/pom11/alpha/pull/12")]))
+    cfg = {"name": "alpha", "repo": str(repo), "board": "alpha"}
+    assert mq._discover_ready_cards(cfg, gh_runner=gh) == []
+
+
+# ── projects sharing one repo path share one queue/lock (F3) ───────────────
+
+def test_projects_sharing_a_repo_process_one_pr_per_repo_per_tick(tmp_path):
+    pair = _repo_pair(tmp_path)
+    second_head = _new_branch(pair["repo"], "wt/t_second")
+    registry = _registry_multi(
+        tmp_path, [("alpha", pair["repo"]), ("beta", pair["repo"])])
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        8: {"headRefName": "wt/t_second", "headRefOid": second_head},
+    })
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    mq.add_to_queue("beta", 8, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    # ONE FIFO per repo: the beta entry waits even though it is another project.
+    assert [p["project"] for p in result["processed"]] == ["alpha"], result
+    assert gh.merged == [7]
+    doc = mq.load_state(_state(tmp_path))
+    assert doc["projects"]["alpha"]["queue"] == []
+    assert [e["pr"] for e in doc["projects"]["beta"]["queue"]] == [8]
+
+    # Same repo path -> same lock file; a different repo -> a different one.
+    lock_a = mq.repo_lock_path(str(pair["repo"]), root=str(tmp_path))
+    lock_b = mq.repo_lock_path(str(pair["repo"] / "."), root=str(tmp_path))
+    other = mq.repo_lock_path(str(tmp_path / "other"), root=str(tmp_path))
+    assert lock_a == lock_b
+    assert lock_a != other
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert [p["pr"] for p in result["processed"]] == [8], result
+    assert gh.merged == [7, 8]
+
+
+# ── sandbox isolation (HSCC_HOME / HSCC_DIR) ───────────────────────────────
+
+def test_state_paths_honour_hscc_home_and_hscc_dir(tmp_path, monkeypatch):
+    """F13: the ledger/worktrees follow the sandbox root, like alerts.py."""
+    monkeypatch.delenv("HSCC_HOME", raising=False)
+    monkeypatch.delenv("HSCC_DIR", raising=False)
+    home = tmp_path / "sandbox-home"
+    monkeypatch.setenv("HSCC_HOME", str(home))
+    assert mq.state_file() == str(home / "merge-queue-state.json")
+    assert mq.queue_root() == str(home / "merge-queue")
+
+    hscc_dir = tmp_path / "sandbox-dir"
+    monkeypatch.delenv("HSCC_HOME")
+    monkeypatch.setenv("HSCC_DIR", str(hscc_dir))
+    assert mq.state_file() == str(hscc_dir / "merge-queue-state.json")
+    assert mq.queue_root() == str(hscc_dir / "merge-queue")
+
+    # HSCC_HOME (the alerts.py variable) wins when both are set.
+    monkeypatch.setenv("HSCC_HOME", str(home))
+    assert mq.state_file() == str(home / "merge-queue-state.json")
+
+
+def test_add_to_queue_writes_only_under_hscc_home(tmp_path, monkeypatch):
+    """A sandboxed write must land in $HSCC_HOME, never $HOME/.hscc."""
+    home = tmp_path / "home"
+    sandbox = tmp_path / "sandbox"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HSCC_HOME", str(sandbox))
+    monkeypatch.delenv("HSCC_DIR", raising=False)
+
+    mq.add_to_queue("alpha", 7, card="t_sandbox")
+
+    assert (sandbox / "merge-queue-state.json").exists()
+    assert not (home / ".hscc" / "merge-queue-state.json").exists()
+    assert mq.load_state()["projects"]["alpha"]["queue"][0]["pr"] == 7
+
+
+# ── a concurrent CLI add survives the tick's auto-enqueue write (F9) ────────
+
+def test_concurrent_cli_add_during_auto_enqueue_is_not_clobbered(tmp_path):
+    """F9: the tick must reload+merge under the lock after its network probes.
+
+    Reproduces audit reproduction K: a CLI `add` lands while auto-enqueue is
+    probing; the tick's later save must preserve it instead of writing the
+    snapshot it loaded at the top of the tick.
+    """
+    pair = _repo_pair(tmp_path)
+    cli_head = _new_branch(pair["repo"], "wt/t_cli_add")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        99: {"headRefName": "wt/t_cli_add", "headRefOid": cli_head},
+    })
+
+    def source(cfg, gh_runner=None):
+        # The operator's add lands between the tick's load and its save.
+        mq.add_to_queue("alpha", 99, card="t_cli_add", path=_state(tmp_path))
+        return [{"pr": 7, "card": "t_auto", "assignee": "worker"}]
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run, auto_source=source)
+
+    # The added PR is older, so it is the one claimed; the auto candidate
+    # stays queued. Before the fix the stale save erased 99 entirely.
+    assert result["processed"][0]["pr"] == 99, result
+    assert gh.merged == [99]
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [7]
+    assert ps["in_flight"] is None
+
+
+# ── a red-gated PR is not auto-re-enqueued until its head changes (F11) ─────
+
+def test_red_gate_is_not_auto_re_enqueued_until_the_head_changes(tmp_path):
+    """F11: dropping a red-gate PR must not make the next tick rerun it."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["sh -c 'echo BOOM >&2; exit 7'"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, card="t_red", assignee="worker",
+                    path=_state(tmp_path))
+
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+    assert first["processed"][0]["result"] == "red-gate", first
+    comments = len(gh.comments)
+    last = mq.load_state(_state(tmp_path))["projects"]["alpha"]["last"]
+    assert last["result"] == "red-gate"
+    assert last["head_sha"] == pair["head"]
+
+    def source(cfg, gh_runner=None):
+        return [{"pr": 7, "card": "t_red", "assignee": "worker"}]
+
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     auto_source=source)
+    assert second["processed"] == [], second
+    assert len(gh.comments) == comments
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["waiting"] == []
+
+    # The worker pushes a fix; only then may auto-enqueue pick it up again.
+    _git(pair["repo"], "checkout", pair["branch"])
+    (pair["repo"] / "fixed.txt").write_text("fixed\n")
+    _git(pair["repo"], "add", ".")
+    _git(pair["repo"], "commit", "-m", "fix the gate")
+    _git(pair["repo"], "push", "origin", pair["branch"])
+    new_head = _git(pair["repo"], "rev-parse", "HEAD")
+    gh.heads[7]["headRefOid"] = new_head
+    fixed_registry = _registry(tmp_path, pair["repo"], gates=["true"])
+
+    third = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"),
+                    registry_path=fixed_registry, gh_runner=gh,
+                    git_runner=subprocess.run, auto_source=source)
+    assert third["processed"][0]["result"] == "merged", third
+    assert gh.merged == [7]
+
+
+# ── a non-green head leaves the head slot for the wait list (F12) ──────────
+
+def test_non_green_head_moves_to_the_wait_list_so_the_fifo_proceeds(tmp_path):
+    """F12: one pending PR must not starve the entry behind it forever."""
+    pair = _repo_pair(tmp_path)
+    second_head = _new_branch(pair["repo"], "wt/t_second")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        8: {"headRefName": "wt/t_second", "headRefOid": second_head},
+    }, views={7: [{"statusCheckRollup": pending},
+                  {"statusCheckRollup": pending},
+                  {"statusCheckRollup": pending},
+                  {"statusCheckRollup": pending}]})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    mq.add_to_queue("alpha", 8, path=_state(tmp_path))
+
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+    assert first["processed"][0]["result"] == "waiting", first
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [8]
+    assert [e["pr"] for e in ps["waiting"]] == [7]
+    rows = mq.view(state_path=_state(tmp_path),
+                   registry_path=registry)["rows"]
+    assert [(r["pr"], r["state"]) for r in rows] == [(8, "queued"),
+                                                     (7, "waiting")]
+
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert second["processed"][0]["pr"] == 8, second
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [8]
+
+    # The wait-listed PR is retried once the active FIFO is empty (still
+    # pending, so it goes back to the wait list rather than blocking again).
+    third = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+    assert third["processed"][0]["pr"] == 7, third
+    assert third["processed"][0]["result"] == "waiting", third
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and [e["pr"] for e in ps["waiting"]] == [7]
+
+
+# ── generated_at is the ledger write time, not the read time (F14) ─────────
+
+# ── the four "the stamp moved" cases, and what an absolute freeze does to them ──
+#
+# test_view_generated_at_is_the_last_state_write_not_the_read,
+# test_tick_stamps_the_ledger_even_when_it_does_no_work,
+# test_gate_heartbeat_advances_the_stream_while_the_gate_runs and
+# test_check_merge_queue_stamps_the_stream_when_the_tick_does_no_work all assert that
+# TWO SUCCESSIVE WRITES stamp differently. `save_state` stamps `generated_at` from
+# `merge_queue._now_iso()`, so under an ABSOLUTE freeze (t_3b38aca4's t3b3_freeze,
+# `--frozen <iso> --freeze-time`) every write in the process answers the same instant
+# and the assertion is unsatisfiable by construction: measured red at frozen
+# 2020-01-01 AND frozen 2200-01-01 with `assert '<instant>' != '<instant>'`.
+#
+# That both-directions shape is the signature of a clock that cannot ADVANCE, not of a
+# two-clock window — a window defect flips in ONE direction only, when the fixture
+# literal crosses it. The cross-check agrees: all four are green at the real clock and
+# under the shipped relative harness at ±400 days and at the equivalent travel
+# (HSCC_WALL_SHIFT_DAYS=±2518/+63225), where the clock keeps moving (t_0389093a).
+# Nothing here goes red on a future date; do not "fix" it by pinning the stamps, which
+# would delete the freshness promise these four cases exist to hold.
+
+
+def test_view_generated_at_is_the_last_state_write_not_the_read(tmp_path):
+    """F14: two reads with no tick/write between them share one timestamp."""
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, path=state)
+    first = mq.view(state_path=state,
+                    registry_path=str(tmp_path / "none.yaml"))
+    second = mq.view(state_path=state,
+                     registry_path=str(tmp_path / "none.yaml"))
+    doc = mq.load_state(state)
+
+    assert first["generated_at"] == second["generated_at"]
+    assert first["generated_at"] == doc["generated_at"]
+
+    time.sleep(0.01)
+    mq.add_to_queue("alpha", 8, path=state)
+    third = mq.view(state_path=state,
+                    registry_path=str(tmp_path / "none.yaml"))
+    assert third["generated_at"] != first["generated_at"]
+
+
+def test_tick_stamps_the_ledger_even_when_it_does_no_work(tmp_path):
+    """F14: a live-but-idle daemon is distinguishable from a dead one."""
+    state = _state(tmp_path)
+    registry = _registry(tmp_path, tmp_path / "repo", enabled=False)
+    first = mq.tick(state_path=state, registry_path=registry)
+    stamp = first["generated_at"]
+
+    time.sleep(0.01)
+    second = mq.tick(state_path=state, registry_path=registry)
+    assert second["processed"] == []
+    assert second["generated_at"] != stamp
+    assert mq.load_state(state)["generated_at"] == second["generated_at"]
+
+
+# ── default-on eligibility (t_0546ef10) ────────────────────────────────────
+
+def _github_mirror(pair):
+    """Make ``origin`` look like github.com while git still resolves locally.
+
+    Eligibility reads the RAW configured URL (``git config --get``); git's
+    ``url.*.insteadOf`` rewrite keeps fetch/push inside ``tmp_path`` so no test
+    touches the network.
+    """
+    local = str(pair["origin"])
+    url = "https://github.com/example/project.git"
+    _git(pair["repo"], "config", f"url.{local}.insteadOf", url)
+    _git(pair["repo"], "remote", "set-url", "origin", url)
+
+
+def _status(tmp_path, registry, name="alpha"):
+    from hscc_daemon.merge_queue_cli import _status_doc
+    return _status_doc(registry_path=registry,
+                       state_path=_state(tmp_path))["projects"][name]
+
+
+def test_default_on_for_a_github_checkout_with_declared_gates(tmp_path):
+    """The default is on with only repo + github origin + gates declared."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is True
+    assert row["enabled_source"] == "default"
+    assert row["default_enabled"] is True
+    assert row["default_reason"] is None
+    assert mq.view(state_path=_state(tmp_path),
+                   registry_path=registry)["projects"]["alpha"][
+                       "enabled"] is True
+
+
+def test_hscc_builtin_gates_make_it_eligible(tmp_path):
+    """hscc needs no registry gates: its built-in gates count."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], name="hscc", enabled=None)
+
+    row = _status(tmp_path, registry, "hscc")
+
+    assert row["enabled"] is True
+    assert row["default_reason"] is None
+
+
+def test_hscc_explicit_empty_gates_disables_the_builtins(tmp_path):
+    """`gates: []` is an explicit no-gates choice, even for hscc."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], name="hscc", enabled=None,
+                         gates=[])
+
+    row = _status(tmp_path, registry, "hscc")
+
+    assert row["enabled"] is False
+    assert row["default_reason"] == "no gates"
+
+
+def test_default_off_without_a_repo(tmp_path):
+    """A registry path that does not exist is 'no repo'."""
+    registry = _registry(tmp_path, tmp_path / "missing", enabled=None,
+                         gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["enabled_source"] == "default"
+    assert row["default_reason"] == "no repo"
+
+
+def test_default_off_when_the_path_is_not_a_git_checkout(tmp_path):
+    """A directory that is not a work-tree root is 'no repo'."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    registry = _registry(tmp_path, plain, enabled=None, gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["default_reason"] == "no repo"
+
+
+@pytest.mark.parametrize("remote", ["local-path", "none"])
+def test_default_off_without_a_github_remote(tmp_path, remote):
+    """A git checkout whose origin is not github.com is 'no GitHub remote'."""
+    pair = _repo_pair(tmp_path)
+    if remote == "none":
+        _git(pair["repo"], "remote", "remove", "origin")
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["enabled_source"] == "default"
+    assert row["default_reason"] == "no GitHub remote"
+
+
+@pytest.mark.parametrize("gates", [None, []])
+def test_default_off_without_gates(tmp_path, gates):
+    """A github checkout with no (or empty) gates stays off."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=gates)
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["default_reason"] == "no gates"
+
+
+def test_explicit_disable_beats_default_on_and_persists(tmp_path):
+    """A CLI disable wins over the default and survives a fresh ledger read."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=["true"])
+    state = _state(tmp_path)
+    assert _status(tmp_path, registry)["enabled"] is True
+
+    mq.set_enabled("alpha", False, path=state)
+
+    row = _status(tmp_path, registry)
+    assert row["enabled"] is False
+    assert row["enabled_source"] == "cli"
+    assert row["default_enabled"] is True   # the default still applies...
+    assert mq.load_state(state)["projects"]["alpha"]["enabled"] is False
+    assert mq.view(state_path=state, registry_path=registry)[
+        "projects"]["alpha"]["enabled"] is False
+
+
+def test_explicit_enable_beats_missing_gates(tmp_path):
+    """The operator can still opt in a project the default declines."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=None)
+    state = _state(tmp_path)
+    assert _status(tmp_path, registry)["default_reason"] == "no gates"
+
+    mq.set_enabled("alpha", True, path=state)
+
+    row = _status(tmp_path, registry)
+    assert row["enabled"] is True
+    assert row["enabled_source"] == "cli"
+
+
+def test_registry_enabled_false_still_forces_off(tmp_path):
+    """An explicit registry ``enabled: false`` is not overridden by the default."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=False, gates=["true"])
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is False
+    assert row["enabled_source"] == "registry"
+
+
+def test_registry_enabled_true_still_forces_on_without_gates(tmp_path):
+    """The old explicit opt-in keeps working for a project with no gates."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=True, gates=None)
+
+    row = _status(tmp_path, registry)
+
+    assert row["enabled"] is True
+    assert row["enabled_source"] == "registry"
+
+
+def test_status_prints_why_a_default_project_stays_off(tmp_path, monkeypatch,
+                                                      capsys):
+    """`hscc merge-queue status` names the failed condition in its line."""
+    from hscc_daemon import merge_queue_cli
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=None)
+    monkeypatch.setenv("FLIGHTDECK_REGISTRY", registry)
+    monkeypatch.setenv("HSCC_HOME", str(tmp_path / "hscc"))
+
+    assert merge_queue_cli.cmd_merge_queue(["status"]) == 0
+
+    out = capsys.readouterr().out
+    assert "alpha: disabled (no gates)" in out
+
+
+def test_help_documents_default_on_and_the_three_reasons(capsys):
+    """The --help text is the operator contract for the default."""
+    from hscc_daemon import merge_queue_cli
+
+    assert merge_queue_cli.cmd_merge_queue(["--help"]) == 0
+
+    out = capsys.readouterr().out
+    assert "ON BY DEFAULT" in out
+    assert "no repo" in out and "no GitHub remote" in out
+    assert "no gates" in out
+
+
+def test_tick_processes_a_project_enabled_by_the_default(tmp_path):
+    """No registry ``enabled`` flag: eligibility alone drives a real tick."""
+    pair = _repo_pair(tmp_path)
+    _github_mirror(pair)
+    registry = _registry(tmp_path, pair["repo"], enabled=None, gates=["true"])
+    gh = FakeGh({11: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 11, card="t_default", path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [11]
+    assert result["projects"]["alpha"]["enabled"] is True
+    assert result["projects"]["alpha"]["enabled_source"] == "default"
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/owner/repo.git",
+    "http://github.com/owner/repo",
+    "git@github.com:owner/repo.git",
+    "ssh://git@github.com/owner/repo.git",
+    "git://github.com/owner/repo.git",
+    "https://GitHub.com/owner/repo.git",
+])
+def test_github_remote_recognises_the_usual_url_forms(url):
+    assert mq._github_remote(url)
+
+
+@pytest.mark.parametrize("url", [
+    "",
+    None,
+    "/tmp/origin.git",
+    "https://gitlab.com/owner/repo.git",
+    "git@bitbucket.org:owner/repo.git",
+])
+def test_github_remote_rejects_non_github_urls(url):
+    assert not mq._github_remote(url)
+
+
+# ── liveness stamping while a gate runs (t_444c32c9) ───────────────────────
+#
+# ``check_merge_queue`` is a 60 s daemon stream and ``hscc verify`` calls
+# ``state/merge_queue.json`` stale after 600 s, while ONE gate leg may run for
+# the whole 1800 s ``DEFAULT_GATE_TIMEOUT_S``. That made a demonstrably live
+# runner read as dead on main (measured: stamp 31 min past the budget, the gate
+# a live child of the daemon pid). These tests pin the fix from the OUTSIDE:
+# what the stream FILE says while the work runs, and what stops saying it once
+# the work stops. None of them reach into verify — the fix is on the stamping
+# side, so the judging side stays exactly as strict.
+
+def _stream_file(tmp_path):
+    """``state/merge_queue.json`` under the redirected STATE_DIR."""
+    return tmp_path / "state" / f"{mq.STREAM_NAME}.json"
+
+
+def _read_stream(tmp_path):
+    """The current stream stamp, or None when nothing has been written."""
+    path = _stream_file(tmp_path)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def _require_stream(tmp_path):
+    """The stream stamp, failing the test when the stream is dark."""
+    stamp = _read_stream(tmp_path)
+    assert stamp is not None, f"{_stream_file(tmp_path)} was never written"
+    return stamp
+
+
+def _heartbeat_stamps(seen):
+    """Only the stamps the heartbeat wrote — a stage stamp carries gate=None."""
+    return [s for _ts, s in seen if (s.get("in_flight") or {}).get("gate")]
+
+
+def _live_heartbeats():
+    return [t for t in threading.enumerate()
+            if t.name.startswith(mq._LIVENESS_THREAD_PREFIX)]
+
+
+@pytest.fixture(autouse=True)
+def _redirect_stream_state_dir(tmp_path, monkeypatch):
+    """Keep EVERY stream write inside ``tmp_path`` for this whole module.
+
+    ``tick()`` now stamps the stream from INSIDE the run — the claim, each stage
+    transition, each gate heartbeat — and ``STATE_DIR`` is an import-time
+    constant in ``hscc_daemon.state``. Unredirected, the ~40 ticks in this file
+    would stamp the OPERATOR's live ``~/.hscc/state``, where a test's invented PR
+    number would read as a real in-flight merge.
+    """
+    from hscc_daemon import state as daemon_state
+    monkeypatch.setattr(daemon_state, "STATE_DIR", str(tmp_path / "state"))
+
+
+def _isolated_hscc_root(tmp_path, monkeypatch):
+    """Point the queue at a scratch state root with no registry to tick.
+
+    ``check_merge_queue()`` takes no arguments — it resolves the real ledger
+    path and the real registry itself — so an isolated run needs both pins.
+    """
+    monkeypatch.setenv("HSCC_HOME", str(tmp_path / "hscc-home"))
+    monkeypatch.setenv("FLIGHTDECK_REGISTRY",
+                       str(tmp_path / "no-registry.yaml"))
+
+
+def test_gate_heartbeat_advances_the_stream_while_the_gate_runs(tmp_path,
+                                                                monkeypatch):
+    """The stream stamp must advance DURING a gate leg, not only after it.
+
+    The fake leg blocks until the heartbeat has stamped twice (capped, so a
+    missing heartbeat FAILS rather than hangs) and samples the stream from
+    INSIDE the leg — so every stamp collected here was, by construction, read
+    while the gate was in flight. ``LIVENESS_STAMP_S`` is retuned to 0.5 s to
+    keep it fast; the shape is the measured one (a leg far longer than the
+    stream's allowed silence).
+    """
+    pair = _repo_pair(tmp_path)
+    gate_cmd = "bash scripts/run_tests.sh"
+    registry = _registry(tmp_path, pair["repo"], gates=[gate_cmd])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+
+    interval = 0.5
+    monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
+
+    seen = []          # (timestamp, stamp) per DISTINCT stamp read in-leg
+    leg = {}
+
+    def gate(command, worktree, timeout_s):
+        leg["start"] = time.monotonic()
+        deadline = leg["start"] + 10.0
+        while time.monotonic() < deadline:
+            stamp = _read_stream(tmp_path)
+            ts = stamp.get("timestamp") if stamp else None
+            if ts and (not seen or seen[-1][0] != ts):
+                seen.append((ts, stamp))
+            if len(_heartbeat_stamps(seen)) >= 2:
+                break
+            time.sleep(0.02)
+        leg["end"] = time.monotonic()
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    beats = _heartbeat_stamps(seen)
+    # (1) the stamp ADVANCED while the gate ran (verify reads this same
+    #     ``timestamp`` field, not the file mtime — verify.py's recency check).
+    assert len({s["timestamp"] for s in beats}) >= 2, (
+        f"stream dark through the whole leg; saw {[t for t, _ in seen]!r}")
+    # (2) and every heartbeat says WHICH gate is running, on which claim.
+    assert beats, "no heartbeat ever named the running gate"
+    for stamp in beats:
+        row = stamp["in_flight"]
+        assert row["gate"] == gate_cmd
+        assert row["stage"] == "gating"
+        assert row["project"] == "alpha" and row["pr"] == 7
+        assert row["elapsed_s"] >= 0
+        assert stamp["ok"] is True
+    # (3) the cadence is the configured interval, not "two stamps at once": the
+    #     leg could not end before the second beat existed, and a beat's own
+    #     elapsed_s is measured from the leg's start.
+    assert leg["end"] - leg["start"] >= interval * 0.9, leg
+    assert max(s["in_flight"]["elapsed_s"] for s in beats) >= interval * 0.9
+    # (4) nothing outlives the tick.
+    assert _live_heartbeats() == []
+
+
+def test_heartbeat_stops_the_moment_the_gate_leg_ends(tmp_path, monkeypatch):
+    """A beat that outlived its leg would report a DEAD tick as alive — the
+    exact inversion of the defect this fixes, so the stop is asserted and not
+    assumed. The thread is joined in __exit__, so the stamping stops with it.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 9, path=_state(tmp_path))
+
+    interval = 0.2
+    monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
+    monkeypatch.setattr(mq, "_run_gate", lambda c, w, t: ("pass", ""))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert result["processed"][0]["result"] == "merged", result
+
+    last = _read_stream(tmp_path)
+    assert last is not None
+    time.sleep(interval * 5)          # 5 full intervals of silence, if it stopped
+    assert _read_stream(tmp_path) == last, "heartbeat still stamping after tick()"
+    assert _live_heartbeats() == []
+
+
+def test_stream_mirrors_every_stage_transition_the_ledger_records(tmp_path,
+                                                                  monkeypatch):
+    """One writer, one truth: the stream's ``in_flight`` row follows the LEDGER's
+    ``stage`` at the same moment — from the claim through rebase, gate, merge.
+
+    Without this the stream advances only when ``tick()`` returns, minutes
+    behind the stage the queue is actually in.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({11: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 11, path=_state(tmp_path))
+
+    mirrored = []
+    real_stamp = mq._stream_stamp
+
+    def spy(**fields):
+        mirrored.append(fields)
+        return real_stamp(**fields)
+
+    monkeypatch.setattr(mq, "_stream_stamp", spy)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert result["processed"][0]["result"] == "merged", result
+
+    stages = [f["stage"] for f in mirrored]
+    # The heartbeat repeats "gating" once per interval, so collapse repeats.
+    sequence = [s for i, s in enumerate(stages)
+                if i == 0 or s != stages[i - 1]]
+    assert sequence == ["claimed", "rebasing", "gating", "merging"], sequence
+    assert all(f["project"] == "alpha" and f["pr"] == 11 for f in mirrored)
+    # The claim is stamped before any work, and names no gate.
+    assert mirrored[0]["stage"] == "claimed"
+    assert mirrored[0].get("gate") is None
+    assert mirrored[0].get("elapsed_s") is None
+    # Readers get a STABLE row: all five keys are always present, not only when
+    # a gate happens to be running.
+    row = _require_stream(tmp_path)["in_flight"]
+    assert set(row) == {"project", "pr", "stage", "gate", "elapsed_s"}
+    assert row["stage"] == "merging" and row["gate"] is None
+
+
+def test_check_merge_queue_stamps_the_stream_when_the_tick_does_no_work(
+        tmp_path, monkeypatch):
+    """Stream twin of test_tick_stamps_the_ledger_even_when_it_does_no_work.
+
+    A dark stream is indistinguishable from a dead daemon, so an idle tick still
+    stamps — and stamps WITHOUT an in_flight row, because nothing is in flight:
+    the tick's real verdict replaces the in-run mirrors when it returns.
+    """
+    _isolated_hscc_root(tmp_path, monkeypatch)
+
+    first = mq.check_merge_queue()
+    assert first["ok"] is True, first
+    stamp = _read_stream(tmp_path)
+    assert stamp is not None, "an idle tick left the stream dark"
+    assert stamp["stream"] == mq.STREAM_NAME
+    assert stamp["ok"] is True
+    assert "in_flight" not in stamp, "a finished tick must not leave a claim row"
+
+    time.sleep(0.01)
+    second = mq.check_merge_queue()
+    assert second["generated_at"] != first["generated_at"]
+    again = _read_stream(tmp_path)
+    assert again is not None
+    assert again["timestamp"] != stamp["timestamp"]
+
+
+def test_check_merge_queue_never_raises_when_write_state_fails(tmp_path,
+                                                               monkeypatch):
+    """A health-reporting write must never fail the health check itself."""
+    from hscc_daemon import state as daemon_state
+    _isolated_hscc_root(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(daemon_state, "write_state", boom)
+    result = mq.check_merge_queue()          # must not raise into the stream
+    assert result["ok"] is True, result
+    assert not _stream_file(tmp_path).exists()
+
+
+def test_a_failing_stream_write_never_breaks_the_gate_run(tmp_path, monkeypatch):
+    """The in-run mirrors carry the SAME contract as the final stamp.
+
+    A read-only filesystem or a full disk must not lose the merge: if the stage
+    mirror or the heartbeat let an OSError escape, ``process_entry`` aborts and
+    the entry is retried instead of merged — which is what this pins.
+    """
+    from hscc_daemon import state as daemon_state
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({13: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 13, path=_state(tmp_path))
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(daemon_state, "write_state", boom)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [13]
+    assert not _stream_file(tmp_path).exists()
+
+
+# ── merge-queue livelock (t_ec0821ed) ──────────────────────────────────────
+#
+# Right after the base moves, GitHub answers ``mergeable: UNKNOWN`` for every
+# open PR until it recomputes. The queue treated that as "not ready" and parked
+# the entry in `waiting`, which used to drain only via auto-enqueue on an EMPTY
+# queue — so a non-empty queue never drained it. The same trap swallowed every
+# pushed PR whose CI was still running. These cases pin the three remedies:
+# bounded re-poll, every-tick wait-list drain, and a held `ci-pending` claim.
+
+def test_mergeable_unknown_is_repolled_then_merged(tmp_path, monkeypatch):
+    """UNKNOWN is "not decided yet": re-poll, do not park the PR."""
+    monkeypatch.setattr(mq, "MERGEABLE_POLL_DELAY_S", 0.0)
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {17: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={17: [{"mergeable": "UNKNOWN"},
+                    {"mergeable": "UNKNOWN"}]})
+    mq.add_to_queue("alpha", 17, path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [17]
+    views = [argv for argv in gh.calls if argv[:3] == ["gh", "pr", "view"]]
+    assert len(views) >= mq.MERGEABLE_POLL_ATTEMPTS, gh.calls
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["waiting"] == []
+
+
+def test_still_unknown_after_the_polls_keeps_the_head_slot(tmp_path,
+                                                           monkeypatch):
+    """A still-UNKNOWN PR stays at the FIFO head, and the next tick merges it."""
+    monkeypatch.setattr(mq, "MERGEABLE_POLL_DELAY_S", 0.0)
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    unknown = {"mergeable": "UNKNOWN"}
+    gh = FakeGh(
+        {18: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={18: [unknown, unknown, unknown]})
+    mq.add_to_queue("alpha", 18, path=_state(tmp_path))
+
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+
+    assert first["processed"][0]["result"] == "mergeable-unknown", first
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [18]
+    assert ps["waiting"] == [] and ps["in_flight"] is None
+    assert [r["state"] for r in mq.view(
+        state_path=_state(tmp_path), registry_path=registry)["rows"]] == [
+            "queued"]
+
+    # GitHub has recomputed by the next tick: the same entry proceeds.
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [18]
+
+
+def test_waiting_green_returns_to_the_fifo_while_the_queue_is_not_empty(
+        tmp_path):
+    """The waiting drain must not wait for an empty FIFO (the livelock)."""
+    pair = _repo_pair(tmp_path)
+    second_head = _new_branch(pair["repo"], "wt/t_second")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        8: {"headRefName": "wt/t_second", "headRefOid": second_head},
+    })
+    # PR 8 was enqueued first, then parked in waiting; PR 7 now occupies the
+    # active FIFO, so auto-enqueue (which requires an EMPTY FIFO) never runs.
+    mq.add_to_queue("alpha", 8, path=_state(tmp_path))
+    doc = mq.load_state(_state(tmp_path))
+    ps = mq._project_state(doc, "alpha")
+    ps["waiting"].append(ps["queue"].pop())
+    mq.save_state(doc, _state(tmp_path))
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+
+    logged = []
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     log=lambda msg, *a, **k: logged.append(msg))
+
+    # The older waiting PR came back and was claimed ahead of the queued PR.
+    assert result["processed"][0]["pr"] == 8, result
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [8]
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [7]
+    assert ps["waiting"] == []
+    assert any("returned green waiting" in line for line in logged), logged
+
+
+def test_ci_pending_is_rechecked_in_place_without_rerunning_the_gates(
+        tmp_path, monkeypatch):
+    """The held claim is a CI wait, not a reason to rebase and gate again."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    gh = FakeGh(
+        {19: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={19: [{}, {"statusCheckRollup": pending}]})
+    mq.add_to_queue("alpha", 19, path=_state(tmp_path))
+    gate_calls = []
+
+    def gate(command, worktree, timeout_s):
+        gate_calls.append(command)
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+    assert first["processed"][0]["result"] == "ci-pending", first
+    assert len(gate_calls) == 1
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"]["stage"] == "ci-pending"
+
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [19]
+    assert len(gate_calls) == 1, "the pushed head was re-gated on resume"
+
+
+def test_post_push_unknown_mergeable_keeps_the_claim_not_waiting(
+        tmp_path, monkeypatch):
+    """Green checks + still-UNKNOWN mergeable after a push is not "ready" yet."""
+    monkeypatch.setattr(mq, "MERGEABLE_POLL_DELAY_S", 0.0)
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    unknown = {"mergeable": "UNKNOWN"}
+    gh = FakeGh(
+        {22: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={22: [{}, unknown, unknown, unknown]})
+    mq.add_to_queue("alpha", 22, path=_state(tmp_path))
+
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run)
+
+    assert first["processed"][0]["result"] == "ci-pending", first
+    assert gh.merged == []
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"]["stage"] == "ci-pending"
+    assert ps["waiting"] == []
+
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [22]
+
+
+def test_ci_red_on_the_pushed_head_hands_the_card_back(tmp_path):
+    """A red CI is a real verdict, unlike a pending one: resolve, not wait."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    red = [{"__typename": "CheckRun", "status": "COMPLETED",
+            "conclusion": "FAILURE"}]
+    gh = FakeGh(
+        {20: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={20: [{}, {"statusCheckRollup": red}]})
+    mq.add_to_queue("alpha", 20, card="t_ci_red", assignee="worker",
+                    path=_state(tmp_path))
+    handed = []
+
+    def handback(card, assignee, body):
+        handed.append((card, assignee, body))
+        return True
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     handback=handback)
+
+    assert result["processed"][0]["result"] == "red-ci", result
+    assert gh.merged == []
+    assert handed and handed[0][0] == "t_ci_red"
+    assert gh.comments and "CI is red" in gh.comments[0][-1]
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"] is None and ps["waiting"] == []
+    assert ps["last"]["result"] == "red-ci"
+    assert [r["state"] for r in mq.view(
+        state_path=_state(tmp_path), registry_path=registry)["rows"]] == [
+            "resolve"]
+
+
+def test_ci_pending_timeout_releases_to_the_rechecked_wait_list(tmp_path):
+    """A CI that never answers is not terminal: the wait list is rechecked."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    gh = FakeGh(
+        {21: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={21: [{"statusCheckRollup": pending}]})
+    state = _state(tmp_path)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    ps["in_flight"] = {
+        "pr": 21, "card": "t_ci_timeout", "assignee": "worker",
+        "branch": pair["branch"], "stage": "ci-pending",
+        "pushed_sha": pair["head"], "ci_base": "main",
+        "ci_since": "2020-01-01T00:00:00+00:00",
+        "enqueued_at": "2020-01-01T00:00:00+00:00",
+    }
+    mq.save_state(doc, state)
+
+    result = mq.tick(state_path=state,
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "ci-timeout", result
+    assert gh.merged == []
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert [e["pr"] for e in ps["waiting"]] == [21]
+    assert mq.outcome_state("ci-timeout") == "waiting"
+
+
+def test_checks_verdict_separates_pending_from_red():
+    green = [{"__typename": "CheckRun", "status": "COMPLETED",
+              "conclusion": "SUCCESS"}]
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    red = [{"__typename": "CheckRun", "status": "COMPLETED",
+            "conclusion": "FAILURE"}]
+    assert mq._checks_verdict({"statusCheckRollup": green}) == "green"
+    assert mq._checks_verdict({"statusCheckRollup": pending}) == "pending"
+    assert mq._checks_verdict({"statusCheckRollup": red}) == "red"
+    # Empty is green only when GitHub positively said there are no required
+    # checks; otherwise nothing has reported yet.
+    assert mq._checks_verdict({"statusCheckRollup": []},
+                              required_checks=False) == "green"
+    assert mq._checks_verdict({"statusCheckRollup": []},
+                              required_checks=True) == "pending"
+    assert mq._checks_verdict({"statusCheckRollup": []},
+                              required_checks=None) == "pending"
+
+
+def test_daemon_entry_point_logs_merge_queue_outcomes(tmp_path, monkeypatch):
+    """The daemon tick must log through ~/.hscc (or $HSCC_HOME)/daemon.log."""
+    _isolated_hscc_root(tmp_path, monkeypatch)
+    seen = {}
+
+    def fake_tick(**kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "generated_at": "2026-01-01T00:00:00+00:00"}
+
+    monkeypatch.setattr(mq, "tick", fake_tick)
+    mq.check_merge_queue()
+    assert seen["log"] is mq._daemon_log
+
+    mq._daemon_log("merge-queue test: PR #1 -> merged")
+    log_path = tmp_path / "hscc-home" / "daemon.log"
+    assert "merge-queue test: PR #1 -> merged" in log_path.read_text()

@@ -2,52 +2,46 @@ import SwiftUI
 import WidgetKit
 
 // ---------------------------------------------------------------------------
-// KanbanMonitorWidget.swift — `hscc kanban monitor`'s board table on the Home
-// Screen and Lock Screen. READ-ONLY: one GET through `WidgetDataClient`, no
-// actions, and only the projected board rows are persisted.
+// KanbanMonitorWidget.swift — the Boards widget (B3 Stacked bars, 2026-11-20).
 //
-// WHAT IT SHOWS, AND WHERE EACH NUMBER COMES FROM
+// The WidgetKit kind stays `KanbanMonitorWidget` so placed widgets survive the
+// consolidation; the display name is now "Boards". It replaces three surfaces:
+// Kanban Monitor, Board Status and Projects.
 //
-// The CLI's board table (hscc_daemon/kanban_live.py::boards_table) prints one
-// row per registered board with Running, Ready, Todo, Scheduled, Review,
-// Blocked, Triage and Done 24h. The data contract's compact route,
-// `GET /v1/mobile/summary`, is the same collection projected by
-// `kanban_live.board_status_counts`: per board, `counts.{running,ready,todo,
-// blocked,done,archived}` plus `total`. So every number this file draws is a
-// direct field of `boards[].counts`:
+// WHAT IT SHOWS
 //
-//   running  <- boards[].counts.running   (CLI column "Running")
-//   ready    <- boards[].counts.ready     (CLI column "Ready")
-//   todo     <- boards[].counts.todo      (CLI column "Todo")
-//   blocked  <- boards[].counts.blocked   (CLI column "Blocked")
-//   done     <- boards[].counts.done      (CLI column "Done 24h", i.e. done today)
+//   small  — "Open cards" and the top four boards by open count: name + total,
+//            a stacked bar split running (accent) / todo (secondary) / blocked
+//            (orange), length proportional to the largest open count.
+//   medium — "Open cards by board" + as-of, four rows with the board name,
+//            stacked bar and "N done" today, plus the legend row.
+//   large  — every active board (up to ten) as medium rows, the worker-slot
+//            strip "R of C slots" and the footer "D done 24h · B blocked".
+//   scoped — the same bar for ONE board (the existing scope intent), its
+//            column counts and the titles of that board's running cards.
 //
-// The board name is `boards[].board`; the row order is the CLI's
-// `(-running, name)`, and a board with no open card and no done-today card is
-// skipped exactly as `boards_table` skips it. Scheduled/Review/Triage are not
-// drawn: the card asks for the five above and the route folds any other status
-// into `other`, which is never rendered as one of them.
+// EVERY NUMBER IS A ROUTE FIELD
 //
-// WHY NOT THE KANBAN TRIO. `/v1/kanban/{running,blocked,stale}` has no `done`
-// and no per-board histogram; it cannot answer "done today exactly as the CLI".
-// The summary route is the contract's compact board table and costs one request
-// instead of three. `/v1/mobile/summary` is served by the same
-// `kanban_live.collect(registered_only=True)` pass as `hscc kanban monitor`, so
-// orphan sqlite boards never appear here.
+// `GET /v1/mobile/summary` (optionally narrowed with `?boards=`) supplies
+// `boards[].counts.{running,todo,blocked,done}` and `max_in_progress`, the
+// server's own `kanban.max_in_progress` cap. The widget never carries a
+// literal slot count: with no cap on the wire it says "R running" rather than
+// inventing "of 6". `/v1/kanban/running` is read a second time ONLY when the
+// operator scoped this surface to one board, because that is the only size
+// that draws running titles.
 //
-// FAILURE RULE. `WidgetData.read` owns live/stale/failed. A stale entry draws
-// its real rows with an explicit "updated Nm ago · reason"; a failed entry draws
-// the reason, never five dashes dressed up as a quiet board. A truncated or
-// per-board-error payload is refused rather than drawn as an under-count
-// (§6 rules 4/5 of WIDGET_DATA_CONTRACT.md). The provider decides pause BEFORE
-// it builds a client, so a paused surface sends zero requests.
+// FAILURE RULE. `WidgetData.read` owns live/stale/failed. A stale entry keeps
+// its real rows, dims them, and says "offline · HH:mm"; a failed read says so
+// and never dresses an empty table up as a quiet fleet. Truncation and a
+// board-level error are refusals, not an under-count. The provider decides
+// pause BEFORE it builds a client, so a paused surface sends zero requests.
 // ---------------------------------------------------------------------------
 
 // MARK: - One board row
 
-/// One row of the CLI's board table, projected to the five columns this card
-/// owns. All counts are optional so a payload that did not carry a board cannot
-/// be rendered as `0`; only rows built from a real `counts` map have values.
+/// One row of the CLI's board table, projected to the columns the Boards
+/// widget draws. Counts stay optional so a payload that did not carry a board
+/// cannot be rendered as `0`.
 struct KanbanBoardRow: Codable, Identifiable, Equatable, Hashable, Sendable {
     let board: String
     let running: Int?
@@ -55,17 +49,39 @@ struct KanbanBoardRow: Codable, Identifiable, Equatable, Hashable, Sendable {
     let todo: Int?
     let blocked: Int?
     let done: Int?
+    /// Cards in scheduled/review/triage (the server folds them into `other`).
+    /// Without this a board whose only open cards are those statuses was
+    /// dropped from the table entirely (audit W14).
+    let other: Int?
+
+    init(board: String, running: Int?, ready: Int?, todo: Int?,
+         blocked: Int?, done: Int?, other: Int? = nil) {
+        self.board = board
+        self.running = running
+        self.ready = ready
+        self.todo = todo
+        self.blocked = blocked
+        self.done = done
+        self.other = other
+    }
 
     var id: String { board }
 
+    /// The B3 bar: running + todo + blocked, plus the folded `other` bucket so
+    /// a scheduled/review/triage card is still an open card. `ready` and `done`
+    /// are separate facts, never folded into the bar length.
+    var openCards: Int { (running ?? 0) + (todo ?? 0) + (blocked ?? 0) + (other ?? 0) }
+
     /// The CLI's idle-board rule: a board with nothing open and nothing finished
-    /// today is skipped by `boards_table`, so it is skipped here too.
+    /// today is skipped by `boards_table`, so it is skipped here too. `other`
+    /// is included for the same reason the open bar includes it.
     var hasActivity: Bool {
-        [running, ready, todo, blocked, done].contains { ($0 ?? 0) > 0 }
+        [running, ready, todo, blocked, done, other].contains { ($0 ?? 0) > 0 }
     }
 
-    /// The response → rows. nil counts (a board-level `error`) are dropped, not
-    /// zeroed; the caller refuses the whole read when the envelope is truncated.
+    /// The response → rows, ordered by open cards (the B3 question), then name.
+    /// nil counts (a board-level `error`) are dropped, not zeroed; the caller
+    /// refuses the whole read when the envelope is truncated.
     static func rows(from summary: MobileSummaryResponse) -> [KanbanBoardRow] {
         summary.entries.compactMap { tile -> KanbanBoardRow? in
             guard tile.error == nil, let counts = tile.counts else { return nil }
@@ -74,13 +90,14 @@ struct KanbanBoardRow: Codable, Identifiable, Equatable, Hashable, Sendable {
                                   ready: counts.ready,
                                   todo: counts.todo,
                                   blocked: counts.blocked,
-                                  done: counts.done)
+                                  done: counts.done,
+                                  other: counts.other ?? 0)
         }
         .filter(\.hasActivity)
         .sorted { lhs, rhs in
-            let l = lhs.running ?? -1
-            let r = rhs.running ?? -1
-            return l == r ? lhs.board < rhs.board : l > r
+            lhs.openCards == rhs.openCards
+                ? lhs.board < rhs.board
+                : lhs.openCards > rhs.openCards
         }
     }
 
@@ -88,12 +105,20 @@ struct KanbanBoardRow: Codable, Identifiable, Equatable, Hashable, Sendable {
     /// degraded, truncated, or wholly-unreadable payload is refused (the
     /// last-known rows stay on screen); a single board-level error drops only
     /// that board, and the entry announces the count.
-    static func readResult(from summary: MobileSummaryResponse) -> Result<KanbanBoardTable, WidgetDataFailure> {
+    static func readResult(from summary: MobileSummaryResponse,
+                           scopedBoard: String? = nil) -> Result<KanbanBoardTable, WidgetDataFailure> {
         guard !summary.degraded else {
             return .failure(.decoding(detail: "mobile/summary carried no boards"))
         }
         if summary.truncated == true || (summary.omitted_boards ?? 0) > 0 {
             return .failure(.decoding(detail: "mobile/summary was truncated"))
+        }
+        // The all-boards tile's totals are a sum of the tiles present. A board
+        // the server could not read is not a zero, so refuse the read rather
+        // than draw a total that is low by construction (audit W13). A
+        // one-board scope is unaffected by another board being unreadable.
+        if scopedBoard == nil, (summary.unreadable_boards ?? 0) > 0 {
+            return .failure(.decoding(detail: "mobile/summary had unreadable boards"))
         }
         let usable = summary.entries.filter { $0.error == nil && $0.counts != nil }
         guard !usable.isEmpty || summary.entries.isEmpty else {
@@ -101,28 +126,32 @@ struct KanbanBoardRow: Codable, Identifiable, Equatable, Hashable, Sendable {
         }
         return .success(KanbanBoardTable(rows: rows(from: summary),
                                          boardCount: summary.board_count,
-                                         unreadableBoards: summary.unreadable_boards))
-    }
-
-    /// The five numbers as one short line for the rectangular accessory.
-    var countsLine: String {
-        [
-            "\(KanbanMonitorReading.text(running)) run",
-            "\(KanbanMonitorReading.text(ready)) ready",
-            "\(KanbanMonitorReading.text(todo)) todo",
-            "\(KanbanMonitorReading.text(blocked)) blk",
-            "\(KanbanMonitorReading.text(done)) done",
-        ].joined(separator: " · ")
+                                         unreadableBoards: summary.unreadable_boards,
+                                         maxInProgress: summary.max_in_progress,
+                                         generatedAtRaw: summary.generated_at))
     }
 }
 
-/// The compact summary's board half: active rows plus the envelope's own counts.
-/// `unreadableBoards` is a COUNT only — the route never echoes a slug that
-/// failed its shape gate.
+/// The compact summary's board half: active rows plus the envelope's own counts
+/// and the server's worker-slot cap.
 struct KanbanBoardTable {
     let rows: [KanbanBoardRow]
     let boardCount: Int?
     let unreadableBoards: Int?
+    let maxInProgress: Int?
+    let generatedAtRaw: String?
+    var runningTitles: [String]
+
+    init(rows: [KanbanBoardRow], boardCount: Int?, unreadableBoards: Int?,
+         maxInProgress: Int? = nil, generatedAtRaw: String? = nil,
+         runningTitles: [String] = []) {
+        self.rows = rows
+        self.boardCount = boardCount
+        self.unreadableBoards = unreadableBoards
+        self.maxInProgress = maxInProgress
+        self.generatedAtRaw = generatedAtRaw
+        self.runningTitles = runningTitles
+    }
 }
 
 /// The one place a count becomes a string. nil is "the payload did not carry
@@ -131,9 +160,6 @@ struct KanbanBoardTable {
 enum KanbanMonitorReading {
     static func text(_ value: Int?) -> String { value.map { "\($0)" } ?? "—" }
 
-    /// Fleet running is the CLI title's `n_run`: the sum of the per-board
-    /// `Running` cells in the table below it. It is the one aggregate the CLI
-    /// itself prints (`n/cap slots`).
     static func runningTotal(_ rows: [KanbanBoardRow]) -> Int {
         rows.reduce(0) { $0 + ($1.running ?? 0) }
     }
@@ -149,33 +175,50 @@ enum KanbanMonitorReading {
 
 // MARK: - Last-known board rows
 
-/// The board rows and the date they were read. Board slugs + integers only —
-/// no card title, no path, no address, no token (§7).
+/// The board rows, the server cap and the date they were read. Board slugs +
+/// integers only — no card title, no path, no address, no token (§7). Running
+/// titles are deliberately not persisted: the next timeline asks the server.
 enum KanbanMonitorSnapshotStore {
+    /// One slot per board scope, so two Boards widgets pointed at different
+    /// boards keep their own last-known rows (audit W12). The unscoped surface
+    /// keeps the original key so an existing snapshot survives the upgrade.
     static let storageKey = "hscc.kanbanmonitor.rows"
+
+    static func storageKey(board: String?) -> String {
+        guard let board, !board.isEmpty else { return storageKey }
+        return storageKey + "." + board
+    }
 
     struct Snapshot: Codable {
         let date: Date
         let rows: [KanbanBoardRow]
+        var maxInProgress: Int? = nil
     }
 
-    static func save(_ rows: [KanbanBoardRow], at date: Date = Date()) {
+    static func save(_ rows: [KanbanBoardRow], maxInProgress: Int?,
+                     board: String? = nil, at date: Date = Date()) {
         guard !rows.isEmpty,
-              let data = try? JSONEncoder().encode(Snapshot(date: date, rows: rows)) else { return }
-        SharedStore.suite?.set(data, forKey: storageKey)
+              let data = try? JSONEncoder().encode(
+                Snapshot(date: date, rows: rows, maxInProgress: maxInProgress))
+        else { return }
+        SharedStore.suite?.set(data, forKey: storageKey(board: board))
     }
 
-    static func load() -> Snapshot? {
-        guard let data = SharedStore.suite?.data(forKey: storageKey),
-              let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return nil }
+    static func load(board: String? = nil) -> Snapshot? {
+        guard let data = SharedStore.suite?.data(forKey: storageKey(board: board)),
+              let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+        else { return nil }
         return snapshot
     }
 
-    static func lastKnown() -> (value: KanbanBoardTable, at: Date)? {
-        guard let snapshot = load(), !snapshot.rows.isEmpty else { return nil }
+    static func lastKnown(board: String? = nil) -> (value: KanbanBoardTable, at: Date)? {
+        guard let snapshot = load(board: board), !snapshot.rows.isEmpty else { return nil }
         return (KanbanBoardTable(rows: snapshot.rows,
                                  boardCount: snapshot.rows.count,
-                                 unreadableBoards: nil), snapshot.date)
+                                 unreadableBoards: nil,
+                                 maxInProgress: snapshot.maxInProgress,
+                                 generatedAtRaw: nil),
+                snapshot.date)
     }
 }
 
@@ -187,12 +230,18 @@ struct KanbanMonitorEntry: TimelineEntry {
     let date: Date
     let configured: Bool
     /// The rows the views draw, already filtered to active boards and sorted
-    /// like the CLI. Empty with `failure == nil` is an honest "nothing open".
+    /// by open count. Empty with `failure == nil` is an honest "nothing open".
     let rows: [KanbanBoardRow]
-    /// Registered boards the payload carried, `nil` when the read failed.
     let boardCount: Int?
-    /// Boards the server could not read; announced, never silently dropped.
     let unreadableBoards: Int?
+    /// The server's `kanban.max_in_progress`; nil when unset or unreadable.
+    let maxInProgress: Int?
+    /// The summary's `generated_at`, the data's own clock.
+    let generatedAtRaw: String?
+    /// The one board this surface is pointed at, when the scope intent chose one.
+    let scopeBoard: String?
+    /// Titles of that board's running cards; only read for a scoped surface.
+    let runningTitles: [String]
     /// Set only when NOTHING usable came back. A partial read keeps its rows
     /// and names the gap in `partialReason` instead of hiding the whole table.
     let failure: WidgetDataFailure?
@@ -201,6 +250,29 @@ struct KanbanMonitorEntry: TimelineEntry {
     let ageMinutes: Int?
     let refreshMinutes: Int
     let paused: Bool
+
+    init(date: Date, configured: Bool, rows: [KanbanBoardRow],
+         boardCount: Int?, unreadableBoards: Int?,
+         maxInProgress: Int? = nil, generatedAtRaw: String? = nil,
+         scopeBoard: String? = nil,
+         runningTitles: [String] = [], failure: WidgetDataFailure?,
+         partialReason: WidgetDataFailure?, ageMinutes: Int?,
+         refreshMinutes: Int, paused: Bool) {
+        self.date = date
+        self.configured = configured
+        self.rows = rows
+        self.boardCount = boardCount
+        self.unreadableBoards = unreadableBoards
+        self.maxInProgress = maxInProgress
+        self.generatedAtRaw = generatedAtRaw
+        self.scopeBoard = scopeBoard
+        self.runningTitles = runningTitles
+        self.failure = failure
+        self.partialReason = partialReason
+        self.ageMinutes = ageMinutes
+        self.refreshMinutes = refreshMinutes
+        self.paused = paused
+    }
 
     static let unconfigured = KanbanMonitorEntry(
         date: .now, configured: false, rows: [], boardCount: nil,
@@ -226,41 +298,109 @@ struct KanbanMonitorEntry: TimelineEntry {
         return "Paused"
     }
 
-    // MARK: Text the families draw
+    // MARK: The data's own clock
+
+    /// HH:mm of the server's `generated_at` (the data), never of the render.
+    var dataAt: Date? {
+        if let ageMinutes {
+            return Date().addingTimeInterval(-Double(ageMinutes) * 60)
+        }
+        if let generatedAt {
+            return generatedAt
+        }
+        if failure != nil { return nil }
+        return date
+    }
+
+    /// Parsed once per entry; a malformed stamp falls back to the fetch time.
+    private var generatedAt: Date? { Self.parseStamp(generatedAtRaw) }
+
+    static func parseStamp(_ raw: String?) -> Date? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: raw) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: raw)
+    }
+
+    var staleState: StaleState? {
+        guard configured, !paused else { return nil }
+        return StaleState(dataAt: dataAt,
+                          fetchedAt: Date(),
+                          refreshMinutes: refreshMinutes,
+                          failed: failure != nil || ageMinutes != nil)
+    }
+
+    // MARK: Aggregates the families draw
 
     var runningTotal: Int { KanbanMonitorReading.runningTotal(rows) }
     var blockedTotal: Int { KanbanMonitorReading.blockedTotal(rows) }
     var doneTotal: Int { KanbanMonitorReading.doneTotal(rows) }
-    var headlineNumber: Int? { failure == nil ? runningTotal : nil }
-    var headlineLabel: String { "running" }
+
+    /// The largest open count, the denominator of every B3 bar.
+    var maxOpenCards: Int { max(rows.map(\.openCards).max() ?? 0, 1) }
+
+    var topBoards: [KanbanBoardRow] { Array(rows.prefix(4)) }
+
+    var scopedRow: KanbanBoardRow? {
+        guard let scopeBoard else { return nil }
+        return rows.first { $0.board == scopeBoard }
+    }
 
     /// `accessoryInline`: one short line, setup invite first when unconfigured.
     var inlineLine: String {
         if !configured || paused { return shortGateLabel }
         if let failure { return failure.shortLabel }
-        guard let first = rows.first else { return "No open cards" }
-        // One board's exact cells, not a fleet sum: the Lock Screen line is a
-        // pointer to the busiest board, and every number on it is a field of
-        // that row in the CLI's table. A name that will not fit is dropped
-        // rather than cut in half.
-        let withBoard = "\(first.board) \(KanbanMonitorReading.text(first.running)) run · \(KanbanMonitorReading.text(first.blocked)) blocked"
-        if withBoard.count <= 25 { return withBoard }
-        return "\(KanbanMonitorReading.text(first.running)) run · \(KanbanMonitorReading.text(first.blocked)) blocked"
+        return "\(KanbanMonitorReading.text(runningTotal)) running · "
+            + "\(KanbanMonitorReading.text(blockedTotal)) blocked"
     }
 
-    /// `accessoryRectangular`'s second line: the busiest board, verbatim.
+    /// `accessoryRectangular`'s second line.
     var rectangularLine: String {
         if !configured || paused { return shortGateLabel }
         if let failure { return failure.shortLabel }
-        guard let first = rows.first else { return "No open cards" }
-        return "\(first.board) \(KanbanMonitorReading.text(first.running)) run · \(KanbanMonitorReading.text(first.blocked)) blocked"
+        return "\(KanbanMonitorReading.text(doneTotal)) done 24h · "
+            + "\(KanbanMonitorReading.text(blockedTotal)) blocked"
     }
 
-    /// The freshness line every family can afford.
+    // MARK: L2 Lock Screen copy
+
+    /// The server's worker-slot cap, widened to the running count when a stale
+    /// row claims more workers than the cap. Nil means the route sent no cap;
+    /// the ring then says "N running" instead of inventing "of 6".
+    var slotCap: Int? {
+        guard let maxInProgress, maxInProgress > 0 else { return nil }
+        return max(maxInProgress, runningTotal)
+    }
+
+    /// `accessoryCircular`: "2/6" when the cap is known, otherwise "2".
+    var slotValueText: String {
+        slotCap.map { "\(runningTotal)/\($0)" } ?? "\(runningTotal)"
+    }
+
+    /// `accessoryCircular`: "slots" when the cap is known, otherwise "running".
+    var slotCaption: String { slotCap == nil ? "running" : "slots" }
+
+    var slotGaugeRange: ClosedRange<Double> {
+        let upper = Double(slotCap ?? max(runningTotal, 1))
+        return 0...max(upper, 1)
+    }
+
+    var slotGaugeValue: Double {
+        min(Double(runningTotal), slotGaugeRange.upperBound)
+    }
+
+    /// The rectangular header: "BOARDS · N RUNNING".
+    var rectangularHeadline: String {
+        "BOARDS · \(KanbanMonitorReading.text(runningTotal)) RUNNING"
+    }
+
+    /// The freshness line the Home Screen families can afford.
     var updatedLine: String {
         if !configured { return "Set up the app to see the board" }
         if paused { return "No data while paused" }
-        if let ageMinutes { return "updated \(ageMinutes)m ago · \(partialReason?.shortLabel ?? "kept last known")" }
+        if ageMinutes != nil { return "offline · \(NativeStyle.hhmm(dataAt))" }
         if let failure { return failure.operatorLine }
         if rows.isEmpty { return "updated just now · no open cards" }
         return "updated just now"
@@ -277,9 +417,9 @@ struct KanbanMonitorEntry: TimelineEntry {
 
     static func rowLimit(for family: WidgetFamily) -> Int {
         switch family {
-        case .systemSmall: return 2
-        case .systemLarge, .systemExtraLarge: return 8
-        default: return 5
+        case .systemSmall: return 4
+        case .systemLarge, .systemExtraLarge: return 10
+        default: return 4
         }
     }
 
@@ -290,8 +430,8 @@ struct KanbanMonitorEntry: TimelineEntry {
                 KanbanBoardRow(board: "hscc", running: 2, ready: 0, todo: 0, blocked: 5, done: 73),
                 KanbanBoardRow(board: "radio", running: 1, ready: 2, todo: 3, blocked: 0, done: 4),
             ],
-            boardCount: 2, unreadableBoards: nil, failure: nil, partialReason: nil,
-            ageMinutes: nil,
+            boardCount: 2, unreadableBoards: nil, maxInProgress: 6,
+            failure: nil, partialReason: nil, ageMinutes: nil,
             refreshMinutes: KanbanMonitorTimelineProvider.defaultRefreshMinutes,
             paused: false)
     }
@@ -300,7 +440,7 @@ struct KanbanMonitorEntry: TimelineEntry {
 // MARK: - Timeline provider
 
 struct KanbanMonitorTimelineProvider: TimelineProvider {
-    static let defaultRefreshMinutes = 5
+    static let defaultRefreshMinutes = 30
 
     // GATE-SLICE-BEGIN: kanban_monitor_cadence
     static func nextRefreshDate(refreshMinutes: Int, from now: Date = .now) -> Date? {
@@ -345,19 +485,25 @@ struct KanbanMonitorTimelineProvider: TimelineProvider {
         let client = WidgetDataClient.makeIfConfigured()
         guard let client else { return .unconfigured }
 
+        let scope = AppGroupWidgetSettings.load()?.scope(for: .widgetKanbanMonitor)
+        let board = scope?.board
         let outcome = await WidgetData.read(
             using: client,
-            lastKnown: KanbanMonitorSnapshotStore.lastKnown
+            lastKnown: { KanbanMonitorSnapshotStore.lastKnown(board: board) }
         ) { c in
-            await Self.readBoards(client: c)
+            await Self.readBoards(client: c, board: board)
         }
 
         switch outcome {
         case .live(let table, let fetchedAt):
-            KanbanMonitorSnapshotStore.save(table.rows, at: fetchedAt)
+            KanbanMonitorSnapshotStore.save(table.rows, maxInProgress: table.maxInProgress,
+                                            board: board, at: fetchedAt)
             return KanbanMonitorEntry(date: fetchedAt, configured: true, rows: table.rows,
                                       boardCount: table.boardCount,
                                       unreadableBoards: table.unreadableBoards,
+                                      maxInProgress: table.maxInProgress,
+                                      scopeBoard: board,
+                                      runningTitles: table.runningTitles,
                                       failure: nil, partialReason: nil, ageMinutes: nil,
                                       refreshMinutes: surface?.refreshMinutes
                                           ?? Self.defaultRefreshMinutes,
@@ -366,6 +512,8 @@ struct KanbanMonitorTimelineProvider: TimelineProvider {
             return KanbanMonitorEntry(date: .now, configured: true, rows: table.rows,
                                       boardCount: table.boardCount,
                                       unreadableBoards: table.unreadableBoards,
+                                      maxInProgress: table.maxInProgress,
+                                      scopeBoard: board,
                                       failure: nil, partialReason: reason, ageMinutes: age,
                                       refreshMinutes: surface?.refreshMinutes
                                           ?? Self.defaultRefreshMinutes,
@@ -373,6 +521,7 @@ struct KanbanMonitorTimelineProvider: TimelineProvider {
         case .failed(let failure):
             return KanbanMonitorEntry(date: .now, configured: true, rows: [],
                                       boardCount: nil, unreadableBoards: nil,
+                                      maxInProgress: nil, scopeBoard: board,
                                       failure: failure, partialReason: nil, ageMinutes: nil,
                                       refreshMinutes: surface?.refreshMinutes
                                           ?? Self.defaultRefreshMinutes,
@@ -380,15 +529,24 @@ struct KanbanMonitorTimelineProvider: TimelineProvider {
         }
     }
 
-    /// One read; the summary is the CLI's board table. Truncation and a
-    /// board-level error are refusals, not an under-count: a table missing
-    /// boards would look like those boards went quiet.
-    private static func readBoards(client: WidgetDataClient) async -> Result<KanbanBoardTable, WidgetDataFailure> {
-        switch await client.mobileSummary() {
+    /// The summary is the CLI's board table. A one-board scope narrows it and
+    /// pays for a second read only for the running titles that size draws.
+    private static func readBoards(client: WidgetDataClient,
+                                   board: String?) async -> Result<KanbanBoardTable, WidgetDataFailure> {
+        let requested = board.map { [$0] } ?? []
+        switch await client.mobileSummary(boards: requested) {
         case .failure(let failure):
             return .failure(failure)
         case .success(let summary):
-            return KanbanBoardRow.readResult(from: summary)
+            let result = KanbanBoardRow.readResult(from: summary, scopedBoard: board)
+            guard case .success(var table) = result else { return result }
+            if let board, !board.isEmpty,
+               case .success(let running) = await client.kanbanRunning() {
+                table.runningTitles = (running.tasks ?? [])
+                    .filter { $0.board == board }
+                    .compactMap { $0.title }
+            }
+            return .success(table)
         }
     }
 }
@@ -399,16 +557,12 @@ struct KanbanMonitorWidget: Widget {
     let kind = "KanbanMonitorWidget"
 
     var body: some WidgetConfiguration {
-        let style = WidgetStyle.resolved(for: .widgetKanbanMonitor)
-        return StaticConfiguration(kind: kind, provider: KanbanMonitorTimelineProvider()) { entry in
+        StaticConfiguration(kind: kind, provider: KanbanMonitorTimelineProvider()) { entry in
             KanbanMonitorWidgetView(entry: entry)
-                .containerBackground(for: .widget) {
-                    WidgetSurfaceBackground(style: style)
-                }
-                .widgetRenderingAdaptation(style: style)
+                .containerBackground(NativeStyle.surface, for: .widget)
         }
-        .configurationDisplayName("Kanban Monitor")
-        .description("Registered project boards: running, ready, todo, blocked and done today. Read-only.")
+        .configurationDisplayName("Boards")
+        .description("Open cards by board: running, todo and blocked, plus the worker slots. Read-only.")
         #if os(iOS)
         .supportedFamilies([.accessoryInline, .accessoryCircular, .accessoryRectangular,
                             .systemSmall, .systemMedium, .systemLarge])
@@ -419,7 +573,6 @@ struct KanbanMonitorWidget: Widget {
 }
 
 struct KanbanMonitorWidgetView: View {
-    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
     @Environment(\.widgetFamily) private var family
 
@@ -428,9 +581,9 @@ struct KanbanMonitorWidgetView: View {
         #if os(iOS)
         case .accessoryInline:
             if !entry.configured || entry.paused {
-                Text(entry.shortGateLabel).font(style.font(.caption2))
+                Text(entry.shortGateLabel).font(NativeStyle.small())
             } else {
-                Text(entry.inlineLine).font(style.font(.caption2))
+                Text(entry.inlineLine).font(NativeStyle.small())
             }
         case .accessoryCircular:
             KanbanMonitorCircular(entry: entry)
@@ -450,205 +603,326 @@ struct KanbanMonitorWidgetView: View {
 // MARK: - Shared panes
 
 struct KanbanMonitorGateView: View {
-    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
-    var systemTinted = false
-
-    private var primaryText: Color { systemTinted ? .primary : style.primaryTextColor }
-    private var secondaryText: Color { systemTinted ? .secondary : style.secondaryTextColor }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            Image(systemName: entry.paused ? "pause.circle" : "gearshape").widgetIcon(style)
-                .font(style.font(.subheadline))
-                .foregroundColor(secondaryText)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Boards")
+                .font(NativeStyle.label())
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(entry.shortGateLabel)
+                .font(NativeStyle.hero(24))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
             Text(entry.gateLine)
-                .font(style.font(.caption2, weight: .semibold))
-                .foregroundColor(primaryText)
-            Text(entry.paused
-                 ? "Turn it back on under Widgets & Live Activities in the HSCC app."
-                 : WidgetDataFailure.notConfigured.operatorLine)
-                .font(style.font(.caption2))
-                .foregroundColor(secondaryText)
-                .lineLimit(3)
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            AsOfStamp(date: nil)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
 struct KanbanMonitorErrorPane: View {
-    @Environment(\.widgetStyle) private var style
     let failure: WidgetDataFailure
     var detailed = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            HStack(spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
-                    .font(style.font(.subheadline))
-                    .foregroundColor(style.badColor)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(NativeStyle.bad)
                 Text("board read failed")
-                    .font(style.font(.caption, weight: .semibold))
-                    .foregroundColor(style.primaryTextColor)
+                    .font(NativeStyle.label())
+                    .foregroundStyle(.primary)
             }
             Text(detailed ? failure.operatorLine : failure.shortLabel)
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
                 .lineLimit(detailed ? 3 : 2)
             Text("counts unknown")
-                .font(style.font(.caption2))
-                .foregroundColor(style.secondaryTextColor)
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
-private struct KanbanMonitorHeader: View {
-    @Environment(\.widgetStyle) private var style
-    let entry: KanbanMonitorEntry
-
+private struct BoardsLegend: View {
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-            Text("Boards")
-                .font(style.font(.caption, weight: .semibold))
-                .foregroundColor(style.primaryTextColor)
-            Spacer(minLength: 0)
-            Text(entry.updatedLine)
-                .font(style.font(size: 8))
-                .foregroundColor(entry.ageMinutes == nil ? style.secondaryTextColor : style.warnColor)
-                .lineLimit(1)
+        HStack(spacing: 8) {
+            legend("running", NativeStyle.accent)
+            legend("todo", Color.secondary)
+            legend("blocked", NativeStyle.warn)
         }
-        .widgetHeader(style)
+        .font(NativeStyle.small())
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+
+    private func legend(_ label: String, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(label)
+        }
     }
 }
 
-/// One board row with all five columns. `compact` drops the labels (the header
-/// above names the columns) for the two-row small family.
-private struct KanbanBoardRowView: View {
-    @Environment(\.widgetStyle) private var style
+/// A B3 bar: the capsule track is the largest open count; the filled part is
+/// this board's open cards, split running / todo / blocked. Length is
+/// proportional to open cards, so a growing orange segment stands out.
+private struct StackedBoardBar: View {
     let row: KanbanBoardRow
-
-    private func value(_ v: Int?) -> Text {
-        Text(KanbanMonitorReading.text(v))
-            .font(style.font(.caption2, weight: .medium).monospacedDigit())
-            .foregroundColor(v == nil ? style.secondaryTextColor : style.primaryTextColor)
-    }
-
-    private func cell(_ v: Int?, width: CGFloat) -> some View {
-        value(v).frame(width: style.scaled(width), alignment: .trailing)
-    }
+    let maxOpen: Int
+    var height: CGFloat = 8
 
     var body: some View {
-        HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
+        GeometryReader { geometry in
+            let total = row.openCards
+            let width = maxOpen > 0
+                ? geometry.size.width * CGFloat(total) / CGFloat(maxOpen)
+                : 0
+            HStack(spacing: 0) {
+                segment(row.running ?? 0, total: total, width: width, color: NativeStyle.accent)
+                segment(row.todo ?? 0, total: total, width: width, color: Color.secondary)
+                segment(row.blocked ?? 0, total: total, width: width, color: NativeStyle.warn)
+            }
+            .frame(width: max(2, width), alignment: .leading)
+            .background(Capsule().fill(.quaternary))
+            .clipShape(Capsule())
+        }
+        .frame(height: height)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func segment(_ value: Int, total: Int, width: CGFloat,
+                         color: Color) -> some View {
+        if value > 0, total > 0 {
+            Rectangle()
+                .fill(color)
+                .frame(width: width * CGFloat(value) / CGFloat(total))
+        }
+    }
+}
+
+private struct BoardBarRow: View {
+    let row: KanbanBoardRow
+    let maxOpen: Int
+    var showDone = true
+
+    var body: some View {
+        HStack(spacing: 8) {
             Text(row.board)
-                .font(style.font(.caption2, weight: .semibold))
-                .foregroundColor(style.primaryTextColor)
+                .font(NativeStyle.small())
                 .lineLimit(1)
-            Spacer(minLength: style.spacing(Theme.Spacing.xs.rawValue))
-            cell(row.running, width: 18)
-            cell(row.ready, width: 18)
-            cell(row.todo, width: 20)
-            cell(row.blocked, width: 20)
-            cell(row.done, width: 22)
+                .truncationMode(.tail)
+                .frame(width: 100, alignment: .leading)
+            StackedBoardBar(row: row, maxOpen: maxOpen, height: 10)
+            if showDone {
+                Text("\(row.done ?? 0) done")
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 54, alignment: .trailing)
+            }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(rowAccessibility)
+        .accessibilityLabel(accessibilityLine)
     }
 
-    private var rowAccessibility: String {
-        "\(row.board): \(KanbanMonitorReading.text(row.running)) running, "
-            + "\(KanbanMonitorReading.text(row.ready)) ready, "
-            + "\(KanbanMonitorReading.text(row.todo)) todo, "
-            + "\(KanbanMonitorReading.text(row.blocked)) blocked, "
-            + "\(KanbanMonitorReading.text(row.done)) done today"
+    private var accessibilityLine: String {
+        "\(row.board): \(row.openCards) open, \(row.running ?? 0) running, "
+            + "\(row.todo ?? 0) todo, \(row.blocked ?? 0) blocked, "
+            + "\(row.done ?? 0) done 24h"
     }
 }
 
-private struct KanbanColumnHeader: View {
-    @Environment(\.widgetStyle) private var style
+private struct BoardsHeader: View {
+    let entry: KanbanMonitorEntry
+    var title: String
 
-    private func label(_ text: String, width: CGFloat) -> some View {
-        Text(text)
-            .font(style.font(size: 7, weight: .semibold))
-            .foregroundColor(style.secondaryTextColor)
-            .frame(width: style.scaled(width), alignment: .trailing)
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(title)
+                .font(NativeStyle.label())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            AsOfStamp(date: entry.dataAt)
+        }
+    }
+}
+
+private struct NoOpenCards: View {
+    var body: some View {
+        Text("No open cards")
+            .font(NativeStyle.small())
+            .foregroundStyle(.secondary)
+    }
+}
+
+/// The worker-slot strip: one segment per server-advertised slot. The cap is
+/// the API's `max_in_progress`, never a literal in this file.
+private struct WorkerSlotStrip: View {
+    let running: Int
+    let cap: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let cap, cap > 0 {
+                HStack(spacing: 3) {
+                    ForEach(0..<min(cap, 24), id: \.self) { index in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(index < running ? NativeStyle.accent : Color.secondary.opacity(0.2))
+                            .frame(height: 8)
+                    }
+                }
+                Text("\(running) of \(cap) slots")
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            } else {
+                Text("\(running) running")
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+    }
+}
+
+// MARK: - One-board scope
+
+/// The B4 half of B3: one board's stacked bar, its column counts and the
+/// running card titles. `family` trims the list to what the size can hold.
+private struct BoardScopeBody: View {
+    let entry: KanbanMonitorEntry
+    let row: KanbanBoardRow
+    let family: WidgetFamily
+
+    private var titleLimit: Int {
+        switch family {
+        case .systemSmall: return 2
+        case .systemLarge, .systemExtraLarge: return 8
+        default: return 3
+        }
     }
 
     var body: some View {
-        HStack(spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
-            Text("BOARD")
-                .font(style.font(size: 7, weight: .semibold))
-                .foregroundColor(style.secondaryTextColor)
+        VStack(alignment: .leading, spacing: 6) {
+            BoardsHeader(entry: entry, title: entry.scopeBoard ?? row.board)
+            StackedBoardBar(row: row, maxOpen: max(row.openCards, 1), height: 8)
+            HStack(spacing: 10) {
+                count(row.running, "run", NativeStyle.accent)
+                count(row.todo, "todo", Color.secondary)
+                count(row.blocked, "blk", NativeStyle.warn)
+                Spacer(minLength: 0)
+                count(row.done, "done", Color.secondary)
+            }
+            if family == .systemSmall {
+                if let first = entry.runningTitles.first {
+                    Text(first)
+                        .font(NativeStyle.small())
+                        .lineLimit(1)
+                }
+            } else {
+                if entry.runningTitles.isEmpty {
+                    Text("Nothing running")
+                        .font(NativeStyle.small())
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(entry.runningTitles.prefix(titleLimit)), id: \.self) { title in
+                        Text("▸ \(title)")
+                            .font(NativeStyle.small())
+                            .lineLimit(1)
+                    }
+                }
+            }
             Spacer(minLength: 0)
-            label("RUN", width: 18)
-            label("RDY", width: 18)
-            label("TODO", width: 20)
-            label("BLK", width: 20)
-            label("DONE", width: 22)
         }
-        .widgetHeader(style)
+        .stale(entry.staleState)
+    }
+
+    private func count(_ value: Int?, _ label: String, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("\(value ?? 0)")
+                .font(NativeStyle.number(16))
+                .foregroundStyle(color)
+            Text(label)
+                .font(NativeStyle.small())
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
 // MARK: - Accessory families
 
 struct KanbanMonitorCircular: View {
-    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
             Text(entry.shortGateLabel)
-                .font(style.font(size: 9, weight: .semibold))
+                .font(NativeStyle.small())
                 .foregroundStyle(.secondary)
                 .minimumScaleFactor(0.6)
                 .multilineTextAlignment(.center)
         } else if let failure = entry.failure {
-            Image(systemName: "exclamationmark.triangle.fill").widgetIcon(style)
             Text(failure.shortLabel)
+                .font(NativeStyle.small())
+                .foregroundStyle(.primary)
+                .minimumScaleFactor(0.6)
+                .multilineTextAlignment(.center)
         } else {
-            VStack(spacing: 0) {
-                Text(KanbanMonitorReading.text(entry.runningTotal))
-                    .font(style.font(.body))
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.primary)
-                Text("running")
-                    .font(style.font(size: 8))
-                    .foregroundStyle(.secondary)
-            }
+            L2Gauge(value: entry.slotGaugeValue,
+                    range: entry.slotGaugeRange,
+                    valueText: entry.slotValueText,
+                    caption: entry.slotCaption,
+                    label: "Boards, \(entry.slotValueText) \(entry.slotCaption)")
+                .stale(entry.staleState)
         }
     }
 }
 
 struct KanbanMonitorRectangular: View {
-    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
         if !entry.configured || entry.paused {
-            KanbanMonitorGateView(entry: entry, systemTinted: true)
+            KanbanMonitorGateView(entry: entry)
         } else if let failure = entry.failure {
             VStack(alignment: .leading, spacing: 1) {
                 Text("board read failed")
-                    .font(style.font(.caption2, weight: .semibold))
+                    .font(NativeStyle.small())
                 Text(failure.shortLabel)
-                    .font(style.font(.caption2))
+                    .font(NativeStyle.small())
                 Text(entry.updatedLine)
-                    .font(style.font(.caption2))
+                    .font(NativeStyle.small())
             }
         } else {
             VStack(alignment: .leading, spacing: 1) {
-                Text("Kanban · \(KanbanMonitorReading.text(entry.runningTotal)) running")
-                    .font(style.font(.caption2, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(entry.rectangularLine)
-                    .font(style.font(.caption2))
+                Text(entry.rectangularHeadline)
+                    .font(NativeStyle.label())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .widgetAccentable()
+                Text(entry.rectangularLine)
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
                 Text(entry.updatedLine)
-                    .font(style.font(size: 8))
+                    .font(NativeStyle.small())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            .stale(entry.staleState)
         }
     }
 }
@@ -656,121 +930,144 @@ struct KanbanMonitorRectangular: View {
 // MARK: - Home Screen families
 
 struct SmallKanbanMonitor: View {
-    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
-        Group {
-            if !entry.configured || entry.paused {
-                KanbanMonitorGateView(entry: entry)
-            } else if let failure = entry.failure {
-                KanbanMonitorErrorPane(failure: failure)
+        if !entry.configured || entry.paused {
+            KanbanMonitorGateView(entry: entry)
+        } else if let failure = entry.failure {
+            KanbanMonitorErrorPane(failure: failure)
+        } else if let row = entry.scopedRow {
+            BoardScopeBody(entry: entry, row: row, family: .systemSmall)
+        } else {
+            smallBody
+        }
+    }
+
+    private var smallBody: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            BoardsHeader(entry: entry, title: "Open cards")
+            Spacer(minLength: 0)
+            if entry.rows.isEmpty {
+                NoOpenCards()
             } else {
-                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                    KanbanMonitorHeader(entry: entry)
-                    HStack(alignment: .firstTextBaseline, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                        Text(KanbanMonitorReading.text(entry.headlineNumber))
-                            .font(style.font(.largeTitle, weight: .bold))
-                            .foregroundColor(style.primaryTextColor)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.6)
-                        Text(entry.headlineLabel)
-                            .font(style.font(.caption, weight: .semibold))
-                            .foregroundColor(style.secondaryTextColor)
-                    }
-                    if entry.rows.isEmpty {
-                        Text("No open cards")
-                            .font(style.font(.caption2))
-                            .foregroundColor(style.secondaryTextColor)
-                    } else {
-                        ForEach(entry.rows.prefix(KanbanMonitorEntry.rowLimit(for: .systemSmall))) { row in
-                            KanbanBoardRowView(row: row)
+                ForEach(entry.topBoards) { row in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 4) {
+                            Text(row.board)
+                                .font(NativeStyle.small())
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            Text("\(row.openCards)")
+                                .font(NativeStyle.number())
                         }
-                    }
-                    Spacer(minLength: 0)
-                    if let partial = entry.partialLine {
-                        Text(partial)
-                            .font(style.font(size: 8))
-                            .foregroundColor(style.warnColor)
-                            .lineLimit(1)
+                        StackedBoardBar(row: row, maxOpen: entry.maxOpenCards, height: 6)
                     }
                 }
             }
+            Spacer(minLength: 0)
+            if let partial = entry.partialLine {
+                Text(partial)
+                    .font(NativeStyle.small())
+                    .foregroundStyle(NativeStyle.warn)
+                    .lineLimit(1)
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .stale(entry.staleState)
     }
 }
 
 struct MediumKanbanMonitor: View {
-    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
-        Group {
-            if !entry.configured || entry.paused {
-                KanbanMonitorGateView(entry: entry)
-            } else if let failure = entry.failure {
-                KanbanMonitorErrorPane(failure: failure)
+        if !entry.configured || entry.paused {
+            KanbanMonitorGateView(entry: entry)
+        } else if let failure = entry.failure {
+            KanbanMonitorErrorPane(failure: failure)
+        } else if let row = entry.scopedRow {
+            BoardScopeBody(entry: entry, row: row, family: .systemMedium)
+        } else {
+            mediumBody
+        }
+    }
+
+    private var mediumBody: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            BoardsHeader(entry: entry, title: "Open cards by board")
+            if entry.rows.isEmpty {
+                Spacer(minLength: 0)
+                NoOpenCards()
+                Spacer(minLength: 0)
             } else {
-                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xxs.rawValue)) {
-                    KanbanMonitorHeader(entry: entry)
-                    KanbanColumnHeader()
-                    ForEach(entry.rows.prefix(KanbanMonitorEntry.rowLimit(for: .systemMedium))) { row in
-                        KanbanBoardRowView(row: row)
-                    }
-                    if entry.rows.isEmpty {
-                        Text("No open cards")
-                            .font(style.font(.caption2))
-                            .foregroundColor(style.secondaryTextColor)
-                    }
-                    Spacer(minLength: 0)
-                    if let partial = entry.partialLine {
-                        Text(partial)
-                            .font(style.font(size: 8))
-                            .foregroundColor(style.warnColor)
-                            .lineLimit(1)
-                    }
+                ForEach(entry.topBoards) { row in
+                    BoardBarRow(row: row, maxOpen: entry.maxOpenCards)
+                }
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 6) {
+                BoardsLegend()
+                Spacer(minLength: 0)
+                if let partial = entry.partialLine {
+                    Text(partial)
+                        .font(NativeStyle.small())
+                        .foregroundStyle(NativeStyle.warn)
+                        .lineLimit(1)
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .stale(entry.staleState)
     }
 }
 
 struct LargeKanbanMonitor: View {
-    @Environment(\.widgetStyle) private var style
     let entry: KanbanMonitorEntry
 
     var body: some View {
-        Group {
-            if !entry.configured || entry.paused {
-                KanbanMonitorGateView(entry: entry)
-            } else if let failure = entry.failure {
-                KanbanMonitorErrorPane(failure: failure, detailed: true)
+        if !entry.configured || entry.paused {
+            KanbanMonitorGateView(entry: entry)
+        } else if let failure = entry.failure {
+            KanbanMonitorErrorPane(failure: failure, detailed: true)
+        } else if let row = entry.scopedRow {
+            BoardScopeBody(entry: entry, row: row, family: .systemLarge)
+        } else {
+            largeBody
+        }
+    }
+
+    private var largeBody: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            BoardsHeader(entry: entry, title: "Boards")
+            if entry.rows.isEmpty {
+                Spacer(minLength: 0)
+                NoOpenCards()
+                Spacer(minLength: 0)
             } else {
-                VStack(alignment: .leading, spacing: style.spacing(Theme.Spacing.xs.rawValue)) {
-                    KanbanMonitorHeader(entry: entry)
-                    // The CLI title's `n_run`: the one fleet aggregate the
-                    // command prints. Everything below is a per-board row.
-                    Text("\(KanbanMonitorReading.text(entry.runningTotal)) running")
-                        .font(style.font(.caption, weight: .semibold))
-                        .foregroundColor(style.primaryTextColor)
-                    KanbanColumnHeader()
-                    ForEach(entry.rows.prefix(KanbanMonitorEntry.rowLimit(for: .systemLarge))) { row in
-                        KanbanBoardRowView(row: row)
-                    }
-                    if entry.rows.isEmpty {
-                        Text("No open cards")
-                            .font(style.font(.caption2))
-                            .foregroundColor(style.secondaryTextColor)
-                    }
-                    Spacer(minLength: 0)
-                    if let partial = entry.partialLine {
-                        Text(partial)
-                            .font(style.font(size: 8))
-                            .foregroundColor(style.warnColor)
-                            .lineLimit(1)
-                    }
+                ForEach(Array(entry.rows.prefix(KanbanMonitorEntry.rowLimit(for: .systemLarge)))) { row in
+                    BoardBarRow(row: row, maxOpen: entry.maxOpenCards)
                 }
             }
+            Spacer(minLength: 0)
+            WorkerSlotStrip(running: entry.runningTotal, cap: entry.maxInProgress)
+            HStack(spacing: 6) {
+                Text("\(KanbanMonitorReading.text(entry.doneTotal)) done 24h · "
+                     + "\(KanbanMonitorReading.text(entry.blockedTotal)) blocked")
+                    .font(NativeStyle.small())
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Spacer(minLength: 0)
+                BoardsLegend()
+            }
+            if let partial = entry.partialLine {
+                Text(partial)
+                    .font(NativeStyle.small())
+                    .foregroundStyle(NativeStyle.warn)
+                    .lineLimit(1)
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .stale(entry.staleState)
     }
 }

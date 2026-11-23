@@ -1,11 +1,13 @@
 name: app-build-checks
 
-# Compile gates for the two Apple clients. Both scripts are swiftc-only: they
-# generate nothing, sign nothing, link nothing and never launch an app.
+# Gates for the two Apple clients. Every offline `*_check.sh` in each app's
+# scripts tree runs here, by glob, so a gate is wired the day its file lands.
+# They compile only: nothing generates, signs, links or launches an app.
 #
-# The iOS project targets iOS 26, so its leg SKIPS on a runner whose Xcode is
-# older than that SDK. Skipping is announced and does not fail the job; the
-# macOS leg runs everywhere (macOS 14 deployment target).
+# The iOS project targets iOS 26, so the iOS compile + asset-catalog legs SKIP
+# on a runner whose Xcode is older than that SDK. Skipping is announced and
+# does not fail the job; the macOS legs run everywhere (macOS 14 deployment
+# target), and every other iOS gate compiles against the macOS SDK.
 
 on:
   push:
@@ -23,6 +25,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # merge_base_check.sh measures drift against origin/main and never
+          # fetches; a shallow checkout would leave the ref unresolvable.
+          fetch-depth: 0
 
       - name: Show toolchain
         run: |
@@ -38,6 +44,21 @@ jobs:
 
       - name: macOS Sparkle wiring gate
         run: bash macos-app/scripts/update_check.sh
+
+      # HSCCMacWidgets compiles the iOS widget sources by path, so the desktop
+      # tile's density depends on two specs in two different projects agreeing.
+      # Pure text — no SDK, no compile — so it runs on every macOS runner.
+      - name: macOS widget parity gate
+        run: bash macos-app/scripts/widget_parity_check.sh
+
+      # DECISION-t_447cc7fc left the two Apple clients split across two history
+      # routes, and a tile that charts history can pick the retired one with a
+      # plausible line of code — it compiles, it decodes, it draws. This trips on
+      # any Swift source under either Sources tree asking for a history path
+      # other than /v1/cluster/history. Pure text — no SDK, no compile — so it
+      # belongs next to the other text gates and runs on every PR.
+      - name: canonical history-route guard
+        run: bash ios-app/scripts/history_route_guard_check.sh
 
       - name: iOS compile gate
         run: |
@@ -58,3 +79,47 @@ jobs:
 
       - name: iOS update-feed gate
         run: bash ios-app/scripts/update_check.sh
+
+      - name: widget registry gate
+        run: python3 ios-app/scripts/widget_registry.py --check
+
+      # plist_drift_check.sh refuses to run without the generator whose output it
+      # audits — it does not skip and announce itself, because an announced skip is
+      # how the Info.plists drifted from project.yml across four releases. Whether
+      # macos-latest happens to ship xcodegen is therefore not something this job
+      # gets to be unsure about, so the step installs it if it is missing.
+      - name: xcodegen for the plist-drift gate
+        run: command -v xcodegen || brew install xcodegen
+
+      # Run the rest of the offline gates by glob. The four exclusions read live
+      # state or a live capture and cannot run on a runner; build_check.sh is
+      # covered by the guarded compile steps above. Everything else — including
+      # the widget gates that merged red while this workflow named only a few
+      # files — runs here.
+      - name: offline app gates (glob)
+        run: |
+          set -uo pipefail
+          ios_ver=$(xcrun --sdk iphonesimulator --show-sdk-version 2>/dev/null || true)
+          ios_major="${ios_ver%%.*}"
+          rc=0
+          for script in ios-app/scripts/*_check.sh macos-app/scripts/*_check.sh; do
+            case "$script" in
+              ios-app/scripts/build_check.sh|macos-app/scripts/build_check.sh)
+                echo "::notice::$script runs in the compile steps above"; continue ;;
+              ios-app/scripts/monitor_activity_check.sh|ios-app/scripts/offline_cache_fix_check.sh)
+                echo "::notice::$script needs the live API; not an offline gate"; continue ;;
+              ios-app/scripts/live_decode_check.sh|ios-app/scripts/fleet_stats_render_check.sh)
+                echo "::notice::$script needs a live capture (scripts/capture_live.sh); not an offline gate"; continue ;;
+              ios-app/scripts/actool_icon_check.sh)
+                if [ -z "$ios_major" ] || [ "$ios_major" -lt 26 ]; then
+                  echo "::notice::$script skipped: no iOS 26 SDK on this runner"; continue
+                fi ;;
+            esac
+            echo "::group::$script"
+            if ! bash "$script"; then
+              echo "::error file=$script::$script failed"
+              rc=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$rc"

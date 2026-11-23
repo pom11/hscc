@@ -81,9 +81,9 @@ def test_resolver_general_sentinel(registry_file):
     got = orchestrators.resolve_orchestrator("general", path=registry_file)
     assert got == {
         "project": "general",
-        "profile": "general-orch",
+        "profile": "general",
         "session": "general",
-        "board": "default",
+        "board": "general",
         "repo": None,
     }
 
@@ -91,9 +91,9 @@ def test_resolver_general_sentinel(registry_file):
 def test_resolver_general_is_default_when_none(registry_file):
     """No project specified -> the general orchestrator (repo=None)."""
     got = orchestrators.resolve_orchestrator(None, path=registry_file)
-    assert got["profile"] == "general-orch"
+    assert got["profile"] == "general"
     assert got["session"] == "general"
-    assert got["board"] == "default"
+    assert got["board"] == "general"
     assert got["repo"] is None
 
 
@@ -107,10 +107,16 @@ def test_resolver_repo_none_for_general(registry_file):
     assert got["repo"] is None
 
 
-def test_resolver_default_registry_path_used_without_arg():
+def test_resolver_default_registry_path_used_without_arg(monkeypatch):
     """Without a path arg the resolver targets the real registry default — but
     we never read it here; this just proves the default resolves to the
-    documented path (expanduser, no crash)."""
+    documented path (expanduser, no crash).
+
+    The env override is deleted first because this case is a claim about the
+    DEFAULT: with ``HSCC_REGISTRY`` exported in the ambient shell (the runner does
+    not scrub it) the assertion would be answering a different question.
+    """
+    monkeypatch.delenv("HSCC_REGISTRY", raising=False)
     resolved_path = orchestrators._registry_path(None)
     assert resolved_path == os.path.expanduser("~/.flightdeck/registry.yaml")
 
@@ -121,10 +127,83 @@ def test_resolver_missing_board_raises_clear_error(registry_file):
 
 
 def test_resolver_env_registry_override(registry_file, monkeypatch):
-    """HSCC_REGISTRY env var overrides the default registry path."""
+    """HSCC_REGISTRY env var overrides the default registry path.
+
+    The env is read when the resolver RUNS, not when the module is imported —
+    that distinction is the whole case, because ``monkeypatch.setenv`` is by
+    definition a post-import set. It is also why this case could stay green on
+    the operator's host while the override was inert: the resolver fell through
+    to ``~/.flightdeck/registry.yaml``, which exists here and carries an ``hscc``
+    row whose PROFILE happens to be the string being asserted. The ``repo``
+    assertion below is what closes that — the fixture says ``/tmp/hscc``, a real
+    registry says wherever the operator's checkout actually is. Measured
+    t_4b70e8d4: red on CI (no registry file at the default path, so an empty
+    project list and ``UnknownProjectError('hscc')``), green locally, for the
+    same inert-override reason.
+    """
     monkeypatch.setenv("HSCC_REGISTRY", registry_file)
+    assert orchestrators._registry_path(None) == os.path.expanduser(registry_file)
     got = orchestrators.resolve_orchestrator("hscc")
     assert got["profile"] == "hscc-orch"
+    # The FIXTURE answered, not this machine. Proof, not decoration: it is the
+    # only assertion here that can tell "the override worked" from "this host
+    # happens to have a registry whose hscc row agrees on the profile name".
+    assert got["repo"] == "/tmp/hscc"
+
+
+def test_registry_env_override_is_read_per_call_not_at_import(
+        registry_file, registry_file_no_noboard, monkeypatch):
+    """The override follows the env on every call — no snapshot, no cache.
+
+    Three states in one case, in the order a snapshot or a memo would break on:
+    unset (default), then one value, then a DIFFERENT value after the first was
+    already resolved. An import-time capture fails at the first transition; a
+    lazily cached one fails at the second. The empty-string arm pins the other
+    half of the same line: an exported-but-empty ``HSCC_REGISTRY`` means unset,
+    not path ``""``.
+    """
+    default = os.path.expanduser(orchestrators.DEFAULT_REGISTRY_PATH)
+
+    monkeypatch.delenv("HSCC_REGISTRY", raising=False)
+    assert orchestrators._registry_path(None) == default
+
+    monkeypatch.setenv("HSCC_REGISTRY", registry_file)
+    assert orchestrators._registry_path(None) == os.path.expanduser(registry_file)
+
+    monkeypatch.setenv("HSCC_REGISTRY", registry_file_no_noboard)
+    assert orchestrators._registry_path(None) == os.path.expanduser(
+        registry_file_no_noboard)
+
+    monkeypatch.setenv("HSCC_REGISTRY", "")
+    assert orchestrators._registry_path(None) == default
+    # And the module attribute stays the documented default whatever the env does,
+    # so nobody can re-introduce the frozen value by reading it again downstream.
+    assert orchestrators.REGISTRY_PATH == orchestrators.DEFAULT_REGISTRY_PATH
+
+
+def test_explicit_path_arg_beats_the_env_override(
+        registry_file, registry_file_no_noboard, monkeypatch):
+    """Documented precedence: explicit arg > env > default, at resolve level.
+
+    Two mirrored arms, discriminated by WHICH error the resolver raises, because
+    only the registry that actually answered can produce that shape. The
+    ``noboard`` row exists in ``registry_file`` and is absent from
+    ``registry_file_no_noboard``:
+
+      * env = the clean one, arg = the one holding ``noboard``  -> the arg's row
+        is missing a board, so the contract error about ``no 'board'`` fires. If
+        the env had won, the project would simply be unknown and no message could
+        match.
+      * env = the one holding ``noboard``, arg = the clean one   -> ``UnknownProjectError``,
+        which only the arg's registry can raise.
+    """
+    monkeypatch.setenv("HSCC_REGISTRY", registry_file_no_noboard)
+    with pytest.raises(orchestrators.OrchestratorError, match="no 'board'"):
+        orchestrators.resolve_orchestrator("noboard", path=registry_file)
+
+    monkeypatch.setenv("HSCC_REGISTRY", registry_file)
+    with pytest.raises(orchestrators.UnknownProjectError):
+        orchestrators.resolve_orchestrator("noboard", path=registry_file_no_noboard)
 
 
 # -- generator (idempotent, empty memory, no worker repoint) --
@@ -259,8 +338,8 @@ def test_ensure_orchestrator_general_repo_none(registry_file, isolated_home):
     got = orchestrators.ensure_orchestrator(None, base_identity="BASE-ID",
                                              path=registry_file)
     assert got["repo"] is None
-    assert got["profile"] == "general-orch"
-    pdir = os.path.join(isolated_home, "general-orch")
+    assert got["profile"] == "general"
+    pdir = os.path.join(isolated_home, "general")
     assert os.path.isdir(pdir)
     with open(os.path.join(pdir, "SOUL.md")) as f:
         soul = f.read()
@@ -413,10 +492,11 @@ def test_orch_all_ensures_every_project_plus_general(
     code, report = _run_orch_all(registry_file, isolated_home)
     assert code == 1  # noboard failed -> non-zero exit
     ensured = {e["profile"] for e in report["ensured"]}
-    assert ensured == {"ecofire-app-orch", "hscc-orch", "general-orch"}
+    assert ensured == {"ecofire-app-orch", "hscc-orch", "general"}
     assert "noboard" in {f["project"] for f in report["failures"]}
-    for name in ("ecofire-app", "hscc", "general"):
+    for name in ("ecofire-app", "hscc"):
         assert os.path.isdir(os.path.join(isolated_home, f"{name}-orch"))
+    assert os.path.isdir(os.path.join(isolated_home, "general"))
     # no orchestrator was half-written for the failing project
     assert not os.path.isdir(os.path.join(isolated_home, "noboard-orch"))
 
@@ -446,8 +526,8 @@ def test_orch_all_missing_registry_still_ensures_general(tmp_path, isolated_home
     code, report = _run_orch_all(missing, isolated_home)
     assert code == 0
     assert report["requested"] == ["general"]
-    assert report["ensured"][0]["profile"] == "general-orch"
-    assert os.path.isdir(os.path.join(isolated_home, "general-orch"))
+    assert report["ensured"][0]["profile"] == "general"
+    assert os.path.isdir(os.path.join(isolated_home, "general"))
 
 
 def test_orch_all_stdout_is_pure_json(registry_file_no_noboard, isolated_home):
@@ -500,11 +580,11 @@ def test_cli_orch_all_subprocess_ensures_fleet(registry_file_no_noboard,
     import json as _json
     report = _json.loads(result.stdout)   # stdout must be pure JSON
     assert {e["profile"] for e in report["ensured"]} == \
-        {"ecofire-app-orch", "hscc-orch", "general-orch"}
+        {"ecofire-app-orch", "hscc-orch", "general"}
     assert result.stderr == ""  # ssh into registry present, no warnings
     home = tmp_path / "home"
     assert (home / "profiles" / "hscc-orch").is_dir()
-    assert (home / "profiles" / "general-orch").is_dir()
+    assert (home / "profiles" / "general").is_dir()
 
 
 def test_cli_orch_all_subprocess_missing_registry(tmp_path, monkeypatch):
@@ -514,6 +594,6 @@ def test_cli_orch_all_subprocess_missing_registry(tmp_path, monkeypatch):
     import json as _json
     report = _json.loads(result.stdout)
     assert report["requested"] == ["general"]
-    assert (tmp_path / "home" / "profiles" / "general-orch").is_dir()
+    assert (tmp_path / "home" / "profiles" / "general").is_dir()
     # the warning about the missing registry is on STDERR, keeping stdout pure
     assert "warn" in result.stderr

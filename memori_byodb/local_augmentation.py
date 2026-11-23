@@ -10,6 +10,9 @@ Endpoint + model are read from the environment so no host/topology is baked in:
   HSCC_MEMORI_AUGMENT_MODEL model name served at that URL (default:
                             worker-model, the role alias every serving unit
                             advertises)
+  HSCC_MEMORI_EMBED_MODEL   local fastembed model the facts are embedded with
+                            (default: all-MiniLM-L6-v2, the memori SDK's own
+                            default, which recall embeds the query with)
 """
 
 from __future__ import annotations
@@ -34,6 +37,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_API_URL = os.environ.get(
     "HSCC_MEMORI_AUGMENT_URL", "http://localhost:4000/v1/chat/completions")
 DEFAULT_MODEL = os.environ.get("HSCC_MEMORI_AUGMENT_MODEL", "worker-model")
+# Must match the model memori.recall embeds the query with (the SDK's
+# Config.embeddings.model): a fact embedded with another model has another
+# dimension and cannot be compared.
+DEFAULT_EMBED_MODEL = os.environ.get("HSCC_MEMORI_EMBED_MODEL", "all-MiniLM-L6-v2")
+
+
+def sdk_embed(texts: list[str], model: str) -> list[list[float]]:
+    """Embed with the memori SDK's local fastembed model (no network)."""
+    from memori.embeddings import embed_texts
+
+    return embed_texts(texts, model=model)
 
 
 @dataclass
@@ -44,6 +58,7 @@ class LocalAugmentationConfig:
     max_tokens: int = 2048
     temperature: float = 0.3
     timeout_seconds: int = 120
+    embed_model: str = DEFAULT_EMBED_MODEL
 
 
 class LocalLLMAugmentation:
@@ -56,6 +71,7 @@ class LocalLLMAugmentation:
     def __init__(self, config: LocalAugmentationConfig | None = None) -> None:
         self.config = config or LocalAugmentationConfig()
         self._session: aiohttp.ClientSession | None = None
+        self._embed = sdk_embed
 
     async def __aenter__(self) -> "LocalLLMAugmentation":
         self._session = aiohttp.ClientSession()
@@ -130,10 +146,23 @@ class LocalLLMAugmentation:
                                 m_content,
                             )
 
-            # 3. Write entity facts, linked to the conversation via mentions.
-            if entity_id and fact_texts and conversation_id:
+            # 3. Embed the facts, then write them linked to the conversation via
+            #    mentions. A fact stored without an embedding is not just
+            #    unfindable: memori.recall refuses the whole query
+            #    (missing_embedding_data), so an embedding failure writes no facts.
+            fact_embeddings = None
+            if fact_texts:
+                try:
+                    fact_embeddings = self._embed(fact_texts, self.config.embed_model)
+                except Exception as exc:
+                    logger.error(f"Fact embedding failed; {len(fact_texts)} facts not stored: {exc}")
+                if fact_embeddings is not None and (
+                        len(fact_embeddings) != len(fact_texts) or not all(fact_embeddings)):
+                    logger.error("Fact embedding returned an empty or short result; facts not stored")
+                    fact_embeddings = None
+            if entity_id and fact_texts and conversation_id and fact_embeddings:
                 driver.entity_fact.create(
-                    entity_id, fact_texts, None, conversation_id
+                    entity_id, fact_texts, fact_embeddings, conversation_id
                 )
 
             logger.info(f"Local augmentation extracted {len(memories)} facts")
@@ -220,53 +249,62 @@ CRITICAL: Return ONLY the JSON array, nothing else. No markdown, no explanation.
             return None
 
     def _parse_response(self, response: str) -> list[dict[str, Any]]:
-        """Parse LLM response into memories (entity facts)."""
-        # Try to extract JSON from response (handle markdown code blocks)
-        text = response.strip()
-        if "```" in text:
-            match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-            if match:
-                text = match.group(1)
+        """Parse LLM response into memories (entity facts).
 
-        try:
-            facts = json.loads(text)
-            if not isinstance(facts, list):
-                return []
-
-            memories = []
-            for fact in facts:
-                if not isinstance(fact, dict):
-                    continue
-                subject = str(fact.get("subject", ""))
-                predicate = str(fact.get("predicate", ""))
-                obj = str(fact.get("object", ""))
-                confidence = float(fact.get("confidence", 0.8))
-
-                if not subject or not obj:
-                    continue
-
-                # Construct content string
-                content = f"{subject} {predicate} {obj}"
-
-                memories.append({
-                    "content": content,
-                    "metadata": {
-                        "subject": subject,
-                        "predicate": predicate,
-                        "object": obj,
-                        "confidence": confidence,
-                        "extraction_method": "local_llm",
-                    }
-                })
-
-            return memories
-
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse LLM response as JSON: {text[:200]}")
-            # Fallback: treat entire response as one fact
-            if response.strip():
-                return [{
-                    "content": f"Extraction: {response.strip()}",
-                    "metadata": {"extraction_method": "local_llm", "fallback": True}
-                }]
+        The fact list is found wherever the model put it: bare, inside a
+        ```json fence (closed or not), or after reasoning text. A reply with no
+        parseable list stores NOTHING. It used to store the whole reply as one
+        "Extraction: ..." fact, which filled memory with the model's reasoning
+        and unparsed JSON (376 of 3068 live facts on 2026-11-21).
+        """
+        facts = self._extract_fact_list(response)
+        if facts is None:
+            logger.warning(f"No fact list in LLM response; nothing stored: {response.strip()[:200]}")
             return []
+
+        memories = []
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            subject = str(fact.get("subject", ""))
+            predicate = str(fact.get("predicate", ""))
+            obj = str(fact.get("object", ""))
+            try:
+                confidence = float(fact.get("confidence", 0.8))
+            except (TypeError, ValueError):
+                confidence = 0.8
+
+            if not subject or not obj:
+                continue
+
+            memories.append({
+                "content": f"{subject} {predicate} {obj}",
+                "metadata": {
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": obj,
+                    "confidence": confidence,
+                    "extraction_method": "local_llm",
+                }
+            })
+        return memories
+
+    @staticmethod
+    def _extract_fact_list(response: str) -> list | None:
+        """The JSON array in ``response``, or None when there is none."""
+        text = response.strip()
+        candidates = [text]
+        fence = re.search(r"```(?:json)?\s*(.*?)(?:```|$)", text, re.DOTALL)
+        if fence:
+            candidates.append(fence.group(1).strip())
+        start, end = text.find("["), text.rfind("]")
+        if start != -1 and end > start:
+            candidates.append(text[start:end + 1])
+        for candidate in candidates:
+            try:
+                value = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, list):
+                return value
+        return None

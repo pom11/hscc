@@ -350,6 +350,11 @@ def _get_help_text():
         *_entry("uninstall", "Remove the service and stop the daemon"),
         *_entry("plist", "Print the launchd plist (no install)"),
         *_entry("log", "Show the daemon log output"),
+        # start-daemon is a dispatched TOP_LEVEL_COMMAND, so the primary
+        # surface names it too (t_88d896f3); `hscc help advanced` still
+        # documents it as the service-manager entry point.
+        *_entry("start-daemon",
+                "Foreground daemon loop (used by launchd)"),
     ])
 
     health = _section("Health & monitoring", [
@@ -368,8 +373,17 @@ def _get_help_text():
                 "Aggregate vLLM throughput + queue depth across the fleet"),
         *_entry("autoscale",
                 "Show autoscale decision from current queue depth (read-only)"),
+        # F6: the one-line entry must not imply the verb never mutates — the
+        # same word names POST /v1/escalate, which does. 47 cols, so the pair
+        # still renders on one line inside the 78 budget.
         *_entry("escalate",
-                "Show pending failure escalations (dry-run, no mutations)"),
+                "Preview escalations — POST /v1/escalate mutates"),
+        # Heal verbs are live TOP_LEVEL_COMMANDS (the breaker's alert names
+        # `hscc heal-clear`), so they are listed on the primary surface too.
+        *_entry("heal-clear <node>",
+                "Clear one node's heal-breaker strikes (mutates; not /heal)"),
+        *_entry("heal-status",
+                "List heal-breaker strikes per node (read-only; not /heal)"),
     ])
 
     cluster = _section("Cluster & templates", [
@@ -405,21 +419,42 @@ def _get_help_text():
                 "Idle autodown/autoup: status enable disable wake cancel"),
         *_entry("kanban <cmd>",
                 "Board hygiene: blocked (show/recover), stale (list/archive)"),
+        # merge-queue (MQ1) is dispatched and in COMMAND_HELP; the primary
+        # surface must list it like every other live top-level command
+        # (F5 surface-honesty rule, t_88d896f3).
+        *_entry("merge-queue <cmd>",
+                "Local merge queue: status list add remove pause resume "
+                "enable disable"),
         *_entry("cards monitor [--live]",
                 "One live panel per running card, streaming its worker"),
+        # main group (M4/M5): the main orchestrator's own pane + wake-ups.
+        *_entry("main start|status|wakeups",
+                "Main orchestrator pane and daemon wake-up schedule"),
         # orch group (t_5da7fd56): dispatched at main() and listed in
         # COMMAND_HELP, so the main banner must show it too (F5 surface-honesty
         # rule: a live command must not hide from the primary help surface).
         *_entry('orch inject <p> "<msg>"',
-                "Inject into a running Hermes REPL pane (tmux)"),
+                "Inject into a running Hermes REPL pane (tmux; not orch_message)"),
         # orch-waker W3 (t_2b34b5c7): the same F5 rule — `hscc orch waker …`
         # is live, so it is advertised on the primary surface too.
         *_entry("orch waker status|enable|disable",
                 "The built-in orchestrator waker (daemon-resident)"),
+        # node group (t_c28f4f14): dispatched at main() and listed in
+        # COMMAND_HELP, so the primary banner names it too (F5 surface-honesty
+        # rule, t_88d896f3). The ask is called out because a pause is NOT
+        # done until the operator answers y, and an operator who does not know
+        # that reads "pause" as already done.
+        *_entry("node pause <host> [flags]",
+                "Park one node; it asks before anything stops"),
     ])
 
     util = _section("Utility", [
-        *_entry("notify <message>", "Send a desktop notification"),
+        *_entry("notify <title> <body> | list | ack <id>",
+                "Post, read or acknowledge an HSCC alert-feed entry",
+                ["flags: --level info|action|critical --key <dedupe-key>",
+                 "--node <host> (a paused node's alert is refused at the feed)",
+                 "list: --since <id> --limit <n>; all: --json",
+                 "requires the API: hscc api start"]),
         *_entry("bootstrap [flags]",
                 "Run the HSCC installer from any layout (repo, plugins, brew)",
                 ["flags pass through: --yes --dry-run --force --no-backup",
@@ -462,7 +497,7 @@ def _get_advanced_help():
     from rich.console import Group
     from rich.text import Text
 
-    heading = Text("Advanced / internal commands (omitted from main help):", style="label")
+    heading = Text("Advanced / internal commands:", style="label")
     lines = Text("", style="text")
     lines.append("", style="text")
     for cmd, desc in [
@@ -484,7 +519,18 @@ COMMAND_HELP = {
     "check": "Run one check cycle now. Usage: hscc check [stream]\n  streams: dgx gateway local heartbeat nas watchdog triggers\n  hscc check --repo <path> [--json]   address-guard posture for that checkout\n          (default: cwd's top-level). Calls posture() from hscc-bootstrap/\n          install_hooks.py — single implementation, nothing recomputed here.\n          States: armed | unarmed | armed-but-absent (config advertises\n          protection, this checkout resolves no runnable hook = FAIL-OPEN) |\n          not-a-repo. Exit 0 only for 'armed', non-zero otherwise.",
     "watch": "Live-tail check results. Usage: hscc watch [stream]",
     "triggers": "Show trigger-engine rules and recent firings",
-    "notify": "Send a desktop notification. Usage: hscc notify <message>",
+    "notify": "Post, list or acknowledge HSCC alert-feed entries.\n"
+              "  Usage: hscc notify <title> <body>\n"
+              "         [--level info|action|critical] [--key <dedupe-key>]\n"
+              "         [--node <host>] [--json]\n"
+              "         hscc notify list [--since <id>] [--limit <n>] [--json]\n"
+              "         hscc notify ack <id> [--json]\n"
+              "  A keyed alert does not repeat until its content changes or\n"
+              "  it is acknowledged; per-key and global rate limits apply.\n"
+              "  --node scopes the alert to one node: while 'hscc node pause'\n"
+              "  holds that host the post is refused and nothing is stored.\n"
+              "  list prints newest first. The API must be up (hscc api\n"
+              "  start).",
     # bootstrap (card t_bc5a3fee): installer verb. Every line authored <=76 so
     # the (B) gate's 78 budget holds at both mandated widths (only the FIRST
     # line receives _handle_help's 2-space prefix).
@@ -512,9 +558,11 @@ COMMAND_HELP = {
     # line gets the 2-space prefix — every line is authored to stay <=76 so
     # the rendered block fits the (B) gate's 78 budget (t_90082309: the old
     # single "Subcommands: status hosts … up [--dry-run]" line overflowed at
-    # width 80). Verb list unchanged, split into two aligned lines.
+    # width 80). Verb list split into two aligned lines there; `history` was
+    # added by the LEFT-4 coverage gate (t_c13de3cc) after the dispatcher had
+    # carried it unadvertised.
     "cluster": "Cluster management commands.\n"
-               "  Subcommands: status  hosts  monitor  jobs  info\n"
+               "  Subcommands: status  hosts  monitor  jobs  info  history\n"
                "               stop <id>  down [--dry-run]  up [--dry-run]\n"
                "  Usage: hscc cluster <subcommand> [args]",
     "template": "Cluster template commands.\n  Subcommands: list status preview validate apply\n  preview/validate take <name>; validate also takes\n  [--structural-only] [--json]; apply also takes\n  [--confirm] [--force-recreate]. Try 'hscc template --help'.\n  Usage: hscc template <subcommand> [args]",
@@ -533,12 +581,25 @@ COMMAND_HELP = {
                "  Delegates to the relocated portfolio CLI under hscc-project/.\n"
                "  Try 'hscc project --help' for the full subcommand surface.\n"
                "  Usage: hscc project <subcommand> [args]",
-    "api": "HSCC HTTP API server lifecycle.\n  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>] stop status\n  Usage: hscc api <subcommand> [args]",
+    "api": "HSCC HTTP API server lifecycle.\n"
+           "  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>]\n"
+           "               stop  status  install-service  uninstall-service\n"
+           "  Usage: hscc api <subcommand> [args]",
     "autodown": "Idle autodown/autoup for the GPU serving layer.\n  Subcommands: status enable [--idle-minutes <n>] [--force] disable wake cancel\n  Usage: hscc autodown <subcommand> [args]",
     # Multi-line value, same 76-col authored budget as project/cluster above
     # (F5 card t_fc307a51: the base blocked/stale sentences measured 121 and
     # 111 cols — (B) overflow at width 80 and, for blocked, at width 120.
     # Wording verbatim; re-flowed onto hanging-indent continuations).
+    #
+    # F3 (card t_46d03105): this entry must name EVERY verb the group
+    # dispatches. `hscc kanban --help` (kanban_blocked.HELP_TEXT) listed all
+    # seven; this one listed three — pause/resume/paused/enforce were added to
+    # the dispatcher and never advertised here, so `hscc help kanban` hid half
+    # the group. The verb set is NOT a literal here: it is derived from the
+    # dispatcher's own unknown-verb inventory and asserted against BOTH help
+    # surfaces by hscc_daemon/tests/test_kanban_help_honesty.py, which is what
+    # keeps the two surfaces from drifting again. A new kanban verb must be
+    # advertised in this entry in the same change that dispatches it.
     "kanban": "Board hygiene for autodown.\n"
               "  blocked [--json]: list BLOCKED cards with why; blocked --recover\n"
               "    <id> [--reason <t>]: recover one blocked card to ready\n"
@@ -546,7 +607,21 @@ COMMAND_HELP = {
               "    stale --archive <id>: archive one (t_e751e652)\n"
               "  monitor [--live] [--interval <s>] [--board <slug>]: workers\n"
               "    on every board, running/ready/counts/outcomes (read-only)\n"
+              "  pause <board>... [--reason <t>] | resume <board>...: hold or\n"
+              "    release whole boards (reclaim + block running/ready; resume\n"
+              "    restores exactly those)\n"
+              "  paused: list paused boards and what they hold; enforce: block\n"
+              "    cards that became ready or running on a paused board since\n"
+              "  Try 'hscc kanban --help' for each verb's full flag list.\n"
               "  Usage: hscc kanban <subcommand> [args]",
+    # merge-queue (MQ1): local FIFO of green PRs run by the daemon. Lines
+    # authored <=76 for the same (B)-gate reason as kanban/cards above.
+    "merge-queue": "Local merge queue (daemon-run, one PR at a time per repo).\n"
+                   "  status [--json] | list [<project>] [--json]\n"
+                   "  add <project> <pr> [--card <id>] | remove <project> <pr>\n"
+                   "  pause|resume|enable|disable <project> [--json]\n"
+                   "  Rebase -> gates -> force-with-lease push -> squash merge.\n"
+                   "  Usage: hscc merge-queue <subcommand> [args]",
     "cards": "Live per-card worker view (read-only).\n"
              "  monitor [--live] [--interval <s>] [--board <slug>] [--tools]:\n"
              "    one panel per running card streaming its transcript; waiting\n"
@@ -567,13 +642,51 @@ COMMAND_HELP = {
             "  Subcommands: waker status|enable|disable\n"
             "  (the daemon-resident orchestrator waker; status also\n"
             "  takes [--json])\n"
+            "  inject TYPES into a live tmux pane. Distinct from the\n"
+            "  orch_message tool (queue-only nudge), /orch-restart\n"
+            "  (restarts the orchestrator vLLM) and the API route\n"
+            "  POST /v1/orchestrator/chat (one chat turn, by job id).\n"
             "  Usage: hscc orch <subcommand> [args]",
+    # node group (card t_c28f4f14): the operator surface for the node-pause
+    # overlay. Every line authored <=76 for the same (B)-gate reason as
+    # orch/main above (only the FIRST line gets _handle_help's 2-space
+    # prefix). Wording note: pause/resume ASK before they mutate (operator
+    # rule 11-22) — the --dry-run preview flag means the same thing here as in
+    # `hscc cluster up|down [--dry-run]`, and --yes is what a script passes.
+    "node": "Node pause commands (park one machine for maintenance).\n"
+            "  Subcommands: pause <host>  resume <host>  paused\n"
+            "  pause/resume print the plan, then ask: only y proceeds,\n"
+            "  a bare Enter stops nothing. --dry-run previews, --yes acts.\n"
+            "  paused is read-only and never touches the fleet.\n"
+            "  Usage: hscc node <subcommand> [args]",
+    # main group (M4/M5): the main orchestrator's own tmux pane + the daemon's
+    # wake-up schedule. Lines authored <=76 for the same (B)-gate reason.
+    "main": "The main orchestrator's pane and wake-ups.\n"
+            "  Subcommands: start  status [--json]\n"
+            "  wakeups list|set <name> <schedule>|enable|disable <name>\n"
+            "  start ensures ONE pane runs hermes -p <main profile>,\n"
+            "  reusing a running pane; never kills another pane/window.\n"
+            "  status reports pane, busy/idle, board and name.\n"
+            "  wakeups edits the daemon-fired schedule (--json).\n"
+            "  Usage: hscc main <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
     "throughput": "Aggregate vLLM throughput + queue depth across the fleet.\n  Usage: hscc throughput [--json]",
     "autoscale": "Show autoscale decision from current queue depth (read-only, never scales).\n  Usage: hscc autoscale [--json]",
-    "escalate": "Show pending failure escalations (dry-run, no mutations).\n  Usage: hscc escalate [--json]",
+    # F6 (audit docs/audits/2026-11-23-agent-surface.md §9): this verb's name is
+    # shared with POST /v1/escalate, which DOES mutate. The old wording —
+    # "(dry-run, no mutations)" — read as a property of the verb, so an agent
+    # that read only the CLI help had a false model of the route (and "dry-run"
+    # is a false friend besides: everywhere else in this CLI --dry-run is a flag
+    # on the mutating verb, not a property of a read). The honest split is now
+    # stated: this verb writes nothing, the route is the mutating half.
+    # Both halves are pinned together by
+    # hscc-api/tests/test_escalate_surface_contract.py.
+    "escalate": "Preview pending escalations — this verb writes nothing.\n"
+                "  POST /v1/escalate is the mutating half: confirm-gated,\n"
+                "  it reassigns a failing card or alerts a human.\n"
+                "  Usage: hscc escalate [--json]",
     "advanced": "Internal/service-manager commands.\n  See 'hscc help advanced' for details.",
     "start-daemon": "Run the daemon loop in the foreground (used by launchd)",
     # heal verbs (audit B5, card t_aeb982bc): the breaker's alert text names
@@ -586,15 +699,17 @@ COMMAND_HELP = {
     # never quote that wording — "clears nothing" is the contract B4 proves.
     "heal-clear": "Clear one node's heal-breaker strikes (MUTATES the ledger).\n"
                   "Usage: hscc heal-clear <node> [reason...]\n"
-                  "  --help/-h prints this help and clears nothing. See: hscc heal-status",
+                  "  --help/-h prints this help and clears nothing. See: hscc heal-status\n"
+                  "  NOT the /heal slash command: that restarts unhealthy workers.",
     "heal-status": "List heal-breaker strikes per node (read-only).\n"
                    "Usage: hscc heal-status\n"
-                   "  --help/-h prints this help. See also: hscc heal-clear <node>",
+                   "  --help/-h prints this help. See also: hscc heal-clear <node>\n"
+                   "  NOT the /heal slash command: that restarts unhealthy workers.",
 }
 
 
 CLUSTER_SUBCOMMANDS = {"status", "hosts", "monitor", "jobs", "info", "stop",
-                       "down", "up"}
+                       "down", "up", "history"}
 TEMPLATE_SUBCOMMANDS = {"list", "status", "preview", "validate", "apply"}
 
 # ── unknown-command hint: the single source of the advertised verb list ────
@@ -626,8 +741,9 @@ TOP_LEVEL_COMMANDS = (
     "start", "stop", "status", "check", "watch", "triggers", "notify",
     "plist", "install", "uninstall", "log", "bootstrap", "update",
     "cluster", "template", "profiles", "project", "api", "autodown",
-    "kanban", "cards", "orch", "verify", "stats", "throughput", "autoscale",
-    "escalate", "start-daemon", "heal-clear", "heal-status",
+    "kanban", "cards", "orch", "main", "node", "verify", "stats",
+    "throughput", "autoscale", "escalate", "start-daemon", "heal-clear",
+    "heal-status", "merge-queue",
 )
 
 # ── template group help surface (t_9032f96b) ───────────────────────────────
@@ -746,6 +862,12 @@ _CLUSTER_GROUP_ENTRIES = [
     ("hscc cluster hosts", "All cluster hosts and saved sparkrun clusters"),
     ("hscc cluster monitor",
      "One CPU/RAM/GPU snapshot (--live: refreshing view + per-model load)"),
+    # `history` (t_eee43fac) is the stored series behind that snapshot: the
+    # same rows GET /v1/cluster/history serialises, printed. Read-only, and it
+    # reads the recorder's store rather than the fleet, so it needs no sparkrun.
+    ("hscc cluster history [--window W|--tier N]",
+     "Stored CPU/GPU/serving series for one window or tier (read-only; "
+     "--json prints the rows the API serves)"),
     ("hscc cluster jobs", "All sparkrun jobs currently running"),
     ("hscc cluster info", "Detailed resolved cluster configuration"),
     ("hscc cluster stop <id>", "Stop a running workload by container id"),
@@ -808,6 +930,26 @@ _CLUSTER_SUBCOMMAND_HELP = {
                  "this starts live workloads across the fleet. Pass "
                  "--dry-run to see the plan without touching the cluster."),
     },
+    # history (t_eee43fac): the CLI behind the canonical stored-series route
+    # (t_447cc7fc ruled /v1/cluster/history canonical), so a chart that looks
+    # wrong can be checked from a terminal. The flags ARE the route's
+    # parameters — two mutually exclusive axes, one machine filter — because a
+    # CLI that invents a third way to say "which window" is a second contract to
+    # keep in sync. Wording describes the flags rather than echoing what the
+    # verb prints. No `example:` line, same reason as every other verb here: the
+    # (C) gate parse-checks a printed example and a fabricated one is a lie.
+    "history": {
+        "usage": "hscc cluster history [--window W | --tier N]",
+        "desc": ("The stored CPU/GPU/serving series the metrics recorder keeps, "
+                 "read from its own store — this reads nothing live: no "
+                 "sample, no ssh, no sparkrun. Two mutually exclusive axes: "
+                 "--window 15m|1h|6h|24h|7d (the default is 1h) or --tier "
+                 "0|1|2 with optional --since/--until (inclusive epoch "
+                 "seconds). --node <host|all> is the one machine filter; "
+                 "--metrics a,b keeps those fields plus the row's identity; "
+                 "--json prints the rows the API serves, verbatim. A value a "
+                 "node never reported prints as an em dash, never as 0."),
+    },
 }
 
 
@@ -859,7 +1001,7 @@ def _print_cluster_verb_usage(sub: str):
 # F3's gate rules (canonical-whitespace pin in
 # hscc_daemon/tests/test_cluster_group_help.py).
 _CLUSTER_HELP_VERBS = ("status", "hosts", "jobs", "info", "stop", "up",
-                       "down")
+                       "down", "history")
 
 
 def _help_token_index(args):
@@ -1117,6 +1259,26 @@ def _handle_cluster():
         _print_cluster_verb_usage(sub)
         return 0
 
+    # ── `hscc cluster history` (t_eee43fac) ────────────────────────────────
+    # Deliberately BEFORE the engine load: this verb's only data source is the
+    # recorder's own store (hscc_daemon/metrics_history.py), so it must not
+    # need the cluster engine — and therefore must not depend on sparkrun being
+    # installed or reachable — to print history that is already on disk. It
+    # never touches metrics_history.get_sampler(), which CONSTRUCTS a Sampler
+    # on first use and would spawn a second `sparkrun cluster monitor` plus a
+    # second writer on the roll-up watermarks.
+    if sub == "history":
+        from hscc_daemon import metrics_history_cli
+        opts, err = metrics_history_cli.parse_history_args(cluster_args[1:])
+        if err:
+            print(metrics_history_cli.usage_error_message(
+                err, width=_cluster_help_width()))
+            return metrics_history_cli.USAGE_ERROR_RC
+        payload = metrics_history_cli.read_history(opts)
+        print(metrics_history_cli.history_json(payload) if opts["json"]
+              else metrics_history_cli.render_history(payload))
+        return 0
+
     eng = _load_cluster_engine()
     if eng is None:
         return 1
@@ -1179,6 +1341,571 @@ def _handle_cluster():
     return renderer(console, result)
 
 
+# ── node group surface (card t_c28f4f14) ───────────────────────────────────
+# `hscc node pause|resume|paused` — the operator surface for the node-pause
+# overlay (hscc_daemon/node_pauses.py) and its sparkrun-only executor
+# (hscc_daemon/node_pause_exec.py). A paused node is skipped by the heal and
+# keepalive paths, so this is how a machine gets parked for maintenance without
+# the daemon walking units back onto it.
+#
+# Mutation safety (operator rule 11-22, replaces `--apply`): `pause` and
+# `resume` print the plan — host, every model it will stop or restart, the
+# reason, the deadline — and then ASK: `Pause <host> and stop these N
+# model(s)? [y/N]`. Only a literal y/Y proceeds; a bare Enter, "yes", "n" or
+# anything else aborts with nothing stopped and nothing recorded. `--yes` is
+# what a script or cron passes to skip the ask, and with no terminal attached
+# the mutation is REFUSED unless `--yes` is there — a scheduled job must never
+# park a machine by answering for the operator. `--dry-run` previews: same
+# plan, no prompt, nothing recorded. `paused` is read-only always.
+#
+# Help is intercepted INSIDE _handle_node, on the RAW tail, before any import,
+# status read or state write — the B6/B10/B12 rule the cluster/orch/kanban
+# surfaces follow (`-h` must never reach a verb that stops live workloads).
+#
+# `--theme` is NOT accepted here, unlike the cluster group: these verbs render
+# plain text, so a palette would select nothing, and silently dropping the
+# token is worse than refusing it (the parser's refusal names it).
+_NODE_VERBS = ("pause", "resume", "paused")
+
+_NODE_GROUP_ENTRIES = [
+    ("hscc node pause <host> [flags]",
+     "Park one node: stop the models on it and record a durable pause the heal "
+     "paths skip. Prints the plan and asks before anything stops; only y "
+     "proceeds. A node parks only when every model on it runs on it alone. "
+     "Flags: [--reason <text>] [--until <duration>] [--force] [--yes] "
+     "[--dry-run]."),
+    ("hscc node resume <host> [--yes] [--dry-run]",
+     "Restart the models the pause recorded (sparkrun --ensure, the same "
+     "recipe and flags), then clear the pause and that node's heal strikes. "
+     "Prints what it will restart and asks before anything restarts; "
+     "--dry-run only previews."),
+    ("hscc node paused [--json]",
+     "Every paused node with its units, reason, since and until. Read-only: "
+     "reads the overlay file, never the fleet."),
+]
+
+_NODE_SUBCOMMAND_HELP = {
+    "pause": {
+        "usage": "hscc node pause <host> [flags]",
+        "desc": ("Park <host>: enumerate its models, stop them, then record "
+                 "the pause. Prints the plan — the host, every model it will "
+                 "stop, the reason and the deadline — then asks 'Pause <host> "
+                 "and stop these N model(s)? [y/N]'. Only y proceeds; a bare "
+                 "Enter, n, 'yes' or anything else stops nothing and records "
+                 "nothing. A node parks only when EVERY model on it runs on "
+                 "that node alone — a model that spans other nodes is refused "
+                 "by name and no flag overrides that. Flags: --reason <text> "
+                 "(recorded on the pause), --until <duration> (90m, 2h, 1d3h, "
+                 "45 = seconds, or an ISO timestamp; open-ended without it), "
+                 "--force (override the orchestrator guard ONLY: the applied "
+                 "template's declared orchestrator node, or a pause that would "
+                 "leave no healthy unit serving the orchestrator model), --yes "
+                 "(act without asking — what a script or cron must pass to "
+                 "mean it; without a terminal the verb refuses instead), "
+                 "--dry-run (print the plan and change nothing)."),
+    },
+    "resume": {
+        "usage": "hscc node resume <host> [--yes] [--dry-run]",
+        "desc": ("Restart the models recorded by the pause of <host>, through "
+                 "sparkrun's --ensure path, so the same recipe and flags "
+                 "re-issue the same workload instead of launching a "
+                 "duplicate. Prints what it will restart, then asks 'Resume "
+                 "<host> and restart these N model(s)? [y/N]'; only y "
+                 "proceeds. --yes restarts without asking, --dry-run prints "
+                 "the commands and changes nothing — including the pause. A "
+                 "model whose launch recipe cannot be rebuilt is refused and "
+                 "the pause is kept."),
+    },
+    "paused": {
+        "usage": "hscc node paused [--json]",
+        "desc": ("Every node the pause overlay holds: host, the units it "
+                 "stopped, reason, since, until, and the span it covers. "
+                 "Read-only — this reads ~/.hscc/node_pauses.json and nothing "
+                 "on the fleet, so it works with sparkrun unreachable. --json "
+                 "prints the same records as one machine-readable object."),
+    },
+}
+
+
+def _node_entry_lines(sub, width=None):
+    """Render one node-verb help entry (usage line + wrapped description,
+    continuation indented — the cluster/template two-line layout)."""
+    if width is None:
+        width = _cluster_help_width()
+    entry = _NODE_SUBCOMMAND_HELP[sub]
+    lines = [f"  {entry['usage']}"]
+    lines.extend(textwrap.wrap(entry["desc"], width=width,
+                               initial_indent=" " * _CLUSTER_HELP_INDENT,
+                               subsequent_indent=" " * _CLUSTER_HELP_INDENT))
+    return lines
+
+
+def _print_node_verb_usage(sub):
+    """`hscc node <verb> --help`: usage + description. Prints text only — no
+    executor import, no status read, no sparkrun call."""
+    print(f"Usage: {_NODE_SUBCOMMAND_HELP[sub]['usage']}")
+    print()
+    for line in _node_entry_lines(sub)[1:]:
+        print(line)
+
+
+def _print_node_group_help():
+    """`hscc node` / `hscc node --help`: the group listing. Text only."""
+    width = _cluster_help_width()
+    print("Node pause commands:")
+    print()
+    for cmd, desc in _NODE_GROUP_ENTRIES:
+        for line in _cluster_group_entry_lines(cmd, desc, width):
+            print(line)
+
+
+#: Per-verb switches and value flags. Anything else is refused (see
+#: _parse_node_args): these are mutating verbs on a live fleet, and a flag the
+#: parser did not understand must never be read as "the operator did not ask".
+_NODE_FLAGS = {
+    "pause": {"switches": ("--force", "--yes", "--dry-run"),
+              "values": ("--reason", "--until")},
+    "resume": {"switches": ("--yes", "--dry-run"), "values": ()},
+    "paused": {"switches": ("--json",), "values": ()},
+}
+
+
+def _parse_node_args(verb, argv):
+    """``(positional, opts, error)`` for one node verb's argv.
+
+    Hand-rolled like the rest of this file (no argparse: a subparser would
+    print its own usage on stderr and exit, which is the surface the help
+    intercepts above own). Unknown flag -> error, never a silent drop.
+    """
+    spec = _NODE_FLAGS[verb]
+    opts = {f: False for f in spec["switches"]}
+    opts.update({f: None for f in spec["values"]})
+    positional, i = [], 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in spec["switches"]:
+            opts[tok] = True
+            i += 1
+            continue
+        if tok in spec["values"]:
+            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                return [], opts, f"{tok} needs a value"
+            opts[tok] = argv[i + 1]
+            i += 2
+            continue
+        name, eq, val = tok.partition("=")
+        if eq and name in spec["values"]:
+            opts[name] = val
+            i += 1
+            continue
+        if tok == "--theme":
+            return [], opts, ("--theme selects a palette for the themed "
+                              "views; these verbs print plain text, so it "
+                              "would do nothing here")
+        if tok.startswith("-"):
+            return [], opts, f"unknown flag: {tok}"
+        positional.append(tok)
+        i += 1
+    return positional, opts, None
+
+
+# ── the mutation gate (replaces `--apply`, operator rule 11-22) ────────────
+#: The verdicts :func:`_confirm_mutation` reaches. Strings, not bools, because
+#: a caller must tell "the operator said no" from "there was nobody to ask":
+#: the first is an abort, the second a refusal that names `--yes` as the way
+#: out. Both leave the fleet and the overlay untouched.
+CONFIRM_PROCEED = "proceed"
+CONFIRM_DECLINED = "declined"
+CONFIRM_NO_TTY = "no-tty"
+
+
+def _stdin_is_tty():
+    """Is there a terminal to ask? Anything that is not — a pipe, cron,
+    launchd, ``ssh -T``, the agent tool — answers NO, and the verb refuses
+    instead of inventing an answer."""
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _ask_yes_no(prompt):
+    """One line from stdin. A closed stdin is an EMPTY answer (= no), never a
+    yes: an ``EOFError`` that got swallowed into a default would be the one bug
+    that turns "nobody answered" into a stopped node.
+
+    Two module-level seams (this and :func:`_stdin_is_tty`) so the y / n /
+    bare-Enter / no-terminal paths are all drivable without a pty.
+    """
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+
+
+def _answer_is_yes(answer):
+    """ONLY ``y`` or ``Y``. The question's default is N, so a bare Enter, "yes",
+    "Y?" or "y ah" are all NO — a mutation needs the one keystroke that means
+    it."""
+    return (answer if isinstance(answer, str) else "").strip() in ("y", "Y")
+
+
+def _confirm_mutation(prompt, yes):
+    """Ask the operator before a node verb touches the fleet. -> CONFIRM_*.
+
+    ``yes`` is the caller's ``--yes``: it skips the ask because a script cannot
+    answer, not because nobody objected. Without it and without a terminal the
+    mutation is REFUSED — that is the half that keeps a cron entry from parking
+    a node nobody meant to park.
+    """
+    if yes:
+        return CONFIRM_PROCEED
+    if not _stdin_is_tty():
+        return CONFIRM_NO_TTY
+    return (CONFIRM_PROCEED if _answer_is_yes(_ask_yes_no(prompt))
+            else CONFIRM_DECLINED)
+
+
+def _pause_prompt(host, count):
+    """The question, verbatim — docs/ops/node-pause.md quotes this line."""
+    return f"Pause {host} and stop these {count} model(s)? [y/N] "
+
+
+def _resume_prompt(host, count):
+    """The resume half, same shape, listing what comes back up."""
+    return f"Resume {host} and restart these {count} model(s)? [y/N] "
+
+
+def _node_flag_conflict(opts):
+    """``--yes`` and ``--dry-run`` contradict each other. Refuse the pair
+    instead of quietly preferring one — the same rule the parser applies to a
+    flag it did not understand, applied to a pair it did."""
+    if opts.get("--yes") and opts.get("--dry-run"):
+        return ("--yes and --dry-run contradict each other: --dry-run "
+                "previews, --yes acts")
+    return None
+
+
+def _node_paused(argv):
+    """`hscc node paused [--json]` — the overlay, printed.
+
+    Imports only node_pauses: no executor, no serving read, no sparkrun, so a
+    paused-node list is readable while the fleet is unreachable.
+    """
+    from hscc_daemon import node_pauses
+
+    _pos, opts, err = _parse_node_args("paused", argv)
+    if err:
+        print(f"error: {err}")
+        _print_node_verb_usage("paused")
+        return 1
+    pauses = node_pauses.list_pauses()
+    if opts["--json"]:
+        rows = []
+        for host in sorted(pauses):
+            row = {"host": host}
+            row.update(pauses[host])
+            rows.append(row)
+        print(json.dumps({"count": len(rows), "pauses": rows}, indent=2,
+                         sort_keys=True))
+        return 0
+    if not pauses:
+        print("No paused nodes — every node is healable.")
+        return 0
+    for host in sorted(pauses):
+        entry = pauses[host]
+        units = ", ".join(entry["units"]) or "(none recorded)"
+        stopped = ("confirmed down" if entry["stopped"] else
+                   "not confirmed down (pause recorded before the stop "
+                   "finished)")
+        print(f"{host}")
+        print(f"  units:   {units}")
+        print(f"  stopped: {stopped}")
+        print(f"  reason:  {entry['reason'] or '(none given)'}")
+        print(f"  since:   {entry['since'] or '(unknown)'}")
+        until = entry["until"]
+        if not until:
+            print("  until:   open-ended (only 'hscc node resume' ends it)")
+        elif node_pauses.is_expired(entry):
+            print(f"  until:   {until} — PAST DUE; resume it "
+                  f"(hscc node resume {host})")
+        else:
+            print(f"  until:   {until}")
+        if entry["span_nodes"]:
+            span = ", ".join(n for n in entry["span_nodes"] if n != host)
+            print(f"  span:    {host}" + (f" + {span}" if span else ""))
+    return 0
+
+
+def _node_pause(argv):
+    """`hscc node pause <host> [flags]` — plan, refuse, then stop + record.
+
+    Order is the contract: the plan is read from the executor (the only
+    sanctioned reader of fleet facts), refusals print WHY and change nothing,
+    and the overlay is written only AFTER the stop has been attempted — the
+    pause record's `stopped` flag is what tells a reader whether the units are
+    confirmed down or merely promised to the operator.
+    """
+    from hscc_daemon import node_pause_exec, node_pauses
+
+    positional, opts, err = _parse_node_args("pause", argv)
+    if err:
+        print(f"error: {err}")
+        _print_node_verb_usage("pause")
+        return 1
+    if len(positional) != 1:
+        print(f"error: pause needs exactly one host, got "
+              f"{positional or 'none'}")
+        _print_node_verb_usage("pause")
+        return 1
+    host = positional[0].strip()
+    dry_run = opts["--dry-run"]
+    conflict = _node_flag_conflict(opts)
+    if conflict:
+        print(f"error: {conflict}")
+        _print_node_verb_usage("pause")
+        return 1
+
+    until_iso = None
+    if opts["--until"] is not None:
+        # node_pauses.parse_until degrades an unparseable value to
+        # open-ended — for the overlay that is the safe direction, for a CLI
+        # flag it is a typo silently parking a node forever. Check here.
+        until_iso = node_pauses.parse_until(opts["--until"])
+        if until_iso is None:
+            print(f"error: --until {opts['--until']!r} is not a duration "
+                  f"(90m, 2h, 1d3h, 45 = seconds) or an ISO timestamp.")
+            print("Refusing to record a pause whose deadline cannot be read.")
+            return 1
+
+    p = node_pause_exec.plan(host)
+    units = p["units"]
+    affected = p["span_nodes"]
+
+    # ── the plan: printed before anything is decided, asked or stopped ─────
+    # The operator confirms against what they can READ — the host, every model
+    # this stops, the reason, the deadline. An unreadable node prints no table,
+    # and the shared eligibility check owns even that refusal, so this verb
+    # never has to word "cannot enumerate" in its own voice.
+    if p.get("ok"):
+        print(f"{host}: {len(units)} unit(s) on this node"
+              f"{' — dry run, nothing stopped' if dry_run else ''}")
+        for u in units:
+            flags = f"port {u['port']}" if u.get("port") else "port ?"
+            if u.get("tp"):
+                flags += f" tp={u['tp']}"
+            print(f"  {u['unit_id']:<16} {u['kind']:<12} "
+                  f"{', '.join(u['nodes'])}  ({flags})")
+            if not u["observed"]:
+                print(f"    not in the latest sweep — stopping it is a no-op if "
+                      f"it is already down")
+            if u.get("resume_blocked"):
+                print(f"    cannot be resumed later: {u['resume_blocked']}")
+        if len(affected) > 1:
+            print(f"  every node this affects: {', '.join(affected)}")
+        until_note = until_iso or "open-ended (only node resume ends it)"
+        print(f"  reason:  {opts['--reason'] or '(none given)'}")
+        print(f"  until:   {until_note}")
+
+    # ── the two guards: eligibility first, then the orchestrator ───────────
+    # BOTH are one function's verdict printed verbatim, and neither is worded
+    # here. The agent tool calls this verb, so printing the checks' own lines is
+    # what makes the two entry points agree by construction rather than by luck.
+    # Order is eligibility -> orchestrator, and either refusal stops everything:
+    # an ineligible node never reaches the orchestrator question, and `--force`
+    # belongs to the orchestrator guard alone (it cannot unlock a shared model).
+    # Both refuse a preview too — the plan is printed above them, so nothing is
+    # hidden, and a preview is exactly when an operator wants to hear that this
+    # node is not safe to park.
+    elig = node_pause_exec.pause_eligibility(host, p)
+    for line in elig["lines"]:
+        print(line)
+    if elig["verdict"] == node_pause_exec.ELIG_REFUSE:
+        return 1
+
+    verdict = node_pause_exec.orchestrator_pause_guard(
+        host, plan=p, force=opts["--force"])
+    for line in verdict["lines"]:
+        print(line)
+    if verdict["verdict"] == node_pause_exec.GUARD_REFUSE:
+        return 1
+
+    if dry_run:
+        print("Dry run: nothing stopped and nothing recorded. Re-run without "
+              "--dry-run to be asked whether to stop them.")
+        return 0
+
+    # ── the confirmation: nothing stops until the operator answers y ───────
+    # The question is the mutation safety (it replaces `--apply`): the plan is
+    # already printed above, the default is N, and only a literal y proceeds.
+    answer = _confirm_mutation(_pause_prompt(host, len(units)), opts["--yes"])
+    if answer != CONFIRM_PROCEED:
+        if answer == CONFIRM_NO_TTY:
+            print("REFUSED: no terminal to ask — this would stop live models "
+                  "with nobody confirming them.")
+            print(f"  Pass --yes to pause {host} non-interactively (a script "
+                  f"or cron must mean it), or --dry-run to look again.")
+        else:
+            print(f"Aborted: only y confirms a pause — {host} keeps running.")
+        print("Nothing stopped and nothing recorded.")
+        return 1
+    if opts["--yes"]:
+        print("note: --yes given — proceeding without asking.")
+
+    # ── confirmed: stop first, record second (see the module docstring) ────
+    res = node_pause_exec.stop_units(units, apply=True)
+    recorded = [u["unit_id"] for u in units]
+    try:
+        node_pauses.pause(host, reason=opts["--reason"] or "",
+                          until=until_iso, units=recorded,
+                          span_nodes=affected, stopped=bool(res["ok"]))
+    except OSError as e:
+        # The units are down but nobody knows the node is parked: the heal
+        # paths will walk units back onto it. Say so, do not claim success.
+        print(f"error: the units were stopped but the pause did not reach "
+              f"disk ({e}).")
+        print(f"  {node_pauses.overlay_path()} is NOT updated — re-run "
+              f"'hscc node pause {host}' before leaving this node.")
+        return 1
+    # ── the report: what actually came down, per unit ──────────────────────
+    # "N unit(s) stopped" is a claim about the fleet, so it prints ONLY when
+    # every stop confirmed (t_8ad06a53: sparkrun had matched no intent, had
+    # stopped nothing, and this line still claimed the stop one line before its
+    # own WARNING said otherwise). The overlay keeps the record either way —
+    # that is docs/ops/node-pause.md's ordering rule: a failed stop still PARKS
+    # the node, because the heal paths must skip it even with a unit up — but a
+    # parked node whose unit is still running is reported as exactly that, with
+    # each unit's own outcome and sparkrun's reason.
+    failed = [r for r in res["units"] if not r["ok"]]
+    if failed:
+        print(f"paused {host}: pause RECORDED with stopped=False — "
+              f"{len(failed)} of {len(recorded)} unit(s) did not stop cleanly; "
+              f"overlay at {node_pauses.overlay_path()}")
+        for r in res["units"]:
+            print(f"  {r['unit_id']}: "
+                  + ("stopped" if r["ok"] else f"NOT stopped — {r['error']}"))
+        print("  WARNING: the node is parked but at least one unit may still be "
+              "running on it — nothing here counts it as down. Fix the stop and "
+              f"re-run 'hscc node pause {host}', or stop that unit by hand.")
+        return 1
+    print(f"paused {host}: {len(recorded)} unit(s) stopped — "
+          f"{', '.join(recorded)}; overlay at {node_pauses.overlay_path()}")
+    return 0
+
+
+def _node_resume(argv):
+    """`hscc node resume <host> [--yes] [--dry-run]` — restart, then clear.
+
+    A thin surface over :func:`node_pause_exec.resume_host`, which holds the
+    resume policy and is the SAME function the daemon's expiry tick runs — so
+    the confirmation gate, the rebuild-or-refuse rule and the clear pairing
+    cannot drift between an operator at a terminal and the daemon. The gate is
+    handed IN to that function (the tick passes none, so it never asks): the
+    question has to come after the executor has listed what would restart, and
+    the verb cannot list it without sweeping the fleet a second time.
+
+    This function owns only the argument grammar, the "is this host paused at
+    all" answer (which needs the whole overlay to name the span owner) and the
+    exit code.
+
+    The overlay stores unit IDS (node_pauses keeps the entry to six typed
+    keys), so the launch commands are rebuilt by the executor's `plan()` from
+    serving.json — the same source the keepalive relaunch reads. A recorded
+    unit that no longer has a rebuildable command is REFUSED and the pause is
+    kept: clearing it would leave a node nobody remembers how to start.
+    """
+    from hscc_daemon import node_pause_exec, node_pauses
+
+    positional, opts, err = _parse_node_args("resume", argv)
+    if err:
+        print(f"error: {err}")
+        _print_node_verb_usage("resume")
+        return 1
+    if len(positional) != 1:
+        print(f"error: resume needs exactly one host, got "
+              f"{positional or 'none'}")
+        _print_node_verb_usage("resume")
+        return 1
+    host = positional[0].strip()
+    conflict = _node_flag_conflict(opts)
+    if conflict:
+        print(f"error: {conflict}")
+        _print_node_verb_usage("resume")
+        return 1
+
+    def _confirm(_host, uids):
+        """The resume half of the mutation gate — same question, same y-only
+        rule, printed under the list of what comes back."""
+        answer = _confirm_mutation(_resume_prompt(_host, len(uids)),
+                                   opts["--yes"])
+        if answer == CONFIRM_PROCEED:
+            if opts["--yes"]:
+                print("note: --yes given — proceeding without asking.")
+            return True
+        if answer == CONFIRM_NO_TTY:
+            print("REFUSED: no terminal to ask — this would restart live "
+                  "models with nobody confirming them.")
+            print(f"  Pass --yes to resume {_host} non-interactively (a script "
+                  f"or cron must mean it), or --dry-run to look again.")
+        else:
+            print(f"Aborted: only y confirms a resume — {_host} stays parked.")
+        print("Nothing restarted and the pause stays recorded.")
+        return False
+
+    # ONE snapshot for both questions. node_pauses.load() normalises into fresh
+    # objects every call, so `paused()` + `covering()` would compare two
+    # different reads and could disagree mid-flight; the owner of a span is
+    # read from the same dict that answered "is this host keyed".
+    pauses = node_pauses.list_pauses()
+    entry = pauses.get(host)
+    if entry is None:
+        owners = sorted(h for h, e in pauses.items()
+                        if host in e["span_nodes"])
+        if owners:
+            print(f"{host} is not paused itself — it is inside the span of "
+                  f"the pause on {', '.join(owners)}.")
+            print("  The span stops and starts as one unit: resume the owner, "
+                  "not this node.")
+            return 1
+        print(f"{host} is not paused. Nothing to resume.")
+        return 0
+    if opts["--dry-run"]:
+        # The preview keeps the executor's own dry-run posture: it prints the
+        # commands it would issue and cannot end the pause either.
+        return 0 if node_pause_exec.resume_host(host, entry)["ok"] else 1
+    res = node_pause_exec.resume_host(host, entry, apply=True,
+                                      confirm=_confirm)
+    return 0 if res["ok"] else 1
+
+
+def _handle_node(argv):
+    """Route `hscc node <verb>` — help first, then the three verbs.
+
+    Shape follows _handle_orch / _handle_cluster: help loads nothing and
+    shells out nothing; the executor is imported by the verbs that need it,
+    so `hscc node paused` and every help path never touch the fleet.
+    """
+    raw_tail = list(argv)
+    if not raw_tail or raw_tail[0] in ("--help", "-h"):
+        _print_node_group_help()
+        return 0
+    sub = raw_tail[0]
+    if sub not in _NODE_VERBS:
+        print(f"Error: unknown node subcommand: {sub}")
+        print(f"Valid subcommands: {', '.join(_NODE_VERBS)}")
+        return 1
+    # A help token ANYWHERE in the verb's tail is help (raw slice, before any
+    # state read) — the B10 class: `node pause <host> --help` must not stop.
+    if _help_token_index(raw_tail) is not None:
+        _print_node_verb_usage(sub)
+        return 0
+    if sub == "paused":
+        return _node_paused(raw_tail[1:])
+    if sub == "pause":
+        return _node_pause(raw_tail[1:])
+    return _node_resume(raw_tail[1:])
+
+
 # ── orch group surface (card t_5da7fd56) ───────────────────────────────────
 # `hscc orch inject <profile> "<msg>"` — the unified-CLI entry the operator
 # asked for. The VERB lives in the cluster engine (hscc-cluster/hscc.py
@@ -1193,7 +1920,10 @@ _ORCH_GROUP_ENTRIES = [
      "bracketed paste; exactly one pane for the profile or refuse). Flags: "
      "[--mode auto|plain|queue|steer] [--dry-run] [--pane <target>] [--json]. "
      "--dry-run resolves the pane and reports target/busy/verb, sending "
-     "nothing."),
+     "nothing. Four things answer to \"orch\" and only one is this verb: "
+     "`orch_message` is the agent tool that queues a signed nudge between "
+     "orchestrators, `/orch-restart` restarts the orchestrator vLLM, and "
+     "`POST /v1/orchestrator/chat` runs one chat turn by job id."),
     # orch-waker W3 (t_2b34b5c7): the operator surface for the daemon-resident
     # waker. Three verbs on one line — the group entry is the help for all of
     # them, so the F5 surface-honesty rule (a live verb must not hide from the
@@ -2135,6 +2865,13 @@ def main():
         rc = cmd_autodown(args[1:])
         sys.exit(rc)
 
+    # 'merge-queue' group (MQ1) — local FIFO of green PRs. Help is intercepted
+    # inside cmd_merge_queue before any state read, like kanban/api.
+    if cmd == "merge-queue":
+        from hscc_daemon.merge_queue_cli import cmd_merge_queue
+        rc = cmd_merge_queue(args[1:])
+        sys.exit(rc)
+
     # 'kanban' group — board hygiene. kanban_blocked owns the single dispatcher
     # and delegates `stale` to kanban_cli, so both subcommands work regardless
     # of which card's module landed first.
@@ -2160,6 +2897,23 @@ def main():
     # group listing instead.
     if cmd == "orch":
         rc = _handle_orch(args[1:])
+        sys.exit(rc)
+
+    # 'main' group (M4) — the main orchestrator's own tmux pane. Help is
+    # intercepted inside cmd_main (before any pane discovery), like orch.
+    if cmd == "main":
+        from hscc_daemon.main_cli import cmd_main
+        rc = cmd_main(args[1:])
+        sys.exit(rc)
+
+    # 'node' group (t_c28f4f14) — the node-pause overlay verbs. Help is
+    # intercepted INSIDE _handle_node, before any executor import or status
+    # read, so `hscc node pause <host> --help` can never reach a verb that
+    # stops live workloads (the B6/B10 rule the cluster/orch groups follow).
+    # Deliberately after the `main` branch and before the DAEMON_COMMANDS help
+    # intercept below: TOP_LEVEL_COMMANDS lists `node` in dispatch order.
+    if cmd == "node":
+        rc = _handle_node(args[1:])
         sys.exit(rc)
 
     # Per-command help for the daemon verbs (t_5132deb3: the branch used to
@@ -2263,7 +3017,7 @@ def main():
         cmd_triggers()
     elif cmd_lower == "notify":
         from hscc_daemon.cli import cmd_notify
-        cmd_notify(" ".join(args[1:])) if len(args) > 1 else print("Usage: hscc notify <message>")
+        sys.exit(cmd_notify(args[1:]))
     elif cmd_lower == "plist":
         from hscc_daemon.install import cmd_plist
         cmd_plist()

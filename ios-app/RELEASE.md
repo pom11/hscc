@@ -42,7 +42,12 @@ Only iPhones registered in the team's Ad Hoc provisioning profile can install.
    `-authenticationKeyPath/-authenticationKeyID/-authenticationKeyIssuerID`.
    When none are set, Xcode's signed-in account is used. A partial set is a
    hard error.
-5. **GitHub Pages.** The first publish enables Pages from the `gh-pages` branch
+5. **Nothing to enable for notifications.** The apps carry no notifications
+   (operator decision 2026-11-19), so the app asks for no notification
+   permission and the target carries no push entitlement. An App ID
+   with Push Notifications enabled from an earlier build is harmless; you do
+   not need to change it.
+6. **GitHub Pages.** The first publish enables Pages from the `gh-pages` branch
    through `gh api`. The account running the release needs admin on
    `pom11/hscc`.
 

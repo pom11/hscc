@@ -10,12 +10,16 @@ import WidgetKit
 // exactly those fields; the views render the strings this file returns and
 // compose no numbers of their own.
 //
-// Reads (two, the §2 budget):
-//   * GET /v1/cluster/monitor — hosts[].error / sample (node state, GPU,
+// Reads (the §2 budget — two per refresh for every family):
+//   GET /v1/cluster/monitor — hosts[].error / sample (node state, GPU,
 //     CPU/GPU temps) and serving[] (per-node model, run/wait, Gen t/s).
-//   * GET /v1/autodown/status — the fleet power state. It is the one word the
+//   GET /v1/cluster/status — the fleet power state. It is the one word the
 //     remaining surfaces use to say "Serving"/"Waking"/"Down"; the node and
 //     model rows above are the CLI truth either way.
+//   ...and for `systemSmall` ONLY (t_2681d3de) the status read is swapped for
+//     GET /v1/cluster/history, the recorder's stored series behind the tile's
+//     GPU% sparklines. The provider picks one or the other per family, so no
+//     family ever sends more than the two reads §2 allows.
 //
 // Removed from the old surface: the hard-coded four-node topology glyph (four
 // invented node identities), the load average (the CLI's host
@@ -54,9 +58,18 @@ enum ClusterMetricHeat: Equatable {
 
     /// A serving node's GPU is the number an operator watches; a node that did
     /// not answer is not "calm".
+    ///
+    /// A node the operator PARKED is not "hot" either. Its row keeps its
+    /// `error` — the overlay refuses to delete a real diagnostic — so a heat
+    /// verdict that asked `isUp` first would paint a deliberate pause in the
+    /// same alarm colour as a machine that failed. It gets `.unknown`, the
+    /// verdict this enum already uses for "there is no reading to judge",
+    /// because a parked machine genuinely has no load to colour.
     static func node(_ node: FleetNodeLine) -> ClusterMetricHeat {
-        guard node.isUp else { return .hot }
-        return percent(node.gpuPct)
+        guard node.isPaused else {
+            return node.isUp ? percent(node.gpuPct) : .hot
+        }
+        return .unknown
     }
 }
 
@@ -64,6 +77,240 @@ enum ClusterMetricHeat: Equatable {
 // The entry. Gate states are first class: unconfigured and paused each say so,
 /// and a failed read carries its reason plus the age of the last good read.
 // ---------------------------------------------------------------------------
+
+/// The one stale/offline rule every widget runs.
+///
+/// Stale means the DATA is older than twice the surface's refresh interval; it
+/// dims to 50% and says "stale · HH:mm". A failed fetch says "offline · HH:mm"
+/// and dims whatever cached content the caller still has. Neither state ever
+/// renders cached data as fresh.
+// MARK: - C1 Health line (2026-11-20 redesign)
+
+/// One node row in the new Cluster widget: identity, state, and the four
+/// numbers C1 prints beside it. Every field is a route field (or the serving
+/// row that names the node's backend); no view derives a number of its own.
+struct ClusterC1Node: Equatable, Identifiable {
+    /// The node's shared label: the last octet of its IP (`MonitorNode.nodeLabel`,
+    /// reached here through `FleetNodeLine.label`). Before apps 1.4.4 this was a
+    /// positional row-number name built from the row's index in the frame, which
+    /// named a ROW rather than a machine and reordered with sparkrun; the
+    /// operator replaced it with the octet so a tile names the host they
+    /// recognise. One to three digits, so it still fits the medium node column
+    /// and a Lock Screen ring — the reason the positional name was chosen in the
+    /// first place.
+    let label: String
+    /// The node's own hostname when it reported one, else its label — the name
+    /// an accessibility label speaks (`ClusterWidgetViews`'s `Hottest …`), which
+    /// is a place a name has always been the point. Never an address (§7).
+    let hostname: String
+    let model: String?
+    let isUp: Bool
+    let isOrchestrator: Bool
+    let gpuPct: Double?
+    let tempC: Double?
+    let powerW: Double?
+    let genTps: Double?
+
+    var id: String { label }
+
+    init(_ node: FleetNodeLine) {
+        self.label = node.label
+        self.hostname = node.reportedName ?? node.label
+        self.model = node.model
+        self.isUp = node.isUp
+        self.isOrchestrator = node.isOrchestrator
+        self.gpuPct = node.gpuPct
+        self.tempC = node.gpuTempC ?? node.cpuTempC
+        self.powerW = node.gpuPowerW
+        // An engine that answers with nothing running reports no rate; that is
+        // an idle 0 tok/s, not an unknown.
+        self.genTps = node.genTps ?? ((node.model != nil && node.running == 0) ? 0 : nil)
+    }
+}
+
+/// One point of the large tile's 2 h total-throughput chart: the sum of every
+/// engine's `gen_tps` at that recorder timestamp.
+struct ClusterThroughputPoint: Equatable {
+    let t: TimeInterval
+    let value: Double
+}
+
+enum ClusterThroughput {
+    /// Sum the engine series by timestamp. A timestamp with no readable engine
+    /// value is a gap, not a zero. Nil/empty response means no chart.
+    static func series(_ response: ClusterHistoryResponse?) -> [ClusterThroughputPoint] {
+        guard let response else { return [] }
+        let set = ClusterHistorySeriesSet.make(response, for: .genTps)
+        var sums: [TimeInterval: Double] = [:]
+        for line in set.series {
+            for sample in line.samples {
+                guard let value = sample.value else { continue }
+                sums[sample.t, default: 0] += value
+            }
+        }
+        let ordered = sums.keys.sorted().map { ClusterThroughputPoint(t: $0, value: sums[$0] ?? 0) }
+        guard let last = ordered.last?.t else { return [] }
+        return ordered.filter { $0.t >= last - 2 * 60 * 60 }
+    }
+}
+
+/// Everything C1 draws, projected once from the entry's one monitor read.
+struct ClusterC1: Equatable {
+    let up: Int?
+    let total: Int?
+    /// The frame minus the machines the operator parked. Owned by
+    /// `FleetVerdict` (`Sources/Shared/ClusterNodeTally.swift`) — the one pair
+    /// every `N/M up` sentence in the apps counts, now also the one CarPlay and
+    /// the macOS menu bar count. Carried here rather than recomputed so a
+    /// surface that wants the parked number asks the same projection.
+    let verdict: FleetVerdict
+    /// Frame-listed nodes the operator parked. Excluded from every verdict this
+    /// struct can print: a parked machine is neither evidence a fleet is
+    /// answering nor evidence it is failing, so it belongs in neither side of a
+    /// `up/total` sentence or of a colour.
+    var paused: Int? { verdict.paused }
+    /// Frame-listed nodes that answered AND were not parked — the numerator the
+    /// headline and the tally may use. nil when the read named no frame, which
+    /// is why this is NOT `answered ?? 0` anywhere downstream.
+    var answered: Int? { verdict.answered }
+    /// The nodes a verdict here may judge: the frame the route listed, minus
+    /// the machines the operator parked. nil when the frame itself is nil, so
+    /// "not told" never becomes "nothing is up".
+    var judged: Int? { verdict.judged }
+    let tokPerSec: Double?
+    let hottestC: Double?
+    let nodes: [ClusterC1Node]
+    let modelNames: [String]
+    let daemonRunning: Bool?
+    let dataAt: Date?
+    let fetchedAt: Date
+    let refreshMinutes: Int
+    let failed: Bool
+
+    var headline: String {
+        guard let answered, let judged else { return failed ? "Offline" : "No data" }
+        // Every listed node parked: nothing is failing and nothing is serving,
+        // so neither `Down` (an alarm about a choice the operator made) nor
+        // `All up` (a claim about a fleet that is deliberately parked) is true.
+        // `allParked` is the shared ordering — this arm MUST be asked before the
+        // `answered == 0` one, and `FleetVerdict` is what keeps that true for
+        // every surface rather than just this one.
+        if verdict.allParked { return FleetVerdict.pausedWord }
+        if answered == 0 { return "Down" }
+        if answered == judged { return "All up" }
+        return "\(answered)/\(judged) up"
+    }
+
+    /// The headline when the whole frame is parked. A name this struct keeps so
+    /// its own gate assertion binds; the word itself is owned by
+    /// `FleetVerdict.pausedWord`, next to the per-node copy in
+    /// `FleetFormat.paused`, so the two cannot drift apart.
+    static let pausedHeadline = FleetVerdict.pausedWord
+
+    /// The `answered/judged` pair the medium column draws. The string is
+    /// `FleetVerdict.tallyText` — the same line the macOS menu bar's
+    /// `Cluster nodes up` title prints — so the two cannot drift apart.
+    var tally: String { verdict.tallyText }
+
+    var tokText: String {
+        guard let tokPerSec else { return "— tok/s" }
+        return "\(Int(tokPerSec.rounded())) tok/s"
+    }
+
+    var hottestText: String {
+        guard let hottestC else { return "Hottest —" }
+        return "Hottest \(Int(hottestC.rounded()))°"
+    }
+
+    // MARK: L2 Lock Screen copy
+    //
+    // The three accessory families read these values. They are computed here
+    // rather than in a body so the executed gate can pin the exact strings and
+    // numbers a Lock Screen draws without a simulator.
+
+    /// The hottest node and its reading, or nil when no node reported one.
+    /// A missing temperature keeps the ring empty instead of claiming 0 °C.
+    var hottestNode: ClusterC1Node? {
+        nodes.filter { $0.tempC != nil }
+            .max { ($0.tempC ?? 0) < ($1.tempC ?? 0) }
+    }
+
+    /// The gauge fill, clamped to the L2 contract's 0...90 °C range.
+    var hottestGaugeValue: Double? {
+        hottestNode?.tempC.map { min(max($0, 0), 90) }
+    }
+
+    /// `accessoryInline`: "4/4 up · N tok/s".
+    var inlineL2: String {
+        guard up != nil, total != nil else { return failed ? "Offline" : "No data" }
+        return "\(tally) up · \(tokText)"
+    }
+
+    /// `accessoryRectangular`: "CLUSTER · N TOK/S".
+    var rectangularHeadline: String {
+        "CLUSTER · " + (tokPerSec.map { "\(Int($0.rounded())) TOK/S" } ?? "— TOK/S")
+    }
+
+    /// The four node temperatures the rectangular row draws, in route order.
+    var rectangularTemps: [String] {
+        nodes.prefix(4).map { node in
+            node.tempC.map { "\(Int($0.rounded()))°" } ?? "—"
+        }
+    }
+
+    /// The footer's model line: `name ×N` per model, in route order.
+    var modelLine: String {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for node in nodes {
+            guard let model = node.model else { continue }
+            if counts[model] == nil { order.append(model) }
+            counts[model, default: 0] += 1
+        }
+        if order.isEmpty { return "no models" }
+        return order.map { "\($0) ×\(counts[$0] ?? 0)" }.joined(separator: " · ")
+    }
+
+    var daemonText: String {
+        switch daemonRunning {
+        case .some(true): return "daemon OK"
+        case .some(false): return "daemon down"
+        case .none: return "daemon —"
+        }
+    }
+
+    var stale: StaleState {
+        StaleState(dataAt: dataAt, fetchedAt: fetchedAt,
+                   refreshMinutes: refreshMinutes, failed: failed)
+    }
+
+    init(_ entry: ClusterEntry) {
+        self.up = entry.fleet?.tally.nodesUp
+        self.total = entry.fleet?.tally.nodesTotal
+        // Counted from the projected rows, not from the tally's arithmetic: a
+        // parked node keeps its `error`, so the only place that knows both the
+        // tag and the answer for a given machine is the row itself. The rule is
+        // `FleetVerdict`'s — the same projection CarPlay's headline and the
+        // macOS menu bar's title tally now count, so the three cannot disagree.
+        self.verdict = FleetVerdict(rows: entry.fleet?.nodes)
+        // No rate with live backends and nothing running is an idle fleet:
+        // 0 tok/s. No backend at all stays unknown.
+        if let serving = entry.fleet?.serving {
+            self.tokPerSec = serving.genTps
+                ?? ((serving.backends > 0 && serving.running == 0) ? 0 : nil)
+        } else {
+            self.tokPerSec = nil
+        }
+        self.nodes = entry.fleet?.nodes.map { ClusterC1Node($0) } ?? []
+        self.hottestC = nodes.compactMap(\.tempC).max()
+        self.modelNames = entry.fleet?.serving.modelNames ?? []
+        self.daemonRunning = entry.daemonHost?.daemon_running
+        self.dataAt = entry.dataAt
+        self.fetchedAt = entry.date
+        self.refreshMinutes = entry.refreshMinutes
+        self.failed = entry.failure != nil
+    }
+}
 
 /// `hscc cluster status`'s counts, reduced to the two numbers the widget draws.
 struct ClusterStatusSummary: Equatable {
@@ -92,6 +339,13 @@ struct ClusterEntry: TimelineEntry {
     let monitor: ClusterMonitorViewModel?
     /// `hscc cluster status`'s counts, or nil when that read did not answer.
     let status: ClusterStatusSummary?
+    /// The two tables the large/extra-large surfaces draw (t_9e64d9d9),
+    /// projected from the SAME monitor read as `fleet` — never a second request.
+    /// Nil when that read sent no host list, which is the same condition `fleet`
+    /// is nil under. Named apart from `monitor` because the two are different
+    /// projections of that one read: `monitor` is the CLI view-model the medium
+    /// table and the small grid draw, this is the large/extra-large LAYOUT.
+    let tableData: ClusterMonitorTables?
     /// What stopped this refresh being live. Nil while live.
     let failure: WidgetDataFailure?
     let configured: Bool
@@ -99,42 +353,112 @@ struct ClusterEntry: TimelineEntry {
     /// Age of the last successful read, shown as "updated Nm ago". Set only
     /// when this entry is showing last-known/offline content.
     let lastKnownAgeMinutes: Int?
-    /// Operator content toggles. Only "nodes" and "models" are drawn; the old
-    /// "topology"/"board" values are kept in the shared model for the settings
-    /// editor but no longer have pixels here.
+    /// The recorder's series behind each host's GPU% sparkline (t_2681d3de):
+    /// the `GET /v1/cluster/history` answer for this refresh. Nil whenever the
+    /// read was not made (every family except `systemSmall`), failed, or came
+    /// back unusable — and nil is honestly "no trend": the GPU cells draw the
+    /// single-sample bars they drew before, never a flat line. A failed
+    /// history read deliberately does NOT set `failure` either; the trend is
+    /// an extra the tile can live without, and the rows above it are live.
+    let history: ClusterHistoryResponse?
+    /// Operator content toggles. Only "nodes" is offered/drawn; the old
+    /// "state"/"topology"/"models"/"board" values were dead controls (audit
+    /// W11) and no longer exist in `availableSections`.
     let showSections: Set<String>
+    /// The four Lock Screen metrics, projected from the CLI view-model over the
+    /// SAME monitor read as `fleet`. Nil when that read never answered — the
+    /// accessory families then fall back to the failure/last-known copy below
+    /// rather than drawing a row of dashes.
+    let lockScreen: CLILockScreenMetrics?
+    /// When the DATA was sampled, for AsOfStamp / the stale rule. Falls back to
+    /// the fetch time when the route sends no usable timestamp.
+    let dataAt: Date?
+    /// The surface's configured cadence, for the 2× stale rule.
+    let refreshMinutes: Int
+    /// The daemon-host sidecar, read only by sizes that draw its state.
+    let daemonHost: MonitorDaemonHost?
+    /// The large tile's 2 h total-throughput series, from the same history read
+    /// the old small tile used. Empty means "no chart", never a flat zero line.
+    let throughput: [ClusterThroughputPoint]
 
     init(date: Date,
          fleet: ClusterFleet?,
          monitor: ClusterMonitorViewModel? = nil,
          status: ClusterStatusSummary? = nil,
+         tableData: ClusterMonitorTables? = nil,
          failure: WidgetDataFailure? = nil,
          configured: Bool,
          paused: Bool,
          lastKnownAgeMinutes: Int? = nil,
-         showSections: Set<String> = ClusterEntry.availableSections) {
+         showSections: Set<String> = ClusterEntry.availableSections,
+         lockScreen: CLILockScreenMetrics? = nil,
+         history: ClusterHistoryResponse? = nil,
+         dataAt: Date? = nil,
+         refreshMinutes: Int = 30,
+         daemonHost: MonitorDaemonHost? = nil,
+         throughput: [ClusterThroughputPoint] = []) {
         self.date = date
         self.fleet = fleet
         self.monitor = monitor
         self.status = status
+        self.tableData = tableData
         self.failure = failure
         self.configured = configured
         self.paused = paused
         self.lastKnownAgeMinutes = lastKnownAgeMinutes
+        self.history = history
         self.showSections = showSections
+        self.lockScreen = lockScreen
+        self.dataAt = dataAt
+        self.refreshMinutes = refreshMinutes
+        self.daemonHost = daemonHost
+        self.throughput = throughput
     }
 
     static let availableSections = WidgetSurfaceKind.widgetCluster.availableSections
 
+    /// What the small tile draws (t_9e110d88): four of the CLI's host columns
+    /// across up to four hosts, plus the serving totals — and since t_2681d3de,
+    /// each host's GPU% cell carries the recorder-backed trend when this
+    /// entry's `history` answer has one for it. Nil means there is nothing to
+    /// grid — the family then shows its gate pane (setup invite, "Paused", or
+    /// why the read failed), never a table of dashes.
+    var smallTile: ClusterSmallGrid.Tile? {
+        ClusterSmallGrid.tile(from: monitor, history: history)
+    }
+
+    /// The tables a large/extra-large body may draw, or nil. This is the SAME
+    /// gate `text(for:)` runs first: an unconfigured or paused surface has no
+    /// table, so no family can paint a live-looking table where the text model
+    /// would have printed the invite. Checking it here rather than in each body
+    /// keeps one owner for the rule.
+    var tables: ClusterMonitorTables? {
+        (!configured || paused) ? nil : tableData
+    }
+
+    /// Everything the 2026-11-20 C1 layout draws, from this entry's one read.
+    var c1: ClusterC1 { ClusterC1(self) }
+
     /// The headline colour: green only when every listed node answered, amber
     /// when some are down, red when none answered. The label beside it is the
     /// tally, not a second state word.
+    ///
+    /// A parked node is in none of those sentences. It is excluded from BOTH
+    /// sides of the comparison — from the numerator because it is not evidence
+    /// a fleet is answering, from the denominator because it is not evidence a
+    /// fleet is failing — and the count comes from the projected rows, never
+    /// from a number this file assumes. When every listed node is parked there
+    /// is nothing left to judge: `.unknown`, the verdict for "no reading", which
+    /// is the colour for "not told" and not the colour for "alarm".
     var heat: ClusterMetricHeat {
-        guard let fleet, let up = fleet.tally.nodesUp, let total = fleet.tally.nodesTotal else {
+        guard let fleet, fleet.tally.nodesUp != nil, fleet.tally.nodesTotal != nil else {
             return .unknown
         }
-        if up == 0 && total > 0 { return .hot }
-        return up == total ? .calm : .warm
+        let judged = fleet.nodes.filter { !$0.isPaused }
+        guard !judged.isEmpty else { return .unknown }
+        let up = judged.filter { $0.isUp }.count
+        if up == 0 { return .hot }
+        return up == judged.count ? .calm : .warm
     }
 
     /// The host rows a CLI-shaped surface (the medium tile) may draw, or nil
@@ -171,6 +495,18 @@ struct ClusterEntry: TimelineEntry {
         let shortForm = surface == .small || surface == .inline
             || surface == .circular || surface == .rectangular
         let reason = shortForm ? failure?.shortLabel : failure?.operatorLine
+        // The three Lock Screen families draw the CLI's own four numbers —
+        // hottest temperature, GPU load, fleet watts, running/waiting — when
+        // this refresh has them. `CLILockScreenCopy.text` returns nil for a
+        // system family, so this one branch cannot reach small/medium/large,
+        // and a nil `lockScreen` (a monitor read that never answered) falls
+        // through to the tally / failure copy below instead of drawing dashes.
+        if let lockScreen, !lockScreen.hasNothing,
+           let cli = CLILockScreenCopy.text(for: surface, lockScreen,
+                                            failure: reason,
+                                            ageMinutes: lastKnownAgeMinutes) {
+            return cli
+        }
         guard let fleet else {
             if let status {
                 let detail = FleetFormat.count(status.jobs, singular: "job", plural: "jobs")
@@ -190,6 +526,21 @@ struct ClusterEntry: TimelineEntry {
         text(for: .inline).headline + (text(for: .inline).detail.map { " · \($0)" } ?? "")
     }
 
+    /// The value the Lock Screen ring fills to: the fleet's GPU load, 0…100.
+    /// Nil means the ring has nothing to measure and draws the gated line
+    /// instead — a ring at zero would claim an idle fleet (§6 rule 1).
+    var lockScreenGaugeValue: Double? {
+        lockScreen.flatMap { $0.gpuUtil?.value }
+    }
+
+    /// The VoiceOver sentence, and only when the Lock Screen copy is what is on
+    /// screen: a fallback line ("Timed out") must not be read out as a list of
+    /// things nobody measured.
+    var lockScreenVoice: String? {
+        guard let lockScreen, !lockScreen.hasNothing else { return nil }
+        return CLILockScreenCopy.voice(lockScreen)
+    }
+
     static let unconfigured = ClusterEntry(date: .now,
                                            fleet: nil,
                                            configured: false,
@@ -201,20 +552,26 @@ struct ClusterEntry: TimelineEntry {
 
     /// First-render / gallery data. Sample only: `placeholder(in:)` never runs
     /// through the provider's fetch path and can never replace a real entry.
-    /// It carries the CLI table too, so the gallery shows the medium tile as
-    /// the operator will meet it rather than as an empty frame.
+    /// It carries the CLI table AND the large/XL tables, so the gallery shows
+    /// the medium tile as the operator will meet it rather than as an empty
+    /// frame, and a preview of a size that draws tables shows tables — the same
+    /// projections the live path uses, over sample data, so the preview cannot
+    /// drift from what ships.
     static let placeholder = ClusterEntry(date: .now,
                                           fleet: sampleFleet,
                                           monitor: sampleMonitor,
+                                          tableData: ClusterMonitorTables.project(sampleResponse),
                                           configured: true,
-                                          paused: false)
+                                          paused: false,
+                                          lockScreen: sampleLockScreen)
 
-    /// One sample payload, projected BOTH ways: the glance projection the
-    /// small/large/accessory surfaces draw and the CLI cell table the medium
-    /// tile draws. From one `MonitorResponse` on purpose — a second, hand-typed
-    /// sample would be a second truth about what the fleet looks like, and the
-    /// gallery would then show a headline tally that does not match its own
-    /// table.
+    /// One sample payload, projected FOUR ways from one `MonitorResponse`: the
+    /// glance projection the small/accessory surfaces draw, the CLI cell table
+    /// the medium tile draws, the large/extra-large table layout, and the Lock
+    /// Screen's four numbers. A second, hand-typed sample would be a second truth
+    /// about what the fleet looks like, and the gallery would then show a
+    /// headline tally, a table and a Lock Screen line that do not describe the
+    /// same cluster. Addresses are TEST-NET only (§7).
     private static let sampleResponse = MonitorResponse(
         json: MonitorPayload(timestamp: nil, hosts: sampleHosts),
         serving: sampleServing,
@@ -225,6 +582,11 @@ struct ClusterEntry: TimelineEntry {
     private static let sampleFleet = FleetProjection(projecting: sampleResponse)
 
     private static let sampleMonitor = ClusterMonitorViewModel.project(sampleResponse)
+
+    /// The Lock Screen sample comes from the same bytes, through the same
+    /// projection the shipped widgets run — a hand-written sample line here
+    /// would be a second copy rule nobody executes.
+    private static let sampleLockScreen = CLILockScreenMetrics(sampleResponse)
 
     /// The sample hosts, in route order. The values cover the threshold bands
     /// the medium tile paints — a calm pair, a warm one (CPU 87.3 %, RAM 91.2 %,
@@ -274,6 +636,7 @@ struct ClusterEntry: TimelineEntry {
                  swapUsed: "0", swapTotal: nil, gpu: "0",
                  gpuTemp: "88", cpuTemp: "91.2", power: "196.5", workload: "b"),
         ]
+
     }()
 
     private static let sampleServing: [ServingRow] = [

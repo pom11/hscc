@@ -24,6 +24,10 @@ with no server route now fails CI instead of reaching a phone as a 404.
 | `GET /v1/cluster/status` | Cluster widget | `routes_cluster.handle_cluster_status` | `hscc-cluster` engine `cmd_cluster_status` (`hscc cluster status`) |
 | `GET /v1/daemon/host` | Monitor widget, monitor Live Activity | `routes_ops.handle_daemon_host` | `hscc_daemon` host metrics (`hscc status` daemon-host block) |
 | `GET /v1/autodown/status` | Cluster widget, cluster-health Live Activity | `routes_autodown.handle_autodown_status` | `hscc_daemon.autodown` + `lifecycle` status classifiers (`hscc autodown status`) |
+| `POST /v1/alerts` | `hscc notify` (main orchestrator, daemon, operators) | `routes_alerts.handle_post_alert` | `hscc_daemon.alerts.post_alert` — the same store/rules `hscc notify` reaches over HTTP |
+| `GET /v1/alerts?since=<id>` | "Needs me" widget, macOS menu bar dropdown (`NeedsMeWidget.swift` / `DashboardView.swift`) | `routes_alerts.handle_list_alerts` | `hscc_daemon.alerts.list_alerts` |
+| `GET /v1/merge-queue` | widget/extension read of the local queue; `hscc kanban monitor`'s per-project tables | `routes_merge_queue.handle_merge_queue` | `hscc_daemon.merge_queue.view` — exactly the rows `hscc kanban monitor` renders (and `hscc project review --queue` reads for its `merge` column) |
+| `POST /v1/alerts/<id>/ack` | CLI only (`hscc notify ack`); the apps are read-only | `routes_alerts.handle_ack_alert` | `hscc_daemon.alerts.ack_alert` |
 
 
 ## GET /v1/kanban/running
@@ -88,10 +92,13 @@ the integer mask them.
 **Board-table consumers (CARD B3).** The Kanban monitor widget draws one row per
 registered board with `counts.running`, `counts.ready`, `counts.todo`,
 `counts.blocked` and `counts.done` (= Done 24h), sorted like
-`kanban_live.boards_table`. The Board Status widget draws the same five fields
-for one board, and the Board Progress Live Activity carries them across the Lock
-Screen and Dynamic Island. No client derives a status from a card list; the
-numbers are the route's fields, which are the CLI's columns.
+`kanban_live.boards_table`. The Boards widget draws those counts as one stacked
+bar per board (and narrows to one board when the scope intent names one), and
+the Board Progress Live Activity carries them across the Lock Screen and Dynamic
+Island. The same payload carries `max_in_progress`, the operator's
+`kanban.max_in_progress`, so the widget's slot strip needs no client literal. No
+client derives a status from a card list; the numbers are the route's fields,
+which are the CLI's columns.
 
 
 Rule (card t_8743f98c): **every route a widget or Live Activity reads is served
@@ -104,13 +111,28 @@ numbers/rows.
 The CLI is the ground truth. If the CLI and one of these routes disagree, the
 route is wrong.
 
-Failure shape on the cluster routes: HTTP 200 with
-`{"error": "<specific cause>", "speak": "<command> failed: <cause>"}` plus the
-route's normal empty collections. `error` is the backing command's stderr/exit
-status or the engine-load reason — never the word "unavailable", never the auth
-token. This is deliberate: a generic "unavailable" hid the 2026-11-18 outage
-(the API process had been launched from a Homebrew Cellar directory that an
-upgrade deleted).
+Failure shape: a degraded `/v1/cluster/monitor` is **HTTP 503** with
+`{"success": false, "degraded": true, "error": "<specific cause>", "speak":
+"Fleet monitor failed: <cause>", "taken_at": "<UTC>"}` and no `json` key. A 200
+with no `json` used to be indistinguishable from a healthy empty fleet, and the
+app counted a reachable daemon host as "serving" (W5); the non-2xx status plus
+`success:false` makes every client take its offline/degraded path. The other
+cluster routes keep their 200-with-`error` shape (for example `/v1/cluster/status`
+still answers `{"error", "speak", "workloads": [], "total_hosts": 0}`), because
+their clients already treat the `error` key as a failed read. `error` is the
+backing command's stderr/exit status or the engine-load reason — never the word
+"unavailable", never the auth token. This is deliberate: a generic "unavailable"
+hid the 2026-11-18 outage (the API process had been launched from a Homebrew
+Cellar directory that an upgrade deleted).
+
+**Snapshots are cached for 20 s, single-flight.** `/v1/cluster/status` and
+`/v1/cluster/monitor` run live sparkrun/SSH work, so the route keeps one
+snapshot per key for `CLUSTER_SNAPSHOT_TTL_S` (20 s). Concurrent misses share
+one in-progress read instead of each spawning a subprocess. Every envelope
+carries `taken_at` — the snapshot's cache-fill time as UTC `...Z`, not the
+request time — so a client can show the age of the sample it is drawing. A
+cached answer is otherwise byte-for-byte the same payload a fresh read would
+return.
 
 ---
 
@@ -128,6 +150,7 @@ called by `hscc_daemon/hscc.py::_handle_cluster` (same function the CLI uses).
 | `workloads[].nodes` | array[string] | host IPs in that job's block; a tp=2 job lists both |
 | `idle_hosts` | array[string] | host lines in sparkrun's Idle section |
 | `total_hosts` | integer | `Total: N host(s)` from sparkrun, else workloads + idle |
+| `taken_at` | string | cache-fill time, UTC `...Z`; identical for every request inside the 20 s snapshot TTL |
 | `speak` | string | `"{total} hosts up. {n} workload(s) running, {i} idle."` |
 
 `raw_output` is intentionally not sent (the CLI uses it only for human
@@ -144,7 +167,10 @@ CLI's one-shot view.
 
 | field | type | meaning |
 |---|---|---|
-| `success` | bool | the sparkrun monitor frame was received and parsed |
+| `success` | bool | `true` only when the sparkrun monitor frame was received and parsed; `false` on the 503 degraded body |
+| `degraded` | bool | `true` on the 503 degraded body, `false` on a real snapshot — explicit so a client never infers it from `json` being absent |
+| `error` | string | present only on the 503 degraded body: the backing command's exit/stderr detail |
+| `taken_at` | string | cache-fill time, UTC `...Z`; identical for every request inside the 20 s snapshot TTL |
 | `output` | string | raw first JSON line (CLI fallback text; clients may ignore) |
 | `json` | object | the parsed sparkrun frame |
 | `json.timestamp` | number | sample epoch |
@@ -195,30 +221,83 @@ must never have to guess whether a point is 2 seconds or 5 minutes wide:
 | `1h`, `6h`, `24h` | 1 | 1 min | `~/.hscc/metrics/history.db` | `cpu_temp_c_max`, `gpu_temp_c_max`, `gpu_power_w_max` |
 | `7d` | 2 | 5 min | the same file | the same three |
 
+**The default window is 1 h everywhere a chooser exists.** With neither axis,
+the route serves `window=1h`; `hscc cluster history` uses `DEFAULT_WINDOW =
+"1h"`; `WidgetDataClient.clusterHistory` defaults to `"1h"`; and the macOS
+menu-bar graphs' `DashboardGraphPlan.window` (and the shared
+`ClusterGraphWindow.recommended`) are `.oneHour`. `15m` is still requestable
+where the recorder ring is resident, but it is not a default: in the deployed
+topology the API process does not host the ring, so a 15 m default is the empty
+`recorder_ring_absent` chart W7 measured.
+
+**Two request axes, exactly one per request.** A preset is anchored to `now`, and
+that is the only span it can name — it cannot ask about last night. `tier` +
+`since`/`until` is the second axis and names an explicit span over one raw tier:
+
+```
+GET /v1/cluster/history?node=<host|all>&metrics=a,b
+    &window=15m|1h|6h|24h|7d                    # axis A — a preset, anchored to now
+    &tier=0|1|2&since=<epoch>&until=<epoch>     # axis B — an explicit span, anchored to nothing
+```
+
+The two are rejected together rather than resolved by precedence, because they
+denote two different spans and a client whose `since`/`until` were silently
+ignored has no way to learn it. So: `window` + `tier` → 400 naming both;
+`since`/`until` without `tier` → 400 (a preset has an anchor, a raw tier does not,
+so naming both asks for two spans at once); neither → `window=1h`.
+`since`/`until` are **inclusive epoch-second bucket starts** — `since=until=ts`
+returns the bucket starting at `ts` — and the span is clamped to that tier's own
+retention (900 s / 86 400 s / 604 800 s), read from `metrics_history` rather than
+copied here. On the tier axis `window` is a derived span label (`"600s"`), never a
+preset name the request did not use.
+
 | field | type | meaning |
 |---|---|---|
-| `window` / `window_s` | string / integer | the requested window and its length in seconds |
+| `axis` | string | `"window"` or `"tier"` — which axis answered, stated rather than left to be inferred from which keys are non-null |
+| `source` | string | `recorder_ring`, `recorder_ring_absent`, `sqlite_store`, `sqlite_store_absent` — where the rows came from, as a **code**. Branch on this, not on the English of `note`. `null` only when the read itself failed, which `error` states |
+| `window` / `window_s` | string / integer | the window label and its length in seconds. On the preset axis the label is the preset; on the tier axis it is `"<window_s>s"` |
 | `tier` | integer | 0, 1 or 2 — the tier that answered |
 | `resolution_s` / `resolution` | integer / string | 2/60/300 and `"2s"`/`"60s"`/`"300s"` |
 | `tier_summary` | string | what that tier is, in words ("1-minute averages, with peaks for …") |
 | `max_fields` | array | the peak columns this response carries — `[]` at tier 0, which stores no peak |
-| `since` / `until` | integer | epoch seconds; both inclusive, and the store's bucket starts are what they filter |
+| `since` / `until` | integer | epoch seconds; **the pair actually served**, both inclusive, and the store's bucket starts are what they filter. When a clamp moved them these are the clamped values and `note` says so |
 | `node` | string | the echo of `?node=` (`all` by default) |
 | `metrics` | array | the effective field names, taken from the recorder's own vocabulary |
 | `hosts_included` / `engines_included` | bool | `false` means this `metrics=` filter named no field of that series — it is excluded, not empty |
 | `hosts` | array | the recorder's `host_rollup` rows, key names unchanged: `tier`, `ts`, `host`, the `HOST_KEYS` averages, the three `*_max`, `n`, `error` |
 | `engines` | array | the recorder's `engine_rollup` rows: `tier`, `ts`, `node`, `port`, `model`, `run`, `wait`, `kv`, `gen_tps`, `prompt_tps`, `n`, `error` |
 | `counts` | object | `{hosts, engines}` — the row counts served |
-| `store` | object | `{path, exists, db_bytes, tier0_resident, error}` |
-| `note` | string | why the answer is empty when it is (fresh install, ring not resident) |
+| `store` | object | `{path, exists, db_bytes, bound_bytes, tier1_rows, tier2_rows, tier0_resident, error}` — one block for everything the store is, so there is no second `stats` to disagree with it. See below on what is measured where |
+| `note` | string | why the answer is not what was asked, or empty: a clamp that shortened the span, a fresh install, a ring that is not resident |
 | `error` | string | present only when the store read failed, with the real reason |
 | `speak` | string | window + resolution + how much data came back |
+
+**The response always states the window it actually served, on either axis.**
+`since`/`until` are the served pair and `window_s` the served span, so a client
+draws what arrived instead of assuming its request was honoured. When the tier
+axis clamps a span to the tier's retention, `note` names both numbers — the one
+asked and the retention that moved it. A silently shortened span is the worst
+shape a history route can have: the chart reads as a quiet fleet for exactly the
+hours the route quietly dropped.
 
 **A `null` is a missing reading, never a zero.** The recorder stores `None` for
 a field a node did not report (an empty CSV string would otherwise draw "GPU
 idle, 0 W" for a node that never answered), and this route forwards it
 untouched. `metrics=` is a projection of those rows, not a second query: it
 drops columns, it never recomputes a mean.
+
+**A temperature or power chart draws the average AND its peak.** `gpu_temp_c` is
+the bucket's mean and `gpu_temp_c_max` is what it reached, and the peak column
+exists precisely because a 1-minute mean is what hides a throttle spike — a
+surface that plots the average alone is drawing the quieter fact on purpose.
+`max_fields` names the peak columns this answer carries (`[]` at tier 0, whose
+raw samples have no peak to report), and on the Swift side
+`ClusterHistoryMetric.peakCompanion` pairs every average with the peak stored
+beside it, so the pairing is one lookup instead of a convention each surface
+remembers differently. `hscc-api/tests/test_contract_swift_routes.py` holds the
+rule on the wire and `ios-app/scripts/cluster_history_chart_check.sh` holds it
+in the type. (Both rules arrived from the route t_2c629557 retired, which is
+where they were written down before this file had one history section.)
 
 **`window=15m` is honest about where tier 0 lives.** The 2 s ring is
 memory-only, and the API server is its own process
@@ -229,14 +308,40 @@ so and point at `window=1h` — it does not return an empty list as if the fleet
 had been quiet. When the route *does* own the ring (a test, or any process that
 hosts the sampler) it serves it verbatim.
 
+**`store` states what it measured, and is silent about what it did not.**
+`bound_bytes` is the recorder's stated ceiling and is always knowable.
+`tier1_rows`/`tier2_rows` are the store's own counts, read from the one branch
+that opens the file: they are the real numbers at tiers 1-2, `0` when the store
+does not exist yet (there is nothing there to count — a measured absence), and
+`null` at `tier=0`, which answers from memory and never opens it. A `0` there
+would be a default wearing a measurement's name. The same rule already governs
+`tier0_resident`, two paragraphs down.
+
+**`store.tier0_resident` means what its name says, and only at `tier == 0`.** It
+is written by the one branch that reads the ring, so it is `true`/`false` when
+the served `tier` is 0 and `null` when it is not: at tiers 1-2 nobody measured
+the ring, and `null` is what that says. It used to start as `true`, which let a
+`window=6h` payload claim a resident ring in a process that hosts no recorder at
+all (measured on #413's fixtures — `true` at tiers 1 and 2, `false` at tier 0,
+same generator, same process). The key is always present, so the shape clients
+parse is unchanged, and `note`/`speak` stay the honest signal for an empty
+answer. `test_cluster_history_parity.py` pins both halves: `None` at every
+durable window against a store with nothing resident, `false` at tier 0.
+
 Rejected with `400 bad_request` (message + `speak`), never a silent empty
-answer: an unknown `window`; a `metrics` name the recorder does not store for
-that tier — including any `*_max` at `window=15m`, which has no peak column to
+answer: an unknown `window`; `window` and `tier` in one request; `since`/`until`
+without `tier`; a `tier` that is not 0, 1 or 2; a `since`/`until` that is not
+epoch seconds; a `since` after its `until` (an inverted range answered empty
+would read as "nothing happened"); a `metrics` name the recorder does not store
+for that tier — including any `*_max` at `window=15m`, which has no peak column to
 give; `metrics` naming no field; a `node` that is not a host name; and any
-parameter other than `node`, `metrics` and `window`. A well-formed node with no
-samples in the window is *not* an error — it answers `200` with empty `hosts`
-and `engines`, because a node that was down for the whole window is a fact
-about the window.
+parameter other than `node`, `metrics`, `window`, `tier`, `since` and `until`.
+`host=` is deliberately not in that set: `host_rollup.host` and
+`engine_rollup.node` are two column names for one identity, so `node=` filters
+both series and a second machine key would only be a second way to ask the same
+question. A well-formed node with no samples in the window is *not* an error — it
+answers `200` with empty `hosts` and `engines`, because a node that was down for
+the whole window is a fact about the window.
 
 Parity: `hscc-api/tests/test_cluster_history_parity.py` drives the recorder's
 own `tick()` to build one store, serves it over HTTP and reads the same store
@@ -316,6 +421,33 @@ orchestrator answers healthy, the status read reports `state: "up"`,
 **read-only** — it does not rewrite the file. The daemon's own disabled-state
 cycle performs the same reconcile (debounced) so the file heals too.
 
+## GET /v1/merge-queue
+
+Source: `hscc_daemon/merge_queue.py::view()` — the same rows
+`hscc kanban monitor` renders as its per-project "merge queue" tables, and the
+same ledger (`~/.hscc/merge-queue-state.json`) the daemon's queue tick owns.
+The route is a pure read: it never ticks the queue, runs git/gh, or writes the
+ledger. `?board=<slug>` narrows to the project whose registry `board` matches,
+mirroring `hscc kanban monitor --board`.
+
+| field | type | meaning |
+|---|---|---|
+| `projects` | object | project name → `{enabled, paused, repo, queue_len, rows, last}` |
+| `projects[].rows` | array | that project's queue rows, FIFO first |
+| `rows` | array | every project's rows flattened, in registry order |
+| `count` / `queued` | integer | all rows / rows whose state is `queued` |
+| `rows[].project` | string | registry project name |
+| `rows[].position` | integer/null | FIFO position (`1` is next); null for the in-flight claim and the last-outcome row |
+| `rows[].pr` | integer/null | PR number |
+| `rows[].card` | string/null | card id the resolve handback targets |
+| `rows[].branch` | string/null | the PR's head branch (`gh pr view`'s `headRefName`), recorded when the daemon first claims the PR |
+| `rows[].state` | string | `queued`, `rebasing`, `gating`, `merging`, `resolve`, `merged` or `failed` |
+| `rows[].age_s` | number/null | seconds since enqueue for live rows, since the outcome for a last-result row |
+| `rows[].last_result` | string/null | this row's recorded result (`merged`, `conflict`, `red-gate`, `error`) or `retry` |
+| `rows[].detail` | string/null | conflicted files, the failing gate, or the recorded error |
+| `rows[].is_last` | bool | true on the project's last-outcome row when it is no longer queued |
+| `speak` | string | one-line summary |
+
 ## Project rows (CARD A3)
 
 `GET /v1/projects` keeps the existing identity fields (`name`, `repo`, `board`,
@@ -324,9 +456,17 @@ cycle performs the same reconcile (debounced) so the file heals too.
 | Field | Meaning | Owner |
 |---|---|---|
 | `health` | `ok` / `partial` / `absent` | `project_lifecycle.project_health` — identical to `hscc project list` |
-| `counts` | status histogram + `total`, including `done` / `archived` | one archived-inclusive `kanban.list_cards()` read, folded by `routes_mobile.count_cards`; `/v1/mobile/summary` uses `kanban_live.board_status_counts` |
+| `counts` | status histogram whose `done` (and explicit `done_24h`) is the rolling 24 h count, same as `/v1/mobile/summary`; `total` is that route's open + archived + done-24h total. The all-time facts are `done_all_time` and `total_all_time` | one archived-inclusive `kanban.list_cards()` read, folded by `routes_mobile.count_cards` into `kanban_live.board_status_counts` — the same projection `/v1/mobile/summary` uses |
 | `last_activity` | newest parseable card timestamp on the board (epoch seconds), `null` when none | the same card read |
 | `orchestrator` | live turn row (`profile`, `session`, `state`, `turn_s`, tokens) or `null` when idle | `kanban_live.attach_orchestrators` — identical to `hscc kanban monitor` |
+
+**One board, one `done` (W10).** `counts.done` on `/v1/projects` is now the
+`done_24h` column `hscc kanban monitor` prints, not the all-time archive count.
+For the same minute and board, `/v1/projects` and `/v1/mobile/summary` therefore
+agree on `done` and `total`. The historical numbers did not disappear: they are
+`counts.done_all_time` (every `status=done` card, archived-inclusive) and
+`counts.total_all_time` (every card the archived-inclusive read returned), named
+so a client cannot mistake either for the rolling window.
 
 `repo` stays on the wire for the console. The widget does not decode it and the
 App Group projection never stores it (contract §7).
@@ -342,6 +482,79 @@ the live server already answers, but without the board-truth fields above —
 older clients decode only `{name, board}`, newer ones render `—` for missing
 counts.
 
+## Alert feed (cards N1 + R3)
+
+The main orchestrator reaches the operator through one durable feed under
+`~/.hscc/alerts.json` (the last 500 alerts). `hscc notify` is an authenticated
+client of this route, not a second writer, so dedupe and rate limits cannot
+drift between producers. `hscc notify list` reads it newest first (`--since`,
+`--limit`, `--json`) and `hscc notify ack <id>` marks one seen. There is no APNs
+sender and no device registration (operator decision 2026-11-19): the read-only
+"Needs me" widget and the macOS menu bar dropdown render the feed; neither
+registers for or posts notifications.
+
+### POST /v1/alerts
+
+Body: `title` (required, ≤200 chars), `body` (≤4000), `level`
+(`info|action|critical`, default `info`), `key` (optional dedupe identity,
+≤200). `201` means a new alert was stored; `200` means the same key/content was
+already live (`deduped: true`) or the rate limit suppressed it
+(`rate_limited: true`, with `retry_after_s`). Suppression is success, not an
+error.
+
+| field | type | meaning |
+|---|---|---|
+| `alert.id` | integer | monotonic alert id, never reused |
+| `alert.ts` | string | UTC `...Z` creation time |
+| `alert.title` / `.body` | string | what the operator reads |
+| `alert.level` | string | `info` / `action` / `critical` |
+| `alert.key` | string/null | the dedupe identity, when given |
+| `alert.acked` / `.acked_at` | boolean/null | whether it has been seen, and when |
+| `created` / `deduped` / `rate_limited` | boolean | which path answered |
+| `reason` | string | `created`, `duplicate`, `rate_limited_key`, `rate_limited_global` |
+| `retry_after_s` | number/null | seconds until the rate limit frees a slot |
+
+### GET /v1/alerts?since=&lt;id&gt;&amp;limit=&lt;n&gt;
+
+`since` is exclusive; rows are ascending by id. Without `since` the newest
+`limit` alerts are returned (default 100, cap 500), so a first launch can render
+a screenful. `has_more` asks for another page; `next_since` is the cursor to
+advance; `latest_id` is the newest id the store holds.
+
+### POST /v1/alerts/&lt;id&gt;/ack
+
+Marks one alert acknowledged (idempotent — the first `acked_at` is kept) and
+clears its key's dedupe slot, so a condition that recurs after the operator has
+seen it can alert again. `404` when the id is not in the bounded feed.
+
+### "Needs me" widget mapping (card R3)
+
+`WidgetDataClient.alerts(limit:)` performs one `GET /v1/alerts?limit=100`; the
+Foundation-only `NeedsMeFeed.from` projection in
+`ios-app/Sources/Shared/NeedsMeReading.swift` is the one mapping the iOS widget,
+the macOS widget and the menu bar dropdown share.
+
+| route field | surface use | rule |
+|---|---|---|
+| `alerts[]` | the row set | drop `acked: true` (a "needs me" row is unacknowledged work); `hscc notify list` still prints acked history with its `(acked)` marker |
+| `alerts[].id` | identity + newest-first order | descending id, the reverse of the route's ascending page — exactly the order `hscc notify list` presents |
+| `alerts[].ts` | age | the CLI's vocabulary: `2m`, `3h`, `4d`; a stale snapshot's age is minutes since it was read |
+| `alerts[].title` | row title / newest title | verbatim |
+| `alerts[].body` | large family's second line | first non-empty line only |
+| `alerts[].level` | level colour | `critical`/`action` → the operator's accent (`#FF5722` in the default style), `info` → secondary; an unknown level is `info` |
+| `alerts[].key` | not rendered | dedupe identity only |
+| `alerts[].acked` / `.acked_at` | filter only | not rendered |
+| `count` / `latest_id` / `has_more` | not drawn | the surface's count is `NeedsMeFeed.count` (unacknowledged rows), never the page count |
+
+Families: iOS `systemSmall` (count + newest title + age), `systemMedium` (top 3
+rows: level, title, age), `systemLarge` (up to 8 rows with the body first line),
+`accessoryCircular` (count), `accessoryRectangular` (newest title),
+`accessoryInline` (`"N need you"` / `"nothing needs you"`). macOS ships the same
+small/medium/large widget by path and a "Needs you" section at the top of the
+menu bar dropdown, hidden when the feed has no row. Empty is `"Nothing needs
+you"` with the update age; a failed read renders the shared client's reason
+(never a fabricated zero).
+
 ## Parity tests
 
 * `hscc-api/tests/test_routes_project.py::test_projects_list_matches_hscc_project_list_json`
@@ -351,6 +564,11 @@ counts.
 * `hscc-api/tests/test_widget_route_parity.py` runs the cluster
   status/monitor and autodown status CLI functions against the live route on
   the same fixture state and asserts equal rows/numbers (card t_8743f98c).
+  Its `test_alerts_api_matches_notify_list` pins the alert route and
+  `hscc notify list` to the same rows/order before `NeedsMeFeed` applies the
+  unacknowledged filter (card R3), and
+  `test_merge_queue_api_matches_the_monitor_view` pins `/v1/merge-queue` to
+  `merge_queue.view()` — the rows `hscc kanban monitor` draws (card MQ4).
   builds one SQLite board, serves it through the route's flightdeck seam and
   through `hscc_daemon.kanban_live.collect` (the function behind
   `hscc kanban monitor --json`), and asserts identical status histograms.
@@ -365,3 +583,13 @@ registered project board + one orphan board) and runs both sides on it:
 `hscc kanban stale --json`, and `/v1/mobile/summary` vs
 `kanban_live.collect()` + `board_status_counts()`. Each asserts equal
 counts/rows and that the orphan board appears in neither answer.
+
+Both sides reach `age_s` through `kanban_live.collect`, which samples its clock
+once per pass (`int(time.time())`), so the file pins ONE instant for every
+`collect()` in the process (`pinned_collect_clock`, which fills `collect()`'s
+existing `now=` seam): with an unpinned clock the two sides compare two
+wall-clock samples taken milliseconds apart and go red whenever a whole-second
+boundary lands between them (t_0e457f72).
+`test_running_route_parity_survives_a_clock_step` keeps that pin honest — it
+replaces `kanban_live`'s clock with one that steps 1.5 s per call, so the two
+sides can never land in the same second.

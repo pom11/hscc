@@ -90,7 +90,10 @@ def test_streams_elapsed_and_cpu_to_a_redirected_file(live):
     assert m["leg"] == "demo"
     # The two numbers that together separate slow from stopped.
     assert int(m["elapsed"]) >= 1
-    assert re.fullmatch(r"\d+:\d\d(\.\d+)?", m["cpu"]), f"cpu not `ps -o time` form: {m['cpu']!r}"
+    # `ps -o time` is platform-shaped: macOS prints MM:SS.ss, Linux prints
+    # HH:MM:SS (and DD-HH:MM:SS past a day). All are valid cpu-time output.
+    assert re.fullmatch(r"(?:\d+-)?(?:\d+:)?\d+:\d\d(?:\.\d+)?", m["cpu"]), \
+        f"cpu not `ps -o time` form: {m['cpu']!r}"
 
 
 def test_names_the_child_the_leg_is_waiting_on(live):

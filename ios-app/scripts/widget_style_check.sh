@@ -19,16 +19,16 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 WIDGET_VIEWS=(
   Sources/HSCCWidgets/ClusterWidgetViews.swift
-  Sources/HSCCWidgets/MonitorViews.swift
-  Sources/HSCCWidgets/BoardStatusWidget.swift
-  Sources/HSCCWidgets/ProjectsWidget.swift
+  # The shared systemSmall tile (t_9e110d88). It is in this list because it is
+  # the file that draws the densest surface: its fonts and colours must come from
+  # the stored style like every other widget view, or the operator's Settings
+  # changes would stop reaching the small tile.
+  Sources/HSCCWidgets/ClusterSmallGridView.swift
   Sources/HSCCWidgets/KanbanMonitorWidget.swift
   Sources/HSCCWidgets/CardsRunningWidget.swift
-  Sources/HSCCLiveActivity/HSCCLiveActivity.swift
-  Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
-  Sources/HSCCLiveActivityMonitor/CardsRunningLiveActivity.swift
+  Sources/HSCCWidgets/NeedsMeWidget.swift
+  Sources/HSCCWidgets/MergeQueueWidget.swift
   Sources/HSCCLiveActivityMonitor/ClusterHealthLiveActivity.swift
-  Sources/HSCCLiveActivityMonitor/BoardProgressLiveActivity.swift
 )
 
 fail=0
@@ -64,7 +64,7 @@ for f in "${WIDGET_VIEWS[@]}"; do
 done
 
 # 3. Every registry surface resolves exactly one style, by its own kind.
-SRC="Sources/Shared/SharedStore.swift"
+SRC="Sources/Shared/WidgetSurfaceKind.generated.swift"
 cases=$(sed -n '/^enum WidgetSurfaceKind: String, CaseIterable, Codable {/,/^}/p' "$SRC" \
   | sed -n 's/^    case \([A-Za-z][A-Za-z0-9]*\).*/\1/p')
 case_count=$(printf '%s\n' "$cases" | sed '/^$/d' | wc -l | tr -d ' ')
@@ -73,6 +73,55 @@ if [ "$case_count" -lt 1 ]; then
 else
   missing=0
   for kind in $cases; do
+    if [ "$kind" = "widgetCluster" ]; then
+      # The 2026-11-20 Native redesign: the Cluster tile reads the shared
+      # NativeStyleKit tokens instead of the old per-surface WidgetStyle.
+      if grep -q 'NativeStyle' Sources/HSCCWidgets/ClusterWidgetViews.swift \
+         && grep -q 'struct AsOfStamp' Sources/HSCCWidgets/NativeStyleKit.swift \
+         && grep -q 'struct MeterBar' Sources/HSCCWidgets/NativeStyleKit.swift \
+         && grep -q 'struct StaleModifier' Sources/HSCCWidgets/NativeStyleKit.swift; then
+        ok "surface $kind uses the shared NativeStyleKit (tokens, AsOfStamp, MeterBar, StaleModifier)"
+      else
+        bad "surface $kind does not use the shared NativeStyleKit"
+        missing=$((missing + 1))
+      fi
+      continue
+    fi
+    if [ "$kind" = "widgetKanbanMonitor" ]; then
+      # The Boards widget (B3) is the second Native redesign surface: it takes
+      # its tokens, timestamps and stale rule from the same shared kit.
+      if grep -q 'NativeStyle' Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+         && grep -q 'AsOfStamp' Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+         && grep -q 'StaleState' Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+         && grep -q 'struct StaleModifier' Sources/HSCCWidgets/NativeStyleKit.swift; then
+        ok "surface $kind uses the shared NativeStyleKit (tokens, AsOfStamp, StaleState)"
+      else
+        bad "surface $kind does not use the shared NativeStyleKit"
+        missing=$((missing + 1))
+      fi
+      continue
+    fi
+    case "$kind" in
+      widgetCardsRunning) native_file=Sources/HSCCWidgets/CardsRunningWidget.swift ;;
+      widgetNeedsMe) native_file=Sources/HSCCWidgets/NeedsMeWidget.swift ;;
+      widgetMergeQueue) native_file=Sources/HSCCWidgets/MergeQueueWidget.swift ;;
+      *) native_file="" ;;
+    esac
+    if [ -n "$native_file" ]; then
+      # R3 running, N3 needs-me and M1 merge queue are Native redesign
+      # surfaces: they take tokens, the data clock and the stale rule from the
+      # one kit instead of resolving a per-surface WidgetStyle.
+      if grep -q 'NativeStyle' "$native_file" \
+         && grep -q 'AsOfStamp' "$native_file" \
+         && grep -q 'StaleState' "$native_file" \
+         && grep -q 'containerBackground(NativeStyle.surface' "$native_file"; then
+        ok "surface $kind uses the shared NativeStyleKit (tokens, AsOfStamp, StaleState)"
+      else
+        bad "surface $kind does not use the shared NativeStyleKit"
+        missing=$((missing + 1))
+      fi
+      continue
+    fi
     n=$(grep -rhoF "WidgetStyle.resolved(for: .$kind)" "${WIDGET_VIEWS[@]}" | wc -l | tr -d ' ')
     if [ "$n" -eq 1 ]; then
       ok "surface $kind resolves WidgetStyle.resolved(for: .$kind)"
@@ -107,10 +156,57 @@ for f in "${WIDGET_VIEWS[@]}"; do
   done
 done
 
+# 4b. The L2 Lock Screen pick (2026-11-20): the three circular gauges use the
+#     shared SwiftUI Gauge with the system accessoryCircular style. A custom
+#     ring or a per-widget style is the regression this refuses.
+l2_gauges=$(grep -h 'L2Gauge(' Sources/HSCCWidgets/ClusterWidgetViews.swift \
+                       Sources/HSCCWidgets/KanbanMonitorWidget.swift \
+                       Sources/HSCCWidgets/NeedsMeWidget.swift | wc -l | tr -d ' ')
+if [ "$l2_gauges" -ge 3 ]; then
+  ok "the Cluster, Boards and Needs Me rings use the shared L2Gauge"
+else
+  bad "only $l2_gauges L2 gauges (want Cluster, Boards and Needs Me)"
+fi
+for f in ClusterWidgetViews.swift KanbanMonitorWidget.swift NeedsMeWidget.swift; do
+  grep -q '\.widgetAccentable()' "Sources/HSCCWidgets/$f" \
+    && ok "$f marks its Lock Screen values accentable" \
+    || bad "$f does not mark a Lock Screen value accentable"
+done
+grep -q 'gaugeStyle(.accessoryCircular)' Sources/HSCCWidgets/NativeStyleKit.swift \
+  && ok "L2Gauge uses the system accessoryCircular style" \
+  || bad "L2Gauge does not use the system accessoryCircular style"
+
 # 5. Every view file reads the environment and wires both toggles; the roots
 #    also set the resolved background. This catches a new family copied from an
 #    old one without the style plumbing.
 for f in "${WIDGET_VIEWS[@]}"; do
+  if [ "$(basename "$f")" = "ClusterWidgetViews.swift" ]; then
+    if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" && grep -q 'MeterBar' "$f"; then
+      ok "$(basename "$f"): native kit components are wired"
+    else
+      bad "$(basename "$f") does not use the native kit"
+    fi
+    continue
+  fi
+  if [ "$(basename "$f")" = "KanbanMonitorWidget.swift" ]; then
+    if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" \
+       && grep -q 'StaleState' "$f" && grep -q 'containerBackground(NativeStyle.surface' "$f"; then
+      ok "$(basename "$f"): native kit components are wired"
+    else
+      bad "$(basename "$f") does not use the native kit"
+    fi
+    continue
+  fi
+  case "$(basename "$f")" in
+    CardsRunningWidget.swift|NeedsMeWidget.swift|MergeQueueWidget.swift)
+      if grep -q 'NativeStyle' "$f" && grep -q 'AsOfStamp' "$f" \
+         && grep -q 'StaleState' "$f" && grep -q 'containerBackground(NativeStyle.surface' "$f"; then
+        ok "$(basename "$f"): native kit components are wired"
+      else
+        bad "$(basename "$f") does not use the native kit"
+      fi
+      continue ;;
+  esac
   file_ok=1
   grep -q '@Environment(\\.widgetStyle)' "$f" || { bad "$(basename "$f") has no widgetStyle environment"; file_ok=0; }
   grep -q 'widgetHeader(style)' "$f" || { bad "$(basename "$f") has no header toggle"; file_ok=0; }
@@ -122,6 +218,10 @@ nbg=0
 bgok=1
 nadapt=0
 for f in Sources/HSCCWidgets/*.swift; do
+  if grep -q 'containerBackground(NativeStyle.surface, for: .widget)' "$f"; then
+    ok "$(basename "$f") uses the system container background (Native redesign)"
+    continue
+  fi
   c=$(grep -c 'containerBackground(for: .widget)' "$f" || true)
   [ "$c" -eq 0 ] && continue
   nbg=$((nbg + c))
@@ -141,16 +241,19 @@ adapter_ok=1
   && grep -q 'Color.clear' "$ADAPTER" \
   && grep -q 'systemTinted(for:' "$ADAPTER" \
   || adapter_ok=0
-if [ "$nbg" -eq 6 ] && [ "$bgok" -eq 1 ] && [ "$nadapt" -eq 6 ] && [ "$adapter_ok" -eq 1 ]; then
-  ok "all 6 widget roots paint containerBackground through the rendering-mode adapter (fullColor = style.backgroundColor, accented/vibrant = system material)"
+# The expectation is the number of roots FOUND in the source, not a pinned
+# count: a new widget root must add its own adapter call, and the gate must not
+# need a number edit (which is how the graph surface reached main unchecked).
+if [ "$nbg" -gt 0 ] && [ "$bgok" -eq 1 ] && [ "$nadapt" -eq "$nbg" ] && [ "$adapter_ok" -eq 1 ]; then
+  ok "all $nbg widget roots paint containerBackground through the rendering-mode adapter (fullColor = style.backgroundColor, accented/vibrant = system material)"
 else
   bad "a widget root does not paint containerBackground through the rendering-mode adapter (roots=$nbg wrapped=$nadapt bg=$bgok adapter=$adapter_ok)"
 fi
-nla=$(grep -l 'activityBackgroundTint(style.backgroundColor)' Sources/HSCCLiveActivityMonitor/*.swift Sources/HSCCLiveActivity/*.swift | wc -l | tr -d ' ')
-if [ "$nla" -eq 5 ]; then
-  ok "all 5 Live Activity roots tint from style.backgroundColor"
+nla=$(grep -l 'activityBackgroundTint(style.backgroundColor)' Sources/HSCCLiveActivityMonitor/*.swift | wc -l | tr -d ' ')
+if [ "$nla" -eq 1 ]; then
+  ok "the one Live Activity root tints from style.backgroundColor"
 else
-  bad "only $nla/5 Live Activity roots tint from style.backgroundColor"
+  bad "only $nla/1 Live Activity roots tint from style.backgroundColor"
 fi
 
 if [ "$fail" -ne 0 ]; then

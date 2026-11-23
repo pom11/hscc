@@ -112,11 +112,15 @@ def a_counts_baseline():
 
 # Candidate list for the cross-interpreter pin. An entry is only a CANDIDATE;
 # :func:`_sibling_is_runnable` decides whether it is a SIBLING (see there).
+#: The PATH interpreters the gate considers. Kept in one place so the
+#: independent capability probe below cannot test a version (e.g. 3.14) the
+#: gate never looks at and then call the resulting skip "un-gated".
+_SIBLING_PY_NAMES = ("python3.11", "python3.12", "python3.13")
 _SIBLING_CANDIDATES = (
     "~/.hermes/hermes-agent/venv/bin/python",
     "~/miniconda3/envs/p313/bin/python",
     "/Users/desac/miniconda3/envs/p313/bin/python",
-    "python3.11", "python3.12", "python3.13",
+    *_SIBLING_PY_NAMES,
 )
 
 # path -> drop reason, filled by :func:`_sibling_interpreters`. Module level so
@@ -704,6 +708,44 @@ def test_sibling_gate_uses_the_interpreter_that_can_import_the_audit(
         shutil.rmtree(sandbox, ignore_errors=True)
 
 
+def _capable_python_on_path():
+    """The first PATH interpreter the gate could select that can import the
+    audit's deps, if any.
+
+    Scans the same names as :data:`_SIBLING_PY_NAMES`: a version the gate never
+    considers (e.g. ``python3.14`` on the runner) is not evidence of an un-gated
+    pin. The candidate must also be a DIFFERENT interpreter from the one running
+    this leg. In the CI venv ``python3.13`` on PATH *is* this interpreter (the
+    venv was built from it), and counting it made the anti-vacuity assertion
+    below fail on a runner that has no second CPython — while the gate itself
+    correctly deduped it as "this interpreter"."""
+    here = os.path.realpath(sys.executable)
+    for name in _SIBLING_PY_NAMES:
+        path = _which(name)
+        if not path or os.path.realpath(path) == here:
+            continue
+        probe = subprocess.run(
+            [path, "-c", "import rich, yaml, pygments, markdown_it"],
+            capture_output=True, text=True, timeout=60, env=_probe_env())
+        if probe.returncode == 0:
+            return path
+    return None
+
+
+def test_capable_python_probe_ignores_the_running_interpreter(monkeypatch):
+    """CI's only ``python3.x`` is the venv's own base interpreter.
+
+    setup-python puts ``python3.13`` on PATH and the leg builds its venv from
+    it, so a capability probe that forgets distinctness reports a "capable
+    sibling" that the selector has already (correctly) deduped. That is how
+    test_sibling_gate_still_runs_a_real_sibling went red on Ubuntu with an
+    empty drop map."""
+    monkeypatch.setattr(sys.modules[__name__], "_which", lambda name: sys.executable)
+    # The running interpreter can import the audit deps (the suite runs there),
+    # so this is the exact shape CI hit: capable, but not a sibling.
+    assert _capable_python_on_path() is None
+
+
 def test_sibling_gate_still_runs_a_real_sibling():
     """Anti-vacuity: the gate may not be 'fixed' into a permanent skip.
 
@@ -714,7 +756,7 @@ def test_sibling_gate_still_runs_a_real_sibling():
          surface name that cannot exist makes it return ``{}`` without
          launching a probe subprocess, so this proves the whole
          spawn -> import -> argparse -> JSON path for real in seconds;
-      2. if this host has ANY python3.x that can import the audit's
+      2. if this host has ANY DISTINCT python3.x that can import the audit's
          third-party deps (checked independently of the gate's own probe, so
          the assertion is not circular) the gate must have selected at least
          one sibling. A change that empties `_sibling_interpreters()` on a
@@ -727,17 +769,7 @@ def test_sibling_gate_still_runs_a_real_sibling():
             f"selected sibling {py} cannot run the (A)-only contract: {failed}")
         assert table == {}, f"unexpected (A) table for a phantom surface: {table}"
 
-    have_capable = False
-    for name in ("python3.11", "python3.12", "python3.13", "python3.14"):
-        path = _which(name)
-        if not path:
-            continue
-        probe = subprocess.run([path, "-c", "import rich, yaml"],
-                               capture_output=True, text=True, timeout=60,
-                               env=_probe_env())
-        if probe.returncode == 0:
-            have_capable = True
-            break
+    have_capable = _capable_python_on_path() is not None
     if have_capable:
         assert siblings, (
             "a capable interpreter exists on PATH but the gate selected no "
@@ -1217,13 +1249,18 @@ def test_bound_without_listen_does_not_report_refused():
 
 
 def test_prober_never_asks_a_port_it_holds(tmp_path, monkeypatch, request):
-    """While the hold is up, the port sensor may not open a socket.
+    """While the hold is up, asking THAT port may not open a socket.
 
     Deterministic on purpose: the assertion is "no syscall", not "fast", so a
-    loaded box cannot flake it. `port_flip` cannot fire while this Prober holds
-    the port anyway (a stray grandchild dies on EADDRINUSE — that is what the
-    hold IS for), so a held port's answer is known without asking the kernel,
-    and asking costs the 0.25 s black hole pinned above, once per probe.
+    loaded box cannot flake it. A port this Prober holds cannot have been bound
+    by anyone else (a stray grandchild dies on EADDRINUSE — that is what the
+    hold IS for), so its answer is known without asking the kernel, and asking
+    costs the 0.25 s black hole pinned above.
+
+    t_e5a9469e narrowed what the sensor asks by DEFAULT: `prober._port_busy()`
+    measures `prober.sensor_port` (a sealed port this walk reserves and pins
+    into the sandbox config), never a defended product port. This pin keeps the
+    cost rule for an explicitly named held port.
     """
     api_port = _free_loopback_port()
     monkeypatch.setattr(audit_mod, "API_DEFAULT_PORT", api_port)
@@ -1234,26 +1271,26 @@ def test_prober_never_asks_a_port_it_holds(tmp_path, monkeypatch, request):
 
     def no_sockets(*_a, **_k):
         raise AssertionError(
-            "Prober._port_busy opened a socket while holding the api port. A "
-            "bound-but-not-listening port never answers a SYN (pinned by "
+            f"Prober._port_busy opened a socket while holding port {api_port}. "
+            "A bound-but-not-listening port never answers a SYN (pinned by "
             "test_bound_without_listen_does_not_report_refused), so this "
             "connect cannot tell us anything and burns the full socket timeout "
             "on every one of ~1k probes (t_4c9feb44).")
 
     monkeypatch.setattr(audit_mod.socket, "socket", no_sockets)
-    assert prober._port_busy() is False, (
-        "the api port is held by this Prober: nothing else can have bound it, "
-        "so 'busy' here would be a phantom (D) finding")
+    assert prober._port_busy(api_port) is False, (
+        f"port {api_port} is held by this Prober: nothing else can have bound "
+        "it, so 'busy' here would be a phantom (D) finding")
 
 
-def test_prober_still_probes_a_port_it_does_not_hold(tmp_path, monkeypatch,
-                                                     request):
-    """The fix must not blind the sensor for the case where the bind FAILED.
+def test_prober_still_asks_the_kernel_for_a_port_it_does_not_hold(
+        tmp_path, monkeypatch, request):
+    """The seal must not blind the sensor: an un-held port is still measured.
 
-    That is the state the sensor exists for: the operator's live api (or a
-    concurrent audit) owns the port, so the hold is empty and the answer must
-    still come from a real connect — otherwise the (D) "a --help bound the api
-    port" check dies silently. The blocker is bound WITHOUT listen() on
+    The sealed sensor port is deliberately NOT held (a held port cannot be
+    bound by the stray server the check looks for), so the sensor's own answer
+    must still come from a real connect — otherwise the (D) "a --help bound the
+    api port" check dies silently. The blocker is bound WITHOUT listen() on
     purpose: a `listen()` here would make a CONCURRENT audit on this host read
     the port as busy and manufacture a false (D) finding in someone else's leg.
     """
@@ -1288,10 +1325,179 @@ def test_prober_still_probes_a_port_it_does_not_hold(tmp_path, monkeypatch,
         s.getsockname()[1] for s in prober._tripwire_socks}, (
         "premise broken: the Prober took the api port even though the blocker "
         "holds it, so this does not measure the un-held case")
-    assert prober._port_busy() is True, (
-        "with the hold empty the sensor must ask the kernel again, or the (D) "
+    assert prober._port_busy(api_port) is True, (
+        "with no hold on this port the sensor must ask the kernel, or the (D) "
         "port-flip check silently stops existing")
     assert opened == [("127.0.0.1", api_port)], opened
+
+
+# ── the (D) port check must not read the operator's live api state ────────
+#
+# t_e5a9469e. `--help bound the api port 8787` was reported on an innocent diff
+# by a sensor that asked `connect_ex("127.0.0.1", API_DEFAULT_PORT)` whenever
+# its own defensive hold failed to acquire that port. MEASURED
+# (card t_e5a9469e, and re-measurable in seconds by the first test below):
+# while the hold is UP the check is unfireable (a port we hold cannot be bound
+# by anyone), and when the hold FAILS the answer belongs to whoever owns the
+# port — on this host that includes another audit run's own defensive hold,
+# which was holding 127.0.0.1:8787 AND :8788 bound-without-listen while this
+# card's tests were written (pid 35264, a concurrent `scripts` leg:
+# `bind failed: EADDRINUSE`, `connect_ex=EAGAIN in 0.252s`). Same host state,
+# silent when the listener predates the walk and loud when it appears during
+# it — which is why the same tree passed alone and failed in a full leg.
+#
+# The seal: the sensor measures `Prober.sensor_port`, an ephemeral port this
+# walk reserved, verified free, and pinned into the sandbox `~/.hscc/api.json`
+# every probe child reads. A flip there can only be this walk's own probe.
+
+def test_host_api_state_cannot_move_the_port_finding(tmp_path, monkeypatch,
+                                                     request):
+    """The incident, replayed: a foreign listener on the api port is NOT a finding.
+
+    Reconstructs the exact state that manufactured five `--help bound the api
+    port` findings on t_776d0cb8's gate: the api port bound-without-listen when
+    the walk starts (so the defensive hold FAILS and the old baseline read
+    "free"), turning into a real listener before the probe runs. Then asks the
+    same probe the incident blamed — `hscc project init -h` — three times,
+    because the finding is per-probe and one innocent probe must stay clean.
+
+    Pre-fix this returns True (measured: the same five surfaces, verbatim). The
+    companion below is the positive control — the same sensor DOES fire when
+    the port it owns gets bound — so this cannot pass by being blind.
+    """
+    import socket
+
+    api_port = _free_loopback_port()
+    # The hold only ever binds the defended ports, so the blocker has to sit on
+    # one of them for the replay to be the incident's posture.
+    monkeypatch.setattr(audit_mod, "API_DEFAULT_PORT", api_port)
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", api_port))         # the incident's S2
+    request.addfinalizer(blocker.close)
+    prober = _make_prober(tmp_path, request)
+    # The hold must genuinely fail for the replay to mean anything: pre-fix,
+    # that failure is what silently switched the sensor to reading live state.
+    assert api_port not in {s.getsockname()[1]
+                            for s in prober._tripwire_socks}, (
+        f"premise broken: the Prober holds the test api port {api_port}, so "
+        "this does not replay the posture the incident was in")
+    assert prober.port_busy_at_start is False, (
+        "premise broken: the walk baselined the api port as busy, so the old "
+        "sensor would have stayed silent here for the wrong reason")
+    blocker.close()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", api_port))        # the incident's S3
+    listener.listen(8)
+    request.addfinalizer(listener.close)
+    assert prober._port_busy(api_port) is True, (
+        "premise broken: the foreign listener is not answering, so the hostile "
+        "posture was never established")
+
+    for _ in range(3):
+        r = prober.run(["project", "init", "-h"], 120)
+        assert r["port_flip"] is False, (
+            f"{' '.join(r['argv'])} (a help path that binds nothing) was "
+            f"charged with binding the api port because a FOREIGN process "
+            f"listens on {api_port}. The (D) port check may only measure "
+            f"Prober.sensor_port ({prober.sensor_port}), which this walk owns "
+            f"end to end (t_e5a9469e).")
+
+
+def test_port_flip_fires_when_a_probe_binds_the_sealed_port(tmp_path, request):
+    """TEETH: a stray server on the sealed port is still a finding.
+
+    The seal moves the sensor off the operator's port; it must not move it off
+    the phenomenon. This is the positive control for the test above — the same
+    `Prober.run`, the same probe surface, and a listener on the port the walk
+    actually measures (planted here; in the regression it guards, a --help
+    whose intercept is lost and forks the server, which resolves THIS port
+    because the sandbox pins it). Blind the sensor and this goes red.
+    """
+    import socket
+
+    prober = _make_prober(tmp_path, request)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", prober.sensor_port))
+    listener.listen(8)
+    request.addfinalizer(listener.close)
+
+    r = prober.run(["project", "init", "-h"], 120)
+    assert r["port_flip"] is True, (
+        f"the sealed api port {prober.sensor_port} — the one port the (D) port "
+        "check is allowed to measure — was listening and the probe reported no "
+        "flip: the check is dead, which is the other way this gate lies")
+    assert r["sensor_port"] == prober.sensor_port
+
+
+def test_port_sensor_never_opens_a_socket_to_a_defended_port(tmp_path,
+                                                             monkeypatch,
+                                                             request):
+    """The sensor may not talk to 8787/8788 at all — defence, not measurement.
+
+    The defensive hold stays (it is what keeps a stray grandchild off the
+    operator's machine), but reading those ports is what made the finding a
+    function of host state. This pins the separation by recording every
+    `connect_ex` a walk makes across construction and a real probe: the only
+    port it may name is the sealed one.
+    """
+    real_socket = audit_mod.socket.socket
+    asked: list = []
+
+    class _Spy(real_socket):
+        def connect_ex(self, addr):
+            asked.append(addr)
+            return real_socket.connect_ex(self, addr)
+
+    api_port = _free_loopback_port()
+    smoke_port = _free_loopback_port()
+    monkeypatch.setattr(audit_mod, "API_DEFAULT_PORT", api_port)
+    monkeypatch.setattr(audit_mod, "API_SMOKE_PORT", smoke_port)
+    monkeypatch.setattr(audit_mod.socket, "socket", _Spy)
+    prober = _make_prober(tmp_path, request)
+    r = prober.run(["project", "init", "-h"], 120)
+
+    assert r["port_flip"] is False, r
+    wrong = sorted({p for p in asked if p[1] in (api_port, smoke_port)})
+    assert wrong == [], (
+        f"the walk connected the defended api ports {wrong} — those two are "
+        "hold-only since t_e5a9469e: reading them makes a --help finding depend "
+        "on what the operator's api (or a sibling audit) is doing")
+    assert ("127.0.0.1", prober.sensor_port) in asked, (
+        "the sensor never asked its own sealed port either — an all-zero "
+        "instrument is an unplanted probe, not a passing test")
+
+
+def test_probe_child_resolves_the_sealed_api_port(tmp_path, request):
+    """The seal must pin the SOURCE, not just the sensor.
+
+    `hscc-api/api_server.py` resolves `defaults <- ~/.hscc/api.json <- flags`,
+    and every probe runs with HOME=<sandbox>, so the seeded api.json is what a
+    probe child would bind if a --help ever forks the server. Proved through
+    the real CLI rather than by reading the file back: `hscc api status` prints
+    the address it resolved, and under the walk's own env it must print the
+    sealed port — not 8787. Drop the seed and the child resolves DEFAULT_PORT
+    again, which is the posture where a real leak is invisible to the gate.
+    """
+    prober = _make_prober(tmp_path, request)
+    seed = prober.sandbox / ".hscc" / "api.json"
+    assert seed.exists(), (
+        "the walk seeded no api config into the sandbox: a probe child then "
+        "resolves DEFAULT_PORT (8787), so a genuine --help leak lands on a "
+        "port the sensor does not read (t_e5a9469e)")
+    assert json.loads(seed.read_text())["port"] == prober.sensor_port
+    assert prober.sensor_port not in (audit_mod.API_DEFAULT_PORT,
+                                      audit_mod.API_SMOKE_PORT)
+
+    r = prober.run(["api", "status"], 120)   # the verb that reports its port
+    assert r["rc"] == 0, r["err"][-400:]
+    assert f"127.0.0.1:{prober.sensor_port}" in (r["out"] + r["err"]), (
+        f"`hscc api status` under the walk's own environment did not resolve "
+        f"the sealed port {prober.sensor_port}; output: "
+        f"{(r['out'] + r['err'])[:300]!r}")
+    assert "8787" not in (r["out"] + r["err"]), (
+        "a probe child still names the operator's default api port — the seal "
+        "is not holding for this surface")
+
 
 
 def test_write_findings_artifact(report):

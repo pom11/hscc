@@ -208,6 +208,27 @@ def test_stamp_module_resolves_the_sibling_file(tmp_path, monkeypatch):
     assert cw is not None and cw.CHECK_NAME.startswith("cron watchers")
 
 
+def test_stamp_module_checkout_wins_over_a_deployed_copy(tmp_path, monkeypatch):
+    """t_77db1513: a deployed ~/.hermes/plugins package must never shadow the
+    checkout. A fake deployed package is importable AND already in
+    sys.modules — the loader must still return the sibling file."""
+    import types
+    fake_pkg = types.ModuleType("hscc_daemon")
+    fake_pkg.__path__ = [str(tmp_path)]
+    fake_cw = types.ModuleType("hscc_daemon.cron_watchers")
+    fake_cw.__file__ = str(tmp_path / "cron_watchers.py")
+    fake_cw.CHECK_NAME = "deployed copy"
+    fake_pkg.cron_watchers = fake_cw
+    monkeypatch.setitem(sys.modules, "hscc_daemon", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hscc_daemon.cron_watchers", fake_cw)
+    cw = w._stamp_module()
+    assert cw is not None
+    assert cw.__file__ == os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(w.__file__))),
+        "hscc_daemon", "cron_watchers.py")
+    assert cw.CHECK_NAME.startswith("cron watchers")
+
+
 def test_reports_created_card(monkeypatch):
     monkeypatch.setattr(w, "list_review_prs", lambda: [_pr(7)])
     monkeypatch.setattr(w, "ensure_cards", lambda prs: [(7, "t_x")])

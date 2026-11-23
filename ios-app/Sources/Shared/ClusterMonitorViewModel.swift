@@ -170,6 +170,9 @@ enum CLIMonitorFormat {
 ///   * GPU power: ≥ 80% / ≥ 95% of `gpu_power_limit_w`; no limit read = no verdict
 ///   * RAM used:  warn ≥ 85, critical ≥ 95 (%)
 ///   * CPU used:  warn ≥ 85, critical ≥ 95 (%)
+///   * GPU used:  warn ≥ 85, critical ≥ 95 (%) — added by t_1685f884 for the
+///     Live Activity's glance metric, on the same util band as the two above:
+///     one "how busy is this part" rule, not three.
 ///
 /// Unreadable (`nil`) is `.unknown`, never `.dim`: `.dim` is the CLI's word
 /// for "measured, and idle", and painting an absent metric like an idle one is
@@ -242,6 +245,11 @@ struct CLIMonitorHostRow: Equatable, Identifiable {
     var gpuTempLevel: ClusterMetricLevel { .level(gpuTempC, warn: 80, critical: 90) }
     var memLevel: ClusterMetricLevel { .level(memUsedPct, warn: 85, critical: 95) }
     var cpuLevel: ClusterMetricLevel { .level(cpuUsagePct, warn: 85, critical: 95) }
+    /// GPU utilization, on the same util band as CPU and RAM above (t_1685f884:
+    /// the Live Activity's glance metric needed a verdict for it, and a second
+    /// band invented in a surface is how one card ends up calling 75% hot and
+    /// another calling it fine).
+    var gpuUtilLevel: ClusterMetricLevel { .level(gpuUtilPct, warn: 85, critical: 95) }
 
     /// GPU power only has a verdict against the part's own limit; the CLI
     /// prints the wattage and nothing else, so no limit read is no verdict.
@@ -337,11 +345,18 @@ extension MonitorSample {
 /// `total (n)` rows the CLI appends per model.
 ///
 /// `cells(wide:)` is the row, and width is part of the ROW and not a filter on
-/// it: the CLI builds both shapes through one `row()` helper that slices
-/// `rest[:6]`, so for a `down` backend the reason lands in `Routes` when wide
-/// and in `Run` when narrow. That is the CLI's behaviour, mirrored rather than
-/// "fixed"; the fields below describe the WIDE row, and `cells(wide: false)`
-/// drops `Routes` and `Prompt t/s` exactly as the CLI does.
+/// it: the CLI builds both shapes through one `row(node, port, model, routes,
+/// *rest)` helper that splices `rest[:6]` in after `routes` (only when wide) and
+/// appends `rest[6]` (only when wide). So the columns the narrow shape drops are
+/// `Routes` and `Prompt t/s`, and nothing moves position within `rest`.
+///
+/// For a `down` backend that means the reason is `rest[0]` — the RUN column — in
+/// BOTH shapes, and `Routes` still holds the alias list on the wide row. It is
+/// not, as an earlier version of this comment claimed, a cell that lands in
+/// `Routes` when wide and in `Run` when narrow: the code below writes
+/// `run = reason` unconditionally because that is what `cluster_live.py` does,
+/// and a future card that trusted the old wording would have retargeted the
+/// wrong column. Mirrored rather than "fixed".
 struct CLIMonitorServingRow: Equatable, Identifiable {
     /// Wide: every column. Narrow (`width < WIDE_MIN`): the same minus
     /// `Routes` and `Prompt t/s`, in the CLI's order.
@@ -364,8 +379,20 @@ struct CLIMonitorServingRow: Equatable, Identifiable {
 
     /// A `total (n)` row carries no node/port (the CLI prints "").
     let isTotalRow: Bool
-    /// The backend reported an error, so the CLI printed `down` + the reason.
+    /// The backend reported an error, so the CLI printed `down` + the reason —
+    /// unless the operator parked the machine it runs on, in which case the
+    /// Model cell prints the verdict instead (`isPaused`).
     let isDown: Bool
+    /// The machine behind this backend is parked, so the Model cell reads the
+    /// paused verdict with its reason and stamp rather than `down`.
+    ///
+    /// `serving_table` consults the pause overlay ONLY in its error branch
+    /// (`cluster_live.py`'s `if r.get("error")`), so this is false for a backend
+    /// that is answering — a parked machine whose engine is still up has nothing
+    /// to hide, and the CLI prints its model. It is also false whenever the
+    /// caller has no pause knowledge, which is exactly the CLI's `pauses=None`
+    /// rule and why the committed parity golden still says `down`.
+    let isPaused: Bool
     /// The queue state, per the CLI's own `_load_style`. A `down` or total row
     /// has no per-backend style: `.unknown` and `.ok` respectively.
     let loadLevel: ClusterMetricLevel
@@ -383,19 +410,40 @@ struct CLIMonitorServingRow: Equatable, Identifiable {
     /// The same, from a terminal width — the CLI's own `WIDE_MIN` rule.
     func cells(forWidth width: Int) -> [String] { cells(wide: width >= CLIMonitorFormat.wideMin) }
 
+    /// The row a table builds when it has the payload's parked INDEX rather than
+    /// one record: the lookup from a backend's `node` to the machine it runs on
+    /// lives HERE, so the two cell view-models that build these rows cannot
+    /// invent two rules for it.
+    init(row: ServingRow, parked index: [String: FleetPausedNode], now: Date = Date()) {
+        let node = row.node
+        self.init(row: row,
+                  paused: (node?.isEmpty == false) ? index[PauseContract.nodeKey(node ?? "")] : nil,
+                  now: now)
+    }
+
     /// Mirror of `serving_table`'s per-row body.
-    init(row: ServingRow) {
+    ///
+    /// `paused` is the pause overlay's record for THIS row's node, or nil —
+    /// nil meaning either "this machine is not parked" or "this caller has no
+    /// pause knowledge", which is the same distinction `serving_table` draws with
+    /// `pauses=None`. The default keeps every existing call site (and the parity
+    /// golden) rendering exactly what it rendered before. `now` is injected so a
+    /// gate can pin the relative age the verdict carries.
+    init(row: ServingRow, paused: FleetPausedNode? = nil, now: Date = Date()) {
         isTotalRow = false
         node = row.node ?? ""
         port = row.port ?? ""
         shortModel = CLIMonitorFormat.shortModel(row.model ?? "-")
         let down = row.error != nil
         isDown = down
+        isPaused = down && paused != nil
         routes = CLIMonitorFormat.aliasList(row.routes, model: row.model)
         if down {
-            // The dead-backend row: `down` in Model, the reason truncated to
-            // 30 characters in the next slot, and six empty numeric cells.
-            model = "down"
+            // The dead-backend row: the verdict in Model — `down`, or the paused
+            // string when the operator parked this machine — the reason
+            // truncated to 30 characters in the next slot, and six empty
+            // numeric cells.
+            model = paused.map { $0.statusText(now: now) } ?? "down"
             let reason = String((row.error ?? "").prefix(30))
             run = reason; wait = ""; kvPct = ""; tokensIn = ""; tokensOut = ""
             genTps = ""; promptTps = ""
@@ -425,6 +473,7 @@ struct CLIMonitorServingRow: Equatable, Identifiable {
     init(total: CLIMonitorServingTotal) {
         isTotalRow = true
         isDown = false
+        isPaused = false
         shortModel = total.model
         node = "total (\(total.backends))"
         port = ""
@@ -489,6 +538,83 @@ extension CLIMonitorServingTotal {
     }
 }
 
+// MARK: - The serving-block note line
+
+/// The one line `render()` puts under the serving header when something is wrong
+/// or empty — the ONE owner of that sentence for every surface in both apps.
+///
+/// `hscc_daemon/cluster_live.py`'s `render()` is the authority: it appends the
+/// `warn` proxy line between the serving header and the table, and prints the dim
+/// `no backends behind the proxy` in place of the table when there are no rows.
+/// The macOS dropdown has drawn these words since t_f5fdc6b2; `ClusterMonitor-
+/// Tables.proxyError` was projected and drawn by NO iOS view, so the phone met the
+/// same failure and said nothing (t_b5d0ec18). A surface draws `text` verbatim and
+/// decides only colour — a per-platform re-wording is exactly what this type
+/// exists to make impossible, and both apps' gates hold it to the CLI's words.
+///
+/// Lives here rather than in a new file because `ClusterMonitorViewModel.swift` is
+/// Foundation-only, is compiled by all five iOS targets AND by both macOS targets
+/// (`macos-app/project.yml`), and is where the state it reads is projected: one
+/// file, one owner, no second `- path:` list to forget.
+enum CLIMonitorNote: Equatable {
+    /// The CLI's dim note beside the serving header. Not a state, so it is not
+    /// part of `servingBlock`'s decision: it is the header's own caption, owned
+    /// here so no platform re-words it. Its exact bytes are pinned against the
+    /// CLI's rendered text in `monitor_tables.swift`.
+    static let tokensNote = "In/Out = tokens since each engine started"
+
+    /// The proxy route map could not be refreshed. `showingLastKnownRoutes` is
+    /// the CLI's ` (showing last known routes)` suffix, which it prints only when
+    /// rows were drawn: the map is stale, but the routes on screen are real, and
+    /// the sentence has to say which of the two the operator is looking at.
+    case proxyUnreachable(error: String, showingLastKnownRoutes: Bool)
+    /// The serving poll itself failed. `serving_error` has NO line in `render()`
+    /// (the live view just keeps the last rows), so this sentence is the app's —
+    /// and this is its only owner.
+    case servingPollFailed(error: String)
+    /// The route sent a serving section and it was empty: the CLI's dim line in
+    /// place of the table. Deliberately NOT the sentence for a MISSING section
+    /// (§6 rule 1 — nobody said anything, so the surface says nothing), which is
+    /// why `servingBlock` needs `hasServingSection` rather than "no rows".
+    case noBackends
+
+    /// The CLI's precedence: the proxy failure first (it is why the table may be
+    /// stale), then the poll failure, then the empty table. `backendRows` counts
+    /// the CLI's `rows` — the backends, never the per-model `total (n)` rows,
+    /// which the CLI appends itself and which would make an empty fleet look
+    /// like it had routes.
+    static func servingBlock(proxyError: String?, servingError: String?,
+                             hasServingSection: Bool, backendRows: Int) -> CLIMonitorNote? {
+        if let proxyError {
+            return .proxyUnreachable(error: proxyError,
+                                     showingLastKnownRoutes: backendRows > 0)
+        }
+        if let servingError { return .servingPollFailed(error: servingError) }
+        return hasServingSection && backendRows == 0 ? .noBackends : nil
+    }
+
+    /// The line as printed. Composed only here.
+    var text: String {
+        switch self {
+        case .proxyUnreachable(let error, let showingRoutes):
+            return "proxy /v1/model/info unreachable: \(error)"
+                + (showingRoutes ? " (showing last known routes)" : "")
+        case .servingPollFailed(let error):
+            return "serving poll failed: \(error)"
+        case .noBackends:
+            return "no backends behind the proxy"
+        }
+    }
+
+    /// Whether the CLI styles this line `warn` — only the proxy one; the
+    /// empty-table line is `dim`. A surface that paints everything as a warning
+    /// makes the operator's calm readings stop being readable as calm.
+    var isWarning: Bool {
+        if case .proxyUnreachable = self { return true }
+        return false
+    }
+}
+
 // MARK: - The view-model
 
 /// `hscc cluster monitor`'s whole human view, as data: the host table, the
@@ -516,28 +642,58 @@ struct ClusterMonitorViewModel: Equatable {
     /// The route's serving poll itself failed (`serving_error`). The section
     /// is then absent — silence, and NOT "no backends".
     let servingError: String?
+    /// Whether the route sent a `serving` section at all, captured at projection
+    /// time. It has to be captured: `rows = response.serving ?? []` below already
+    /// flattened "empty list" and "no key" into the same empty array, and the two
+    /// are different sentences (§6 rule 1). An errored poll always implies no
+    /// section; a nil error does NOT imply a section was sent.
+    let toldServingSection: Bool
 
     /// nil only for a nil response (the read failed). A degraded response
     /// projects to an empty view rather than nil, because the CLI prints its
     /// headers and `0 host(s)` for that case rather than nothing.
-    static func project(_ response: MonitorResponse?) -> ClusterMonitorViewModel? {
+    static func project(_ response: MonitorResponse?, now: Date = Date()) -> ClusterMonitorViewModel? {
         guard let response else { return nil }
         let hosts = response.json?.hosts ?? []
         let rows = response.serving ?? []
+        // The parked set, indexed once for the whole payload by the shared rule
+        // (`FleetProjection.parkedIndex`, which is `FleetProjection.paused`: the
+        // rows the route tagged plus the top-level `paused_nodes`, keyed by
+        // `PauseContract.nodeKey` — trim and case-fold, the server's own rule,
+        // which is how `pause_for_node` finds a row's machine in the CLI too).
+        // A payload whose frame names no hosts has no parked set and no rows.
+        let parked = FleetProjection.parkedIndex(of: response)
         return ClusterMonitorViewModel(
             hostCount: hosts.count,
             hostRows: hosts.map(CLIMonitorHostRow.init(node:)),
-            backendRows: rows.map(CLIMonitorServingRow.init(row:)),
+            backendRows: rows.map { CLIMonitorServingRow(row: $0, parked: parked, now: now) },
             totalRows: CLIMonitorServingTotal.summing(rows: rows),
             proxyError: response.serving_proxy_error,
-            servingError: response.serving_error)
+            servingError: response.serving_error,
+            toldServingSection: response.serving != nil)
     }
 
     /// Whether the serving section exists at all. `false` means the server
     /// never sent it: the CLI prints `no backends behind the proxy` for an
     /// EMPTY list and shows nothing for a missing one, so a surface must not
     /// read "0 models" out of a nil section (§6 rule 1).
-    var hasServingSection: Bool { servingError == nil }
+    ///
+    /// This reads the wire key's presence rather than `servingError`, which is a
+    /// different fact: a clean poll of a route that sent no `serving` key at all
+    /// has no error and still has nothing to show (t_9e110d88 caught the
+    /// conflation — the small tile rendered that case as "0 running, 0 waiting").
+    var hasServingSection: Bool { toldServingSection }
+
+    /// The CLI's one note line under the serving header, or nil when the CLI
+    /// prints none. The words and their precedence are `CLIMonitorNote`'s; a
+    /// surface draws `text` and chooses only colour. The dropdown's `Tile.note`
+    /// is this value's `text`, so phone and desktop cannot say two different
+    /// things about the same failure.
+    var note: CLIMonitorNote? {
+        CLIMonitorNote.servingBlock(proxyError: proxyError, servingError: servingError,
+                                    hasServingSection: hasServingSection,
+                                    backendRows: backendRows.count)
+    }
 
     /// The host table as cell arrays (`host_table` has no width rule — it is
     /// always these nine columns).
