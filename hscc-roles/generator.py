@@ -465,12 +465,24 @@ def _worker_compaction(existing_compression=None):
     }}
     return out
 
+#: The one-line cluster rule every NON-MAIN SOUL carries (operator ruling R4,
+#: 2026-11-23). It says who may act; it deliberately says nothing about what any
+#: config contains, because the enforcement lives in the bootstrap/skills cards
+#: and a present-tense config claim would go stale the moment they move.
+CLUSTER_ACTIONS_RULE = (
+    "cluster actions go through the main orchestrator (board card or orch message)")
+
 _WORKER_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** role on a worker GPU node of the cluster, "
     "executing a single kanban task in your own git worktree. The task "
     "lifecycle (claim, heartbeat, complete or block-for-review) is provided to "
     "you at runtime — follow it exactly.\n"
+    "\n"
+    "## Cluster actions\n\n"
+    "Fleet rule: " + CLUSTER_ACTIONS_RULE + ". The cluster surface is not "
+    "yours; fleet facts come to you through the hscc routes and the CLI read "
+    "surface, never through a cluster toolset.\n"
     "\n"
     "## Stay small — commit slices, hand off early\n\n"
     "Every model call re-reads your whole conversation. At 20K tokens a call "
@@ -496,7 +508,7 @@ _WORKER_OPS = (
 _ORCH_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** on the gateway node. You route work through the "
-    "native kanban board and hold sole authority over the physical cluster.\n"
+    "native kanban board; " + CLUSTER_ACTIONS_RULE + ".\n"
 )
 
 # Anti-churn rules (operator 2026-11-19). ONE block, appended to both the main
@@ -636,8 +648,11 @@ _PROJECT_ORCH_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** on the gateway node. You route that project's "
     "work through its kanban board and hold sole authority over that board, "
-    "but you do NOT hold authority over the physical cluster (only the "
-    "cluster-wide `orchestrator` role does).\n"
+    "but you do NOT hold authority over the physical cluster.\n"
+    "\n"
+    "Fleet rule: " + CLUSTER_ACTIONS_RULE + ". The cluster surface is not "
+    "yours; fleet facts come to you through the hscc routes and the CLI read "
+    "surface, never through a cluster toolset.\n"
     "\n"
     "## How you manage work\n\n"
     "1. **Sub-atomic cards.** One card = one small change a reviewer can check "
@@ -1026,6 +1041,45 @@ def _write_profile_config(path, config, existing_text):
             return True
         return after != (existing_text or "")
     return _write_if_changed(path, target)
+
+
+def set_kanban_auto_subscribe(pdir, enabled, *, dry_run=False):
+    """Set ``kanban.auto_subscribe_on_create`` in ONE profile config.
+
+    The writer half of ``orch_subscribe`` (t_31c8b258): a pane-backed
+    orchestrator's wake path is its pane + the hscc orch-waker, so Hermes must
+    not auto-create a gateway ``notify+wake`` sub for it. The existing
+    profile document is read whole and written through the same
+    preserve-every-key + Hermes-round-trip writers ``generate_profile`` uses,
+    so comments, key order and foreign keys survive.
+
+    Only an existing, parseable mapping is touched: a missing config or one
+    whose ``kanban`` value is not a mapping is reported and skipped, never
+    created or replaced. Returns ``{action, changed, config_path}`` where
+    ``action`` is ``written`` / ``unchanged`` / ``would-write`` /
+    ``missing-config`` / ``unparseable-config`` / ``unexpected-kanban-shape``.
+    """
+    pdir = os.path.expanduser(str(pdir))
+    path = os.path.join(pdir, "config.yaml")
+    existing, text = _read_config_file(pdir)
+    if existing is None:
+        action = "missing-config" if text is None else "unparseable-config"
+        return {"action": action, "changed": False, "config_path": path}
+    kanban = existing.get("kanban")
+    if kanban is None:
+        kanban = {}
+    elif not isinstance(kanban, dict):
+        return {"action": "unexpected-kanban-shape", "changed": False,
+                "config_path": path}
+    if kanban.get("auto_subscribe_on_create") is bool(enabled):
+        return {"action": "unchanged", "changed": False, "config_path": path}
+    if dry_run:
+        return {"action": "would-write", "changed": False, "config_path": path}
+    config = dict(existing)
+    config["kanban"] = {**kanban, "auto_subscribe_on_create": bool(enabled)}
+    changed = _write_profile_config(path, config, text)
+    return {"action": "written" if changed else "unchanged",
+            "changed": changed, "config_path": path}
 
 
 def _write_if_changed(path, content):

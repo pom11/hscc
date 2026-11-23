@@ -32,6 +32,7 @@ import yaml
 
 import generator
 import main_orch
+import orch_subscribe
 
 # Registry default matches flightdeck's DEFAULT_REGISTRY (~/.flightdeck/registry.yaml).
 # Overridable with HSCC_REGISTRY so tests/provisioning can target a fixture.
@@ -419,8 +420,12 @@ _MAIN_CLUSTER_CONTROL = (
     "- Fleet shape: `list_templates`, `preview_template`, then "
     "`apply_template` — the widest blast radius there is, since it re-shapes "
     "the whole fleet. Preview first, and be able to name why.\n"
-    "- Breaker strikes are CLI-only: `hscc heal-status` to read, "
-    "`hscc heal-clear` for one node.\n"
+    "- Heal strikes: `heal_status` [`hscc heal-status`] — per node, the "
+    "breaker strikes inside the rolling window, their age, and whether the "
+    "daemon is refusing to heal that node (and for how long). It reads; it "
+    "never clears. Clearing `hscc heal-clear <node>` stays CLI-only: it "
+    "re-arms the repair paths, which is an operator decision after "
+    "investigating the hardware — hand the verb to the operator.\n"
     "- A peer gets a nudge through `orch_message`; the channel rules live in "
     "the Talking to orchestrators section and are not repeated here.\n"
     "\n"
@@ -674,6 +679,13 @@ def ensure_orchestrator(
         spec = _project_orch_spec(resolved["project"], resolved)
     changed = generator.generate_profile(spec, base_identity=base_identity)
     # Same rolelib object generate_profile uses (tests monkeypatch it).
-    seed = seed_review_skills_for(
-        os.path.join(generator.rolelib.PROFILES_DIR, resolved["profile"]))
-    return {**resolved, "changed": changed, "review_skill": seed}
+    profile_dir = os.path.join(generator.rolelib.PROFILES_DIR, resolved["profile"])
+    seed = seed_review_skills_for(profile_dir)
+    # t_31c8b258: an orchestrator that is ALREADY pane-backed must not keep
+    # Hermes' auto-subscribe gate on. The pane + orch-waker is its wake path;
+    # resolving the live pane session here is the bootstrap half of the guard
+    # (the pane-start doors re-apply it for a profile whose pane appears later).
+    subscription = orch_subscribe.apply_subscription_policy(
+        resolved["profile"], profile_dir=profile_dir)
+    return {**resolved, "changed": changed, "review_skill": seed,
+            "subscription": subscription}

@@ -140,6 +140,43 @@ Request body:
 `confirm` must be `true`, else 409. `container_id` is required (400 when missing). On
 success returns `{"message": "...", "success": true, "returncode": 0}`.
 
+#### `GET /v1/node-pauses` — read-only
+
+The durable node-pause overlay (`~/.hscc/node_pauses.json`), read through the
+same `hscc_daemon.node_pauses` store `hscc node paused --json` and the
+`node_paused` agent tool read (t_787930b5, audit D10/F9). Read-only by design:
+pause and resume stop/restart live models, so they stay the CLI + agent-tool
+verbs with the printed plan and the y/N gate — no mutation route exists here.
+
+The overlay is read per request at the server's own `hscc_dir`; an empty or
+missing file is `{"count": 0, "pauses": []}`. One row per pause record, sorted
+by `host`:
+
+```json
+{
+  "count": 1,
+  "pauses": [{
+    "host": "192.0.2.13",
+    "owner": "192.0.2.13",
+    "units": ["vllm-unit-a"],
+    "reason": "training run",
+    "since": "2026-11-23T10:00:00+00:00",
+    "until": "2026-11-23T12:00:00+00:00",
+    "span_nodes": ["192.0.2.13"],
+    "stopped": true
+  }],
+  "speak": "1 node paused."
+}
+```
+
+`owner` is the record's keyed host — the host `hscc node resume` takes. A node
+listed only in `span_nodes` is covered by that record, not an owner of its own.
+`units` is exactly the record's recorded unit ids (there is no model-name map in
+the overlay, and this read must work when the fleet does not). `until: null` is
+open-ended; `stopped` is whether the stop was confirmed. A reader failure is a
+degraded `{"error", "speak"}` (never a clean zero) and a corrupt/unreadable file
+fails open to zero pauses, warning on the daemon log, exactly like the CLI.
+
 ---
 
 ### Fleet / health
@@ -368,6 +405,7 @@ Endpoint-specific contracts:
 | `GET /v1/cluster/monitor` | "Fleet snapshot: `{json}`" is too raw. Use a compact aggregate from the JSON if present, else "fleet monitor unavailable". Keep to one clause. |
 | `GET /v1/cluster/jobs` | "`{count}` job(s) running." from the output, else "job list unavailable". |
 | `GET /v1/cluster/info` | "Cluster configuration loaded." / "cluster info unavailable". |
+| `GET /v1/node-pauses` | "`{count}` node(s) paused." / "No nodes paused." Degrade to "Node pause list failed: `{reason}`". |
 | `GET /v1/health` | `ok` ? "All checks passed." : "`{N}` of `{total}` checks have problems." Name the failing checks in one clause if space allows. When the served snapshot is stale, append how old it is — "Health from `{age}` ago." |
 | `GET /v1/fleet/stats` | "Last `{days}` days: `{key stat}`." e.g. "About 1.2k work items across the last 7 days." Keep to the most useful single number. |
 | `GET /v1/fleet/throughput` | `ok`/nodes: "`{nodes_ok}` of `{nodes_total}` nodes healthy." Refer to the dict's `fleet.nodes_ok`/`by_node`. |

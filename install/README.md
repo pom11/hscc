@@ -7,7 +7,7 @@ This directory holds the **bundled skill sources** that the HSCC skills installe
 
 | Directory | Contents |
 |---|---|
-| `hscc-skills/` | The 13 vendored skill directories listed below — 12 are installed by the installer, `hscc-lessons` is not (see *Vendored ≠ installed*). |
+| `hscc-skills/` | The 13 vendored skill directories listed below — all 13 are installed by the installer. |
 
 The complete vendored set, matching `ls install/hscc-skills` exactly:
 
@@ -19,13 +19,12 @@ The complete vendored set, matching `ls install/hscc-skills` exactly:
 `hscc-plugins`, `kanban-orchestrator`, `kanban-worker`, `template-audit`,
 `webhook-subscriptions`).
 
-**Vendored ≠ installed.** The installer copies only the names in `BUNDLED_SKILLS`
-(`hscc-skills/hscc.py`) — 12 of the 13 above. `hscc-lessons` is a real skill with a
-shipped `SKILL.md`, but it is not in `BUNDLED_SKILLS`, so `hscc bootstrap` never
-installs it and never updates it (audit F12,
-`docs/audits/2026-11-23-agent-surface.md` §8). Listing it there is a one-line code
-change in `hscc-skills/hscc.py` and is **not done as of this page**; until it is, treat
-this table as the complete *source* tree, not the installed set.
+**Vendored = installed.** The installer copies every name in `BUNDLED_SKILLS`
+(`hscc-skills/hscc.py`) — all 13 above, including `hscc-lessons`. Two gates keep the
+two directions honest (`hscc_daemon/tests/test_surface_coverage_gates_t_c13de3cc.py`):
+a name in the list with no directory here fails, and a directory here that the list
+does not name fails too. Treat this table as both the complete *source* tree and the
+installed set.
 
 This is the **source of truth** for the bundled skills — edit them here, then run
 `hscc-skills/hscc.py install-skills` to push the changes to `~/.hermes/skills/`.
