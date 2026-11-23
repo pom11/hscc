@@ -100,6 +100,18 @@ BUNDLED_TEMPLATES = [
 #: and that boundary is what makes "always update, never skip" safe.
 OWNED_SKILLS = tuple(BUNDLED_SKILLS)
 
+#: The owned skills that document the cluster CONTROL surface, and therefore
+#: belong on the main orchestrator's home ONLY (driver ruling 4 on the
+#: main-only audit, docs/audits/2026-11-23-main-only-surface.md §5.3 row 6 /
+#: §8 t_b52e70ba): "documentation of a toolset a profile cannot call is a lie in
+#: the prompt". This is a SUBSET of BUNDLED_SKILLS on purpose — the rest
+#: (brainstorming, caveman, sdlc-review, the devops group, …) is generic Hermes
+#: material that stays on every profile, so a check keyed on the whole list
+#: would report the fleet's healthy skill trees as drift. Read (never
+#: re-spelled) by hscc-bootstrap/doctor_main_only.py, which is what keeps
+#: doctor's verdict and this installer's ownership boundary from disagreeing.
+CLUSTER_SKILLS = ("hscc", "hscc-cluster", "hscc-model-onboard")
+
 #: Where a replaced owned-skill copy is kept: a SIBLING of the scanned
 #: ``skills/`` dir, never inside it. hermes collects skill candidates by
 #: directory name AND frontmatter ``name:`` at ANY depth under the scan root
