@@ -157,6 +157,141 @@ if [ -n "${HOME:-}" ]; then
   mkdir -p "$FASTEMBED_CACHE_DIR" 2>/dev/null || true
 fi
 
+# ━━━ roster-wide HOME seal for every leg (t_2b2a6c3b) ━━━━━━━━━━━━━━━━━━━━━━━
+# WHY. A leg that resolves a default path through ``~`` reads the OPERATOR's
+# machine, passes locally, and is red (or silently skipped) on a CI runner whose
+# HOME is empty. That class hid #593 and then produced this card's two measured
+# deltas: `hscc-project` red (`UnknownProjectError: unknown project 'hscc'`,
+# #593's resolver reached from a test) and `hscc-cluster`'s two source
+# cross-checks turning into SKIPS whose reason named `<sealed-home>/sparkrun/…`.
+# `hscc-roles` is sealed in its own conftest (PR #595, `ca2aa8d2`) — necessary but
+# not sufficient: the seal belongs in the runner because ONLY the runner reaches
+# every leg child (the same argument that puts the kanban-pin scrub and
+# HSCC_SKIP_COMPACT_PROBE here rather than in a fixture), and because the other
+# eleven legs have no seal of their own.
+#
+# WHY HERE IN THE FILE. Two lines above derive a value from HOME — `PY` from
+# `${HSCC_TEST_PY:-$HOME/.hermes/…}` and the FASTEMBED_CACHE_DIR block — so the
+# seal goes AFTER both and before any leg child is spawned: the runner keeps the
+# values it needs, every leg and every child a leg spawns sees one HOME.
+#
+# WHY /tmp AND WHY IT IS REFUSED INSIDE THE LOGIN HOME. The empty home is created
+# under `/tmp` explicitly, not `$TMPDIR` (macOS puts TMPDIR under /var/folders/…,
+# and a second answer to "where does a CI-shaped home live" is how an earlier
+# roster run lied: a HOME containing the token `/Users` keeps a
+# `'/Users' in argv[2]`-style escape hatch green). A home inside the login home is
+# refused outright — hermes resolves a home under `~/.hermes` back to the live
+# root (t_d39c720e), so a "sealed" home there is not sealed and would read as one.
+#
+# WHY THE ROOT IS DECIDED BEFORE mktemp (t_9c1ff8e1). On a host whose login home IS
+# `/tmp` — the Linux/CI default shape, and what `HSCC_TEST_LEGS=<bogus>` met on #606's
+# own CI — the two rules above are mutually unsatisfiable: every dir `mktemp` can make
+# under `/tmp` is inside the login home, so the refusal fired rc 3 BEFORE leg selection
+# and the roster could not run at all, nor reject a typo'd leg with its contracted 64.
+# So when `/tmp` is inside the login home the root becomes `/var/tmp` — the other
+# literal, still never `$TMPDIR`, still subject to the same refusal (a host that
+# contains BOTH has nowhere to seal and still gets rc 3). The decision reads ONLY
+# `$SUITE_REAL_HOME`, and never what `mktemp` answered: a fallback triggered by the
+# refusal would swallow the refusal itself, and the guard below would stop being a
+# guard (pinned both ways in scripts/tests/test_run_tests_home_seal.py).
+#
+# WHY THE RUNNER PRINTS THE PATH. A roster log has to prove its own posture: the
+# `sealed HOME=` line is what makes a `1164 passed, 5 skipped` line attributable
+# to the seal rather than to whatever else the machine looked like.
+#
+# The seal is a posture, not a sandbox: `HSCC_TEST_NO_SEAL=1` restores the
+# operator's HOME in one env var (a developer debugging a HOME-dependent case
+# should not have to edit the runner), and the pin test runs both arms.
+SUITE_REAL_HOME="${HOME:-}"
+if [ "${HSCC_TEST_NO_SEAL:-0}" = "1" ]; then
+  echo "HOME seal: DISABLED (HSCC_TEST_NO_SEAL=1) — legs run with the operator's HOME"
+else
+  # The root is decided from the LOGIN HOME alone, before mktemp runs — the two
+  # literals below are the whole answer, never `$TMPDIR` and never "whatever mktemp
+  # answered" (see WHY THE ROOT IS DECIDED BEFORE mktemp above). The literals stay
+  # spelled out per branch rather than folded into one `$SUITE_HOME_ROOT/template`
+  # argument on purpose: `mktemp -d /tmp/hscc-suite-home-XXXXXX` is the string
+  # scripts/tests/test_run_tests_home_seal.py pins, and a rewrite that hides it makes
+  # that guard parse a shape it no longer checks.
+  SUITE_HOME_ROOT="/tmp"
+  case "/tmp" in
+    "$SUITE_REAL_HOME"|"$SUITE_REAL_HOME"/*)
+      SUITE_HOME_ROOT="/var/tmp"
+      echo "HOME seal: /tmp is inside the login home ($SUITE_REAL_HOME) — sealing under /var/tmp instead" ;;
+  esac
+  if [ "$SUITE_HOME_ROOT" = "/var/tmp" ]; then
+    SUITE_HOME="$(mktemp -d /var/tmp/hscc-suite-home-XXXXXX 2>/dev/null || true)"
+  else
+    # Set here, not only above: the branch that runs THIS mktemp is the branch that
+    # owns the root the banner names, so no third value can leave the log naming a
+    # root the path does not live under.
+    SUITE_HOME_ROOT="/tmp"
+    SUITE_HOME="$(mktemp -d /tmp/hscc-suite-home-XXXXXX 2>/dev/null || true)"
+  fi
+  if [ -z "$SUITE_HOME" ] || [ ! -d "$SUITE_HOME" ]; then
+    # Fail CLOSED: running the roster unsealed while claiming otherwise is the
+    # worse outcome, so an inability to seal stops the run before leg 1.
+    echo "run_tests.sh: cannot create the sealed HOME under $SUITE_HOME_ROOT — refusing to run the roster unsealed" >&2
+    exit 3
+  fi
+  case "$SUITE_HOME" in
+    "$SUITE_REAL_HOME"/*)
+      echo "run_tests.sh: refusing a sealed HOME inside the login home: $SUITE_HOME" >&2
+      exit 3 ;;
+  esac
+  export HOME="$SUITE_HOME"
+  export USERPROFILE="$SUITE_HOME"   # pathlib/expanduser readers on a Windows host
+  echo "HOME seal: HOME=USERPROFILE=$SUITE_HOME (empty dir under $SUITE_HOME_ROOT; HSCC_TEST_NO_SEAL=1 opts out)"
+  # Declared, not discovered. `hscc-cluster`'s two source cross-checks compare the
+  # staged media recipes against sparkrun SOURCE, which a deployed plugin dir
+  # cannot import and CI does not have; their seam is `SPARKRUN_SRC`
+  # (t_2b2a6c3b, PR #604). Declaring the machine's own checkout keeps that
+  # coverage running under the seal instead of retiring it as a skip — and the
+  # runner exports ONLY that path, never the operator's home, so the seal stays a
+  # seal. An operator's own `SPARKRUN_SRC` always wins (``${VAR:-}`` test below).
+  if [ -z "${SPARKRUN_SRC:-}" ] && [ -n "$SUITE_REAL_HOME" ] &&
+     [ -d "$SUITE_REAL_HOME/sparkrun/src/sparkrun" ]; then
+    export SPARKRUN_SRC="$SUITE_REAL_HOME/sparkrun/src/sparkrun"
+    echo "HOME seal: declared SPARKRUN_SRC=$SPARKRUN_SRC (this machine's sparkrun checkout)"
+  fi
+  # The Hermes AGENT SOURCE tree, same rule and same reasoning as SPARKRUN_SRC above.
+  # Cases that consult the live `hermes_cli` / kanban board resolve it from
+  # `~/.hermes/hermes-agent` by default, and their own skip reason says "Set
+  # HERMES_AGENT_PATH if it lives elsewhere" — the seam already exists and is honoured in
+  # production (hscc-roles/hscc.py:398, hscc-cluster/workflow.py:594,
+  # hscc_daemon/autodown.py:875). What a seal removes is the DEFAULT, not the capability,
+  # so the runner declares the machine's tree. Measured at 96a9f38a without this line:
+  # `hscc-project/tests/test_mcp_server.py:176` (standup's watermark read) and three
+  # `hscc_daemon` cases retire as skips under the seal. The path, never the home.
+  if [ -z "${HERMES_AGENT_PATH:-}" ] && [ -n "$SUITE_REAL_HOME" ]; then
+    for _agent_candidate in "$SUITE_REAL_HOME/.hermes/hermes-agent" "$SUITE_REAL_HOME/src/hermes-agent"; do
+      if [ -d "$_agent_candidate/hermes_cli" ]; then
+        export HERMES_AGENT_PATH="$_agent_candidate"
+        echo "HOME seal: declared HERMES_AGENT_PATH=$HERMES_AGENT_PATH (this machine's Hermes agent source)"
+        break
+      fi
+    done
+  fi
+  # The homebrew TAP checkout, third instance of the same rule. `scripts`'
+  # formula-drift guard reads it through `bump_formula.py`'s documented seam
+  # (`--tap`, else $HSCC_TAP_DIR, else ~/dev/homebrew-hscc — scripts/bump_formula.py:529),
+  # so under a seal it loses its default and FOUR cases retire: measured at 96a9f38a,
+  # `HSCC_TEST_LEGS=scripts` went 601 passed / 5 skipped -> 598 passed / 8 skipped with
+  # the reason naming the two candidates it looked at and "Set HSCC_TAP_DIR to a
+  # pom11/homebrew-hscc checkout to arm this guard". Declaring the machine's own tap
+  # re-arms the guard; a host without one still skips honestly (and the guard does not
+  # clone — a repo test that needs the network to satisfy itself is not a guard).
+  if [ -z "${HSCC_TAP_DIR:-}" ] && [ -n "$SUITE_REAL_HOME" ]; then
+    for _tap_candidate in "$SUITE_REAL_HOME/dev/homebrew-hscc" "$SUITE_REAL_HOME/.cache/hscc/taps/homebrew-hscc"; do
+      if [ -f "$_tap_candidate/Formula/hscc.rb" ]; then
+        export HSCC_TAP_DIR="$_tap_candidate"
+        echo "HOME seal: declared HSCC_TAP_DIR=$HSCC_TAP_DIR (this machine's tap checkout)"
+        break
+      fi
+    done
+  fi
+fi
+
 # ── leg heartbeat: make "slow" readable as distinct from "stopped" ──────────
 # Every leg's consumer reads a REDIRECTED file, and pytest's -q band carries no
 # elapsed time anywhere, while its [ NN%] is a test-COUNT percent printed once
