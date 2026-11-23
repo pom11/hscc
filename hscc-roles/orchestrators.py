@@ -310,12 +310,25 @@ def main_assistant_work_block() -> str:
 #   * OPERATOR RULE 2026-11-23 07:24 (main-only cluster surface): the section
 #     states out loud that this profile is the ONLY one with cluster control —
 #     the cluster tools, the slash commands, the sparkrun passthrough and the
-#     hscc skills — and that any other profile asks the main instead of taking
-#     the action itself. The main's name is never spelled here (the bootstrap
-#     config owns it, so a renamed main is still correct), and no sentence may
-#     phrase cluster access as available to a worker or a project orchestrator.
-#     Both directions are pinned in
+#     hscc skills — that a worker profile and a project orchestrator profile
+#     have none of it and must ask instead of acting, and that a request reaches
+#     this profile as a board card or an `orch_message`. The main's name is never
+#     spelled here (the bootstrap config owns it, so a renamed main is still
+#     correct), and no sentence may phrase cluster access as available to a
+#     worker or a project orchestrator. Both directions are pinned in
 #     ``tests/test_main_orch_cluster_control.py``.
+#   * WHAT THAT RULE IS AND IS NOT (docs/audits/2026-11-23-main-only-surface.md,
+#     measured 2026-11-23 — read it before "restoring" any of these sentences):
+#     the section states the POLICY, which is what a SOUL can carry. Three
+#     present-tense mechanism claims an earlier draft made are gone because the
+#     audit measured them false: `plugins.enabled` is a PER-HOME switch and
+#     nothing in this repo writes it into any profile home (so bootstrap is not
+#     "what puts the tools here"); the cluster toolsets are also written into
+#     every ``*-orch`` config by ``generator._is_orchestrator`` (so "no project
+#     orchestrator carries them" is false of the config); and the skill fan-out
+#     installs the hscc skills into every profile tree (so "the skills live here
+#     alone" is false). Making the policy TRUE in code is t_e98c6ad4 (bootstrap),
+#     t_b52e70ba (skills) and t_caf98114 (doctor) — not this file.
 #   * genericity as for ``_MAIN_ASSISTANT_WORK``: the repo is public, so no
 #     paths, no account names, no product names, no addresses.
 _MAIN_CLUSTER_CONTROL = (
@@ -324,22 +337,26 @@ _MAIN_CLUSTER_CONTROL = (
     "This profile — the one bootstrap named as the main orchestrator, whatever "
     "it was called — is the ONLY profile on this fleet with cluster control. "
     "The `hscc-cluster` tools, the `hscc` slash commands, the `sparkrun` "
-    "passthrough and the hscc skills live here alone: no worker and no project "
-    "orchestrator carries them, and nobody borrows this surface to change the "
-    "fleet. Bootstrap is what puts it here — the `hscc-cluster` and `sparkrun` "
-    "toolsets are written into this profile's config, and the cluster skills "
-    "belong to this profile alone: `hscc` for the CLI surface, `hscc-cluster` "
-    "for these tools and the state each one reads, `hscc-model-onboard` when a "
-    "new model comes up. Those are the reference for anything you do not "
-    "remember exactly; if one of them does not resolve on this profile, say so "
-    "and work from the CLI verb instead of guessing a flag, and do not go "
-    "reading another profile's tree for it.\n"
+    "passthrough and the hscc skills are this profile's surface and nobody "
+    "else's business: a worker profile and a project orchestrator profile have "
+    "none of it, so they ask — they do not act — and no part of this surface is "
+    "borrowed to change the fleet. The `hscc-cluster` and `sparkrun` toolsets "
+    "are what carry cluster work, and they carry it here alone: if either does "
+    "not resolve on this profile, say so, work from the CLI verb instead of "
+    "guessing a flag, and never go reading another profile's tree or config to "
+    "find one. The cluster skills are your reference for anything you do not "
+    "remember exactly — `hscc` for the CLI surface, `hscc-cluster` for these "
+    "tools and the state each one reads, `hscc-model-onboard` when a new model "
+    "comes up. Copies of that documentation exist in other profile trees: a "
+    "skill is a reading, not a licence, and reading about a tool never "
+    "entitles any profile to run it.\n"
     "\n"
-    "When another profile needs the cluster changed, it asks you — a card on "
-    "its own board, or `orch_message` — and you run it or say why not. That is "
-    "the only path: a cluster verb is never handed to a profile that does not "
-    "hold this surface, and you do not talk a worker into running one for "
-    "you.\n"
+    "When another profile needs the cluster changed — a worker, or a project "
+    "orchestrator — it comes to you: a card on its own board, or "
+    "`orch_message`. You run it, or you say why not. That is the only path in "
+    "either direction: a cluster verb is never handed to a profile that does "
+    "not hold this surface, and you never talk a worker or a project "
+    "orchestrator into running one for you.\n"
     "\n"
     "Each line is a shipped door: the agent tool, then the CLI verb it mirrors "
     "in brackets. Where a verb has no tool, the absence is a decision, not an "

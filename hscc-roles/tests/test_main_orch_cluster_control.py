@@ -121,17 +121,55 @@ NON_TOOL_TOKENS = {"confirm", "force"}
 #: cards the same brief lists. This file pins the statement; those cards own the
 #: enforcement (and ``test_a_worker_still_lacks_the_cluster_toolsets`` pins the
 #: half that is already true in code).
+#:
+#: t_398ea0d5 sharpened this tuple and DELETED three entries
+#: ("the hscc skills live here alone", "no worker and no project orchestrator
+#: carries them", "toolsets are written into this profile's config") because
+#: ``docs/audits/2026-11-23-main-only-surface.md`` measured each of them false of
+#: the code as shipped. A pin that holds a false sentence is worse than no pin:
+#: it makes the next worker preserve the lie. What is pinned instead is the
+#: POLICY (main alone holds the surface, workers and project orchs have none and
+#: ask) plus the arrival path, and ``test_the_section_claims_nothing_the_code_
+#: falsifies`` below guards the boundary in both directions.
 MAIN_ONLY_CLAUSES = (
     "is the ONLY profile on this fleet with cluster control",
     "whatever it was called",                      # resolver-driven, never spelled
     "The `hscc-cluster` tools",
     "the `hscc` slash commands",
     "the `sparkrun` passthrough",
-    "the hscc skills live here alone",
-    "no worker and no project orchestrator carries them",
-    "it asks you",
+    "the hscc skills are this profile's surface",
+    "a worker profile and a project orchestrator profile have none of it",
+    "they ask — they do not act",
+    "The `hscc-cluster` and `sparkrun` toolsets",
+    "a skill is a reading, not a licence",
+    "it comes to you",
+    "a card on its own board",
+    "`orch_message`",
     "a cluster verb is never handed to a profile",
 )
+
+#: Sentences that would put a present-tense mechanism claim in the section that
+#: the 2026-11-23 audit measured FALSE. Each is paired below with the shipped
+#: code that falsifies it, so this list is a guard and not a superstition.
+FALSIFIED_CLAIMS = {
+    "the skills are exclusive to this profile": "live here alone",
+    "the skills are exclusive (second phrasing)": "belong to this profile alone",
+    "project orchs carry no cluster toolset": "no project orchestrator carries them",
+    "bootstrap writes the toolsets into this config": "written into this profile's config",
+}
+
+
+def _missing_exclusivity_claims(text):
+    """Every MAIN_ONLY_CLAUSES entry absent from ``text``.
+
+    A function rather than a loop inside one test, so the mutation probe below
+    can point the SAME predicate at a gutted copy of the section and prove the
+    pin bites. `test_the_main_only_cluster_rule_is_stated` asserts this returns
+    nothing for the shipped text; the probe asserts it returns the deleted claim
+    for a text with the claim removed.
+    """
+    return [c for c in MAIN_ONLY_CLAUSES if c not in text]
+
 
 #: Phrasings that would quietly hand the cluster surface to a profile that must
 #: ask for it instead. The operator's rule is not only "do not give it to them";
@@ -584,6 +622,128 @@ def test_cluster_access_is_never_phrased_as_available_to_a_worker():
     bad_line = "- a worker can run the same tools directly"
     assert not any(mark in bad_line for mark in
                    ("ask", "no worker", "never", "alone", "not "))
+
+
+def _installed_skill_homes(tmp_path):
+    """Every profile home the shipped skills installer writes into — by RUNNING it.
+
+    ``install_review_skill.skill_dirs`` is the installer's OWN discovery function
+    (which trees "installed" covers), and it is pure over a directory: pointed at
+    a tmp home it answers without a profile tree of its own, a real home or a
+    fleet. This is the proof behind ``FALSIFIED_CLAIMS``: the cluster skills go
+    to the root home and to every named profile, worker and ``*-orch`` alike.
+    """
+    import importlib.util
+    src = os.path.join(REPO, "hscc-bootstrap", "install_review_skill.py")
+    spec = importlib.util.spec_from_file_location("_irs_exclusivity_probe", src)
+    assert spec is not None and spec.loader is not None, (
+        f"cannot load the installer's discovery module from {src} — it moved; "
+        "re-measure the skills half of FALSIFIED_CLAIMS before trusting it")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    home = tmp_path / "home"
+    (home / "skills").mkdir(parents=True)
+    for name in ("general", "backend-engineer", "demo-orch"):
+        (home / "profiles" / name / "skills").mkdir(parents=True)
+    (home / "profiles" / ".deleted").mkdir()          # not a profile
+    return {label for label, _dir, _home in mod.skill_dirs(home)}
+
+
+def test_the_exclusivity_claim_reaches_both_render_paths(registry_file,
+                                                         isolated_home):
+    """The claim is not just in the constant — the agent actually receives it.
+
+    Both write paths are checked: ``compose_soul`` and bootstrap's
+    ``ensure_orchestrator`` -> SOUL.md. A claim that lives in the source but is
+    dropped by one of the two renderers is a claim nobody reads.
+    """
+    assert not _missing_exclusivity_claims(
+        _section_only(_rendered_soul(registry_file))), "compose_soul dropped the rule"
+    soul, _cfg = _bootstrapped(registry_file, isolated_home)
+    assert not _missing_exclusivity_claims(_section_only(soul)), (
+        "the bootstrap SOUL.md dropped the rule")
+
+
+def test_the_request_path_names_both_channels_and_both_profile_kinds():
+    """A cluster action reaches the main as a board card or `orch_message`.
+
+    The operator's rule is only half "the main holds it"; the other half is how
+    a request ARRIVES, because that is the sentence a worker reads before it
+    shells a cluster verb itself. Both channels must be named, and the sentence
+    that names them must name both kinds that have to ask.
+    """
+    section = _section_only(orchestrators.main_cluster_control_block())
+    assert "a card on its own board" in section, "the board path dropped"
+    assert "`orch_message`" in section, "the orch_message path dropped"
+    arriving = [ln for ln in section.splitlines() if "it comes to you" in ln]
+    assert arriving, "no sentence carries the request path"
+    assert "worker" in arriving[0] and "project orchestrator" in arriving[0], (
+        f"the request path is not aimed at both profile kinds: {arriving[0]!r}")
+
+
+@pytest.mark.parametrize("claim", (
+    "is the ONLY profile on this fleet with cluster control",
+    "a worker profile and a project orchestrator profile have none of it",
+    "a card on its own board",
+))
+def test_deleting_the_claim_reddens_the_pin(claim):
+    """The card's mutation probe, committed rather than run once by hand.
+
+    Delete the claim from the section and the SAME predicate the pin above uses
+    must report it missing. This is what makes the enforcement a property of the
+    test and not a claim about one: the parent card ran its probes by hand and
+    reverted them, so nothing here proved the pin bites if someone edits it flat.
+    """
+    section = _section_only(orchestrators.main_cluster_control_block())
+    assert not _missing_exclusivity_claims(section), (
+        "the shipped section is already missing a claim; the probe would pass vacuously")
+    gutted = section.replace(claim, "")
+    assert gutted != section, f"the probe did not bite: {claim!r} is not in the section"
+    assert claim in _missing_exclusivity_claims(gutted), (
+        f"deleting {claim!r} left the pin green — the claim is not enforced")
+
+
+def test_the_section_claims_nothing_the_code_falsifies(tmp_path):
+    """The exclusivity is the POLICY; the section may not state it as shipped fact.
+
+    Each forbidden sentence is paired with the shipped code that falsifies it, so
+    this guard is evidence rather than taste — and it is the reason the deleted
+    clauses are NOT restored from the parent card's version:
+
+    * "the skills live here alone" / "belong to this profile alone" — the
+      installer's own ``skill_dirs`` returns the root home plus every profile
+      (run below, in a tmp home).
+    * "no project orchestrator carries them" — ``_is_orchestrator`` matches any
+      ``*-orch``, and ``orchestrator_toolsets()`` carries both cluster toolsets,
+      so ``generator`` writes them into a project orchestrator's config too.
+    * "written into this profile's config" — that key is not what loads a plugin
+      toolset (per-home ``plugins.enabled`` is, and nothing here writes it), so
+      it names a mechanism the code does not implement.
+    """
+    section = _section_only(orchestrators.main_cluster_control_block())
+    for why, phrase in FALSIFIED_CLAIMS.items():
+        assert phrase not in section, (
+            f"the section states {phrase!r} — {why}, and "
+            "docs/audits/2026-11-23-main-only-surface.md measured it false")
+    homes = _installed_skill_homes(tmp_path)
+    assert {"default (root)", "general", "backend-engineer", "demo-orch"} <= homes, (
+        f"the installer's own discovery changed shape ({sorted(homes)}); re-measure "
+        "before trusting the skills half of this guard")
+    assert generator._is_orchestrator("demo-orch"), (
+        "project orchestrators stopped being orchestrators — re-check whether the "
+        "config-falsification above still applies")
+    assert set(CLUSTER_TOOLSETS) <= set(generator.rolelib.orchestrator_toolsets())
+
+
+def test_the_falsified_claim_guard_can_fire():
+    """Positive control: the guard above is satisfiable, not unfalsifiable."""
+    bad = ("the hscc skills live here alone and belong to this profile alone; "
+           "no project orchestrator carries them, because the toolsets are "
+           "written into this profile's config")
+    for why, phrase in FALSIFIED_CLAIMS.items():
+        assert phrase in bad, f"control text does not contain {why}: {phrase!r}"
+    section = _section_only(orchestrators.main_cluster_control_block())
+    assert all(p not in section for p in FALSIFIED_CLAIMS.values())
 
 
 def test_a_worker_profile_is_still_written_without_the_cluster_toolsets():
