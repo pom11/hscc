@@ -998,6 +998,16 @@ class _MultiServer:
         a stop requested during startup still end the loops, instead of the
         request being lost and the process sitting in an accept loop that
         nobody asked to run.
+
+        The flag is POLLED, never awaited: this method asks it ``is_set()`` and
+        nothing else, which is the whole surface a caller needs. That matters
+        because the flag is set from a signal handler, which runs on the thread
+        this loop runs on — a ``threading.Event`` answers ``is_set()`` while
+        holding a lock ``set()`` also needs, so a stop landing here deadlocks
+        against its own thread (t_49f4c69b; ``api_server._StopFlag`` is the
+        lock-free answer here, and t_56552ecc lands the same shape in the
+        sibling plugin). Do not grow this surface to ``wait()`` / ``clear()``: a
+        test pins it to one ``is_set()``.
         """
         self._started = True
         self._threads = [
@@ -1249,6 +1259,44 @@ def _parse_serve_argv(argv):
     return ns.cmd, ns.bind, ns.tailscale, ns.port
 
 
+class _StopFlag:
+    """A "a stop was requested" flag that a signal handler may safely set.
+
+    Deliberately NOT a `threading.Event` (t_49f4c69b; t_56552ecc measured this
+    same shape in the sibling plugin's stop path). `Event._cond` holds a plain
+    non-reentrant `threading.Lock`, and `Event.set()` / `Event.is_set()` both
+    take it — while `_MultiServer.serve_forever` asks `is_set()` on every pass of
+    its join loop. A signal handler runs on the thread it interrupts, so a stop
+    landing during that poll has the handler waiting on a lock only that same
+    thread can release: it never returns, the flag is never set, the loops never
+    end and `serve_main`'s `finally:` — the gateway-sidecar teardown — never
+    runs. Measured on 3.14 (both signals, `..._is_the_hazard` in
+    tests/test_api_server_stop_signal.py reproduces it with no hscc code).
+
+    A plain attribute write/read holds nothing, so the handler and the loop
+    cannot deadlock each other. Duck-typed against the `stop_event` argument
+    `_MultiServer.serve_forever` takes, which only ever asks `is_set()`.
+    """
+    __slots__ = ("_seen",)
+
+    def __init__(self):
+        self._seen = False
+
+    def set(self):
+        self._seen = True
+
+    def is_set(self):
+        return self._seen
+
+
+#: Which signal asked for the stop, for the closing lines in `serve_main`'s
+#: `finally:`. A plain module write, because a signal handler may not take a lock
+#: or call anything (see `_on_term`) — so this cannot be a `threading.Event`, and
+#: it cannot be logged where it happens. None when the process ends for another
+#: reason (a refused bind, a crash).
+_last_signal = None
+
+
 def serve_main(bind_override=None, port_override=None, *,
                tailscale=False, bind_overrides=None) -> int:
     """Bind + serve in the foreground; returns a process exit code.
@@ -1274,6 +1322,9 @@ def serve_main(bind_override=None, port_override=None, *,
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
 
+    global _last_signal
+    _last_signal = None            # this run answers no signal until one lands
+
     # launchd stops the unit with SIGTERM. Without a handler the default action
     # kills us before bridge.shutdown(), orphaning the supervised serve on
     # 9119 with our token — so the next boot pays the stale-token heal.
@@ -1287,22 +1338,58 @@ def serve_main(bind_override=None, port_override=None, *,
     # startup and not just the part after a socket exists. Ordering pinned by
     # tests/test_api_server_entrypoint.py::TestStopHandlersInstallBeforeTheBind.
     import signal as _signal
-    import threading as _threading
 
-    stopping = _threading.Event()    # "a stop was requested"; see serve_forever
-    server = None                    # bound below; the handler may fire first
+    stopping = _StopFlag()         # "a stop was requested"; see serve_forever
 
     def _on_term(signum, frame):
-        # Handlers run on the MAIN thread at a bytecode boundary, so this must
-        # not block: set the flag, and hand the blocking part to a thread —
-        # server.shutdown() waits for serve_forever() to return, so calling it
-        # from the handler would deadlock against the accept loop it stops.
-        # `server` is None until the bind happens: the flag alone is what a
-        # stop-during-startup needs, and serve_main acts on it below.
-        print(f"hscc-api: signal {signum}, shutting down", flush=True)
+        """Cooperative shutdown on SIGTERM/SIGINT: one attribute write, nothing else.
+
+        A signal handler runs ON THE THREAD it interrupts, so its body may not
+        take a lock or call anything: whatever it asks for may already be held by
+        the very thread it stopped, and then the handler never returns — which
+        loses the stop entirely (no flag set, no return from `serve_forever`, no
+        `finally:`, no sidecar teardown, and the supervisor escalates to a
+        SIGKILL that skips that teardown too). Both shapes this body used to have
+        fell into that trap:
+
+          * `print(f"hscc-api: signal {signum}, shutting down", flush=True)` —
+            a write through the stdout `TextIOWrapper`, whose lock the handler
+            takes. (Probed on this interpreter with the stop landing while the
+            same thread was inside a write: it came back, so this file does not
+            claim a measured hang for it. A handler still may not borrow a lock
+            from someone else's design — the line is on the `finally:` below,
+            where a cooperative stop always prints it.)
+          * `stopping.set()` on a `threading.Event`, plus
+            `threading.Thread(target=server.shutdown, daemon=True).start()` to
+            hand the blocking part elsewhere. `Event.set()` takes the event's
+            own non-reentrant lock — which `_MultiServer.serve_forever` is
+            holding on every pass it asks `is_set()`, the state
+            tests/test_api_server_stop_signal.py reproduces and hangs on both
+            signals at the base of this card. And starting a thread takes
+            threading's bookkeeping locks and then waits for the new thread to
+            report itself started, so the handler is no longer bounded by the
+            work it delegated (t_56552ecc measured that one three ways in the
+            sibling plugin).
+
+        What is left is the only thing that is safe here: record which signal
+        arrived (a plain module write) and set the flag (a plain attribute write
+        on a `__slots__` object). `_MultiServer.serve_forever` re-checks the flag
+        on every `poll_interval` pass and `serve_main` asks it before serving, so
+        the stop lands through the one `finally:` that owns the teardown — which
+        is also where the operator's lines about it now live.
+
+        `server.shutdown()` is deliberately not called from here, nor from a
+        helper thread: `BaseServer.shutdown()` waits for the serving loop to
+        return, and on this path the serving loop IS the interrupted thread. The
+        flag makes that loop come back on its own; a call that waits, in a stop
+        path, is how a stop becomes a hang.
+
+        tests/test_api_server_stop_signal.py pins this body to one call — the
+        flag's `set()` — so none of those doors can be reopened by accident.
+        """
+        global _last_signal
+        _last_signal = signum
         stopping.set()
-        if server is not None:
-            _threading.Thread(target=server.shutdown, daemon=True).start()
 
     try:
         _signal.signal(_signal.SIGTERM, _on_term)
@@ -1393,6 +1480,13 @@ def serve_main(bind_override=None, port_override=None, *,
                 print(f"hscc-api: crashed: {exc}", file=sys.stderr)
                 return 1
     finally:
+        # Both lines an operator reads about a stop live HERE, not in the
+        # handler. A cooperative stop always reaches this block; a handler that
+        # never returns from a lock it cannot release prints nothing at all, and
+        # the run then looks like a hang rather than a refused stop. (The shape
+        # this replaced printed the signal line from inside `_on_term`.)
+        if _last_signal is not None:
+            print(f"hscc-api: signal {_last_signal}, shutting down", flush=True)
         clear_api_state()
         if bridge is not None:
             try:
