@@ -169,6 +169,11 @@ def test_start_serve_requires_probe(monkeypatch):
     class _FakeProc:
         poll = lambda self: None
         terminate = lambda self: calls.__setitem__("terminated", True)
+        # start_serve's timeout path now STOPS what it started and waits for it
+        # (a bare terminate left the teardown racing the next start), so the
+        # double models Popen.wait as well. The wait budget it is handed is the
+        # assertion that the stop is bounded, not open-ended.
+        wait = lambda self, timeout=None: calls.__setitem__("waited", timeout)
         returncode = None
 
     monkeypatch.setattr(bridge, "_probe_tcp", fake_probe)
@@ -182,6 +187,7 @@ def test_start_serve_requires_probe(monkeypatch):
     assert bridge.is_serve_up() is False
     assert calls["probe"] > 0
     assert calls["terminated"] is True  # orphan serve was cleaned up
+    assert calls["waited"] == bridge._SHUTDOWN_WAIT_S
 
 
 def test_start_serve_success_sets_up_and_token(monkeypatch):
