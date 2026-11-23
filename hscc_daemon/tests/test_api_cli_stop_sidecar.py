@@ -1036,6 +1036,7 @@ def _wait_serving_child(sandbox, not_pid, timeout=CHILD_READY_BUDGET):
 # the user-reachable path: `hscc api start`, then `hscc api stop`
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.loadstress
 def test_api_stop_tears_the_sidecar_down(sandbox):
     """The defect, from the verb an operator actually types.
 
@@ -1100,6 +1101,7 @@ def test_api_stop_tears_the_sidecar_down(sandbox):
 # the leak guard: a hard kill of the harness's group must take the whole tree
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.loadstress
 def test_a_hard_kill_of_the_harness_group_takes_the_double_forked_server(sandbox):
     """A leg-level hard kill must not be able to orphan `hscc api start`.
 
@@ -1176,6 +1178,7 @@ def test_a_hard_kill_of_the_harness_group_takes_the_double_forked_server(sandbox
         f"leak this card was written to close. {_describe(sandbox)}")
 
 
+@pytest.mark.loadstress
 def test_the_reap_every_teardown_calls_takes_the_serving_childs_sidecar(sandbox):
     """`_reap` must reach the bridge's subprocess, not just the pid it waited on.
 
@@ -1224,6 +1227,7 @@ def test_the_reap_every_teardown_calls_takes_the_serving_childs_sidecar(sandbox)
 # the same exit, with an observable exit code
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
     """A signalled `_serve` must RETURN, so its `finally:` gets to run.
@@ -1285,6 +1289,7 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
         _reap(proc)
 
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
     """A serving process must not inherit its stop signal BLOCKED.
@@ -1349,6 +1354,7 @@ def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
         _reap(proc)
 
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
     """A stop arriving mid-log-write must still tear the sidecar down.

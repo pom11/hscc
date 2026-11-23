@@ -719,6 +719,7 @@ def _resolved_port(out, trail):
 # behaviour: a stop from the state that holds a lock
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_a_stop_landing_inside_the_flag_poll_still_stops(sandbox, sig):
     """The acceptance case: hold the lock, land the stop, expect a clean exit.
@@ -769,6 +770,7 @@ def test_a_stop_landing_inside_the_flag_poll_still_stops(sandbox, sig):
         _reap(proc)
 
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_the_event_shape_is_the_hazard(sandbox, sig):
     """The premise, measured on this interpreter with no hscc code involved.
@@ -804,6 +806,7 @@ def test_the_event_shape_is_the_hazard(sandbox, sig):
         trail.finish()
 
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_a_cooperative_stop_names_its_signal_and_tears_the_sidecar_down(
         sandbox, sig):
@@ -854,6 +857,7 @@ def test_a_cooperative_stop_names_its_signal_and_tears_the_sidecar_down(
         f"alive behind it.\nchild output:\n{out}")
 
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
     """`serve_main` must clear an inherited BLOCK, not just install a handler.
@@ -951,6 +955,7 @@ def _guard_child(sandbox, tag):
                 pass
 
 
+@pytest.mark.loadstress
 def test_every_child_this_file_spawns_leads_its_own_process_group(sandbox):
     """Non-vacuity first: the descendant must exist before ownership means anything.
 
@@ -982,6 +987,7 @@ def test_every_child_this_file_spawns_leads_its_own_process_group(sandbox):
             "would find nothing and every survivor check would pass vacuously")
 
 
+@pytest.mark.loadstress
 def test_killing_the_group_takes_the_descendant_with_it(sandbox):
     """The arm the card asked for, stated as the property it protects.
 
@@ -1003,6 +1009,7 @@ def test_killing_the_group_takes_the_descendant_with_it(sandbox):
             f"tagged processes survived the group kill: {_survivors(tag)}")
 
 
+@pytest.mark.loadstress
 def test_the_sandbox_fixture_reaps_a_child_a_case_never_reaped(tmp_path):
     """The `finally:` in a case is not the last line of defence. The fixture is.
 
