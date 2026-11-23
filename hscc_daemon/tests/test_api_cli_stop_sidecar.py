@@ -361,9 +361,14 @@ if verb == "serve-wedged":
             def _wedged_service_actions():
                 # Announce ENTRY, then block. Writing this from inside the blocked
                 # call is what makes the parent's wait meaningful — see
-                # WEDGE_MARKER_TEXT.
+                # WEDGE_MARKER_TEXT. And NO trailing newline in what it writes:
+                # this template is itself Python source inside a string, so an
+                # escape sequence typed here lands as a real newline in the
+                # GENERATED file — a SyntaxError there, not here, where every arm
+                # of the harness dies at import and each case reports a stalled
+                # child instead. TestTheHarnessIsStillPython compiles it here.
                 with open(_marker, "w") as _fh:
-                    _fh.write("@@WEDGE_ENTERED@@\n")
+                    _fh.write("@@WEDGE_ENTERED@@")
                 while True:
                     _time.sleep(3600)
             _s.service_actions = _wedged_service_actions
@@ -1490,8 +1495,7 @@ class TestTheReportLineItself:
         assert "7.25s" in line, (
             f"the line does not quote the bound it was given: {line!r} — a hard-coded "
             f"number here is how the two entry paths end up promising different waits")
-        import re as _re
-        assert not _re.search(r"\b5(?:\.0)?s", line), (
+        assert not re.search(r"\b5(?:\.0)?s", line), (
             f"the line carries a hard-coded 5s rather than the bound it was handed "
             f"(7.25s): {line!r}")
         # The absent-attribute arm: a caller that cannot say how long it waited
@@ -1509,6 +1513,77 @@ class TestTheReportLineItself:
         """
         line = api_cli._abandoned_listener_report(object(), self._Api())
         assert "listener loop" in line and "None" not in line, line
+
+
+class TestTheHarnessIsStillPython:
+    """Compile the child sources here, where a mistake costs milliseconds.
+
+    `HARNESS`, `FAKE_BRIDGE` and `DUMMY_SIDECAR` are Python source held in
+    strings; nothing in this file's own import checks them, so the first thing to
+    notice a typo is a child that dies at exec. What that looks like from the
+    parent is not a SyntaxError but a case whose child never says anything — and
+    the waits here are deliberately patient (180 s of silence before a verdict),
+    so a stray newline in a template costs three minutes per case and reports a
+    signal handler that never had a process to run in. Measured: one `\\n` inside
+    a nested string literal reddened four cases this way on this very card.
+    """
+
+    @pytest.mark.parametrize("name,source", [
+        ("HARNESS", HARNESS),
+        ("FAKE_BRIDGE", FAKE_BRIDGE),
+        ("DUMMY_SIDECAR", DUMMY_SIDECAR),
+    ])
+    def test_the_child_source_compiles(self, name, source):
+        try:
+            compile(source, f"<{name}>", "exec")
+        except SyntaxError as exc:
+            lines = source.splitlines()
+            where = "\n".join(
+                f"  {n}: {lines[n - 1]}"
+                for n in range(max(1, (exc.lineno or 1) - 2),
+                               min(len(lines), (exc.lineno or 1) + 2) + 1))
+            pytest.fail(
+                f"{name} is not valid Python: {exc.msg} at line {exc.lineno} of "
+                f"the generated file.\n{where}\nFix it here rather than reading "
+                f"it out of a child that dies before it can say anything.")
+
+    def test_the_harness_arms_are_the_ones_the_cases_spawn(self):
+        """Every verb a case asks for must be dispatched by the harness.
+
+        An arm renamed on one side only becomes the failure above in slower form:
+        the child falls through the dispatch and exits without serving, and the
+        parent waits a full stall budget on a server that was never started.
+
+        Two doors, because the harness has two: the named arms, and the tail that
+        hands the verb to the product's own `cmd_api` (that is how `start` and
+        `stop` are reached, and it is the point of those cases — they run the real
+        dispatch). The tail is pinned to exist, or "falls through" would stop
+        meaning anything.
+        """
+        arms = {m.group(1) for m in re.finditer(
+            r'^if verb == "([\w-]+)":', HARNESS, re.MULTILINE)}
+        falls_through = re.search(
+            r"^raise SystemExit\(api_cli\.cmd_api\(\[verb\]", HARNESS,
+            re.MULTILINE)
+        assert falls_through, (
+            "the harness no longer dispatches unmatched verbs through "
+            "`api_cli.cmd_api`, so `start`/`stop` cases would exit without "
+            "running the verb they asked for")
+        # The verbs appear as literals at the call sites; the three helpers are the
+        # only ways a case reaches the harness (`_start_api` wraps `_harness_argv`
+        # because a forking verb must not have its stdout on a pipe).
+        text = Path(__file__).read_text()
+        spawned = {m.group(1) for m in re.finditer(
+            r'(?:_harness_argv|_popen|_run)\(sandbox, "([\w-]+)"', text)}
+        assert spawned, "no case spawns a harness arm any more — this pin is blind"
+        missing = sorted(spawned - arms - {"start", "stop"})
+        assert not missing, (
+            f"cases spawn {missing}, which the harness neither has an arm for nor "
+            f"forwards to `cmd_api`; its arms are {sorted(arms)}")
+        dead = sorted(arms - spawned)
+        assert not dead, (
+            f"the harness still dispatches {dead} but no case spawns it: an arm "
+            f"nothing exercises is a template nothing compiles-checks any more")
 
 
 # --------------------------------------------------------------------------- #
