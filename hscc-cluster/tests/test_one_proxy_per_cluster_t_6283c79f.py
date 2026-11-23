@@ -1,12 +1,18 @@
-"""t_6283c79f — a template may declare at most one ``proxy: true`` family.
+"""t_6283c79f — sparkrun keeps ONE gateway per cache dir, so a second
+``proxy: true`` family can only ever report ``loaded=False`` and its consumers
+get a URL on a port nothing listens on.
 
-WHY. ``install_proxy`` (``cluster_template.py``) is called once per resolved
-family that has a ``proxy_port``, and ``template_intent.resolve`` mints a
-DISTINCT port per proxy family from ``base_proxy_port``. sparkrun does not keep
-one gateway per port — it keeps ONE gateway per cache dir:
+This file PINS the hazard; it does not fix it. The fix is a design decision
+(option (c) below) and is carded separately — see the card comment for the two
+rejected options and why.
+
+WHAT THE CODE DOES TODAY. ``install_proxy`` is called once per resolved family
+that has a ``proxy_port``, and ``template_intent.resolve`` mints a DISTINCT port
+per proxy family from ``base_proxy_port``. sparkrun does not keep one gateway
+per port — it keeps ONE per cache dir:
 
   * ``sparkrun/proxy/_supervisor.py`` ``GatewayState.__init__`` binds
-    ``state_dir = resolve_sparkrun_cache_dir() / "proxy"`` (no port in it), and
+    ``state_dir = resolve_sparkrun_cache_dir() / "proxy"`` (no port in it) and
     ``log_path = state_dir / log_name``;
   * ``is_running()`` reads the PID out of that one shared ``state.yaml`` and
     calls ``process_exists`` — port-agnostic;
@@ -14,20 +20,44 @@ one gateway per port — it keeps ONE gateway per cache dir:
     ``ProxyAlreadyRunning`` for the second family's start *before* comparing
     ports, and ``sparkrun/cli/_proxy.py`` answers that with ``sys.exit(1)``.
 
-So for the second proxy family ``install_proxy`` can only ever return
-``loaded=False``, while ``_proxy_front_for_target`` still writes
-``http://localhost:<that port>/v1`` into consumer configs — a route to a port
-with nothing listening. Eight of the shipped templates are in that shape.
+So the second proxy family's ``install_proxy`` returns ``loaded=False``, apply's
+``proxies/`` step still says ``"status": "ok"``
+(``cluster_template.py`` Step 4 appends it unconditionally) and the apply result
+is ``success: True`` — while ``_proxy_front_for_target`` writes
+``http://localhost:<refused port>/v1`` into consumer configs.
 
-THE GUARD. ``_structural_validate`` rejects a template declaring more than one
-``proxy: true`` family, so ``apply_template``'s pre-flight gate blocks it with a
-named error before any write, stop or start — instead of reporting a silent
-``loaded=False`` under a ``proxies/`` step that says ``"status": "ok"``.
+WHY THE OBVIOUS FIXES ARE WRONG.
+  (a) "validate: at most one ``proxy: true`` family" — implemented, measured,
+      then reverted. It turns 4 existing tests red (two
+      ``test_template_declarations`` fixtures whose families both default to
+      ``proxy: true``, and the v2 parse golden over shipped ``coding-plus-fast``)
+      and, for the 8 shipped templates in this shape, it silently re-aims every
+      ``routing:`` target of the losing family — ``_routing_target_endpoint``
+      falls back to ``units[0].node:units[0].port`` when ``proxy_port is None``,
+      so ``4node/quality``'s ``compaction: family-fast`` stops going through the
+      proxy and becomes a node pin (which is exactly what the flag exists to
+      avoid), and a v4 ``endpoints:`` target under ``uniform_pool`` becomes a
+      hard plan error (``validate_resolved_plan``'s §5 leg). The declaration
+      carries real intent; suppressing it is not a fix.
+  (b) "pass a per-family ``--cache-dir``/instance" — ``sparkrun proxy start``
+      has no such flag (its options are ``--port --host --master-key
+      --hosts/--hosts-file --foreground --no-auto-discover --discovery-backend
+      --discover-interval --discover-removal-grace-sweeps --gateway --restart
+      --clear-cluster --dry-run``), ``gateway_name`` is only a label written
+      into the state file, and the only lever — the cache-dir env override —
+      relocates sparkrun's WHOLE cache dir, so ``install_proxy``'s own
+      ``--cluster hscc`` would fail with "Unknown cluster". Not reachable from
+      hscc.
+
+THE FIX THAT FITS (c): one gateway is the model, so every proxy family must
+resolve to the SAME port — ``resolve`` stops minting a port per family, Step 4
+starts the one gateway once, and the per-family URLs point at the live gateway
+instead of a per-family ghost port. That keeps ``proxy: true`` (and every
+``family-<name>`` target) meaningful and deletes the dead-port class entirely.
 
 Fakes only: ``subprocess.run`` is stubbed by a fake that MODELS sparkrun's
-single-gateway state (one state file per cache dir, a running gateway makes any
-further start exit 1 with the CLI's own wording). No real sparkrun is exec'd and
-the suite's sparkrun fence stays at 0 live-CLI resolutions.
+single-gateway state, so nothing execs sparkrun and the suite's fence stays at
+0 live-CLI resolutions.
 """
 
 import json
@@ -36,8 +66,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
@@ -48,7 +76,26 @@ import template_intent as ti                                     # noqa: E402
 # ── fake topology / cluster.json (TEST-NET-1 only) ─────────────────────────
 
 GATEWAY_IP = "192.0.2.244"
-WORKER_IPS = ["192.0.2.246", "192.0.2.247", "192.0.2.248", "192.0.2.249"]
+WORKER_IPS = ["192.0.2.246", "192.0.2.247", "192.0.2.248"]
+
+# The shipped shape (see 4node/quality.yaml): two proxy families, a routing
+# block whose compaction target is the SECOND one.
+TWO_PROXY_YAML = (
+    "name: two-proxy\nversion: 3\n"
+    "orchestrator:\n  recipe: o.yaml\n  tp: 2\n"
+    f"  nodes: [{GATEWAY_IP}, {WORKER_IPS[0]}]\n"
+    "families:\n"
+    "  - name: coding\n    proxy: true\n    models:\n"
+    "      - recipe: m.yaml\n        tp: 1\n"
+    f"    nodes: [{WORKER_IPS[1]}]\n"
+    "  - name: fast\n    proxy: true\n    models:\n"
+    "      - recipe: m.yaml\n        tp: 1\n"
+    f"    nodes: [{WORKER_IPS[2]}]\n"
+    "routing:\n  delegation: family-coding\n  compaction: family-fast\n"
+)
+
+ONE_PROXY_YAML = TWO_PROXY_YAML.replace(
+    "  - name: fast\n    proxy: true\n", "  - name: fast\n    proxy: false\n")
 
 
 @dataclass
@@ -64,50 +111,12 @@ class FakeTopo:
 
 
 def _topo():
-    return FakeTopo(FakeNode(GATEWAY_IP), [FakeNode(ip) for ip in WORKER_IPS])
+    return FakeTopo(FakeNode(GATEWAY_IP),
+                    [FakeNode(ip) for ip in WORKER_IPS])
 
 
 CLUSTER_OBJ = {"gateway": {"ip": GATEWAY_IP},
                "workers": [{"ip": ip} for ip in WORKER_IPS]}
-
-# One proxy family per declared intent, otherwise the same shape as the
-# known-good fixture in test_apply.py (explicit spans, version 3).
-TWO_PROXY_YAML = (
-    "name: two-proxy\nversion: 3\n"
-    "orchestrator:\n  recipe: o.yaml\n  tp: 2\n"
-    f"  nodes: [{GATEWAY_IP}, {WORKER_IPS[0]}]\n"
-    "families:\n"
-    "  - name: coding\n    proxy: true\n    models:\n"
-    "      - recipe: m.yaml\n        tp: 1\n"
-    f"    nodes: [{WORKER_IPS[1]}]\n"
-    "  - name: fast\n    proxy: true\n    models:\n"
-    "      - recipe: m.yaml\n        tp: 1\n"
-    f"    nodes: [{WORKER_IPS[2]}]\n"
-)
-
-# `proxy:` DEFAULTS to true (``FamilyIntent.proxy: bool = True``), so the extra
-# families must say `proxy: false` EXPLICITLY — a template that merely omits the
-# key has two proxy families and is exactly what the guard rejects. (That this
-# fixture initially omitted it and got blocked is the guard working.)
-ONE_PROXY_YAML = TWO_PROXY_YAML.replace(
-    "  - name: fast\n    proxy: true\n", "  - name: fast\n    proxy: false\n")
-
-# Three families, ONE proxy — the guard must not fire on this shape.
-THREE_FAMILY_ONE_PROXY_YAML = (
-    "name: three-one-proxy\nversion: 3\n"
-    "orchestrator:\n  recipe: o.yaml\n  tp: 2\n"
-    f"  nodes: [{GATEWAY_IP}, {WORKER_IPS[0]}]\n"
-    "families:\n"
-    "  - name: coding\n    proxy: true\n    models:\n"
-    "      - recipe: m.yaml\n        tp: 1\n"
-    f"    nodes: [{WORKER_IPS[1]}]\n"
-    "  - name: fast\n    proxy: false\n    models:\n"
-    "      - recipe: m.yaml\n        tp: 1\n"
-    f"    nodes: [{WORKER_IPS[2]}]\n"
-    "  - name: review\n    proxy: false\n    models:\n"
-    "      - recipe: m.yaml\n        tp: 1\n"
-    f"    nodes: [{WORKER_IPS[3]}]\n"
-)
 
 
 # ── the fake sparkrun: ONE gateway per cache dir ───────────────────────────
@@ -117,13 +126,13 @@ REFUSAL = ("Error: Proxy is already running (PID 4242) on port {port}. "
 
 
 def _single_gateway(tmp_path):
-    """A fake ``subprocess.run`` that models sparkrun's gateway state.
+    """A fake ``subprocess.run`` modelling sparkrun's gateway state.
 
     One state file = one cache dir's ``proxy/state.yaml``: the first ``proxy
     start`` records the gateway and exits 0; every later start sees a live
     gateway in that SAME file and exits 1 with the CLI's own refusal, whatever
     ``--port`` it was given (that is what ``is_running()`` being port-agnostic
-    means). ``--cache-dir`` / ``--instance`` are deliberately not honoured: the
+    means). ``--cache-dir`` / ``--instance`` are deliberately not honoured — the
     real CLI has no such flag, so a test cannot pass one either.
 
     Returns ``(state_file, calls, run)`` — patch ``subprocess.run`` with ``run``.
@@ -152,11 +161,10 @@ def _family(name, port):
                         1, 1)])
 
 
-# ── 1. the sparkrun-side fact the guard rests on ───────────────────────────
+# ── 1. the constraint itself, through install_proxy ────────────────────────
 
 class TestSparkrunKeepsOneGateway:
-    """Green before AND after the guard: this is the constraint being enforced,
-    exercised through ``install_proxy`` itself."""
+    """Nothing here depends on any hscc fix: this is what sparkrun does."""
 
     def test_second_proxy_family_is_refused_and_reports_loaded_false(
             self, tmp_path, monkeypatch):
@@ -169,15 +177,15 @@ class TestSparkrunKeepsOneGateway:
 
         assert first["loaded"] is True, first
         assert second["loaded"] is False, second
-        assert "already running" in (second["error"] or "").lower()
-        # and the port that was refused is the one the second family was given
+        assert "already running" in (second["error"] or "").lower(), second
         assert second["port"] == 4001
+        # the refusal names the FIRST family's port: liveness is not per port
         assert state.read_text() == "4000"
 
     def test_install_proxy_never_asks_for_a_separate_gateway_instance(
             self, tmp_path, monkeypatch):
-        """No ``--cache-dir`` / ``--instance`` in the argv — the CLI has no such
-        flag, which is why the fix cannot be 'pass a per-family instance'."""
+        """Two starts, two ports, no per-instance flag — which is why the fix
+        cannot be 'hand sparkrun a second instance'."""
         monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
         state, calls, run = _single_gateway(tmp_path)
         monkeypatch.setattr(subprocess, "run", run)
@@ -192,13 +200,12 @@ class TestSparkrunKeepsOneGateway:
             assert "--cache-dir" not in a and "--instance" not in a, a
             assert "--restart" not in a, "apply must not restart a live gateway"
 
-    def test_consumer_url_for_the_second_family_points_at_the_dead_port(
+    def test_consumer_url_for_the_second_family_points_at_a_dead_port(
             self, tmp_path, monkeypatch):
-        """The consequence, from the SAME resolver apply uses.
+        """The damage, from the SAME resolver apply uses.
 
-        ``_proxy_front_for_target`` answers a ``family-<name>`` target with the
-        family's own ``proxy_port`` — so a consumer gets a URL on the port whose
-        start the fake gateway state refused."""
+        ``_proxy_front_for_target`` answers ``family-<name>`` with that family's
+        own ``proxy_port`` — here a port whose start the gateway refused."""
         monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
         state, calls, run = _single_gateway(tmp_path)
         monkeypatch.setattr(subprocess, "run", run)
@@ -214,17 +221,19 @@ class TestSparkrunKeepsOneGateway:
         resolved = ct._proxy_front_for_target("family-fast", plan)
         assert resolved is not None
         assert resolved[0] == "http://localhost:4001/v1", resolved
-        # the single recorded gateway serves the FIRST family's port only
-        assert state.read_text() == "4000"
+        assert state.read_text() == "4000", "no gateway ever bound 4001"
 
 
-# ── 2. the guard: the apply gate blocks a two-proxy template ───────────────
+# ── 2. the hazard pin: apply reports success over the dead port ─────────────
 
-class TestApplyBlocksMoreThanOneProxyFamily:
-    """RED before the guard: apply walks into Step 4, gets ``loaded=False`` for
-    the second family, and still reports success under a ``proxies/`` step
-    whose status is ``"ok"``. GREEN after: the gate blocks with a named error
-    before anything is written, stopped or started."""
+class TestApplyOverADeadProxyPort:
+    """WHAT TODAY'S APPLY DOES, pinned so the fix cannot land silently.
+
+    Every assertion here is a BUG (see the module docstring, option (c)). When
+    the one-gateway-per-cluster fix lands, this class is expected to change:
+    one ``proxy start`` argv, no ``loaded=False``, and ``family-fast`` resolving
+    to the single live port. If it passes unchanged after that change, the fix
+    did not reach the apply path."""
 
     def _setup(self, tmp_path, monkeypatch, name, yaml_text):
         tdir = tmp_path / "templates"
@@ -256,97 +265,48 @@ class TestApplyBlocksMoreThanOneProxyFamily:
                                                     fits=True))
         state, calls, run = _single_gateway(tmp_path)
         monkeypatch.setattr(subprocess, "run", run)
-        prov = {"n": 0}
+        monkeypatch.setattr(ct, "_provision_models",
+                            lambda plan, **k: {"status": "ok",
+                                               "provisioned": [],
+                                               "note": "test"})
+        return ct, {"calls": calls, "state": state, "hscc": hscc}
 
-        def _prov(plan, **k):
-            prov["n"] += 1
-            return {"status": "ok", "provisioned": [], "note": "test"}
-        monkeypatch.setattr(ct, "_provision_models", _prov)
-        return ct, {"calls": calls, "state": state, "prov": prov, "hscc": hscc}
+    def _proxy_step(self, res):
+        return next(s for s in res["steps"] if s["step"] == "proxies/")
 
-    def test_apply_blocks_and_starts_nothing(self, tmp_path, monkeypatch):
-        _, rig = self._setup(tmp_path, monkeypatch, "two-proxy", TWO_PROXY_YAML)
-        res = ct.apply_template("two-proxy", confirm=True)
-
-        # (``res.get`` so a pre-guard run FAILS HERE with the whole apply report
-        # in the message — that report is the evidence: two proxy start argv,
-        # the second family loaded=False, and a proxies/ step saying "ok".)
-        assert res.get("status") == "blocked", res
-        assert res["success"] is False
-        # a NAMED error, not a silent per-family loaded=False
-        err = " || ".join(res["errors"])
-        assert "coding" in err and "fast" in err, err
-        assert "proxy: true" in err, err
-        assert "one gateway" in err.lower(), err
-        # blocked BEFORE any stop / start / provision / write
-        assert rig["prov"]["n"] == 0
-        assert [a for a in rig["calls"]
-                if a[:3] == ["sparkrun", "proxy", "start"]] == [], rig["calls"]
-        assert not (rig["hscc"] / "serving.json").exists()
-        assert not (rig["hscc"] / "models.json").exists()
-
-    def test_gate_is_offline_and_matches_standalone_validate(
+    def test_apply_reports_success_though_the_second_proxy_never_loaded(
             self, tmp_path, monkeypatch):
-        """The rule is a property of the TEMPLATE, so the offline structural
-        layer must catch it — `hscc template validate --structural-only` and
-        apply's own gate then agree (apply's errors are exactly validate's)."""
-        ct_mod, _ = self._setup(tmp_path, monkeypatch, "two-proxy",
-                                TWO_PROXY_YAML)
-        val = ct_mod.validate_template("two-proxy", structural_only=True)
+        ct_mod, rig = self._setup(tmp_path, monkeypatch, "two-proxy",
+                                  TWO_PROXY_YAML)
         res = ct_mod.apply_template("two-proxy", confirm=True)
 
-        assert val["ok"] is False and val["structural"]["ok"] is False, val
-        assert any("proxy: true" in e for e in val["structural"]["errors"]), val
-        assert res["errors"] == (val["structural"]["errors"]
-                                 + val["placement"]["errors"])
+        # BUG: the apply succeeds.
+        assert res["success"] is True, res
+        starts = [a for a in rig["calls"]
+                  if a[:3] == ["sparkrun", "proxy", "start"]]
+        # BUG: two starts for one gateway, on two distinct ports.
+        assert [a[a.index("--port") + 1] for a in starts] == ["4000", "4001"]
+        step = self._proxy_step(res)
+        # BUG: the step calls itself ok while a family did not load.
+        assert step["status"] == "ok", step
+        loaded = {d["port"]: d["loaded"] for d in step["details"]}
+        assert loaded == {4000: True, 4001: False}, step
+        assert any(d["port"] == 4001 and "already running"
+                   in (d["error"] or "").lower() for d in step["details"]), step
+        # and the gateway that exists is only the first family's
+        assert rig["state"].read_text() == "4000"
 
-    def test_one_proxy_family_still_applies(self, tmp_path, monkeypatch):
-        """The guard must not fire on the deployed shape (exactly one proxy)."""
+    def test_single_proxy_template_is_the_control(
+            self, tmp_path, monkeypatch):
+        """The deployed shape (one proxy family) is unaffected: one start, one
+        loaded detail. The bug is exactly the second family."""
         ct_mod, rig = self._setup(tmp_path, monkeypatch, "one-proxy",
                                   ONE_PROXY_YAML)
         res = ct_mod.apply_template("one-proxy", confirm=True)
 
         assert res["success"] is True, res
-        assert rig["prov"]["n"] == 1
         starts = [a for a in rig["calls"]
                   if a[:3] == ["sparkrun", "proxy", "start"]]
         assert len(starts) == 1, starts
-        assert starts[0][starts[0].index("--port") + 1] == "4000"
-
-    def test_three_families_one_proxy_still_applies(self, tmp_path, monkeypatch):
-        ct_mod, rig = self._setup(tmp_path, monkeypatch, "three-one-proxy",
-                                  THREE_FAMILY_ONE_PROXY_YAML)
-        res = ct_mod.apply_template("three-one-proxy", confirm=True)
-
-        assert res["success"] is True, res
-        assert len([a for a in rig["calls"]
-                    if a[:3] == ["sparkrun", "proxy", "start"]]) == 1
-
-
-# ── 3. the shipped template library must be honest about the rule ──────────
-
-def test_no_shipped_template_declares_two_proxy_families():
-    """The census the guard is enforced over.
-
-    Counted through the repo's own intent parser, NOT by grepping
-    ``proxy: true``: ``FamilyIntent.proxy`` defaults to **true**, so a template
-    whose extra families simply omit the key also declares two proxy families
-    and must be caught here."""
-    tdir = PLUGIN_DIR / "templates"
-    offenders = []
-    for path in sorted(tdir.rglob("*.yaml")):
-        import yaml
-        try:
-            raw = yaml.safe_load(path.read_text()) or {}
-        except Exception:                                     # noqa: BLE001
-            continue
-        if not isinstance(raw.get("families"), list):
-            continue
-        tpl = ct._ti().ClusterTemplate.from_dict(raw)
-        names = [f.name for f in tpl.families if f.proxy]
-        if len(names) > 1:
-            offenders.append(f"{path.relative_to(tdir)}: {names}")
-    assert offenders == [], (
-        f"{len(offenders)} shipped template(s) declare more than one proxy "
-        "family, which sparkrun cannot serve (one gateway per cache dir):\n  "
-        + "\n  ".join(offenders))
+        step = self._proxy_step(res)
+        assert [d["loaded"] for d in step["details"]] == [True], step

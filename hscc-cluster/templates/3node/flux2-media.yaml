@@ -51,4 +51,4 @@ families:
         kind: video
         gpu_memory_utilization: 0.70
     workers: remaining
-    proxy: false  # one gateway per cluster: the first proxy family owns it
+    proxy: true
