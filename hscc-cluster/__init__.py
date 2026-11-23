@@ -149,11 +149,21 @@ _ORCH_TOOLS = [
 
 
 def register(ctx) -> None:
-    for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
-                                                 + _HEAL_TOOLS + _FLEET_TOOLS
-                                                 + _TEMPLATE_TOOLS + _ORCH_TOOLS):
-        ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
-                          handler=_stringify(handler), emoji=emoji, description=desc)
+    # R3/D-B gate (t_e98c6ad4, docs/audits/2026-11-23-main-only-surface.md §6):
+    # the cluster TOOL catalog registers only where the home resolves to <main>
+    # — R3 tightened D-B so the operator/gateway root home gets the wedge
+    # VERBS (hscc-commands) but no tool catalog for a model chatting there.
+    # Every other home still loads this plugin, because the
+    # hooks below are worker/dispatcher-lane (audit §3.2) — the [budget] note,
+    # the per-profile tool ledger and the kanban completion/blocked observers.
+    # Hermes has no hooks-vs-tools split (audit §7 G-1), so the split is made
+    # here; hooks always register.
+    if orch_message.cluster_tools_allowed(ctx):
+        for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
+                                                     + _HEAL_TOOLS + _FLEET_TOOLS
+                                                     + _TEMPLATE_TOOLS + _ORCH_TOOLS):
+            ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
+                              handler=_stringify(handler), emoji=emoji, description=desc)
     # WS4: on kanban re-dispatch, post an idempotent-resume note so the worker
     # continues from prior branch state instead of redoing finished work.
     if hasattr(ctx, "register_hook"):
