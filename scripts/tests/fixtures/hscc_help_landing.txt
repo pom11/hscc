@@ -1,4 +1,4 @@
-HSCC — Hermes Spark Cluster Control   v2.17.2
+HSCC — Hermes Spark Cluster Control   v2.17.3
 Turn a DGX Spark GPU cluster into a self-running fleet of AI agents.
 Usage:  hscc <command> [args]        hscc help <command>   for details
 Daemon control
@@ -28,8 +28,10 @@ Health & monitoring
       Show autoscale decision from current queue depth (read-only)
   escalate
       Show pending failure escalations (dry-run, no mutations)
-  heal-clear <node>    Clear one node's heal-breaker strikes (mutates)
-  heal-status          List heal-breaker strikes per node (read-only)
+  heal-clear <node>
+      Clear one node's heal-breaker strikes (mutates; not /heal)
+  heal-status
+      List heal-breaker strikes per node (read-only; not /heal)
 
 Cluster & templates
   cluster status       Running workloads + idle hosts
@@ -61,7 +63,8 @@ Cluster & templates
       Local merge queue: status list add remove pause resume enable disable
   cards monitor [--live] One live panel per running card, streaming its worker
   main start|status|wakeups Main orchestrator pane and daemon wake-up schedule
-  orch inject <p> "<msg>" Inject into a running Hermes REPL pane (tmux)
+  orch inject <p> "<msg>"
+      Inject into a running Hermes REPL pane (tmux; not orch_message)
   orch waker status|enable|disable
       The built-in orchestrator waker (daemon-resident)
   node pause <host> [flags] Park one node; it asks before anything stops

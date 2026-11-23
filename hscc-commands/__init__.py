@@ -222,7 +222,12 @@ def cmd_cluster(raw_args):
 
 
 def cmd_orch_restart(raw_args):
-    """Restart the orchestrator vLLM on its node. Confirm-first."""
+    """Restart the orchestrator vLLM on its node. Confirm-first.
+
+    Naming (F7): despite the prefix this has nothing to do with `hscc orch
+    inject` (which types into a live REPL pane) or the `orch_message` agent
+    tool (which queues a nudge between orchestrators). It stops and relaunches
+    one serving unit."""
     units = cmdlib.read_units()
     orch = cmdlib.orchestrator_unit(units)
     if not orch:
@@ -341,14 +346,20 @@ def cmd_status(raw_args):
 
 def cmd_heal(raw_args):
     """Manual healing pass: report unhealthy workers; confirm-first restart.
-    Orchestrator wedge → advise /cluster-restart (template recovery)."""
+    Orchestrator wedge → advise /cluster-restart (template recovery).
+
+    Naming (F7): this heals worker SERVING. It is a different operation from
+    `hscc heal-status` / `hscc heal-clear`, which read and clear the daemon's
+    heal-breaker strike ledger — restarting workers never clears a strike."""
     units = cmdlib.read_units()
     orch = cmdlib.orchestrator_unit(units)
     workers = cmdlib.worker_units(units)
     unhealthy = [w for w in workers if not cmdlib._curl_model(cmdlib.unit_node(w))]
     orch_down = orch and not cmdlib._curl_model(cmdlib.unit_node(orch))
 
-    lines = ["🩺 *HSCC heal*", ""]
+    lines = ["🩺 *HSCC heal*",
+             "Heals worker serving. For heal-breaker strikes: `hscc heal-status`.",
+             ""]
     if orch_down:
         lines.append(f"⚠️ Orchestrator @ {cmdlib.unit_node(orch)} looks DOWN/wedged.")
         lines.append("  → run `/cluster-restart confirm` (re-applies the template).")
@@ -961,7 +972,8 @@ def register(ctx) -> None:
     )
     ctx.register_command(
         name="orch-restart", handler=cmd_orch_restart,
-        description="Restart the orchestrator vLLM (confirm-first).",
+        description="Restart the orchestrator vLLM (confirm-first). Not `hscc orch inject` "
+                    "(types into a pane) and not the `orch_message` tool (a queued nudge).",
         args_hint="confirm",
     )
     ctx.register_command(
@@ -996,7 +1008,8 @@ def register(ctx) -> None:
     )
     ctx.register_command(
         name="heal", handler=cmd_heal,
-        description="Heal unhealthy workers; advise on orchestrator wedge (confirm-first).",
+        description="Heal unhealthy workers; advise on orchestrator wedge (confirm-first). "
+                    "Not `hscc heal-status`: that lists heal-breaker strikes.",
         args_hint="confirm",
     )
     ctx.register_command(
