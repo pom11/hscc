@@ -139,7 +139,9 @@ _ORCH_TOOLS = [
     ("orch_message", orch_message.ORCH_MESSAGE_SCHEMA, orch_message.orch_message, "✉️",
      "Nudge another orchestrator profile (queue-only, signed '[from <you>]', "
      "audited). Both ends must be *-orch; never interrupts a running turn; "
-     "rate-limited per pair per hour."),
+     "rate-limited per pair per hour. Not `hscc orch inject` (types into a "
+     "live pane), not `/orch-restart` (restarts the orchestrator vLLM), not "
+     "the `POST /v1/orchestrator/chat` route (one chat turn, by job id)."),
 ]
 
 

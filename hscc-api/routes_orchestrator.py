@@ -1,6 +1,10 @@
 """HSCC HTTP API — Phase C2: orchestrator chat (job-based).
 
 The conversational endpoint: talk to a project's orchestrator DIRECTLY.
+Naming (F7): this route is one of four things that answer to "orch" and the
+only one that is a chat turn — `hscc orch inject` types into a live REPL pane,
+the `orch_message` agent tool queues a nudge between orchestrators, and the
+`/orch-restart` slash command restarts the orchestrator's vLLM unit.
 Unlike the deterministic structured ops (A2-A4), this is
 the one endpoint where an operator can say "go build X" and the orchestrator
 decomposes it and dispatches real work onto its board. Because it can cause an

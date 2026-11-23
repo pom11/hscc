@@ -378,9 +378,9 @@ def _get_help_text():
         # Heal verbs are live TOP_LEVEL_COMMANDS (the breaker's alert names
         # `hscc heal-clear`), so they are listed on the primary surface too.
         *_entry("heal-clear <node>",
-                "Clear one node's heal-breaker strikes (mutates)"),
+                "Clear one node's heal-breaker strikes (mutates; not /heal)"),
         *_entry("heal-status",
-                "List heal-breaker strikes per node (read-only)"),
+                "List heal-breaker strikes per node (read-only; not /heal)"),
     ])
 
     cluster = _section("Cluster & templates", [
@@ -431,7 +431,7 @@ def _get_help_text():
         # COMMAND_HELP, so the main banner must show it too (F5 surface-honesty
         # rule: a live command must not hide from the primary help surface).
         *_entry('orch inject <p> "<msg>"',
-                "Inject into a running Hermes REPL pane (tmux)"),
+                "Inject into a running Hermes REPL pane (tmux; not orch_message)"),
         # orch-waker W3 (t_2b34b5c7): the same F5 rule — `hscc orch waker …`
         # is live, so it is advertised on the primary surface too.
         *_entry("orch waker status|enable|disable",
@@ -618,6 +618,10 @@ COMMAND_HELP = {
             "  Subcommands: waker status|enable|disable\n"
             "  (the daemon-resident orchestrator waker; status also\n"
             "  takes [--json])\n"
+            "  inject TYPES into a live tmux pane. Distinct from the\n"
+            "  orch_message tool (queue-only nudge), /orch-restart\n"
+            "  (restarts the orchestrator vLLM) and the API route\n"
+            "  POST /v1/orchestrator/chat (one chat turn, by job id).\n"
             "  Usage: hscc orch <subcommand> [args]",
     # node group (card t_c28f4f14): the operator surface for the node-pause
     # overlay. Every line authored <=76 for the same (B)-gate reason as
@@ -659,10 +663,12 @@ COMMAND_HELP = {
     # never quote that wording — "clears nothing" is the contract B4 proves.
     "heal-clear": "Clear one node's heal-breaker strikes (MUTATES the ledger).\n"
                   "Usage: hscc heal-clear <node> [reason...]\n"
-                  "  --help/-h prints this help and clears nothing. See: hscc heal-status",
+                  "  --help/-h prints this help and clears nothing. See: hscc heal-status\n"
+                  "  NOT the /heal slash command: that restarts unhealthy workers.",
     "heal-status": "List heal-breaker strikes per node (read-only).\n"
                    "Usage: hscc heal-status\n"
-                   "  --help/-h prints this help. See also: hscc heal-clear <node>",
+                   "  --help/-h prints this help. See also: hscc heal-clear <node>\n"
+                   "  NOT the /heal slash command: that restarts unhealthy workers.",
 }
 
 
@@ -1878,7 +1884,10 @@ _ORCH_GROUP_ENTRIES = [
      "bracketed paste; exactly one pane for the profile or refuse). Flags: "
      "[--mode auto|plain|queue|steer] [--dry-run] [--pane <target>] [--json]. "
      "--dry-run resolves the pane and reports target/busy/verb, sending "
-     "nothing."),
+     "nothing. Four things answer to \"orch\" and only one is this verb: "
+     "`orch_message` is the agent tool that queues a signed nudge between "
+     "orchestrators, `/orch-restart` restarts the orchestrator vLLM, and "
+     "`POST /v1/orchestrator/chat` runs one chat turn by job id."),
     # orch-waker W3 (t_2b34b5c7): the operator surface for the daemon-resident
     # waker. Three verbs on one line — the group entry is the help for all of
     # them, so the F5 surface-honesty rule (a live verb must not hide from the
