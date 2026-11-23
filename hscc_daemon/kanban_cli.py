@@ -112,6 +112,14 @@ pass --older-than 0 for ALL non-terminal cards.
       done.
 
 '--theme <name>' selects the human palette.""" % DEFAULT_STALE_DAYS,
+    # Audit F8 (docs/audits/2026-11-23-agent-surface.md:158) named this verb's
+    # honest situation: the SAME read already has a route door, but under a
+    # different name (`GET /v1/kanban/running`), and nothing on the monitor
+    # surface said so. The pointer below is the fix — a name, not a new door:
+    # no tool and no mutation was invented for `kanban monitor` (the row's
+    # --live loop is a TTY panel; `kanban pause/resume/paused/enforce` stay
+    # CLI-only per decision D6). Pinned by
+    # hscc-api/tests/test_kanban_monitor_route_pointer.py.
     "monitor": """\
 hscc kanban monitor [--live] [--interval <s>] [--board <slug>] [--json]
 
@@ -120,6 +128,10 @@ worker, run time, heartbeat age), ready cards waiting for a slot,
 per-board counts by status, and the last hour's outcomes. The
 header shows the global kanban.max_in_progress slots in use.
 Read-only: never claims, promotes or archives.
+
+Route parity: GET /v1/kanban/running answers this same read
+              from the same kanban_live collect pass, for a
+              caller with no TTY. Read-only there too.
 
   --live          refresh until Ctrl-C (default every 5s)
   --interval <s>  refresh period for --live (whole seconds, >= 1)
