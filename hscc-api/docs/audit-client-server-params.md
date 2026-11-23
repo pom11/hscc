@@ -53,7 +53,7 @@ satisfied or correctly optional-defaulted.
 | POST /v1/cluster/stop | container_id | routes_actions.py:334 (`handle_cluster_stop`) |
 | POST /v1/sessions/{id}/retire | profile | routes_sessions.py:254 (`handle_sessions_retire`) |
 | POST /v1/sessions/{id}/compact | profile | routes_sessions.py:293 (`handle_sessions_compact`) |
-| POST /v1/orchestrator/chat | prompt | routes_orchestrator.py:1974-1979 (`_validate_prompt`) |
+| POST /v1/orchestrator/chat | prompt | routes_orchestrator.py:1978-1986 (`_validate_prompt`) |
 
 Posts that require only `confirm` (merge, autodown enable/disable/wake/cancel,
 kanban recover, cluster up/down, triggers run, escalate) are covered by the
