@@ -367,6 +367,169 @@ def _ensure_toolsets(cfg, toolsets):
     return added
 
 
+# ── the main-only cluster surface (card t_e98c6ad4) ──────────────────────────
+#
+# SOT: docs/audits/2026-11-23-main-only-surface.md §6 + the driver ruling
+# (~/fleet-check/verdict-main-only.txt). Three of its findings decide what
+# bootstrap may write:
+#
+#   * A Hermes profile is a SEPARATE root — there is no root→profile overlay
+#     (§2), so ``enable()`` wiring the root config wires nothing else.
+#   * ``_migrate_to_21`` (hermes_cli/config_migrations.py:328-347) writes
+#     ``plugins.enabled`` = EVERY manifest-bearing dir under
+#     ``$HERMES_HOME/plugins/`` for any config that LACKS the key. The audit
+#     measured the key absent in 0 of 52 profile configs while every one of
+#     those homes carries 21 plugin dirs: the next migration that touches a
+#     profile silently hands it the whole cluster surface. Writing an explicit
+#     value is what inoculates a home (R5) — that is the landmine this section
+#     defuses, and it is the one part of §6 that is NOT belt-and-braces.
+#   * The tier itself is resolved, never spelled (D-A): ``hscc-roles/main_orch``
+#     owns which home is ``<main>``, and every other home keeps `hscc-cluster`
+#     alone so its six hooks — the worker/dispatcher lanes — stay alive (D-C).
+#
+# Escape hatch for an operator who wants the old flat shape back:
+# ``HSCC_CLUSTER_PLUGINS_MAIN_ONLY=0`` (tiering off, nothing pruned).
+CLUSTER_PLUGINS_MAIN_ONLY = os.environ.get(
+    "HSCC_CLUSTER_PLUGINS_MAIN_ONLY", "1").strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
+def _load_main_orch():
+    """Reach ``hscc-roles/main_orch.py`` — the resolver D-A requires — or None.
+
+    The same loader shape as :func:`_compaction_cap` one screen below: the
+    deployed payload ships ``hscc-roles`` next to ``hscc-bootstrap``, so the
+    resolver is *reached* rather than copied. ``None`` (no file, no PyYAML, any
+    import failure) makes the tier fail open to the flat :data:`HSCC_PLUGINS`
+    shape: bootstrap must never half-wire a fleet because a resolver is
+    missing, and never widen one either — the flat shape is the pre-existing
+    state, which is why the plugins carry their own registration gate
+    (slice 2, ``main_orch.plugin_surface_allowed``).
+    """
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "hscc-roles", "main_orch.py")
+    try:
+        spec = importlib.util.spec_from_file_location("_enable_plugins_main_orch", path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:  # noqa: BLE001 - a missing resolver is a fallback, not an error
+        return None
+
+
+def _plugins_tier_for_home(home_dir):
+    """``(tier_label, plugin_names)`` for the Hermes home at ``home_dir``.
+
+    ``None`` when the tier cannot be resolved (escape hatch off, or no resolver
+    on the path) — callers then keep the flat :data:`HSCC_PLUGINS` shape.
+
+    The names come from ``main_orch.plugins_for_home`` — the ONE resolver — and
+    the label is derived from its answer purely for reporting.
+    """
+    if not CLUSTER_PLUGINS_MAIN_ONLY:
+        return None
+    mod = _load_main_orch()
+    if mod is None:
+        return None
+    home = os.path.abspath(os.path.expanduser(str(home_dir)))
+    try:
+        names = tuple(mod.plugins_for_home(home=home))
+        if names == tuple(mod.CLUSTER_PLUGINS):
+            label = "root" if mod.is_root_home(home) else os.path.basename(home)
+        else:
+            label = os.path.basename(home)
+        return label, names
+    except Exception:  # noqa: BLE001 - unresolvable -> flat shape, never a guess
+        return None
+
+
+def _prune_cluster_plugins(cfg, want):
+    """Drop HSCC's OWN cluster plugins this home must not load; return them.
+
+    Narrow on purpose: only names in :data:`HSCC_PLUGINS` are ever removed, so
+    a third-party entry an operator enabled (the media provider key
+    ``video_gen/openai_compat`` that ``install_payload`` mentions, anything
+    else) survives untouched, as does every other key under ``plugins:``. What
+    gets removed is HSCC taking back the surface HSCC put there — and the
+    ruling is explicit that only ``<main>`` may hold ``hscc-commands`` and
+    ``sparkrun-hermes``. The names are reported, never quietly dropped.
+    """
+    plug = cfg.get("plugins")
+    if not isinstance(plug, dict):
+        return []
+    enabled = plug.get("enabled")
+    if not isinstance(enabled, list):
+        return []
+    drop = {p for p in HSCC_PLUGINS} - {p for p in want}
+    pruned = [p for p in enabled if p in drop]
+    if not pruned:
+        return []
+    plug["enabled"] = [p for p in enabled if p not in drop]
+    return pruned
+
+
+def _write_plugins_tier(cfg, home_dir, plugins=HSCC_PLUGINS):
+    """Apply the §6 shape to one config dict. Returns ``(added, pruned, tier)``.
+
+    ``plugins`` still decides which names may be ADDED (callers override it),
+    but a name HSCC owns and the tier forbids is neither added nor kept.
+    """
+    tier = _plugins_tier_for_home(home_dir)
+    want = list(plugins)
+    if tier is not None:
+        allow, own = set(tier[1]), set(HSCC_PLUGINS)
+        want = [p for p in want if p not in own or p in allow]
+    added = _ensure_plugins_enabled(cfg, want)
+    pruned = _prune_cluster_plugins(cfg, tier[1] if tier is not None else HSCC_PLUGINS)
+    return added, pruned, (tier[0] if tier is not None else "flat")
+
+
+def ensure_plugins_tier_everywhere(home=None):
+    """Write an explicit ``plugins.enabled`` into the root config AND every profile.
+
+    The root home and ``<main>`` get :data:`HSCC_PLUGINS`; every other profile
+    home gets the hooks-only tier (``hscc-cluster`` alone). Same tree walk, same
+    discipline as :func:`ensure_goal_judge_everywhere`: the root is derived from
+    the argument — NEVER from ambient ``HERMES_HOME``, because a dispatched
+    worker carries a profile-scoped home and an env-derived sweep would rewrite
+    the live tree from a test (the t_267f9d88 class); a config that does not
+    exist is Hermes' to create, not ours; a file is backed up and rewritten only
+    when something actually changes, so a re-run is a no-op.
+
+    Returns ``{path: {"tier", "added", "pruned"}}`` — empty in the steady state.
+    """
+    root = backup_util._hermes_root(home or os.environ.get("HERMES_HOME")
+                                    or os.path.expanduser("~/.hermes"))
+    import yaml                                    # file-local convention (see enable())
+    results = {}
+    targets = [os.path.join(root, "config.yaml")]
+    profiles_dir = os.path.join(root, "profiles")
+    if os.path.isdir(profiles_dir):
+        for name in sorted(os.listdir(profiles_dir)):
+            targets.append(os.path.join(profiles_dir, name, "config.yaml"))
+    for path in targets:
+        if not os.path.isfile(path):
+            continue                      # Hermes owns fresh profile creation
+        try:
+            with open(path) as fh:
+                cfg = yaml.safe_load(fh) or {}
+        except Exception:
+            continue                      # unreadable/corrupt: Hermes' problem, not ours
+        if not isinstance(cfg, dict):
+            continue
+        added, pruned, tier = _write_plugins_tier(cfg, os.path.dirname(path))
+        if not added and not pruned:
+            continue
+        backup_util.backup_file(path)
+        with open(path, "w") as fh:
+            yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
+        results[path] = {"tier": tier, "added": added, "pruned": pruned}
+    return results
+
+
 def _ensure_kanban_routing(cfg):
     """Route catch-all kanban work to a worker + size concurrency. Returns the
     keys changed.
@@ -1144,7 +1307,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
            hooks_source=None) -> dict:
     """Ensure HSCC plugins + toolsets + fleet routing + hooks are wired.
 
-    Returns {"plugins": [...], "toolsets": [...], "kanban": [...], "delegation":
+    Returns {"plugins": [...], "plugins_pruned": [...], "plugins_homes": {path: {...}},
+    "toolsets": [...], "kanban": [...], "delegation":
     [...], "compaction": [...], "fallback": [...], "bitwarden": [...],
     "prompt_caching": [...], "dashboard": [...], "multiplex": [...], "hooks": [...],
     "worktree": [...], "hooks_file": {...}} of what
@@ -1165,7 +1329,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             os.path.dirname(os.path.abspath(__file__)), "hooks"
         )
 
-    empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
+    empty = {"plugins": [], "plugins_pruned": [], "toolsets": [], "kanban": [],
+             "delegation": [],
              "compaction": [], "text_aux": [], "goal_judge": [],
              "goal_judge_profiles": [], "fallback": [],
              "bitwarden": [],
@@ -1185,7 +1350,12 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     if not isinstance(cfg, dict):
         return empty
 
-    added_plugins = _ensure_plugins_enabled(cfg, plugins)
+    # The tier itself is reported per home by the sweep below (`plugins_homes`);
+    # the home this call targets shows its answer in `plugins`/`plugins_pruned`,
+    # so the result dict stays "every value is a changed-list" (the contract
+    # test_fully_wired_is_noop pins) apart from the two named dict keys.
+    added_plugins, pruned_plugins, _tier = _write_plugins_tier(
+        cfg, os.path.dirname(os.path.abspath(config_path)), plugins)
     added_toolsets = _ensure_toolsets(cfg, toolsets)
     changed_kanban = _ensure_kanban_routing(cfg)
     changed_worktree = _ensure_worktree_placement(cfg)
@@ -1224,7 +1394,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             file=sys.stderr,
         )
 
-    if (added_plugins or added_toolsets or changed_kanban or changed_worktree
+    if (added_plugins or pruned_plugins or added_toolsets or changed_kanban
+            or changed_worktree
             or changed_delegation or changed_compaction or changed_text_aux
             or changed_goal_judge
             or changed_fallback or changed_bitwarden or changed_prompt_caching
@@ -1248,7 +1419,19 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     sweep_root = backup_util._hermes_root(os.path.dirname(os.path.abspath(config_path)))
     gj_profiles = ensure_goal_judge_everywhere(home=sweep_root)
 
-    return {"plugins": added_plugins, "toolsets": added_toolsets,
+    # R5: the _migrate_to_21 landmine is defused per HOME, not per file, so the
+    # sweep walks the whole tree. It runs only when the config we were pointed at
+    # IS the root of that tree — which is exactly bootstrap's path (``main()``
+    # resolves through ``_root_home``). An operator who deliberately wires ONE
+    # profile with ``--home`` gets that profile's tier, applied above, and not a
+    # rewrite of the other homes they did not ask about.
+    plugins_homes = {}
+    if os.path.dirname(os.path.abspath(config_path)) == sweep_root:
+        plugins_homes = ensure_plugins_tier_everywhere(home=sweep_root)
+
+    return {"plugins": added_plugins, "plugins_pruned": pruned_plugins,
+            "plugins_homes": plugins_homes,
+            "toolsets": added_toolsets,
             "kanban": changed_kanban, "delegation": changed_delegation,
             "compaction": changed_compaction, "text_aux": changed_text_aux,
             "goal_judge": changed_goal_judge,
@@ -1302,6 +1485,15 @@ def main(argv=None):
     missing = res.get("config_missing")
     parts = [f"{k}: {', '.join(v)}" for k, v in res.items()
              if v and isinstance(v, (list, tuple))]
+    # The per-home tiering sweep is a dict, so the line above cannot report it.
+    # It must not be silent: "bootstrap wrote plugins.enabled into N homes" is
+    # the whole point of R5, and a home left unseeded is a home the next
+    # _migrate_to_21 pass can re-widen.
+    homes = res.get("plugins_homes") or {}
+    if homes:
+        named = ", ".join(sorted(homes)[:8])
+        more = f" (+{len(homes) - 8} more)" if len(homes) > 8 else ""
+        parts.append(f"plugins.enabled seeded in {len(homes)} home(s): {named}{more}")
     # The hook-script install status is a dict, not a "changed" section; report
     # it separately as a status line if it failed so it is never silent.
     hf = res.get("hooks_file") or {}

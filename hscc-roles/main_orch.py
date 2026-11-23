@@ -267,11 +267,18 @@ def plugins_for_home(*, profile=None, home=None, hscc_dir=None,
 
     A caller that names a ``home`` gets the answer for THAT home: this is the
     config writer, and failing open here would write the wide tier into a
-    worker profile — the widening the ruling forbids. Only a caller with
-    nothing resolvable at all (no name, no home, no ``HERMES_HOME``) falls back
-    to the full tier.
+    worker profile — the widening the ruling forbids. Under
+    ``<root>/profiles/<name>`` the directory name IS the profile name (Hermes'
+    own rule, and the only form a tree-sweeping writer has), so a home with no
+    ``profile`` argument is resolved from its path before the tier is chosen.
+    Only a caller with nothing resolvable at all (no name, no home, no
+    ``HERMES_HOME``) falls back to the full tier.
     """
     name = (profile or "").strip()
+    if not name and home is not None:
+        h = os.path.abspath(os.path.expanduser(str(home)))
+        if os.path.basename(os.path.dirname(h)) == "profiles":
+            name = os.path.basename(h)
     if name and name == main_profile(hscc_dir):
         return CLUSTER_PLUGINS
     if name == ROOT_PROFILE_NAME:
@@ -313,6 +320,29 @@ def cluster_surface_allowed(*, profile=None, home=None, hscc_dir=None,
         # A named non-main profile with no directory to contradict it.
         return False
     return is_root_home(home, env=env)
+
+
+def plugin_surface_allowed(ctx, *, hscc_dir=None, env=None) -> bool:
+    """``register()``-side wrapper of :func:`cluster_surface_allowed`.
+
+    Reads the home off the Hermes ``PluginContext`` (``ctx.profile_name``,
+    ``hermes_cli/plugins.py:400-407`` — derived from ``HERMES_HOME``, so the
+    gateway and kanban workers get it too) and the home directory off the same
+    environment Hermes routed the process with.
+
+    A ctx WITHOUT a usable ``profile_name`` is not a Hermes context at all — a
+    test stub, or a catalog pass that never set ``HERMES_HOME`` — and is allowed
+    WITHOUT consulting the ambient ``HERMES_HOME``. Reading ambient env for a
+    stub would let whatever home a test suite happens to export decide whether
+    the plugin registers its tools, which is the ambient-state bug class this
+    fleet has been bitten by before.
+    """
+    name = getattr(ctx, "profile_name", None)
+    if not isinstance(name, str) or not name.strip():
+        return True
+    env = os.environ if env is None else env
+    return cluster_surface_allowed(profile=name, home=env.get("HERMES_HOME"),
+                                   hscc_dir=hscc_dir, env=env)
 
 
 # --------------------------------------------------------------------------- #

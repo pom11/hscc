@@ -137,9 +137,13 @@ def test_fully_wired_is_noop(tmp_path):
     before = open(path).read()
     res = enable_plugins.enable(path)
     # No config section changed (hooks already wired) — but the hook FILE
-    # install result is always surfaced on `hooks_file`.
-    assert all(v == [] for k, v in res.items() if k != "hooks_file")
+    # install result is always surfaced on `hooks_file`, and the per-home
+    # plugins.enabled tiering on `plugins_homes` (a dict, like hooks_file: the
+    # changed-list contract below holds for every OTHER key).
+    assert all(v == [] for k, v in res.items()
+               if k not in ("hooks_file", "plugins_homes"))
     assert "hooks_file" in res
+    assert res["plugins_homes"] == {}, "a wired tree must not be rewritten"
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
@@ -158,7 +162,8 @@ def test_missing_config_noop(tmp_path):
 
     # Still a no-op: every change list empty, and no file conjured into place.
     changed = {k: v for k, v in res.items() if isinstance(v, (list, tuple))}
-    assert changed == {"plugins": [], "toolsets": [], "kanban": [],
+    assert changed == {"plugins": [], "plugins_pruned": [], "toolsets": [],
+                       "kanban": [],
                        "delegation": [], "compaction": [], "text_aux": [],
                        "goal_judge": [], "goal_judge_profiles": [],
                        "fallback": [], "bitwarden": [], "prompt_caching": [],
@@ -206,7 +211,8 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert all(v == [] for k, v in res.items() if k != "hooks_file")
+    assert all(v == [] for k, v in res.items()
+               if k not in ("hooks_file", "plugins_homes"))
     assert "hooks_file" in res
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"

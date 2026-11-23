@@ -16,6 +16,8 @@ ruled by the driver review (``~/fleet-check/verdict-main-only.txt``):
 Nothing here touches ``~/.hscc`` or a real Hermes home: the resolver reads
 ``HSCC_DIR`` and an explicit ``home``/``env``, both sandboxed per test.
 """
+import os
+
 import pytest
 
 import main_orch
@@ -177,6 +179,23 @@ def test_named_non_main_profile_without_a_home_is_denied(hscc_dir, monkeypatch):
     assert main_orch.cluster_surface_allowed(profile="backend-engineer") is False
 
 
+def test_a_directory_alone_resolves_the_profile_name(hscc_dir, hermes_root):
+    """A tree-sweeping writer knows only the path.
+
+    Under ``<root>/profiles/<name>`` the basename IS the profile name, so
+    ``<main>``'s home must resolve to the full tier without the caller having to
+    spell the name it is looking at — otherwise bootstrap would write the
+    hooks-only tier into the orchestrator's own config.
+    """
+    main_orch.store_name("ops", registry_path="/nonexistent.yaml")
+    main_home = hermes_root / "profiles" / "ops"
+    main_home.mkdir(parents=True)
+    assert main_orch.plugins_for_home(home=main_home) == main_orch.CLUSTER_PLUGINS
+    assert main_orch.plugins_for_home(
+        home=hermes_root / "profiles" / "backend-engineer") == main_orch.HOOKS_ONLY_PLUGINS
+    assert main_orch.plugins_for_home(home=hermes_root) == main_orch.CLUSTER_PLUGINS
+
+
 def test_answer_follows_the_current_stored_name(hscc_dir, hermes_root):
     """A rename is the operator's statement; the resolver re-reads the state
     document per call, so no process restart is needed to honour it."""
@@ -185,6 +204,48 @@ def test_answer_follows_the_current_stored_name(hscc_dir, hermes_root):
     assert main_orch.cluster_surface_allowed(profile="ops", home=home) is False
     main_orch.store_name("ops", registry_path="/nonexistent.yaml")
     assert main_orch.cluster_surface_allowed(profile="ops", home=home) is True
+
+
+# ── the register()-side wrapper ──────────────────────────────────────────────
+
+class _Ctx:
+    """Minimal stand-in for Hermes' PluginContext (only ``profile_name`` is read)."""
+
+    def __init__(self, profile_name):
+        self.profile_name = profile_name
+
+
+def test_stub_ctx_is_allowed_even_under_a_profile_home(hscc_dir, hermes_root,
+                                                      monkeypatch):
+    """A ctx with no ``profile_name`` is not a Hermes context.
+
+    The suites export ``HERMES_HOME`` at a live profile, so if the wrapper read
+    ambient env for a stub, every existing ``register(ctx)`` test would start
+    depending on which home the suite happens to run under.
+    """
+    home = hermes_root / "profiles" / "backend-engineer"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert main_orch.plugin_surface_allowed(object(), env=os.environ) is True
+    assert main_orch.plugin_surface_allowed(
+        _Ctx(None), env={"HERMES_HOME": str(home)}) is True
+    assert main_orch.plugin_surface_allowed(
+        _Ctx("   "), env={"HERMES_HOME": str(home)}) is True
+
+
+def test_wrapper_denies_tools_in_a_worker_home(hscc_dir, hermes_root, monkeypatch):
+    main_orch.store_name("ops", registry_path="/nonexistent.yaml")
+    home = hermes_root / "profiles" / "backend-engineer"
+    env = {"HERMES_HOME": str(home)}
+    assert main_orch.plugin_surface_allowed(_Ctx("backend-engineer"), env=env) is False
+
+
+def test_wrapper_allows_main_and_root_homes(hscc_dir, hermes_root, monkeypatch):
+    main_orch.store_name("ops", registry_path="/nonexistent.yaml")
+    assert main_orch.plugin_surface_allowed(
+        _Ctx("ops"), env={"HERMES_HOME": str(hermes_root / "profiles" / "ops")}) is True
+    assert main_orch.plugin_surface_allowed(
+        _Ctx(main_orch.ROOT_PROFILE_NAME),
+        env={"HERMES_HOME": str(hermes_root)}) is True
 
 
 # ── D-A grep guard: the new block must not spell a profile name ──────────────
