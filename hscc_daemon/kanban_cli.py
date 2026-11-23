@@ -265,8 +265,17 @@ def _cmd_stale(rest, json_mode, theme_name=None):
     if older_than is None:
         older_than = DEFAULT_STALE_DAYS
 
-    result = autodown.list_stale_tasks(
-        older_than=older_than, registered_only=True)
+    # t_4564c680: ``hscc kanban stale`` (no ``--archive``) is the documented
+    # list verb, and the enumeration it reuses reports an unreachable Hermes
+    # library by appending one WARN to ``$HSCC_HOME/daemon.log``. Borrow the
+    # logger for this ONE read call: the reason is still in
+    # ``result["errors"]``, which this handler prints on stderr below and puts
+    # in the ``--json`` payload, and the WARN budget is deferred rather than
+    # spent. ``--archive`` (the mutating mode above) is deliberately NOT
+    # wrapped — a write that cannot reach the board set keeps its WARN.
+    with autodown.silent_read():
+        result = autodown.list_stale_tasks(
+            older_than=older_than, registered_only=True)
     tasks = result["tasks"]
 
     if json_mode:
