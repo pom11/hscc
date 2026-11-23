@@ -1044,6 +1044,42 @@ def _write_if_changed(path, content):
     return True
 
 
+_ENABLE_PLUGINS_MOD = None          # loaded once; see _seed_plugin_tier
+
+
+def _seed_plugin_tier(pdir):
+    """Seed this profile's explicit ``plugins.enabled`` (R5, card t_e98c6ad4).
+
+    A profile created AFTER the last bootstrap has no ``plugins`` key, and
+    ``_migrate_to_21`` fills a key-less config with every manifest-bearing dir
+    under ``$HERMES_HOME/plugins/`` — for a worker that means the whole cluster
+    surface appearing in a home that must only hold hooks. The tier is NOT
+    decided here: ``hscc-bootstrap/enable_plugins.py`` asks
+    ``hscc-roles/main_orch`` (the single owner; ruling D-A forbids a second
+    resolver and any hard-coded main profile name) what this home may load.
+
+    Best-effort on purpose — generating a profile must not fail because a
+    sibling package could not be loaded — and it reports through the return
+    value so ``generate_profile``'s ``changed`` answer stays truthful.
+    """
+    global _ENABLE_PLUGINS_MOD
+    try:
+        if _ENABLE_PLUGINS_MOD is None:
+            import importlib.util
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "hscc-bootstrap", "enable_plugins.py")
+            spec = importlib.util.spec_from_file_location("_hscc_enable_plugins",
+                                                          path)
+            if spec is None or spec.loader is None:
+                return False
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _ENABLE_PLUGINS_MOD = mod
+        return bool(_ENABLE_PLUGINS_MOD.ensure_plugins_tier_for_home(pdir))
+    except Exception:
+        return False                 # never break a profile generation for this
+
+
 def generate_profile(spec, base_identity):
     """Materialize a Hermes profile dir for a role spec. Idempotent.
 
@@ -1225,6 +1261,15 @@ def generate_profile(spec, base_identity):
         merge_preserving(existing_root, config),
         existing_text,
     )
+
+    # 3b. Seed this home's explicit plugins.enabled (R5, card t_e98c6ad4).
+    # Runs AFTER the config write so the tier sees the file as it now stands,
+    # and it is the only writer of that key: the generator itself never touches
+    # `plugins`, and merge_preserving above would have kept anything already
+    # there. A home that leaves this function with no `plugins` key is one
+    # _migrate_to_21 pass away from loading every plugin dir it contains.
+    if _seed_plugin_tier(pdir):
+        changed = True
 
     # 4. Write profile.yaml via native API (routing_description → description)
     routing_desc = _short_desc(spec)  # routing_description from spec (WS2)

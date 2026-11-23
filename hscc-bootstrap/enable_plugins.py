@@ -530,6 +530,47 @@ def ensure_plugins_tier_everywhere(home=None):
     return results
 
 
+def ensure_plugins_tier_for_home(home):
+    """Seed/repair ONE home's ``plugins.enabled`` — the NEW-profile half of R5.
+
+    :func:`ensure_plugins_tier_everywhere` fixes the tree that exists; this is
+    for the code path that CREATES a home, because a profile scaffolded after
+    the last bootstrap would otherwise sit with no ``plugins`` key and let
+    ``_migrate_to_21`` fill it with every plugin dir under its own ``plugins/``.
+    R5 is explicit: bootstrap "MUST write an explicit plugins.enabled into EVERY
+    profile home ... and must seed NEW profiles the same way" — a sweep that
+    only runs at install time does not satisfy the second half.
+
+    Exactly one config is written (the caller's own home), so a per-project
+    provisioning path can never reach into the other homes. Same resolver, same
+    tier, same "backup then write only on a real change" rule as the sweep.
+
+    Returns ``{"tier", "added", "pruned"}``, or None when there was nothing to
+    write — already tiered, or Hermes has not created that config yet (it owns
+    that file; the next sweep seeds it).
+    """
+    home = os.path.abspath(os.path.expanduser(str(home)))
+    path = os.path.join(home, "config.yaml")
+    if not os.path.isfile(path):
+        return None
+    import yaml                                    # file-local convention (see enable())
+    try:
+        with open(path) as fh:
+            text = fh.read()
+        cfg = yaml.safe_load(text) or {}
+    except Exception:
+        return None                    # unreadable/corrupt: Hermes' problem
+    if not isinstance(cfg, dict):
+        return None
+    added, pruned, tier = _write_plugins_tier(cfg, home)
+    if not added and not pruned:
+        return None
+    backup_util.backup_file(path)
+    with open(path, "w") as fh:
+        yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
+    return {"tier": tier, "added": added, "pruned": pruned}
+
+
 def _ensure_kanban_routing(cfg):
     """Route catch-all kanban work to a worker + size concurrency. Returns the
     keys changed.

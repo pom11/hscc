@@ -181,6 +181,54 @@ def test_enable_reports_pruned_names(tree, monkeypatch):
     assert _enabled(tree["paths"]["worker"]) == ["hscc-cluster"]
 
 
+# ── the single-home path (R5's "seed NEW profiles the same way") ─────────────
+
+def _home(tree, key):
+    return os.path.dirname(str(tree["paths"][key]))
+
+
+def test_single_home_writer_touches_only_its_own_home(tree):
+    """A provisioning path that creates ONE profile must not sweep 52.
+
+    This is the function ``hscc-roles/generator.py`` calls from
+    ``generate_profile`` — the only seeding a profile created after the last
+    bootstrap ever gets — so it has to answer the same tiered question as the
+    sweep while writing exactly one file.
+    """
+    rec = enable_plugins.ensure_plugins_tier_for_home(_home(tree, "worker"))
+    assert rec["added"] == ["hscc-cluster"]
+    assert _enabled(tree["paths"]["worker"]) == ["hscc-cluster"]
+    for key in ("root", MAIN, "orch"):
+        assert (yaml.safe_load(tree["paths"][key].read_text(encoding="utf-8"))
+                .get("plugins") is None), f"{key} was rewritten by a 1-home call"
+
+
+def test_single_home_writer_uses_the_same_tier_as_the_sweep(tree):
+    main_rec = enable_plugins.ensure_plugins_tier_for_home(_home(tree, MAIN))
+    assert main_rec is not None and main_rec["tier"] == MAIN
+    assert _enabled(tree["paths"][MAIN]) == CLUSTER
+    orch_rec = enable_plugins.ensure_plugins_tier_for_home(_home(tree, "orch"))
+    assert orch_rec is not None and orch_rec["tier"] == "ecofire-orch"
+    assert _enabled(tree["paths"]["orch"]) == ["hscc-cluster"]
+
+
+def test_single_home_writer_is_a_noop_when_already_tiered(tree):
+    enable_plugins.ensure_plugins_tier_for_home(_home(tree, "worker"))
+    text = tree["paths"]["worker"].read_text(encoding="utf-8")
+    backups = sorted(tree["paths"]["worker"].parent.glob("config.yaml.bak-*"))
+    assert backups, "the seeding write is supposed to back up first"
+    assert enable_plugins.ensure_plugins_tier_for_home(_home(tree, "worker")) is None
+    assert tree["paths"]["worker"].read_text(encoding="utf-8") == text
+    assert sorted(tree["paths"]["worker"].parent.glob("config.yaml.bak-*")) == backups
+
+
+def test_single_home_writer_never_creates_a_config(tree):
+    fresh = tree["root"] / "profiles" / "not-yet-run"
+    fresh.mkdir(parents=True)
+    assert enable_plugins.ensure_plugins_tier_for_home(fresh) is None
+    assert not (fresh / "config.yaml").exists()
+
+
 # ── fail-open, and the escape hatch ─────────────────────────────────────────
 
 def test_missing_resolver_falls_back_to_the_flat_shape(tree, monkeypatch):
