@@ -324,6 +324,40 @@ def _archive_proxy_log_before_start(reason):
     return res
 
 
+def _proxy_gateway_families(plan) -> list:
+    """Every family whose consumers route through the ONE sparkrun gateway.
+
+    ``proxy_port`` is not None exactly when the family declares a proxy, so this
+    is also the set of families that keep a ``PROXY_DIR/<name>`` entry.
+    """
+    return [f for f in plan.families if f.proxy_port is not None]
+
+
+def _proxy_gateway_port(plan):
+    """The ONE gateway's port, or None when no family declares a proxy.
+
+    Every proxy family resolves to the same port (see
+    ``template_intent.ResolvedFamily.proxy_port``), so the first one names the
+    gateway. The accessor exists so no caller re-derives it — and so no caller
+    can accidentally pick a per-family port that was never started.
+    """
+    fams = _proxy_gateway_families(plan)
+    return fams[0].proxy_port if fams else None
+
+
+def _proxy_family_dir(family):
+    """The per-family bookkeeping dir under ``PROXY_DIR`` (config + backups).
+
+    Per-family ON PURPOSE: it is hscc's own record for that family, not a
+    gateway per family — sparkrun keeps one gateway for the whole cache dir and
+    every proxy family in the plan is served by it. The dir carries no port and
+    nothing may read a gateway out of its existence.
+    """
+    d = PROXY_DIR / family.name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def install_proxy(family) -> dict:
     """Start the native sparkrun proxy for a family. Returns action summary.
 
@@ -336,8 +370,7 @@ def install_proxy(family) -> dict:
     """
     import subprocess
 
-    proxy_dir = PROXY_DIR / family.name
-    proxy_dir.mkdir(parents=True, exist_ok=True)
+    _proxy_family_dir(family)
 
     # Preservation seam (t_569fb349): copy sparkrun's gateway log aside BEFORE
     # the start below, while the old proxy may still be serving. sparkrun
@@ -1087,12 +1120,18 @@ def preview_template(template_name: str, *, _http_get=None) -> dict:
              "details": _describe_config_changes(resolved, read_json(MODELS_JSON))},
         ],
     }
-    proxy_fams = [f for f in resolved.families if f.proxy_port is not None]
+    proxy_fams = _proxy_gateway_families(resolved)
     if proxy_fams:
+        # ONE gateway, named once. sparkrun keeps one gateway per cache dir and
+        # every proxy family resolves to its port, so repeating the port per
+        # family here would read as N gateways that can never exist; the rows
+        # below carry what is actually per-family (the node span).
+        gateway_port = _proxy_gateway_port(resolved)
         out["changes"].append({
             "file": "proxies/", "action": "create",
-            "summary": f"{len(proxy_fams)} proxy configs",
-            "details": [f"  {f.name}: port {f.proxy_port}, "
+            "summary": (f"1 gateway on :{gateway_port} serving "
+                        f"{', '.join(f.name for f in proxy_fams)}"),
+            "details": [f"  {f.name}: via the gateway, "
                         f"nodes {sorted({n for u in f.units for n in u.nodes})}"
                         for f in proxy_fams],
         })
@@ -1363,19 +1402,33 @@ def apply_template(template_name: str, confirm: bool = False,
         if px_declared:
             result["steps"].append(proxy_step)
 
-        # Step 4: Start native sparkrun proxy (per resolved family)
+        # Step 4: Start the ONE native sparkrun proxy gateway.
+        #
+        # ONE start per APPLY, not one per family. sparkrun keeps one gateway per
+        # cache dir — its state file has no port in it and its liveness check is
+        # port-agnostic — so a per-family loop could only ever load the first
+        # family and left the rest reporting loaded=False over ports nothing
+        # bound, while consumers of those families got a URL on a dead port.
+        # Every proxy family resolves to this gateway's port
+        # (template_intent.resolve), so the one gateway serves all of them.
         # The native proxy auto-discovers running endpoints and generates its own
         # LiteLLM config — no manual config.json write needed.
+        gateway_families = _proxy_gateway_families(plan)
         proxy_actions = []
-        for fam in plan.families:
-            if fam.proxy_port is None:
-                continue
-            proxy_result = install_proxy(fam)
-            proxy_actions.append(proxy_result)
+        if gateway_families:
+            gateway = install_proxy(gateway_families[0])
+            # Which families the ONE gateway serves, so the report reads as one
+            # gateway with N consumers rather than N gateways.
+            gateway["serving"] = [f.name for f in gateway_families]
+            proxy_actions.append(gateway)
+            # Per-family config dirs stay per-family (hscc's own bookkeeping,
+            # no gateway implied by one existing); the first family's dir came
+            # with install_proxy above.
+            for fam in gateway_families[1:]:
+                _proxy_family_dir(fam)
         # Remove proxy dirs (+ their accumulated backups) for families no longer
         # in the plan, so orphan families don't leak config.json.bak.* forever.
-        active = [f.name for f in plan.families if f.proxy_port is not None]
-        pruned = _prune_orphan_proxies(active)
+        pruned = _prune_orphan_proxies([f.name for f in gateway_families])
         result["steps"].append({
             "step": "proxies/",
             "status": "ok",
@@ -4206,12 +4259,17 @@ def _describe_config_changes(plan, current_models: Optional[dict]) -> list:
     # helper provisioning and apply use, so preview can never drift from apply.
     changes = [f"  orchestrator: {o.node}:{o.port} (model: {_unit_alias(o, plan)})"]
     for fam in plan.families:
-        port = fam.proxy_port if fam.proxy_port is not None else "—"
         # Node count covers the FULL tp span of every unit, not just primaries —
         # a single tp=2 unit spans 2 nodes, so report 2, not 1 (t_16dcceb4).
         nodes = sorted({n for u in fam.units for n in u.nodes})
+        # Every proxy family is served by the ONE gateway (sparkrun keeps one per
+        # cache dir), so the shared port is labelled as the gateway: two rows
+        # naming the same port would read as two gateways, and "—" is a family
+        # with no gateway at all (its consumers get a concrete endpoint).
+        where = (f"localhost:{fam.proxy_port} (shared gateway)"
+                 if fam.proxy_port is not None else "—")
         changes.append(
-            f"  family-{fam.name}: localhost:{port} "
+            f"  family-{fam.name}: {where} "
             f"({len(fam.units)} units, {len(nodes)} nodes)")
     return changes
 

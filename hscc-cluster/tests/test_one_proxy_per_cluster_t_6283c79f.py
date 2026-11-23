@@ -1,13 +1,14 @@
 """t_6283c79f — sparkrun keeps ONE gateway per cache dir, so a second
-``proxy: true`` family can only ever report ``loaded=False`` and its consumers
-get a URL on a port nothing listens on.
+``proxy: true`` family could only ever report ``loaded=False`` and its consumers
+got a URL on a port nothing listens on.
 
-This file PINS the hazard; it does not fix it. The fix is a design decision
-(option (c) below) and is carded separately — see the card comment for the two
-rejected options and why.
+This file PINS the constraint (the fake below MODELS sparkrun's single-gateway
+state) and the shape the fix had to land in. The two rejected options and the
+measurements that killed them are recorded below so they are not re-litigated.
 
-WHAT THE CODE DOES TODAY. ``install_proxy`` is called once per resolved family
-that has a ``proxy_port``, and ``template_intent.resolve`` mints a DISTINCT port
+WHAT THE BUG DID (measured on `origin/main` before the fix, still pinned below
+so it cannot come back). ``install_proxy`` was called once per resolved family
+that has a ``proxy_port``, and ``template_intent.resolve`` minted a DISTINCT port
 per proxy family from ``base_proxy_port``. sparkrun does not keep one gateway
 per port — it keeps ONE per cache dir:
 
@@ -20,10 +21,10 @@ per port — it keeps ONE per cache dir:
     ``ProxyAlreadyRunning`` for the second family's start *before* comparing
     ports, and ``sparkrun/cli/_proxy.py`` answers that with ``sys.exit(1)``.
 
-So the second proxy family's ``install_proxy`` returns ``loaded=False``, apply's
-``proxies/`` step still says ``"status": "ok"``
-(``cluster_template.py`` Step 4 appends it unconditionally) and the apply result
-is ``success: True`` — while ``_proxy_front_for_target`` writes
+So the second proxy family's ``install_proxy`` returned ``loaded=False``, apply's
+``proxies/`` step said ``"status": "ok"`` anyway
+(``cluster_template.py`` Step 4 appended it unconditionally) and the apply result
+was ``success: True`` — while ``_proxy_front_for_target`` wrote
 ``http://localhost:<refused port>/v1`` into consumer configs.
 
 WHY THE OBVIOUS FIXES ARE WRONG.
@@ -49,11 +50,13 @@ WHY THE OBVIOUS FIXES ARE WRONG.
       ``--cluster hscc`` would fail with "Unknown cluster". Not reachable from
       hscc.
 
-THE FIX THAT FITS (c): one gateway is the model, so every proxy family must
-resolve to the SAME port — ``resolve`` stops minting a port per family, Step 4
-starts the one gateway once, and the per-family URLs point at the live gateway
-instead of a per-family ghost port. That keeps ``proxy: true`` (and every
-``family-<name>`` target) meaningful and deletes the dead-port class entirely.
+THE FIX (c) — SHIPPED: one gateway is the model, so every proxy family resolves
+to the SAME port — ``resolve`` mints no port per family, Step 4 starts the one
+gateway ONCE per apply, and the per-family URLs name the live gateway instead of
+a per-family ghost port. That keeps ``proxy: true`` (and every ``family-<name>``
+target) meaningful and deletes the dead-port class entirely. ``TestApplyOverTheOneGateway``
+below is this file's hazard pin in its post-fix shape: it is the half that had to
+flip, and it fails if a per-family port or a per-family start ever comes back.
 
 Fakes only: ``subprocess.run`` is stubbed by a fake that MODELS sparkrun's
 single-gateway state, so nothing execs sparkrun and the suite's fence stays at
@@ -200,12 +203,16 @@ class TestSparkrunKeepsOneGateway:
             assert "--cache-dir" not in a and "--instance" not in a, a
             assert "--restart" not in a, "apply must not restart a live gateway"
 
-    def test_consumer_url_for_the_second_family_points_at_a_dead_port(
+    def test_a_plan_naming_a_second_port_resolves_to_it_verbatim(
             self, tmp_path, monkeypatch):
-        """The damage, from the SAME resolver apply uses.
+        """Why the MINT SITE is the load-bearing place, not the resolver helpers.
 
-        ``_proxy_front_for_target`` answers ``family-<name>`` with that family's
-        own ``proxy_port`` — here a port whose start the gateway refused."""
+        ``_proxy_front_for_target`` reports whatever port the plan carries — it
+        cannot know the gateway refused that port. So a per-family port minted
+        upstream becomes a dead URL downstream with nothing in between
+        complaining: the fix has to be in ``resolve``, and a regression there is
+        what ``TestApplyOverTheOneGateway`` below catches.
+        """
         monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
         state, calls, run = _single_gateway(tmp_path)
         monkeypatch.setattr(subprocess, "run", run)
@@ -224,16 +231,20 @@ class TestSparkrunKeepsOneGateway:
         assert state.read_text() == "4000", "no gateway ever bound 4001"
 
 
-# ── 2. the hazard pin: apply reports success over the dead port ─────────────
+# ── 2. the hazard pin, post-fix: apply drives the ONE gateway ────────────────
 
-class TestApplyOverADeadProxyPort:
-    """WHAT TODAY'S APPLY DOES, pinned so the fix cannot land silently.
+class TestApplyOverTheOneGateway:
+    """THE FIX, pinned end to end — the flip of this file's hazard pin.
 
-    Every assertion here is a BUG (see the module docstring, option (c)). When
-    the one-gateway-per-cluster fix lands, this class is expected to change:
-    one ``proxy start`` argv, no ``loaded=False``, and ``family-fast`` resolving
-    to the single live port. If it passes unchanged after that change, the fix
-    did not reach the apply path."""
+    Before the fix this class asserted the BUG: two ``proxy start`` argv on two
+    distinct ports, ``loaded == {4000: True, 4001: False}``, the ``proxies/``
+    step calling itself ``ok`` over a family that never loaded, and
+    ``family-fast`` resolving to the port the gateway never bound. Every one of
+    those is inverted here: ONE start for the whole apply, no ``loaded=False``,
+    both families' URLs naming the live gateway — including in the
+    ``config.yaml`` apply actually wrote. Re-introducing a per-family port or a
+    per-family start turns this class red.
+    """
 
     def _setup(self, tmp_path, monkeypatch, name, yaml_text):
         tdir = tmp_path / "templates"
@@ -274,27 +285,83 @@ class TestApplyOverADeadProxyPort:
     def _proxy_step(self, res):
         return next(s for s in res["steps"] if s["step"] == "proxies/")
 
-    def test_apply_reports_success_though_the_second_proxy_never_loaded(
+    def test_apply_starts_the_one_gateway_once_for_two_proxy_families(
             self, tmp_path, monkeypatch):
         ct_mod, rig = self._setup(tmp_path, monkeypatch, "two-proxy",
                                   TWO_PROXY_YAML)
         res = ct_mod.apply_template("two-proxy", confirm=True)
 
-        # BUG: the apply succeeds.
         assert res["success"] is True, res
         starts = [a for a in rig["calls"]
                   if a[:3] == ["sparkrun", "proxy", "start"]]
-        # BUG: two starts for one gateway, on two distinct ports.
-        assert [a[a.index("--port") + 1] for a in starts] == ["4000", "4001"]
+        # ONE start for the whole apply — sparkrun keeps one gateway per cache
+        # dir, so a second one could only be a refusal.
+        assert len(starts) == 1, starts
+        assert [a[a.index("--port") + 1] for a in starts] == ["4000"], starts
         step = self._proxy_step(res)
-        # BUG: the step calls itself ok while a family did not load.
-        assert step["status"] == "ok", step
+        # No family is left unloaded: the refused 4001 detail is gone with the
+        # port that was never bound.
         loaded = {d["port"]: d["loaded"] for d in step["details"]}
-        assert loaded == {4000: True, 4001: False}, step
-        assert any(d["port"] == 4001 and "already running"
-                   in (d["error"] or "").lower() for d in step["details"]), step
-        # and the gateway that exists is only the first family's
+        assert loaded == {4000: True}, step
+        # The report reads as ONE gateway with N consumers, not N gateways.
+        assert step["details"][0]["serving"] == ["coding", "fast"], step
         assert rig["state"].read_text() == "4000"
+
+    def test_the_written_config_names_the_live_gateway_for_both_families(
+            self, tmp_path, monkeypatch):
+        """The damage asserted where it actually landed: the ``config.yaml`` on
+        disk, not the resolver one level above it.
+
+        ``routing: compaction: family-fast`` names the SECOND proxy family — the
+        one whose start used to be refused — so every URL written for it used to
+        point at :4001, a port nothing ever bound.
+        """
+        import yaml
+
+        ct_mod, rig = self._setup(tmp_path, monkeypatch, "two-proxy",
+                                  TWO_PROXY_YAML)
+        res = ct_mod.apply_template("two-proxy", confirm=True)
+        assert res["success"] is True, res
+
+        written = (rig["hscc"] / "config.yaml").read_text()
+        assert "4001" not in written, written
+        cfg = yaml.safe_load(written)
+        by_name = {p["name"]: p for p in cfg["providers"]}
+        for fam in ("family-coding", "family-fast"):
+            assert by_name[fam]["base_url"] == "http://localhost:4000/v1", (
+                fam, by_name[fam])
+        # The consumer that routes to the second family lands on the same
+        # gateway, still as a proxy URL (option (a) would have made it a node
+        # pin — that is the shape this assertion protects).
+        assert cfg["auxiliary"]["compression"]["base_url"] == (
+            "http://localhost:4000/v1"), cfg["auxiliary"]["compression"]
+        assert rig["state"].read_text() == "4000"
+        # Per-family bookkeeping dirs stay per-family — they are hscc's own
+        # record, and they do NOT imply a gateway each.
+        for fam in ("coding", "fast"):
+            assert (rig["hscc"] / "proxies" / fam).is_dir(), fam
+
+    def test_the_preview_names_the_gateway_once(self, tmp_path, monkeypatch):
+        """The same template, as previewed: one gateway row, not N of them.
+
+        Every proxy family resolves to the same port now, so a per-family
+        ``port 4000`` row would read as N gateways that can never exist. The
+        rows keep what IS per-family (the node span) and say nothing about a
+        port; the summary names the one gateway and who it serves.
+        """
+        ct_mod, rig = self._setup(tmp_path, monkeypatch, "two-proxy",
+                                  TWO_PROXY_YAML)
+        prom = ct_mod.preview_template("two-proxy")["changes"]
+        row = next(c for c in prom if c["file"] == "proxies/")
+        assert row["summary"] == "1 gateway on :4000 serving coding, fast", row
+        assert all("port" not in d for d in row["details"]), row["details"]
+        assert len(row["details"]) == 2, row["details"]
+        fam_lines = [l for l in next(
+            c for c in prom if c["file"] == "config.yaml")["details"]
+            if l.strip().startswith("family-")]
+        assert len(fam_lines) == 2, fam_lines
+        assert all("(shared gateway)" in l for l in fam_lines), fam_lines
+        assert "4001" not in json.dumps(prom), prom
 
     def test_single_proxy_template_is_the_control(
             self, tmp_path, monkeypatch):
