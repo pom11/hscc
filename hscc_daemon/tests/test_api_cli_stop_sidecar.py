@@ -65,8 +65,8 @@ import ast
 import collections
 import inspect
 import os
+import re
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -444,13 +444,31 @@ HARNESS = (HARNESS
 # sandbox
 # --------------------------------------------------------------------------- #
 
-def _free_port():
-    """An ephemeral loopback port, released before the child binds it."""
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+#: Every child in this file binds THIS port: 0 means "the kernel picks one".
+#: The number is then read back out of the child's own log line (:func:
+#: `_await_listening`), because that is the only place the bound port exists.
+#:
+#: The old shape was `_free_port()`: bind port 0 in the parent to LEARN a number,
+#: CLOSE the socket, and tell the child to bind it. Closing is the defect — it
+#: hands the number back to the kernel before the child has it, and any other
+#: suite on this host (a queue gate plus workers' legs run concurrently here) can
+#: take it in that window. The child then died of EADDRINUSE inside whichever
+#: case happened to be waiting on it, which reads as a signal-handler failure and
+#: is neither. Same fix t_eed6b74d made on the sibling leg, carried here rather
+#: than shared (each leg is its own pytest process with its own conftest
+#: sys.path, so there is no importable home for such a helper — see
+#: scripts/run_tests.sh's header).
+PORT_AUTO = 0
+
+#: `_serve`'s startup line, with the RESOLVED port in it — the pattern the
+#: readiness wait reads the port back from. `api_server.create_servers` adopts
+#: the OS-assigned port for ALL its listeners (`if port == 0: port =
+#: server.server_address[1]`) and re-publishes it into `ctx.config` as
+#: `int(servers[0].server_address[1])`; `_serve` logs `f"HSCC API listening on
+#: {host}:{addr['port']}"` from that same dict (api_cli.py:482-487), so the line
+#: carries the port the child actually bound, not the 0 it was asked for. The
+#: `NOT listening` line is `HSCC API NOT listening on ...` and cannot match.
+LISTENING_RE = re.compile(r"HSCC API listening on 127\.0\.0\.1:(\d+)")
 
 
 def _child_env(home):
@@ -632,8 +650,15 @@ def _harness_argv(sandbox, verb, *args):
     return [sys.executable, "-u", str(sandbox["harness"]), verb, *args]
 
 
-def _start_api(sandbox, port):
-    """`hscc api start`, with the child's output redirected to a FILE.
+def _start_api(sandbox):
+    """`hscc api start` on an OS-assigned port, with output redirected to a FILE.
+
+    `--port 0` (see :data:`PORT_AUTO`): the port the child bound is read back out
+    of its own log line by :func:`_await_listening`, so nothing here has to
+    reserve one first. `--no-qr` keeps the QR off the child's output; the QR is
+    built from `_handle_start`'s PRE-BIND `resolve_config` port, which for
+    `--port 0` is the literal 0 and would be a useless QR — a product quirk on a
+    path this file does not test, and the reason the sandbox asks for no QR.
 
     Why not `capture_output=True`, measured rather than guessed: `start`
     double-forks and the serving grandchild INHERITS the CLI parent's
@@ -648,7 +673,7 @@ def _start_api(sandbox, port):
     `daemon_ops.log` echo land together, and nothing here asserts on one
     without the other.
     """
-    argv = _harness_argv(sandbox, "start", "--no-qr", "--port", str(port))
+    argv = _harness_argv(sandbox, "start", "--no-qr", "--port", str(PORT_AUTO))
     out_path = sandbox["home"].parent / START_OUTPUT
     with open(out_path, "w") as fh:
         proc = subprocess.Popen(argv, env=sandbox["env"], stdout=fh,
@@ -866,48 +891,66 @@ def _await_child(proc, trail, *, stall=CHILD_STAGE_STALL, cap=CHILD_LIFE_CAP):
         time.sleep(0.05)
 
 
-def _wait_listening(sandbox, port, timeout=CHILD_READY_BUDGET):
-    """Block until the child's OWN log says it is listening on `port`.
+def _await_listening(sandbox, timeout=CHILD_READY_BUDGET):
+    """Block until the child's OWN log says it is listening; return that port.
 
     The log line — not a port probe — is the readiness here: `_serve` writes it
     after every bind and it is the line the operator reads, and unlike a probe
     it also proves the child got far enough into startup to have a log.
+
+    The port comes OUT of the line instead of being handed in: every child binds
+    `PORT_AUTO`, so the number is the kernel's and this is the only place it can
+    be learned (see :data:`PORT_AUTO` for why reserving one in the parent is the
+    wrong shape). A port of 0 in the line would mean the child logged the number
+    it was ASKED for rather than the one it bound — product drift, not a slow
+    runner, so it is named rather than returned to a caller that would then wait
+    on a listener that cannot exist.
     """
-    needle = f"HSCC API listening on 127.0.0.1:{port}"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             text = sandbox["log"].read_text()
         except FileNotFoundError:
             text = ""
-        if needle in text:
-            return
+        found = LISTENING_RE.search(text)
+        if found:
+            port = int(found.group(1))
+            assert port != 0, (
+                f"the child logged its own port as 0 — it bound nothing and "
+                f"reported the number it was asked for. That is a regression in "
+                f"the port adoption api_server.create_servers does today "
+                f"(`if port == 0: port = server.server_address[1]`), not a slow "
+                f"runner.\n{_describe(sandbox)}")
+            return port
         time.sleep(0.05)
     raise AssertionError(
-        f"the child never reached {needle!r} within {timeout}s.\n"
-        f"{_describe(sandbox)}")
+        f"the child never wrote its own {LISTENING_RE.pattern!r} line within "
+        f"{timeout}s.\n{_describe(sandbox)}")
 
 
-def _wait_serving_child(sandbox, port, not_pid, timeout=CHILD_READY_BUDGET):
-    """:func:`_wait_listening` plus the promise `start` makes on top of it.
+def _wait_serving_child(sandbox, not_pid, timeout=CHILD_READY_BUDGET):
+    """`:func:`_await_listening`` plus the promise `start` makes on top of it.
 
     `hscc api start` is a double fork, so the pid the caller must signal is not
     the pid of the CLI process it spawned: the CLI parent writes its OWN pid
     into the pid file and the server grandchild overwrites it a moment later.
     The pid to return therefore has to be alive AND not the harness's, or the
     caller would SIGTERM a process that has already exited and test nothing.
+
+    Returns `(server_pid, port)` — the port the serving process reports, read
+    out of its own log line.
     """
-    _wait_listening(sandbox, port, timeout)
+    port = _await_listening(sandbox, timeout)
     deadline = time.time() + timeout
     while time.time() < deadline:
         pid = _read_int(sandbox["pid_file"])
         if pid and pid != not_pid and _alive(pid):
-            return pid
+            return pid, port
         time.sleep(0.05)
     raise AssertionError(
-        f"`hscc api start` served but never left a live pid of its own in "
-        f"{sandbox['pid_file'].name} within {timeout}s (the caller would have "
-        f"had nothing to signal).\n{_describe(sandbox)}")
+        f"`hscc api start` served on port {port} but never left a live pid of "
+        f"its own in {sandbox['pid_file'].name} within {timeout}s (the caller "
+        f"would have had nothing to signal).\n{_describe(sandbox)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -926,11 +969,10 @@ def test_api_stop_tears_the_sidecar_down(sandbox):
     it: the sidecar pid is GONE, the fake bridge recorded the shutdown, and the
     stop reported a clean stop rather than having to escalate to SIGKILL.
     """
-    port = _free_port()
-    started = _start_api(sandbox, port)
+    started = _start_api(sandbox)
     assert started.returncode == 0, (
         f"`hscc api start` failed: {started.stdout}\n{started.stderr}")
-    pid = _wait_serving_child(sandbox, port, not_pid=started.pid)
+    pid, _port = _wait_serving_child(sandbox, not_pid=started.pid)
 
     stopped = _run(sandbox, "stop")
     try:
@@ -999,15 +1041,14 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
     introduced: a handler that blocks instead of setting the flag hangs the same
     signal an operator in the foreground sends.
     """
-    port = _free_port()
-    proc = _popen(sandbox, "serve", str(port))
+    proc = _popen(sandbox, "serve", str(PORT_AUTO))
     trail = _ChildTrail(proc)
     try:
         # No pid file here: this arm runs `_serve` in the foreground exactly as
         # `python -m api_server serve` does, and that entry path deliberately
         # writes none. The signal goes to the pid WE spawned, so there is no
         # double-fork to resolve and no pid file to wait for.
-        _wait_listening(sandbox, port)
+        _await_listening(sandbox)
         assert _have(sandbox, SIDECAR_STARTED), (
             f"the sidecar never started, so nothing below proves a teardown: "
             f"{_describe(sandbox)}")
@@ -1062,11 +1103,10 @@ def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
     The premise is asserted from the child's own `stage: harness-up` line: a
     green here cannot be a run that forgot to block the signal.
     """
-    port = _free_port()
-    proc = _popen_with_blocked_signal(sandbox, {sig}, "serve", str(port))
+    proc = _popen_with_blocked_signal(sandbox, {sig}, "serve", str(PORT_AUTO))
     trail = _ChildTrail(proc)
     try:
-        _wait_listening(sandbox, port)
+        _await_listening(sandbox)
         upstream = next(
             (line for line in trail.text().splitlines()
              if line.startswith(STAGE_PREFIX + " harness-up")), "")
@@ -1139,8 +1179,7 @@ def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
     (run 45081900690, both arms, empty stdout and no `api.log`) with the child not
     yet entered into the handler at all — and the child had no way to say so.
     """
-    port = _free_port()
-    proc = _popen(sandbox, "serve-lograce", str(port), sig.name)
+    proc = _popen(sandbox, "serve-lograce", str(PORT_AUTO), sig.name)
     trail = _ChildTrail(proc)
     try:
         run = _await_child(proc, trail)
