@@ -314,6 +314,199 @@ def test_the_tier_axis_matches_the_route_once_the_route_answers_it(
     assert cli_payload["until"] == probe["until"]
 
 
+# ── the codes a client branches on: ONE closed set, not two vocabularies ─────
+
+#: t_447cc7fc ruled these strings, so they are a contract and not a local
+#: spelling: a client branches on `source` (and on `axis`) and reads `note` for
+#: the sentence. Each surface defines them as its OWN module constants — copied
+#: verbatim, because the daemon leg runs without the API package, the same
+#: copy-not-import rule as the node-name rule above.
+#:
+#: The VALUES are pinned here as well as compared across the two modules, and
+#: that is what this section is for: `test_the_two_surfaces_expose_the_same_
+#: vocabulary` above is key for key, so rewording a value passes it — both
+#: payloads still carry `source`, and a script comparing "sqlite_store_absent"
+#: quietly takes the store-is-there branch for every answer that came from the
+#: other surface. Pinning the ruled literals also closes the pair-drift: a code
+#: reworded on BOTH surfaces still fails here, because changing a wire code is a
+#: breaking change for every client that branches on it and has to be a decision
+#: made in this file, not a reword in one module's constants.
+SOURCE_CODES = {
+    "SOURCE_RING": "recorder_ring",
+    "SOURCE_RING_ABSENT": "recorder_ring_absent",
+    "SOURCE_STORE": "sqlite_store",
+    "SOURCE_STORE_ABSENT": "sqlite_store_absent",
+}
+
+#: The other code a client branches on, copied across the same seam and with
+#: the same hole: `axis` says which axis answered, and on the tier axis
+#: `window` is null, so a reader that inferred it from the keys would infer a
+#: preset name that was never sent.
+AXIS_CODES = {"AXIS_WINDOW": "window", "AXIS_TIER": "tier"}
+
+
+def _surface_codes(module, group, ruled):
+    """Every ``SOURCE_*`` / ``AXIS_*`` constant one surface defines.
+
+    A vanished or an extra constant NAME is a failure of its own rather than an
+    AttributeError: the name is part of the copy rule (it is how a reader finds
+    the code next to its meaning), and a fifth code on one surface only is a
+    code some client can receive and no client can name.
+    """
+    prefix = group.upper() + "_"
+    defined = {name: value for name, value in vars(module).items()
+               if name.startswith(prefix) and isinstance(value, str)}
+    assert set(defined) == set(ruled), (
+        f"{module.__name__}'s {group} codes are {sorted(defined)}, the ruled "
+        f"set is {sorted(ruled)} — one surface states a code the other cannot "
+        "name, or lost one a client still branches on")
+    return defined
+
+
+def _same_code_on_both_surfaces(state, api, cli_payload, want):
+    """Both surfaces name `state` with the same ruled code.
+
+    The three failures this rules out are three different bugs: a surface that
+    stopped stating the key at all, a surface inventing a code, and the pair
+    disagreeing — the last one invisible to a payload comparison, because two
+    payloads can share every key and mean different things by their values.
+    """
+    for label, payload in (("the route", api), ("the CLI", cli_payload)):
+        assert "source" in payload, (
+            f"{label} no longer states `source` for {state}: a client that "
+            "branches on the code is left reading a key it never sees, and "
+            "every other key of the payload is unchanged so nobody notices")
+        assert payload["source"] in set(SOURCE_CODES.values()), (
+            f"{label} answered {state} with {payload['source']!r}, which is "
+            f"not one of the ruled codes {sorted(set(SOURCE_CODES.values()))} "
+            "— a client can only branch on a code it can name")
+    assert api["source"] == cli_payload["source"], (
+        f"for {state} the route says {api['source']!r} and "
+        f"`hscc cluster history` says {cli_payload['source']!r}. One read, two "
+        "surfaces, two answers: a script that branches on the route's code "
+        "mis-files every read it took from the CLI, and neither payload says "
+        "so")
+    assert api["source"] == want, (
+        f"{state} answered {api['source']!r} on both surfaces, not the ruled "
+        f"{want!r} — the state and the code for it have come apart")
+
+
+@pytest.mark.parametrize("group,ruled", [
+    pytest.param("source", SOURCE_CODES, id="source"),
+    pytest.param("axis", AXIS_CODES, id="axis")])
+def test_the_two_surfaces_share_one_closed_set_of_codes(group, ruled):
+    """Same constant names, same value per name, same closed set — route and CLI.
+
+    Three assertions, for the three drifts that are actually possible: a NAME
+    vanishes on one surface (the copy rule broke), a VALUE moves on one surface
+    (clients branch wrong for every read taken from there), or the set moves on
+    BOTH (the ruling was reworded without being re-made). The key-for-key
+    vocabulary test above cannot see any of them: it compares payloads, and a
+    payload with a reworded value carries the same keys.
+    """
+    route_codes = _surface_codes(routes_cluster, group, ruled)
+    cli_codes = _surface_codes(mhc, group, ruled)
+    for name, ruled_value in ruled.items():
+        assert route_codes[name] == cli_codes[name], (
+            f"{name} is {route_codes[name]!r} on the route and "
+            f"{cli_codes[name]!r} in `hscc cluster history`. The payloads "
+            "still match key for key, so nothing else notices: a client "
+            f"comparing {route_codes[name]!r} takes the wrong branch for every "
+            f"{group} answer that came from the CLI")
+        assert route_codes[name] == ruled_value, (
+            f"the route's {name} is {route_codes[name]!r}, not the ruled "
+            f"{ruled_value!r} (t_447cc7fc). A wire code is what clients branch "
+            "on: rewording it breaks them all, so it is a decision recorded "
+            "here, not a reword inside one module")
+        assert cli_codes[name] == ruled_value, (
+            f"the CLI's {name} is {cli_codes[name]!r}, not the ruled "
+            f"{ruled_value!r} (t_447cc7fc). The route's clients branch on "
+            f"{ruled_value!r}; the CLI's own output would name the same state "
+            "by a code no client knows")
+
+
+def test_a_code_never_means_two_different_things():
+    """`window` is the axis and nothing else, on either surface.
+
+    Two vocabularies copied across two modules can collide without either
+    payload looking wrong, and a code that means an axis on one read and a
+    source on the next cannot be branched on at all.
+    """
+    for module in (routes_cluster, mhc):
+        source = set(_surface_codes(module, "source", SOURCE_CODES).values())
+        axis = set(_surface_codes(module, "axis", AXIS_CODES).values())
+        assert not (source & axis), (
+            f"{module.__name__} uses {sorted(source & axis)} as both a "
+            "`source` and an `axis` code")
+
+
+def test_both_surfaces_answer_with_the_same_code_for_the_same_state(
+        running, token, pinned_clock, store_dir, monkeypatch, tmp_path):
+    """The constants agree; these are the four states actually going on the wire.
+
+    A surface is free to write a literal where its constant sits, and a payload
+    comparison is as blind to that as it is to a reworded constant — so each
+    state is asked of both surfaces and both answers must be the same ruled
+    code. Three of the four come out of the one fixture; the fourth needs a
+    directory nobody has ever written, which needs its own server.
+    """
+    # ── the store answered (the window axis, and the tier axis below) ───────
+    status, api = get(running, token, "/v1/cluster/history?window=1h")
+    assert status == 200, api
+    window_cli = cli(["--window", "1h"], store_dir)
+    _same_code_on_both_surfaces("a 1 h window served from the store", api,
+                                window_cli, SOURCE_CODES["SOURCE_STORE"])
+    assert api["axis"] == window_cli["axis"] == AXIS_CODES["AXIS_WINDOW"], (
+        "the window axis was named differently by the two surfaces")
+
+    # ── tier 0 with no ring here: the deployed case on both surfaces ────────
+    status, api = get(running, token, "/v1/cluster/history?window=15m")
+    assert status == 200, api
+    _same_code_on_both_surfaces(
+        "a tier-0 window with no ring in this process", api,
+        cli(["--window", "15m"], store_dir), SOURCE_CODES["SOURCE_RING_ABSENT"])
+
+    # ── the store is not there at all ───────────────────────────────────────
+    missing = tmp_path / "never-written"
+    missing.mkdir()
+    srv = RunningServer(hscc_dir=str(missing))
+    try:
+        tok = api_server.load_token(srv.server.ctx.hscc_dir)
+        status, api = srv.request(token=tok,
+                                  path="/v1/cluster/history?window=1h")
+        assert status == 200, api
+        _same_code_on_both_surfaces(
+            "a store that has never been written", api,
+            cli(["--window", "1h"], missing),
+            SOURCE_CODES["SOURCE_STORE_ABSENT"])
+    finally:
+        srv.close()
+
+    # ── tier 0 WITH the ring resident: the one state no cross-surface test
+    # had ever compared, because neither surface owns a ring in a test process
+    # unless one is put there. Both surfaces ask exactly one question about
+    # residency — `metrics_history.resident_recorder()` — so one recorder in
+    # this process drives both; whether a process is ALLOWED to claim residency
+    # is pinned by test_cluster_history_parity.py's `ring` fixture.
+    ring = mh.MetricsRecorder(hscc_dir=str(store_dir))
+    for i in range(3):
+        ts = NOW - 4 + i * 2
+        ring.tick(monitor_frame(ts), serving_rows(ts), ts)
+    monkeypatch.setattr(mh, "resident_recorder", lambda: ring)
+    status, api = get(running, token, "/v1/cluster/history?tier=0")
+    assert status == 200, api
+    ring_cli = cli(["--tier", "0"], store_dir)
+    _same_code_on_both_surfaces("a tier-0 read with the ring resident", api,
+                                ring_cli, SOURCE_CODES["SOURCE_RING"])
+    assert api["axis"] == ring_cli["axis"] == AXIS_CODES["AXIS_TIER"], (
+        "the tier axis was named differently by the two surfaces")
+    assert api["hosts"] == ring_cli["hosts"] and api["hosts"], (
+        "the resident ring is transposed into rows differently by the route "
+        "and the CLI — the code agrees, the data it describes does not")
+    assert api["engines"] == ring_cli["engines"] and api["engines"], (
+        "the resident ring's engine rows differ between the two surfaces")
+
+
 # ── the CLI must be a reader, not a second sampler or an HTTP client ────────
 
 def test_the_cli_module_touches_no_transport_and_no_sampler():
