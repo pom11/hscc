@@ -59,7 +59,49 @@ _DESC = (
 )
 
 
+def _cluster_surface_allowed(ctx) -> bool:
+    """May THIS home register ``sparkrun_exec``? (D-B gate, card t_e98c6ad4)
+
+    ``sparkrun_exec`` is an unguarded-by-design CLI passthrough into the fleet,
+    so its reach is cluster authority: the main-only ruling puts it on
+    ``<main>`` and the operator/gateway root home only (the SOUL already
+    described it as "orchestrator-only", and the sibling audit left its reach as
+    LEFT-2 because nothing enforced the claim). The decision comes from
+    ``hscc-roles/main_orch.plugin_surface_allowed`` — never a name compared
+    here — reached by the same sibling-path loader as
+    ``hscc-cluster/orch_message.py`` / ``hscc-commands``. Fail-open when the
+    resolver cannot be reached or cannot answer: no resolver is no gate.
+    """
+    import os
+    import sys
+    roles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "hscc-roles")
+    added = None
+    try:
+        import main_orch  # noqa: F401  (already importable)
+    except ImportError:
+        if os.path.isdir(roles) and roles not in sys.path:
+            sys.path.insert(0, roles)
+            added = 0
+        try:
+            import main_orch  # noqa: F401
+        except ImportError:
+            return True                     # no resolver on the path -> no gate
+        finally:
+            if added is not None and sys.path[:1] == [roles]:
+                sys.path.pop(0)
+    try:
+        return bool(main_orch.plugin_surface_allowed(ctx))
+    except Exception:  # noqa: BLE001 — an unusable resolver must not strip the tool
+        return True
+
+
 def register(ctx) -> None:
+    # t_e98c6ad4 (audit §6 D-B): the cluster surface is <main> + the operator
+    # root home. This plugin registers no hooks, so a denied home registers
+    # nothing at all.
+    if not _cluster_surface_allowed(ctx):
+        return
     ctx.register_tool(
         name="sparkrun_exec",
         toolset="sparkrun",

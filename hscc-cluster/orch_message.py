@@ -311,6 +311,29 @@ def main_orchestrator_profile() -> str | None:
     return None
 
 
+def cluster_tools_allowed(ctx) -> bool:
+    """May THIS home register the cluster tools? (D-B gate, card t_e98c6ad4)
+
+    The one question the main-only ruling asks at plugin-load time, answered by
+    the resolver that owns it (:func:`main_orch.plugin_surface_allowed`) rather
+    than by a comparison invented here: ``<main>`` and the operator/gateway root
+    home get the tools, every other home loads this plugin for its HOOKS only.
+
+    Fail-open whenever the answer cannot be established — no resolver on the
+    path, a ctx that is not a Hermes ``PluginContext``, or a resolver that
+    throws. Stripping the surface is the dangerous direction: it silences the
+    operator's wedge path and, because the gateway multiplexes per-profile
+    sessions from the root home, it can strip the orchestrator itself.
+    """
+    main_orch = _load_main_orch()
+    if main_orch is None:
+        return True
+    try:
+        return bool(main_orch.plugin_surface_allowed(ctx, hscc_dir=hscc_dir()))
+    except Exception:  # noqa: BLE001 — an unusable resolver must not strip tools
+        return True
+
+
 def is_orch_profile(name: str) -> bool:
     """True for a profile the nudge channel accepts at either end.
 
