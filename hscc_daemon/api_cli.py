@@ -35,6 +35,11 @@ from hscc_daemon import cli_theme as theme
 from hscc_daemon import daemon_ops
 from hscc_daemon import qr_code
 from hscc_daemon import verify
+# The daemon's own stdio detach (F6, `cli._detach_stdio`). Imported — NOT
+# re-implemented — so `hscc api start` and `hscc start` daemonise through one
+# code path: see the comment at the call site in `_handle_start`. No import
+# cycle: `cli.py` reaches `api_cli` only lazily, from inside its dispatch.
+from hscc_daemon.cli import _detach_stdio
 
 # The API server is a SEPARATE background process from the monitoring daemon,
 # so it gets its own PID + log files (distinct from daemon.pid / daemon.log).
@@ -965,7 +970,8 @@ def _handle_start(argv, theme_name=None):
     )
 
     # Fork into the background using the same double-fork pattern as the daemon
-    # (cli.cmd_start): fork, setsid, re-fork, write PID, run the serve loop.
+    # (cli.cmd_start): fork, setsid, re-fork, detach stdio, write PID, run the
+    # serve loop.
     pid = os.fork()
     if pid > 0:
         # Parent: record the child PID immediately (grandchild re-saves its own).
@@ -984,7 +990,34 @@ def _handle_start(argv, theme_name=None):
     if pid2 > 0:
         os._exit(0)
 
-    # Grandchild — write the real PID and run the serve loop.
+    # Grandchild. Detach the standard streams BEFORE anything else runs — the
+    # same call `cli.cmd_start` makes at the same point of its own double-fork,
+    # which is the parity the comment above has always claimed. `setsid()`
+    # detaches the SESSION, not the descriptors, so without this the daemon
+    # keeps the caller's fd 0/1/2 and two things follow:
+    #
+    #   1. a caller that waits for its own stdout to close — `subprocess.run
+    #      (capture_output=True)`, `hscc api start | cat`, an editor's shell
+    #      integration — blocks until the API exits, even though `hscc api
+    #      start` printed its panel and returned long ago. The grandchild holds
+    #      the write end, so the pipe never reaches EOF;
+    #   2. the server writes into a terminal that may already be gone (EPIPE on
+    #      a dead controlling-terminal fd) despite the session detach.
+    #
+    # DEVNULL, not API_LOG_FILE. The api's operational output already reaches
+    # ~/.hscc/api.log through `daemon_ops.log(..., log_file=API_LOG_FILE)`, and
+    # the per-request stderr line is deliberately silenced at the source
+    # (`api_server.ApiHandler.log_message` — "we manage our own log"), so the
+    # streams held here carried nothing the log does not already own. Routing
+    # them at the log file instead would be a SECOND writer to a path whose
+    # size cap lives in `daemon_ops`: `_GzipRotatingFileHandler.rotate` copies
+    # the file and `os.remove`s it, so a raw fd dup2'd onto api.log keeps
+    # writing into a deleted inode the first time the log rolls — output that
+    # silently vanishes instead of output that goes to a device. A device keeps
+    # fd 0/1/2 valid, inert, and rotation-proof.
+    _detach_stdio()
+
+    # Write the real PID and run the serve loop.
     daemon_ops.save_pid(API_PID_FILE)
     _serve(api, binds, tailscale, port_override)
     os._exit(0)
