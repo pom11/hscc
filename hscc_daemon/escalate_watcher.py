@@ -14,8 +14,15 @@ writes it when it dispositions a card out-of-band (superseded and re-cut, or
 frozen as a crash artifact of record) and deliberately leaves it ``blocked`` with
 a high ``consecutive_failures`` — which is precisely the shape the decision below
 reads as "the strong tier is also failing". A retired card is never dispatched
-again, so paging a human about it is pure noise (t_0c602cd1: it fired live on
-t_0f214ba0 at 2026-11-23 07:45, on every 15-minute tick after the disposition).
+again, so paging a human about it is pure noise. Live incident (t_0c602cd1):
+``t_0f214ba0`` paged at 2026-11-23 07:45 — about two minutes BEFORE the
+retirement comment was written (last ``crashed`` event 1795412630, marker
+comment 1795412832), so nothing keyed on a comment could have suppressed that
+first page. What this skip removes is every page AFTER a disposition: the
+``~/.hscc/escalated.json`` dedupe holds a card's id only while it keeps
+producing a ``human`` action and that file survives, so a reset state file, a
+status change that drops the card from the candidate set for one tick, or a
+fresh failure each re-page a card the dispatcher will never dispatch again.
 Retirement is per-card state, not a lifetime mute: a card that is unblocked,
 dispatched again and fails AGAIN re-announces (see ``_failed_after_retirement``).
 
