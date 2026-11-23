@@ -1183,7 +1183,8 @@ def merge_queue_table(rows) -> Table:
                       ("Last result", "left")):
         t.add_column(col, justify=just, no_wrap=True)
     state_style = {"queued": "dim", "waiting": "dim", "rebasing": "warn",
-                   "gating": "warn", "merging": "warn", "resolve": "error",
+                   "gating": "warn", "merging": "warn",
+                   "ci-pending": "warn", "resolve": "error",
                    "merged": "ok", "failed": "error"}
     for r in rows:
         state = str(r.get("state") or "failed")
