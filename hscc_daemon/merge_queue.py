@@ -29,7 +29,7 @@ declared gates (``merge_queue.gates``) or hscc's built-in gates::
       # Optional explicit override; omit to follow the default-on rule.
       # enabled: false
       gates: ["python3 scripts/address_guard.py --tracked", "bash scripts/run_tests.sh"]
-      timeout_s: 1800
+      timeout_s: 3600
 
 A project missing one of the three stays off and ``hscc merge-queue status``
 prints why (``no repo`` / ``no GitHub remote`` / ``no gates``). The ``hscc``
@@ -37,6 +37,15 @@ project gets its own defaults (address guard + pytest legs, plus
 ``build_check.sh`` for whichever app tree the PR touched) when the registry
 entry does not declare gates. An explicit ``enable``/``disable`` from the CLI
 is stored in the ledger and always wins over the default.
+
+The local pytest gate is deliberately narrow: for hscc's built-in defaults it
+runs only the test legs whose directories the rebased diff touches, through
+``HSCC_TEST_LEGS``. A diff that touches a shared harness file (the runner,
+conftest, CI config, changelog tooling, requirements, the install payload) or
+more than :data:`MAX_LOCAL_TEST_LEGS` legs falls back to the whole roster.
+Nothing is lost by that: GitHub CI runs the full suite on the pushed head, and
+:func:`_post_push_ready` refuses to merge unless the PR's checks are green on
+that exact SHA.
 
 This module is deliberately a plain git + gh implementation: no GitHub org,
 no GitHub merge queue. Tests inject the ``git``/``gh`` runners and use a
@@ -62,7 +71,7 @@ import urllib.parse
 STREAM_NAME = "merge_queue"
 STATE_VERSION = 1
 
-DEFAULT_GATE_TIMEOUT_S = 1800
+DEFAULT_GATE_TIMEOUT_S = 3600
 DEFAULT_PROCESS_TIMEOUT_S = 120
 MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
@@ -75,7 +84,7 @@ MAX_ERROR_ATTEMPTS = 3
 #: pytest leg in the SAME worktree: warm at default QoS 144.9 s vs warm at
 #: background QoS 484.7 s = 3.34x (3.80x with the queue's exact no-bytecode +
 #: background combination).  The whole 12-leg suite needs 1092.6 s unopposed —
-#: 61% of DEFAULT_GATE_TIMEOUT_S — so it was the scheduling class exhausting the
+#: 30% of DEFAULT_GATE_TIMEOUT_S — so it was the scheduling class exhausting the
 #: budget, not the suite.  `utility` is the smallest elevation that gets a real
 #: scheduler share without claiming foreground priority from the operator.
 GATE_QOS_POLICY_CLASS = "utility"
@@ -111,16 +120,43 @@ _GITHUB_REMOTE_RE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/\s]+@)?github\.com[/:]",
     re.IGNORECASE)
 
+#: The gate name in :data:`DEFAULT_HSCC_GATES` that leg selection rewrites.
+RUN_TESTS_GATE = "bash scripts/run_tests.sh"
+
 #: hscc's own default gates. The app build legs are appended only when the PR
 #: actually touched that tree (see :func:`_resolve_gates`).
 DEFAULT_HSCC_GATES = (
     "python3 scripts/address_guard.py --tracked",
-    "bash scripts/run_tests.sh",
+    RUN_TESTS_GATE,
 )
 APP_BUILD_GATES = {
     "ios-app/": "bash ios-app/scripts/build_check.sh",
     "macos-app/": "bash macos-app/scripts/build_check.sh",
 }
+
+#: Changed paths that can alter how EVERY leg runs, so a local gate may not
+#: narrow to the leg that owns the directory. A prefix without a trailing slash
+#: is also a prefix match (``requirements`` covers ``requirements-ci.txt``).
+SHARED_GATE_PATHS = (
+    "scripts/run_tests.sh",
+    "scripts/leg_heartbeat.sh",
+    "conftest.py",
+    "pytest.ini",
+    "requirements",
+    "install/",
+    ".github/",
+    ".githooks/",
+    "scripts/changelog_fragments.py",
+    "scripts/migrate_changelog_fragments.py",
+)
+
+#: Above this many legs a narrowed local gate stops being a saving, so the
+#: queue runs the whole roster instead.
+MAX_LOCAL_TEST_LEGS = 3
+
+#: A leg name that is safe to put in the gate's shell string verbatim
+#: (``.github/scripts`` is a real roster entry, hence the leading-dot arm).
+_LEG_NAME_RE = re.compile(r"^[A-Za-z0-9.][A-Za-z0-9._/-]*$")
 
 _PR_JSON_FIELDS = (
     "number,state,isDraft,mergeable,headRefName,headRefOid,baseRefName,"
@@ -787,8 +823,68 @@ def refusal_reason(info, base):
     return None
 
 
+def _test_leg_roster(worktree):
+    """The runner's ``DIRS`` roster from the queue worktree, or None.
+
+    Read from the worktree, not this module's install tree: the roster that
+    matters is the one the PR's head would land. An unreadable or malformed
+    roster means the caller must fall back to the full suite.
+    """
+    path = os.path.join(worktree, "scripts", "run_tests.sh")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = re.search(r"^DIRS=\((?P<body>[^)]*)\)", text, re.MULTILINE)
+    if match is None:
+        return None
+    legs = match.group("body").split()
+    return legs or None
+
+
+def _local_test_legs(changed, roster):
+    """Legs a narrowed local gate may run, or ``None`` for the full suite.
+
+    Only a path under a leg's own directory selects that leg. A shared harness
+    path, an unreadable/odd roster, an empty diff, or more than
+    :data:`MAX_LOCAL_TEST_LEGS` distinct legs widen to ``None`` (full suite):
+    under-selection is the failure mode this gate must not have. Paths outside
+    every leg (docs, changelog fragments, app builds) select nothing, so a diff
+    that is *only* those also widens to the full suite rather than running
+    zero legs.
+    """
+    if not roster or any(not _LEG_NAME_RE.match(leg) for leg in roster):
+        return None
+    paths = [p.strip().replace("\\", "/") for p in changed if p.strip()]
+    if not paths:
+        return None
+    for path in paths:
+        if any(path == shared or path.startswith(shared)
+               for shared in SHARED_GATE_PATHS):
+            return None
+    chosen = {leg for leg in roster
+              if any(path.startswith(leg.rstrip("/") + "/") for path in paths)}
+    if not chosen or len(chosen) > MAX_LOCAL_TEST_LEGS:
+        return None
+    return [leg for leg in roster if leg in chosen]
+
+
+def _selected_leg_gate(legs):
+    """The runner command with ``HSCC_TEST_LEGS`` narrowed to ``legs``."""
+    return 'HSCC_TEST_LEGS="%s" %s' % (" ".join(legs), RUN_TESTS_GATE)
+
+
 def _resolve_gates(cfg, worktree, git_runner, base="main"):
-    """Gate command list for this PR, including hscc's conditional app builds."""
+    """Gate command list for this PR, including hscc's conditional app builds.
+
+    Declared gates are used verbatim. For hscc's built-in defaults the pytest
+    gate is narrowed to the legs the rebased diff touches (see
+    :func:`_local_test_legs`); app build gates still come from that same diff.
+    The full suite is not lost with the narrowed local gate: GitHub CI runs it
+    on the pushed head and :func:`_post_push_ready` refuses to merge until that
+    exact SHA is green.
+    """
     declared = cfg.get("gates")
     if declared is not None:
         return [str(g) for g in declared]
@@ -796,6 +892,9 @@ def _resolve_gates(cfg, worktree, git_runner, base="main"):
         return []
     gates = list(DEFAULT_HSCC_GATES)
     changed = _changed_files(worktree, git_runner, base=base)
+    legs = _local_test_legs(changed, _test_leg_roster(worktree))
+    if legs:
+        gates[gates.index(RUN_TESTS_GATE)] = _selected_leg_gate(legs)
     for prefix, cmd in APP_BUILD_GATES.items():
         if any(f.startswith(prefix) for f in changed):
             gates.append(cmd)
@@ -803,7 +902,7 @@ def _resolve_gates(cfg, worktree, git_runner, base="main"):
 
 
 def _changed_files(worktree, git_runner, base="main"):
-    proc = _git(["diff", "--name-only", f"origin/{base}..HEAD"], worktree,
+    proc = _git(["diff", "--name-only", f"origin/{base}...HEAD"], worktree,
                 git_runner, timeout=DEFAULT_PROCESS_TIMEOUT_S)
     if proc is None or proc.returncode != 0:
         return []
@@ -981,7 +1080,7 @@ def _rebase_onto(worktree, base, git_runner):
 # ``check_merge_queue`` is a 60 s daemon stream (daemon_ops.PERIODIC_INTERVALS)
 # and ``hscc verify`` calls ``state/merge_queue.json`` stale after
 # ``max(600, 2*60+90)`` = 600 s.  A tick that holds a claim can spend the WHOLE
-# gate budget inside a single leg (:data:`DEFAULT_GATE_TIMEOUT_S` is 1800 s), so
+# gate budget inside a single leg (:data:`DEFAULT_GATE_TIMEOUT_S` is 3600 s), so
 # a stamp written only once ``tick()`` returns goes RED on a runner that is
 # demonstrably alive — the "cries wolf on a healthy thing" anti-pattern
 # ``verify.py`` documents.  These writers stamp from INSIDE the work instead:
