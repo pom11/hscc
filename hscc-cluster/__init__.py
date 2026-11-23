@@ -11,6 +11,7 @@ from . import template_tools
 from . import orch_message
 from . import autodown_tools as adt
 from . import heal_tools as hlt
+from . import main_status as mst
 from . import merge_queue_tools as mqt
 from . import node_pause_tools as npt
 from . import doctor_tools as dt
@@ -87,6 +88,17 @@ _READ_TOOLS = [
      "node right now and for how long. Read-only: the ledger "
      "`hscc heal-status` prints, as numbers. It never clears strikes — "
      "`hscc heal-clear <node>` stays an operator CLI verb."),
+    # Main orchestrator (t_c920b0ca): the READ half of `hscc main`. `start`
+    # spawns/re-attaches the operator's pane and `wakeups` rewrites the daemon's
+    # wake schedule, so both stay CLI/operator-only. The identity always comes
+    # from the one resolver (hscc-roles/main_orch.py), never a hard-coded name.
+    ("main_status", mst.MAIN_STATUS_SCHEMA, mst.main_status, "👑",
+     "The configured main orchestrator and its live shape: name/profile/board "
+     "from the one resolver, the tmux pane and busy/idle state from the same "
+     "discovery `hscc main status` uses, plus the daemon waker's enabled/"
+     "freshness/board state. Read-only: same payload as `hscc main status "
+     "--json`; it never starts, re-attaches or renames the main orchestrator, "
+     "and never edits its wake schedule."),
 ]
 
 _OPS_TOOLS = [

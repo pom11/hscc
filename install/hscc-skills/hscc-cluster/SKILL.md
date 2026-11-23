@@ -1,6 +1,6 @@
 ---
 name: hscc-cluster
-description: Manages DGX Spark GPU cluster — the 30 registered agent tools, each tool's state source, the CLI verbs, and node/NAS diagnostics
+description: Manages DGX Spark GPU cluster — the 31 registered agent tools, each tool's state source, the CLI verbs, and node/NAS diagnostics
 tags: [hsc, cluster, gpu, spark, hosts, monitor, jobs, agent-tools, serving]
 ---
 
@@ -9,7 +9,7 @@ tags: [hsc, cluster, gpu, spark, hosts, monitor, jobs, agent-tools, serving]
 The DGX Spark GPU cluster is reached through the `hscc-cluster` plugin. There are
 two ways in, and they are not interchangeable:
 
-- **Agent tools** — 30 tools registered by `hscc-cluster/__init__.py`. This is what
+- **Agent tools** — 31 tools registered by `hscc-cluster/__init__.py`. This is what
   a model calls. Most of them are read-only; the rest are confirm-gated.
 - **The `hscc` CLI** — what an operator (or a shell) runs. Fleet-wide and
   power-mutating verbs live only here and on confirm-gated API routes.
@@ -34,7 +34,7 @@ the decisions quoted below.
 - Diagnosing a node (GPU/disk/OOM/docker), a vLLM container's logs, or the NAS mount
 - Asked what the fleet would look like scaled (advice, not action)
 
-## The registered agent tools (30)
+## The registered agent tools (31)
 
 `confirm=true` is the plugin's spelling of the CLI's confirmation: **absent means
 "dry-run and report", never "do it".** Every tool returns a JSON string.
@@ -53,12 +53,17 @@ the decisions quoted below.
 | `merge_queue_status` | per project: enabled (or why off — no repo / no GitHub remote / no gates), paused, queue depth and entries, waiting head, in-flight PR, last outcome | calls the CLI's own verb `merge_queue_cli.cmd_merge_queue(["status", "--json"])`; projection is `merge_queue._status_doc` over `~/.hscc/merge-queue-state.json` (+ the flightdeck registry, to explain a why-off) |
 | `doctor` | every HSCC preflight check as findings — `checks[]` rows of `name` / `ok` / `detail` (one-line cause) / `fix` / `fatal`, plus `ok` and `fatal_failures`. The `fix` text is advice copied from the payload, never an action | runs the operator's own door as a subprocess: `python3 hscc-bootstrap/doctor.py --json` (the line `bootstrap.sh` Stage 1 execs) and relays its payload. Live at call time, cached nowhere. `--fix` — the door's one mutating mode, which rewrites `config.yaml` via `enable_plugins.enable` — is unreachable from here |
 | `heal_status` | per node: heal-breaker strikes inside the rolling window, the age of each strike, whether the daemon is refusing to heal it and for how long, and the `hscc heal-clear <node>` verb it deliberately does **not** expose | `heal_breaker.snapshot()` over `~/.hscc/heal-breaker.json` — the same module and window arithmetic `hscc heal-status` and every heal path use. **Read-only; `heal-clear` is CLI-only** |
+| `main_status` | the configured main orchestrator — name, profile and board from the one resolver — plus its live shape: tmux pane + busy/idle/not-running/ambiguous, and the daemon waker's enabled/freshness/board state | calls the CLI's own verb `main_cli.cmd_main(["status", "--json"])`; the identity is `hscc-roles/main_orch.py` (never a baked-in name), panes are `repl_inject`'s (the same discovery `hscc orch inject` uses), and `waker` is `orch_waker.waker_status()` — the function `hscc orch waker status` renders |
 
-`autodown_status`, `merge_queue_status`, `doctor` and `heal_status` take **no
-arguments at all** (`additionalProperties: false`) — the schema itself refuses
-an invented `host`, `node` or `confirm`, because none has a meaning on a
-surface that is read-only by contract. On `doctor` a `fix` key would be worse:
-it is the mutation the tool exists to withhold.
+`autodown_status`, `merge_queue_status`, `doctor`, `heal_status` and
+`main_status` take **no arguments at all** (`additionalProperties: false`) — the
+schema itself refuses an invented `host`, `node`, `profile` or `confirm`, because
+none has a meaning on a surface that is read-only by contract. On `doctor` a
+`fix` key would be worse: it is the mutation the tool exists to withhold.
+`heal_status` never clears strikes (`hscc heal-clear <node>` stays CLI-only);
+`main_status` never starts, re-attaches or renames the main orchestrator and
+never edits its wake schedule; `hscc main start` and `hscc main wakeups` stay
+CLI/operator-only.
 
 ### Ops (5) — per-unit, two of them guarded
 
@@ -147,16 +152,24 @@ looking for these, and do not "helpfully" add one — each row is pinned by a te
 | `hscc autodown enable` / `disable` / `wake` / `cancel` | **no** | arming or disarming fleet power is daemon/operator scope, not a per-turn agent call | §2.4 |
 | `hscc notify` | **no** | an agent that can page the operator can train the operator to ignore pages | D7 |
 | `hscc doctor` (as an HTTP route) | **no route** — but the read-only **tool** `doctor` exists | D11 refused the *route*: `doctor.py` reads *this host's* trees and state, so answering it from elsewhere is answering a question the caller cannot ask. §12.2 closed the question — "the read-only agent *tool* is a different surface and stands". The repair half (`--fix`) is still CLI-only | §12.2 D11 |
-| `hscc main status`, `orch waker status` | **no tool** | pure reads wanted by the dashboards → read **routes**, not agent tools | D9 |
+| `hscc main start` / `hscc main wakeups` | **no** | spawning/re-attaching the operator's orchestrator pane, and rewriting the daemon's wake schedule, are operator scope. The read is `main_status` | §2.6 |
+| `hscc main status` / `orch waker status` (HTTP **routes**) | **no route yet** — the read-only **tool** `main_status` exists | D9's dashboard read pair is deferred; the agent read is `main_status` today | D9 |
 | `hscc heal-clear <node>` | **no** (`heal-status` reads as the `heal_status` tool) | clearing a node's breaker strikes re-arms the daemon's repair paths immediately — an operator decision after investigating the hardware. Read with `heal_status`, then run the CLI verb | D4, F7 |
 | `hscc template validate` | **no tool** (and no route yet) | D5 recommends `GET /v1/template/validate/{name}` + the `/template` hint. `validate` is the safe half of a family whose destructive half (`apply`) has every surface | D5, F10 |
 | `hscc start` / `stop` / `install` / `uninstall` / `api *` | **no** | service-manager scope: the API cannot start or stop the process that serves it; launchd units are never agent-reachable | §2.1, §2.7 |
 
 ## The one-door rule (read this before adding a tool)
 
-`node_pause` / `node_resume` / `node_paused`, `autodown_status` and
-`merge_queue_status` all do the same thing: **they call the unified CLI's own verb
-functions in-process and report what the verb printed.** No second implementation.
+`node_pause` / `node_resume` / `node_paused`, `autodown_status`,
+`merge_queue_status` and `main_status` all do the same thing: **they call the
+unified CLI's own verb functions in-process and report what the verb printed.**
+No second implementation.
+
+`main_status` follows the rule twice: the main-orchestrator half is the CLI verb
+`main_cli.cmd_main(["status", "--json"])` (identity from the one
+`hscc-roles/main_orch.py` resolver, panes from `repl_inject`), and the `waker`
+block is `orch_waker.waker_status()` — the same function the `hscc orch waker
+status` verb renders. Neither half re-derives a name, a pane or a waker fact.
 
 `doctor` is the one tool that reaches its door as a **subprocess**, and it is the
 same rule applied to a door that is a script, not a verb: it runs the operator's own
