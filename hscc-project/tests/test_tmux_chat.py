@@ -454,3 +454,180 @@ def test_cmd_chat_resume_outside_tmux_uses_same_helper(monkeypatch, tmp_path):
     assert fake.tmux_argv("new-session"), "resume must not bypass tmux"
     created = fake.tmux_argv("new-session")[0]
     assert "--resume" in created and world["orchestrator"]["id"] in created
+
+
+# --------------------------------------------------------------------------- #
+# The tmux SERVER seam (t_4b3e3806): a chat launch must join the running server
+#
+# With TMUX_TMPDIR unset (a fresh shell), unqualified tmux looks only in /tmp
+# and the launch door CREATES hscc-<project> on a SECOND server, invisible to
+# the operator's own tmux. These tests run the real run_tmux against a fake
+# tmux binary and fake unix sockets; no live server is reachable.
+# --------------------------------------------------------------------------- #
+
+FAKE_TMUX_SERVER_SRC = r'''#!{python}
+import json
+import os
+import sys
+
+argv = sys.argv[1:]
+log = os.environ["FAKE_TMUX_LOG"]
+live = [p for p in os.environ.get("FAKE_TMUX_LIVE", "").split(os.pathsep) if p]
+
+target = None
+i = 0
+while i < len(argv) and argv[i].startswith("-"):
+    if argv[i] == "-S" and i + 1 < len(argv):
+        target = argv[i + 1]
+        i += 2
+        continue
+    break
+explicit = target is not None
+if target is None:
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    target = os.path.join(base, "tmux-%d" % os.getuid(), "default")
+
+with open(log, "a") as fh:
+    fh.write(json.dumps({{"argv": argv, "socket": target,
+                         "explicit": explicit}}) + "\n")
+
+if target not in live:
+    sys.stderr.write("no server running on %s\n" % target)
+    sys.exit(1)
+
+verb = next((a for a in argv[i:]
+             if not a.startswith("-") and not a.startswith("#{{")), "")
+if verb == "has-session":
+    sys.exit(1)                       # no hscc-<project> session yet
+if verb in ("new-session", "new-window"):
+    sys.stdout.write("%9\n")
+sys.exit(0)
+'''
+
+
+def _load_repl_inject_by_path():
+    import importlib.util
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[2] / "hscc-api" / "repl_inject.py"
+    spec = importlib.util.spec_from_file_location("_tmux_chat_socket_ri", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def tmux_server(tmp_path, monkeypatch):
+    import os
+    import socket
+
+    base = os.path.join("/tmp", f"htc{os.getpid()}")
+    default_dir = os.path.join(base, "a")
+    private_dir = os.path.join(base, "b")
+    for d in (default_dir, private_dir):
+        os.makedirs(os.path.join(d, f"tmux-{os.getuid()}"), exist_ok=True)
+
+    listeners = []
+    paths = {}
+    for where, root in (("default", default_dir), ("private", private_dir)):
+        path = os.path.join(root, f"tmux-{os.getuid()}", "default")
+        assert len(path) < 104, path
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(path)
+        sock.listen(8)
+        listeners.append(sock)
+        paths[where] = path
+
+    log = tmp_path / "tmux-calls.jsonl"
+    fake = tmp_path / "tmux"
+    fake.write_text(FAKE_TMUX_SERVER_SRC.format(python=__import__("sys").executable))
+    fake.chmod(0o755)
+
+    ri = _load_repl_inject_by_path()
+    monkeypatch.setattr(tmux_chat, "_MATCHER", ri)
+    monkeypatch.setenv("FAKE_TMUX_LOG", str(log))
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", os.path.join(base, "empty"))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+    monkeypatch.setattr(ri, "TMUX_DEFAULT_TMPDIR", default_dir)
+    monkeypatch.setattr(ri, "TMUX_PRIVATE_TMPDIRS", (private_dir,))
+    monkeypatch.setattr(ri, "TMUX_BIN", str(fake))
+    ri.reset_tmux_socket_cache()
+
+    def live(*where):
+        monkeypatch.setenv(
+            "FAKE_TMUX_LIVE", os.pathsep.join(paths[w] for w in where))
+
+    def calls():
+        import json
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text().splitlines()
+                if line.strip()]
+
+    live("private")
+
+    def cleanup():
+        for s in listeners:
+            s.close()
+        ri.reset_tmux_socket_cache()
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+    yield {"paths": paths, "live": live, "calls": calls,
+           "default_dir": default_dir, "ri": ri, "cleanup": cleanup}
+    cleanup()
+
+
+def _tmux_verb(argv):
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):
+        if argv[i] == "-S":
+            i += 2
+            continue
+        break
+    return next((a for a in argv[i:]
+                 if not a.startswith("-") and not a.startswith("#{")), "")
+
+
+def test_launch_joins_the_server_discovered_without_tmux_tmpdir(tmux_server):
+    """MANDATORY shape from t_4c5855a6: TMUX_TMPDIR removed, private server.
+
+    At base `new-session` carries no -S, the fake (like tmux) answers only on
+    the live private socket, and the named session lands on a second server.
+    """
+    import os
+    assert "TMUX_TMPDIR" not in os.environ
+    reason = tmux_chat._ensure_tmux_session(
+        "alpha", HERMES_CHAT, lambda _: "/usr/bin/tmux")
+    assert reason is None, reason
+    news = [c for c in tmux_server["calls"]()
+            if _tmux_verb(c["argv"]) == "new-session"]
+    assert len(news) == 1, tmux_server["calls"]()
+    assert news[0]["explicit"] is True
+    assert news[0]["socket"] == tmux_server["paths"]["private"]
+
+
+def test_launch_adds_no_socket_argument_when_tmux_tmpdir_is_set(tmux_server,
+                                                                 monkeypatch):
+    """NO-REGRESSION: declared TMUX_TMPDIR -> argv byte-identical."""
+    import os
+    tmux_server["live"]("default")
+    monkeypatch.setenv("TMUX_TMPDIR", tmux_server["default_dir"])
+    r = tmux_chat.run_tmux("list-sessions")
+    assert r.returncode == 0, r.stderr
+    assert os.environ["TMUX_TMPDIR"] == tmux_server["default_dir"]
+    assert tmux_server["calls"]()
+    assert all(not c["explicit"] for c in tmux_server["calls"]())
+
+
+def test_two_live_servers_refuse_as_a_named_branch_c_reason(tmux_server):
+    """Two servers + no TMUX_TMPDIR: branch C says which fix, never guesses."""
+    tmux_server["live"]("default", "private")
+    reason = tmux_chat._ensure_tmux_session(
+        "alpha", HERMES_CHAT, lambda _: "/usr/bin/tmux")
+    assert reason is not None
+    assert "TMUX_TMPDIR" in reason, reason
+    assert not [c for c in tmux_server["calls"]()
+                if _tmux_verb(c["argv"]) == "new-session"]

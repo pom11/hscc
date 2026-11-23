@@ -125,6 +125,7 @@ REASON_RATE = "rate_limited"
 REASON_NO_REPL = "repl_inject_missing"
 REASON_NO_PANE = "no_pane"
 REASON_AMBIGUOUS = "ambiguous_pane"
+REASON_AMBIGUOUS_SERVER = "ambiguous_server"
 REASON_TRANSPORT = "transport_error"
 REASON_AUDIT = "audit_unwritable"
 
@@ -133,6 +134,7 @@ REASON_AUDIT = "audit_unwritable"
 _INJECT_KIND_REASON = {
     "no_panes": REASON_NO_PANE,
     "ambiguous": REASON_AMBIGUOUS,
+    "ambiguous_server": REASON_AMBIGUOUS_SERVER,
     "tmux": REASON_TRANSPORT,
     "empty": REASON_EMPTY,
 }
