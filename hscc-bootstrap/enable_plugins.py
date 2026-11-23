@@ -404,7 +404,8 @@ def _load_main_orch():
     shape: bootstrap must never half-wire a fleet because a resolver is
     missing, and never widen one either — the flat shape is the pre-existing
     state, which is why the plugins carry their own registration gate
-    (slice 2, ``main_orch.plugin_surface_allowed``).
+    (slice 2, ``main_orch.plugin_tools_allowed`` /
+    ``main_orch.plugin_commands_allowed``).
     """
     import importlib.util
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

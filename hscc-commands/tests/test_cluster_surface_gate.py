@@ -114,13 +114,13 @@ def test_gate_is_denied_by_name_alone(monkeypatch, homes):
 def test_gate_routes_through_the_resolver_not_a_local_name_check():
     """D-A guard: no plugin may decide main-ness itself.
 
-    The gate must reach ``main_orch.plugin_surface_allowed``; a local
+    The gate must reach ``main_orch.plugin_commands_allowed``; a local
     comparison (``profile == "general"``, a ``-orch`` regex, an ``os.environ``
     sniff) would be a second resolver, and the one this card exists to remove.
     """
     src = open(os.path.join(_REPO, "hscc-commands", "__init__.py"),
                encoding="utf-8").read()
-    block = src[src.index("def _cluster_surface_allowed"):]
-    assert "plugin_surface_allowed" in block
+    block = src[src.index("def _operator_verbs_allowed"):]
+    assert "plugin_commands_allowed" in block
     for needle in ('"general"', "'general'", "-orch", "get_active_profile_name"):
         assert needle not in block, f"second resolver sneaked back in: {needle}"

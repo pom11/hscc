@@ -1,17 +1,19 @@
-"""D-B: hscc-cluster registers tools by home, hooks in every home (t_e98c6ad4).
+"""D-B/R3: hscc-cluster registers tools by home, hooks in every home (t_e98c6ad4).
 
 The audit's whole point (docs/audits/2026-11-23-main-only-surface.md §3.1, §7
 G-1) is that Hermes cannot split hooks from tools: ``register(ctx)`` is
 all-or-nothing at load. The ruling therefore puts the split inside this plugin —
-tools only in ``<main>`` and the operator/gateway root home, hooks everywhere —
-and the pair of facts below is what keeps that honest:
+tools only where the home resolves to ``<main>`` (R3 tightened D-B: the
+operator/gateway root home keeps the wedge VERBS via hscc-commands, not a tool
+catalog for a model chatting there), hooks everywhere — and the pair of facts
+below is what keeps that honest:
 
   * a non-main home registers NO tools, and
   * the same home still registers ALL SIX hooks (audit §3.2), because those six
     are the worker/dispatcher lanes: the ``[budget]`` note, the per-profile tool
     ledger and the kanban completion/blocked observers.
 
-``cluster_tools_allowed`` is a thin reach to ``main_orch.plugin_surface_allowed``
+``cluster_tools_allowed`` is a thin reach to ``main_orch.plugin_tools_allowed``
 (the resolver D-A requires); this file pins both the resolver's verdicts and the
 source shape that keeps hooks outside the gate.
 """
@@ -69,10 +71,16 @@ def _allowed(monkeypatch, profile, home):
     return orch_message.cluster_tools_allowed(Ctx(profile_name=profile))
 
 
-def test_worker_home_denied_main_and_root_allowed(monkeypatch, homes):
+def test_worker_and_root_homes_denied_main_allowed(monkeypatch, homes):
+    """R3 tightened D-B: the root/gateway home is not the orchestrator.
+
+    It keeps the operator's slash verbs (``hscc-commands``, pinned by that
+    plugin's own gate test) and the hooks, but a model chatting at the root gets
+    no cluster tool catalog — that is ``<main>``'s alone.
+    """
     assert _allowed(monkeypatch, "backend-engineer", homes["worker"]) is False
     assert _allowed(monkeypatch, "ops", homes["main"]) is True
-    assert _allowed(monkeypatch, "default", homes["root"]) is True
+    assert _allowed(monkeypatch, "default", homes["root"]) is False
 
 
 def test_stub_ctx_is_allowed(monkeypatch, homes):
@@ -93,7 +101,7 @@ def test_throwing_resolver_fails_open(monkeypatch, homes):
     real = orch_message._load_main_orch
 
     class _Boom:
-        def plugin_surface_allowed(self, ctx, **kw):
+        def plugin_tools_allowed(self, ctx, **kw):
             raise RuntimeError("resolver unusable")
 
     monkeypatch.setattr(orch_message, "_load_main_orch", lambda: _Boom())

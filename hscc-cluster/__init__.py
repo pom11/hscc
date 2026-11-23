@@ -149,9 +149,11 @@ _ORCH_TOOLS = [
 
 
 def register(ctx) -> None:
-    # D-B gate (t_e98c6ad4, docs/audits/2026-11-23-main-only-surface.md §6):
-    # the cluster TOOL catalog registers only in <main> and in the operator/
-    # gateway root home. Every other home still loads this plugin, because the
+    # R3/D-B gate (t_e98c6ad4, docs/audits/2026-11-23-main-only-surface.md §6):
+    # the cluster TOOL catalog registers only where the home resolves to <main>
+    # — R3 tightened D-B so the operator/gateway root home gets the wedge
+    # VERBS (hscc-commands) but no tool catalog for a model chatting there.
+    # Every other home still loads this plugin, because the
     # hooks below are worker/dispatcher-lane (audit §3.2) — the [budget] note,
     # the per-profile tool ledger and the kanban completion/blocked observers.
     # Hermes has no hooks-vs-tools split (audit §7 G-1), so the split is made

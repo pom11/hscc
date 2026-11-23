@@ -312,12 +312,14 @@ def main_orchestrator_profile() -> str | None:
 
 
 def cluster_tools_allowed(ctx) -> bool:
-    """May THIS home register the cluster tools? (D-B gate, card t_e98c6ad4)
+    """May THIS home register the cluster tools? (R3/D-B gate, card t_e98c6ad4)
 
     The one question the main-only ruling asks at plugin-load time, answered by
-    the resolver that owns it (:func:`main_orch.plugin_surface_allowed`) rather
-    than by a comparison invented here: ``<main>`` and the operator/gateway root
-    home get the tools, every other home loads this plugin for its HOOKS only.
+    the resolver that owns it (:func:`main_orch.plugin_tools_allowed`) rather
+    than by a comparison invented here. R3 tightened D-B: the tool catalog
+    registers ONLY where the home resolves to ``<main>`` — the root/gateway home
+    keeps this plugin for its HOOKS (and ``hscc-commands`` for the operator's
+    wedge verbs), and every worker/project-orch home loads it for hooks only.
 
     Fail-open whenever the answer cannot be established — no resolver on the
     path, a ctx that is not a Hermes ``PluginContext``, or a resolver that
@@ -329,7 +331,7 @@ def cluster_tools_allowed(ctx) -> bool:
     if main_orch is None:
         return True
     try:
-        return bool(main_orch.plugin_surface_allowed(ctx, hscc_dir=hscc_dir()))
+        return bool(main_orch.plugin_tools_allowed(ctx, hscc_dir=hscc_dir()))
     except Exception:  # noqa: BLE001 — an unusable resolver must not strip tools
         return True
 

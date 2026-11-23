@@ -1,10 +1,12 @@
-"""D-B: ``sparkrun_exec`` registers only in <main> and the root home (t_e98c6ad4).
+"""R3/D-B: ``sparkrun_exec`` registers only in ``<main>`` (t_e98c6ad4).
 
 The audit left the passthrough's reach as LEFT-2 ("the SOUL claims
 orchestrator-only; nothing enforces it"). This card closes the enforcement half:
-the tool is cluster authority through a raw CLI passthrough, so a worker or a
-per-project orchestrator home must not get it, while ``<main>`` and the
-operator/gateway root home do.
+the tool is cluster authority through a raw CLI passthrough, so a worker, a
+per-project orchestrator, and — per R3's tightening of D-B — the operator/
+gateway ROOT home must not get it. The root keeps the wedge verbs (a human types
+those into the gateway); a raw fleet passthrough is a tool, and tools follow
+``<main>``.
 
 Sandboxed exactly as the sibling gate test does (fake hermes tree + ``HSCC_DIR``
 holding a NON-default main name). Nothing live is read, and the suite's own
@@ -75,9 +77,11 @@ def test_project_orch_home_gets_no_passthrough(monkeypatch, homes):
     assert _run(monkeypatch, "ecofire-orch", orch) == []
 
 
-def test_main_and_root_homes_get_it(monkeypatch, homes):
+def test_main_home_gets_it_and_the_root_home_does_not(monkeypatch, homes):
+    """R3: tools follow ``<main>`` alone. The gateway root is not an
+    orchestrator, so the raw fleet passthrough does not register there."""
     assert _run(monkeypatch, "ops", homes["main"]) == ["sparkrun_exec"]
-    assert _run(monkeypatch, "default", homes["root"]) == ["sparkrun_exec"]
+    assert _run(monkeypatch, "default", homes["root"]) == []
 
 
 def test_stub_ctx_still_registers(monkeypatch, homes):
@@ -90,7 +94,7 @@ def test_stub_ctx_still_registers(monkeypatch, homes):
 def test_gate_routes_through_the_resolver_not_a_local_name_check():
     src = open(os.path.join(_REPO, "sparkrun-hermes", "__init__.py"),
                encoding="utf-8").read()
-    block = src[src.index("def _cluster_surface_allowed"):]
-    assert "plugin_surface_allowed" in block
+    block = src[src.index("def _cluster_tools_allowed"):]
+    assert "plugin_tools_allowed" in block
     for needle in ('"general"', "'general'", "-orch", "get_active_profile_name"):
         assert needle not in block, f"second resolver sneaked back in: {needle}"
