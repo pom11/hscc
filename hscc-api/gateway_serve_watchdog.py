@@ -42,8 +42,20 @@ the caller documents when it ships the fallback.
 
 WHAT THIS DOES NOT COVER, stated rather than hidden: a SIGKILL of *this*
 watchdog still orphans the serve — one level up the same hole, uncloseable
-without ``PR_SET_PDEATHSIG``, which macOS does not have. That shape is what the
-port-occupancy heal in ``gateway_bridge.start_serve`` exists for.
+without ``PR_SET_PDEATHSIG``, which macOS does not have. Measured (card
+t_b952885e: real chain, real SIGKILL of the watcher, 10/10 trials): the
+serve was alive at the 4.0 s bound and at 6.0 s with the port still held,
+and a cooperative ``shutdown()`` after that kill no-ops past the dead
+watchdog and leaves it too (3/3) — while the next ``start_serve``'s
+port-occupancy heal kills it before any supervised serve starts, so the
+orphan never survives a start cycle. The decision recorded with the
+measurement is "documented residual", not a second watcher: chaining this
+module only moves the last-watcher hole one level down (the top watcher is
+what today's single one already covers), and an API-side re-attach would
+have to signal the serve's pid WITHOUT a child handle — identity-blind pid
+signalling, the trap that already reddened this lane's harness twice.
+Pinned in ``tests/test_gateway_serve_watchdog.py`` as one strict-xfail
+acceptance case plus two green pins; a real fix reddens all three at once.
 
 Hermetic: this process touches nothing outside the fd it reads, the child it
 spawns, and the env it was handed. It writes no file, opens no socket, and does
