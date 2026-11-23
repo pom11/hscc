@@ -22,9 +22,11 @@ What is pinned, and why each pin is the pin that matters:
    subcommand table). A name nobody ships is a name the model will call and get
    an error from.
 4. The decisions stay written down: the verbs the audit decided AGAINST a tool
-   (D2 monitor, D3 fleet power, D6 board brake, D8 merge-queue writes, D11
-   doctor, and the autodown write half) are named as CLI, so nobody "fixes" the
-   gap by shelling around a guard.
+   (D2 monitor, D3 fleet power, D6 board brake, D8 merge-queue writes, D11 the
+   doctor HTTP route, and the autodown write half) are named as CLI, so nobody
+   "fixes" the gap by shelling around a guard. D11 is the one the wave moved:
+   §12.2 ruled on the *route* and said the read-only ``doctor`` tool stands, so
+   the section maps the tool AND keeps the route-closed decision.
 5. The toolsets + skills guarantee is asserted on the GENERATED PROFILE, in a
    sandboxed home — the SOUL claims bootstrap gives this profile
    ``hscc-cluster`` + ``sparkrun``, so the config it is written with must say
@@ -101,7 +103,7 @@ DECISIONS = {
     "D3 (fleet power has no tool)": "audit D3",
     "D6 (the board brake is CLI-only)": "audit D6",
     "D8 (merge-queue writes stay closed)": "audit D8",
-    "D11 (doctor stays CLI)": "audit D11",
+    "D11 (the doctor HTTP route stays refused)": "audit D11",
     "section 2.4 (autodown writes are operator scope)": "audit section 2.4",
 }
 
@@ -446,10 +448,17 @@ def test_every_backticked_tool_name_is_a_registered_tool():
 
 
 def test_the_named_read_tools_include_the_two_read_only_additions():
-    """The tools the wave added (autodown_status, merge_queue_status) are mapped."""
+    """The read tools the recent waves added are mapped by name.
+
+    ``autodown_status`` / ``merge_queue_status`` from the audit wave,
+    ``doctor`` from t_7f570861. The parametrized coverage test above derives its
+    cases from the registry and would also pass if a later diff moved a mapped
+    tool into its exclusion set; this one is the static pin that keeps these
+    reads named whatever the registry does.
+    """
     section = _section_only(orchestrators.main_cluster_control_block())
-    for tool in ("autodown_status", "merge_queue_status", "node_paused",
-                 "node_pause", "node_resume", "orch_message"):
+    for tool in ("autodown_status", "merge_queue_status", "doctor",
+                 "node_paused", "node_pause", "node_resume", "orch_message"):
         assert f"`{tool}`" in section, f"{tool} is not mapped to a job"
 
 

@@ -307,11 +307,12 @@ intent): topology, families, per-node request caps, kanban caps, balancer
 `reap_orphans`, so a stale copy makes a live workload reapable: double-check
 `serving.json` against reality before reaping anything (audit F13).
 
-## The `hscc-cluster` agent tools (28)
+## The `hscc-cluster` agent tools (29)
 
 Registered in `hscc-cluster/__init__.py` in seven families — reads:
 `cluster_status`, `list_recipes`, `pick_node`, `discovery_status`,
-`nas_status`, `node_paused`, `autodown_status`, `merge_queue_status` ·
+`nas_status`, `node_paused`, `autodown_status`, `merge_queue_status`,
+`doctor` ·
 ops: `provision_model`, `stop_model`, `model_health`, `node_pause`,
 `node_resume` · debug: `vllm_logs`, `node_diagnostics`, `nas_diagnose` ·
 heal: `restart_model`, `remount_nas`, `repair_nas_export`, `reap_orphans` ·

@@ -257,6 +257,49 @@ def test_generate_profile_idempotent(tmp_path, monkeypatch):
     assert changed_second is False  # unchanged content → no rewrite
 
 
+# -- new profiles get an explicit plugins.enabled (R5, t_e98c6ad4) -----------
+
+def test_generate_profile_seeds_the_plugin_tier(tmp_path, monkeypatch):
+    """A profile created AFTER the last bootstrap is the gap R5 names.
+
+    ``_migrate_to_21`` fills a key-less config with every manifest-bearing dir
+    under the home's ``plugins/``, so "no plugins key" is not neutral: on this
+    fleet it means a worker home one migration away from the whole cluster
+    surface. ``generate_profile`` therefore hands the home to the bootstrap
+    writer, which asks ``main_orch`` (not this file) what the tier is.
+
+    Sealed two ways: ``HSCC_DIR`` holds a NON-default stored main name so the
+    answer cannot come from the live ``~/.hscc``, and ``HERMES_HOME``/
+    ``PROFILES_DIR`` so nothing near the real tree is written.
+    """
+    import main_orch
+    hscc = tmp_path / "hscc-state"
+    hscc.mkdir()
+    monkeypatch.setenv("HSCC_DIR", str(hscc))
+    main_orch.store_name("ops", registry_path="/nonexistent.yaml")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n", "preload_skills": []}
+
+    assert generator.generate_profile(spec, base_identity="BASE") is True
+    cfg = yaml.safe_load(open(os.path.join(str(tmp_path / "profiles" / "coder"),
+                                            "config.yaml")))
+    assert cfg["plugins"]["enabled"] == ["hscc-cluster"]   # worker: hooks only
+
+    # The orchestrator's OWN home is the one home that gets the tools, and the
+    # name that decides it came from the state file — nothing spells it here.
+    orch_spec = {"name": "ops", "identity": "You orchestrate.\n",
+                 "preload_skills": [], "kind": "orchestrator"}
+    generator.generate_profile(orch_spec, base_identity="BASE")
+    cfg = yaml.safe_load(open(os.path.join(str(tmp_path / "profiles" / "ops"),
+                                           "config.yaml")))
+    assert cfg["plugins"]["enabled"] == ["hscc-cluster", "hscc-commands",
+                                         "sparkrun-hermes"]
+
+    # Seeding must not make regeneration look like a change forever.
+    assert generator.generate_profile(spec, base_identity="BASE") is False
+
+
 # -- SOUL regeneration keeps operator-owned trailing sections (t_8695aa1a) --
 
 def test_regen_preserves_operator_soul_section(tmp_path, monkeypatch):

@@ -14,9 +14,14 @@ gate that keeps it fixed. It bites on the two ways the audit says the drift happ
 * **a tool registered and never documented** — the registry grows (it went 23 → 26 →
   28 inside one workstream) and the skill keeps describing the old one;
 * **a tool documented that does not exist** — the audit's own card body listed
-  ``kanban_paused``, ``main_status`` and ``doctor`` as tools this wave "adds", and all
-  three are decided *against* (D6, D9, D11). A document that names a phantom tool is
-  worse than one that omits a real one, because an agent wastes a turn calling it.
+  ``kanban_paused``, ``main_status`` and ``doctor`` as tools this wave "adds", and
+  §10 decided all three against (D6, D9, D11). §12.2 (the operator verdict) then
+  ruled that D11 was about the *route* and that the read-only ``doctor`` **tool**
+  stands, so two of the three are still refused and ``doctor`` is now registered —
+  which is exactly the kind of move this gate is built to notice rather than let
+  drift: the count, the table and the decided-against list have to be edited in the
+  same deliberate commit. A document that names a phantom tool is worse than one
+  that omits a real one, because an agent wastes a turn calling it.
 
 So the tool tables and the registry must be the SAME SET, in both directions — the
 same both-directions rule ``test_plugin_manifest_drift.py`` applies to ``plugin.yaml``,
@@ -71,7 +76,13 @@ DECIDED_AGAINST = [
     ("template validate", "D5"),             # route + slash hint recommended, no tool
     ("hscc notify", "D7"),                   # an agent that can page the operator trains them to ignore pages
     ("hscc main status", "D9"),              # dashboards get a read ROUTE, not an agent tool
-    ("hscc doctor", "D11"),                  # reads this host's trees — meaningless off the host
+    # ("hscc doctor", "D11") was here. It came out deliberately on t_7f570861:
+    # the operator verdict (§12.2) ruled that D11 refused the HTTP *route*
+    # ("it reads this host's trees") and that "the read-only agent *tool* is a
+    # different surface and stands". The tool is registered, so this list — which
+    # means "no tool, and the skill says so" — no longer describes it; the skill
+    # keeps a row recording the route refusal. The repair half (`--fix`) is still
+    # refused, pinned in test_plugin_manifest_drift.py.
 ]
 
 

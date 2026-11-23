@@ -12,6 +12,7 @@ from . import orch_message
 from . import autodown_tools as adt
 from . import merge_queue_tools as mqt
 from . import node_pause_tools as npt
+from . import doctor_tools as dt
 
 
 def _stringify(handler):
@@ -63,6 +64,18 @@ _READ_TOOLS = [
      "waiting (non-green head), the in-flight PR and the last outcome. "
      "Read-only: same payload as `hscc merge-queue status --json`; it never "
      "enqueues, drops, pauses, enables or lands anything."),
+    # The preflight doctor (t_7f570861): the READ half of `hscc-bootstrap/
+    # doctor.py` — every check as data (name, ok, one-line cause). The repair
+    # half stays CLI-only: `--fix` rewrites the operator's config.yaml through
+    # enable_plugins.enable, so there is no doctor_fix tool to add here (audit
+    # §12.2 D11: the route was refused because doctor reads this host; the
+    # read-only tool runs on this host and stands).
+    ("doctor", dt.DOCTOR_SCHEMA, dt.doctor_findings, "🧾",
+     "Every HSCC doctor check as structured findings: check name, ok, and the "
+     "one-line cause (plus the fix text as advice, and which fatal checks "
+     "failed). Read-only: the same verdict as the operator's `doctor.py --json`, "
+     "read live from host/daemon/API state — it never repairs, and `--fix` "
+     "stays CLI-only."),
 ]
 
 _OPS_TOOLS = [
@@ -136,24 +149,36 @@ _TEMPLATE_TOOLS = [
 
 
 #: Orchestrator-to-orchestrator messaging (t_a15f3047). Queue-only by design:
-#: the tool never interrupts a running turn and refuses anything but a
-#: `*-orch` sender and a `*-orch` target. See orch_message.py for the rules.
+#: it never interrupts a running turn. Each end must be a `*-orch` profile or
+#: the configured main orchestrator; `default` and worker profiles are refused.
+#: orch_message.py owns the guard logic — this comment only names the toolset.
 _ORCH_TOOLS = [
     ("orch_message", orch_message.ORCH_MESSAGE_SCHEMA, orch_message.orch_message, "✉️",
      "Nudge another orchestrator profile (queue-only, signed '[from <you>]', "
-     "audited). Both ends must be *-orch; never interrupts a running turn; "
-     "rate-limited per pair per hour. Not `hscc orch inject` (types into a "
+     "audited). Either end may be a *-orch profile or the configured main "
+     "orchestrator; workers and 'default' are refused. Rate-limited per pair "
+     "per hour. Not `hscc orch inject` (types into a "
      "live pane), not `/orch-restart` (restarts the orchestrator vLLM), not "
      "the `POST /v1/orchestrator/chat` route (one chat turn, by job id)."),
 ]
 
 
 def register(ctx) -> None:
-    for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
-                                                 + _HEAL_TOOLS + _FLEET_TOOLS
-                                                 + _TEMPLATE_TOOLS + _ORCH_TOOLS):
-        ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
-                          handler=_stringify(handler), emoji=emoji, description=desc)
+    # R3/D-B gate (t_e98c6ad4, docs/audits/2026-11-23-main-only-surface.md §6):
+    # the cluster TOOL catalog registers only where the home resolves to <main>
+    # — R3 tightened D-B so the operator/gateway root home gets the wedge
+    # VERBS (hscc-commands) but no tool catalog for a model chatting there.
+    # Every other home still loads this plugin, because the
+    # hooks below are worker/dispatcher-lane (audit §3.2) — the [budget] note,
+    # the per-profile tool ledger and the kanban completion/blocked observers.
+    # Hermes has no hooks-vs-tools split (audit §7 G-1), so the split is made
+    # here; hooks always register.
+    if orch_message.cluster_tools_allowed(ctx):
+        for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
+                                                     + _HEAL_TOOLS + _FLEET_TOOLS
+                                                     + _TEMPLATE_TOOLS + _ORCH_TOOLS):
+            ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
+                              handler=_stringify(handler), emoji=emoji, description=desc)
     # WS4: on kanban re-dispatch, post an idempotent-resume note so the worker
     # continues from prior branch state instead of redoing finished work.
     if hasattr(ctx, "register_hook"):

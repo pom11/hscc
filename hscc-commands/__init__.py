@@ -961,7 +961,55 @@ def cmd_workers_up(raw_args):
     return "\n".join(lines)
 
 
+def _operator_verbs_allowed(ctx) -> bool:
+    """May THIS home register the operator slash commands? (R3/D-B gate, t_e98c6ad4)
+
+    The verbs are the operator's wedge path — they run in the gateway, not by a
+    model — and the gateway lives in the root home, so this is the ONE surface
+    R3 leaves at the root: ``<main>``-or-root, and never a worker profile (a
+    worker that somehow loads this plugin must not be handed ``/cluster-reboot``).
+    The cluster TOOL catalog is a different question with a stricter answer
+    (``<main>`` only) — see ``hscc-cluster/orch_message.cluster_tools_allowed``.
+
+    The answer comes from ``hscc-roles/main_orch.plugin_commands_allowed``, the
+    one resolver the ruling (docs/audits/2026-11-23-main-only-surface.md §6
+    D-A/D-B) allows to decide which home is which. Reaching it by sibling path
+    is the S1 pattern used by ``hscc-cluster/orch_message.py:258-288`` and
+    ``hscc_daemon/main_wakeups.py`` — the deployed plugin tree keeps
+    ``hscc-roles`` next to this plugin. Fail-open whenever it cannot be reached
+    or cannot answer: no resolver is no gate, and a silently missing
+    ``/orch-restart`` is exactly the failure this plugin exists to prevent.
+    """
+    import os
+    import sys
+    roles = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "hscc-roles")
+    added = None
+    try:
+        import main_orch  # noqa: F401  (already importable)
+    except ImportError:
+        if os.path.isdir(roles) and roles not in sys.path:
+            sys.path.insert(0, roles)
+            added = 0
+        try:
+            import main_orch  # noqa: F401
+        except ImportError:
+            return True                     # no resolver on the path -> no gate
+        finally:
+            if added is not None and sys.path[:1] == [roles]:
+                sys.path.pop(0)
+    try:
+        return bool(main_orch.plugin_commands_allowed(ctx))
+    except Exception:  # noqa: BLE001 — an unusable resolver must not strip the verbs
+        return True
+
+
 def register(ctx) -> None:
+    # t_e98c6ad4 (R3/D-B): the operator slash verbs are <main> + the operator
+    # root home (the gateway wedge path). This plugin registers no hooks, so a
+    # denied home registers nothing at all.
+    if not _operator_verbs_allowed(ctx):
+        return
     ctx.register_command(
         name="cluster", handler=cmd_cluster,
         description="Show HSCC cluster status (orchestrator + workers, live health).",

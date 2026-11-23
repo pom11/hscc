@@ -2086,6 +2086,71 @@ def _refused_node_pause_expiry_check() -> dict:
                    "routing; a suite must never read the operator's stamp."}
 
 
+# ── main-only cluster surface (t_caf98114) ─────────────────────────────────
+# Why this row exists: the 2026-11-23 main-only audit (PR #666) had to MEASURE,
+# by hand over 52 profile homes, which homes carried the cluster control surface.
+# Bootstrap had never written a per-profile ``plugins.enabled`` at all
+# (``enable_plugins.enable()`` wires only the config.yaml it is handed), so the
+# homes that did name the tool plugins were written by something else — the
+# class the audit called the ``_migrate_to_21`` landmine — and nothing in the
+# fleet's own health surface could see it. This row is that comparison: the
+# cluster tools/skills must sit on the main orchestrator's home and nowhere
+# else, while the hscc-cluster HOOKS stay everywhere (binding ruling R2/D-C —
+# hook presence is NOT drift and this row never reports it).
+
+#: Fallback for the check name when the feature module cannot be imported — same
+#: trick as ``_NODE_PAUSES_CHECK_NAME`` so the row still prints, and pinned equal
+#: to ``doctor_main_only.CHECK_NAME`` by the row's own suite.
+_MAIN_ONLY_SURFACE_CHECK_NAME = \
+    "main-only cluster surface (cluster tools/skills off <main>)"
+
+
+def _load_doctor_main_only():
+    """Import the main-only-surface feature module (t_caf98114).
+
+    The verdict lives with the feature: ``doctor_main_only.py`` owns which
+    surface counts (the ``plugins.enabled`` tool plugins and the hscc-owned
+    cluster skills), which does not (the ``hscc-cluster`` hooks, an on-disk
+    plugin dir, a cosmetic ``toolsets:`` entry), and the wording that names the
+    profile, the surface and the repair. It also refuses to hardcode the main
+    identity and reads it through ``hscc-roles/main_orch.main_name()``
+    (R2/D-A). doctor only adapts the result to its five Check fields.
+
+    Returns None when the module is not deployed next to bootstrap; the row then
+    reports itself unverifiable rather than vanishing from the list.
+    """
+    try:
+        import doctor_main_only
+        return doctor_main_only
+    except Exception:  # noqa: BLE001 - any import failure means "not deployed"
+        return None
+
+
+def _refused_main_only_check() -> dict:
+    """In-suite stand-in for the main-only check when no seam was injected.
+
+    Its real target is the operator's ``~/.hermes`` profile trees — their
+    contents would decide what the suite asserts. Same fence shape as
+    ``_refused_node_pauses_check``: an ERROR naming the missing seam, never a
+    silent pass and never a real read. The wording is delegated to the feature
+    module when it is importable, so doctor and the check cannot state two
+    different rules for the same refusal.
+    """
+    mod = _load_doctor_main_only()
+    refused_hook = getattr(mod, "refused", None)
+    if callable(refused_hook):
+        verdict = refused_hook()
+        if isinstance(verdict, dict):
+            return verdict
+    return {"name": _MAIN_ONLY_SURFACE_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "main-only-surface check refused inside a pytest process "
+                      "— inject _main_only_surface_check",
+            "fix": "Pass _main_only_surface_check=lambda: {...} built from "
+                   "tmp fake profile trees, or call "
+                   "doctor_main_only.doctor_check(hermes_home=...) directly; a "
+                   "suite must never read the operator's profile trees."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -2288,6 +2353,37 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
                        "expired node pause cannot be told apart from a pause "
                        "the daemon is honouring",
         missing_fix="Deploy the hscc_daemon plugin next to hscc-bootstrap "
+                    "(re-run bootstrap)."),
+    # t_caf98114 (main-only audit, PR #666): is the cluster CONTROL surface on a
+    # home that is not the main orchestrator? Two findings count — a non-main
+    # profile whose ``plugins.enabled`` names a cluster TOOL plugin
+    # (``hscc-commands``, ``sparkrun-hermes``), and a non-main profile whose
+    # skills tree carries an hscc-owned cluster skill. Hook presence never
+    # counts (binding ruling R2/D-C): ``hscc-cluster`` must stay enabled in every
+    # home or its six hooks die with it, and tools+hooks register in one call.
+    # WARN on every verdict, never fatal: the row's red is the fleet's CURRENT
+    # posture (the audit measured 26/52 profiles naming the cluster toolsets and
+    # bootstrap has never written a per-profile ``plugins.enabled``), and doctor
+    # is bootstrap's Stage-1 gate — a fatal here would hard-stop an install over
+    # drift the operator is mid-way through fixing. The identity is resolved,
+    # never spelled (R2/D-A), through ``main_orch.main_name()``, whose own
+    # ``hscc_dir`` seam this row is handed.
+    doctor_rows.FeatureCheckRow(
+        key="main_only_surface", seam_kwarg="_main_only_surface_check",
+        # BOTH contexts, each with a real consumer: hermes_home locates the
+        # profile trees (their writers — the installers — honour a named
+        # --home/HERMES_HOME, so a handed root is a root a writer can reach,
+        # unlike the HOME-only daemon-state rows above: t_be690204), and
+        # hscc_dir is main_orch's documented relocation seam for
+        # main-orchestrator.json, which decides WHICH home is <main>.
+        row_kwargs=("hermes_home", "hscc_dir"),
+        loader="_load_doctor_main_only",
+        refusal="_refused_main_only_check",
+        fallback_name="_MAIN_ONLY_SURFACE_CHECK_NAME",
+        missing_detail="hscc-bootstrap/doctor_main_only.py not importable — "
+                       "which homes may hold the cluster control surface "
+                       "cannot be verified",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
                     "(re-run bootstrap)."),
 ]
 
