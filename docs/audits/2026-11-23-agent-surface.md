@@ -358,7 +358,7 @@ found by walking up from the module (`hscc-skills/hscc.py:36-48`) else
 `$HERMES_HOME/skills`. **To:** `$HERMES_HOME/skills`, `HERMES_HOME` defaulting to
 `~/.hermes` (`:30-31`).
 
-**What it installs — 13 names / 12 dirs** (`hscc-skills/hscc.py:59-83`):
+**What it installs — 12 names / 13 dirs** (`hscc-skills/hscc.py:59-83`):
 `brainstorming, caveman, executing-plans, systematic-debugging, test-driven-development,
 verification-before-completion, writing-plans, hscc, hscc-cluster, hscc-model-onboard,
 sdlc-review, devops` (devops carries 7 sub-skills: `brand-migration,
