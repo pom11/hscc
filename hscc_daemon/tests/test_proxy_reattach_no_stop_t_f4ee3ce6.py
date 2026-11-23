@@ -385,12 +385,47 @@ class TestGatewayIdentity:
         self._wire(monkeypatch, (None, None), WRAPPER_PID)
         assert health._proxy_gateway_identity()[0] == "absent"
 
-    def test_the_walk_is_bounded(self, monkeypatch):
-        """A process table that never reaches the tracked PID must terminate."""
+    def test_the_child_verdict_never_consults_a_children_table(
+            self, monkeypatch):
+        """THE PIN t_0df7fc35 ASKS FOR: the uvx wrapper/child pair is classified
+        ``child`` through the SHARED predicate, i.e. from the parent chain and
+        nothing else. Two halves. Behavioural: only ``_proc_ppid`` was consulted,
+        once, so no downward walk over the machine's process table happened.
+        Structural: there is no children-table seam left to consult, so a future
+        edit cannot quietly grow a second answer to "is this PID ours"."""
+        consulted = []
+
+        def ppid(pid):
+            consulted.append(pid)
+            return WRAPPER_PID if pid == CHILD_PID else 1
+
         self._wire(monkeypatch, (CHILD_PID, GATEWAY_CMD), WRAPPER_PID,
-                   ppid=lambda pid: pid + 1, alive=True)
-        monkeypatch.setattr(health, "PROXY_TRACKED_TREE_DEPTH", 4)
+                   ppid=ppid)
+        assert health._proxy_gateway_identity()[0] == "child"
+        assert consulted == [CHILD_PID], \
+            f"identity was not decided by the parent walk alone: {consulted}"
+        assert not hasattr(health, "_proc_children"), \
+            "a children-table seam is back: two predicates, one question"
+        assert not hasattr(health, "_proxy_owner_is_tracked_proxy"), \
+            "the second 'is this PID ours' predicate is back"
+
+    def test_the_walk_is_bounded(self, monkeypatch):
+        """A process table that never reaches the tracked PID must terminate,
+        on the ONE budget. The lookup count is pinned because the patch below
+        only bites at all thanks to t_0df7fc35: this function used to own a
+        private PROXY_TRACKED_TREE_DEPTH, and now passes the shared
+        ``max_hops`` explicitly, which is what makes this a real bound."""
+        seen = []
+
+        def ppid(pid):
+            seen.append(pid)
+            return pid + 1
+
+        self._wire(monkeypatch, (CHILD_PID, GATEWAY_CMD), WRAPPER_PID,
+                   ppid=ppid, alive=True)
+        monkeypatch.setattr(health, "PROXY_ANCESTRY_MAX_HOPS", 4)
         assert health._proxy_gateway_identity()[0] == "foreign"
+        assert len(seen) == 4, f"the walk outlived its budget: {seen}"
 
     def test_the_adopt_accepts_the_child_shape_as_verified(
             self, tmp_hfcc_dir, monkeypatch, fake_sparkrun, logs):

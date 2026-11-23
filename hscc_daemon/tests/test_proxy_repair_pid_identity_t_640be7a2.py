@@ -20,8 +20,13 @@ escalation and a stall page for a proxy that is up.
 THE TWO FIXES THIS FILE PINS
 ----------------------------
 1. IDENTITY IS THE PROCESS TREE. Verification accepts the port owner when it is
-   the tracked PID **or a descendant of it**, walked breadth-first with a
-   bounded depth and a bounded PID budget (:func:`_proxy_owner_is_tracked_proxy`).
+   the tracked PID **or a descendant of it**, proved by the ONE ancestry
+   predicate (:func:`hscc_daemon.health._pid_is_tracked_or_descendant`) — a
+   tri-state UPWARD ``ppid`` walk bounded by ``PROXY_ANCESTRY_MAX_HOPS``, the
+   same one the reap's kill guard consults. t_0df7fc35 collapsed this module's
+   three spellings of "is this PID ours" onto it; the class below used to pin a
+   DOWNWARD BFS answering ``(matched, depth)``, and every assertion of that
+   class is re-pinned here onto the tri-state rather than dropped.
    The reap uses the same rule: a listener that is a child of the tracked
    launcher is our own proxy, and signalling it would take a working ``:4000``
    down.
@@ -38,8 +43,11 @@ A descendant rule that matched anything would be worse than the bug it fixes: it
 would certify a squatter on ``:4000`` (a dev server, a second hscc-api) as "our
 proxy" and hide a real outage. So every acceptance here is pinned against a
 foreign owner that stays UNVERIFIED and still logs ERROR, and the walk is pinned
-as BOUNDED — a descendant below the depth cap, or beyond the PID budget, is not
-credited.
+as BOUNDED — a descendant further up than ``max_hops`` is not credited, and the
+walk costs at most that many lookups whatever the shape of the process table.
+That is where the deleted BFS's two caps went: an upward walk has no fan-out to
+bound, so the pin the BFS needed a PID budget for is now a LOOKUP-COUNT pin, and
+the one it needed a depth cap for is now a hop-budget pin (t_0df7fc35).
 
 SAFETY (the no-live rule)
 -------------------------
@@ -116,7 +124,13 @@ class FakePortTable:
 
 
 class FakeProcessTable:
-    """parent -> [children]: the answer ``ps -o pid= -P`` would give, from a dict.
+    """The process table as ONE parent map — what ``ps -o ppid= -p`` answers.
+
+    Written as parent -> [children] because that is the easiest shape for a
+    tree to spell out in, but the ONLY seam installed is ``_proc_ppid``: the
+    direction the one ancestry predicate walks. t_0df7fc35 deleted the downward
+    BFS, so there is no longer a second direction to fake — and no second seam
+    that a test can forget and leave pointed at the host's real PID table.
 
     ``calls`` records every lookup, so a test can pin that the walk stayed
     BOUNDED rather than scanning the machine's process list.
@@ -125,17 +139,13 @@ class FakeProcessTable:
     def __init__(self, monkeypatch, table=None):
         self.table = dict(table or {})
         self.calls = []
-        # The SAME table answers both directions: the verifier asks for CHILDREN
-        # (`_proc_children`, downward BFS) while the reap asks for PARENTS
-        # (`_proc_ppid`, upward walk, t_af7d5486). Faking only one of them
-        # leaves the other reading the host's real process table — which is
-        # exactly the fail-open shape these tests must never depend on.
-        monkeypatch.setattr(health, "_proc_children", self.children)
+        self._unreadable = False
         monkeypatch.setattr(health, "_proc_ppid", self.ppid)
 
-    def children(self, pid):
-        self.calls.append(int(pid))
-        return list(self.table.get(int(pid), []))
+    def unreadable(self):
+        """Every parent lookup now answers None — the ``ps`` failure the
+        tri-state's NOT-EVALUABLE answer (and the reap's refusal) exist for."""
+        self._unreadable = True
 
     def ppid(self, pid):
         """Parent of `pid` — the inverse of `self.table`, derived on demand.
@@ -151,6 +161,8 @@ class FakeProcessTable:
         """
         pid = int(pid)
         self.calls.append(pid)
+        if self._unreadable:
+            return None
         for parent, kids in self.table.items():
             if pid in [int(k) for k in kids]:
                 return int(parent)
@@ -245,71 +257,108 @@ def logs(monkeypatch):
 # ── fix 1 — the tracked proxy IS its process tree, bounded ─────────────────
 
 class TestTrackedTreeIdentity:
-    """``_proxy_owner_is_tracked_proxy`` — the whole fix in one predicate."""
+    """``_pid_is_tracked_or_descendant`` — the whole fix in one predicate.
 
-    def test_tracked_pid_itself_matches_at_depth_zero(self, procs):
-        assert health._proxy_owner_is_tracked_proxy(WRAPPER, WRAPPER) == \
-            (True, 0)
+    RE-PINNED, NOT RELAXED (t_0df7fc35). These cases used to pin the downward
+    BFS's ``(matched, depth)`` contract; the BFS is deleted and the predicate is
+    now the tri-state upward walk the reap already consulted. The mapping, case
+    by case: ``(True, d)`` -> ``is True`` (plus the depth, read from the one
+    walk that computes it, :func:`_pid_ancestry_walk`); ``(False, None)`` ->
+    ``is False`` when the walk COMPLETED at a root; and an unreadable table ->
+    ``is None`` — the state the BFS could not express, which is precisely why it
+    was fail-open on the kill path. No assertion here got looser than the one it
+    replaces; the two budget pins changed their UNIT (PIDs visited -> lookups
+    spent) because an upward walk has no fan-out to bound.
+    """
 
-    def test_child_of_tracked_pid_matches_at_depth_one(self, procs):
+    def test_tracked_pid_itself_is_ours_at_depth_zero(self, procs):
+        assert health._pid_is_tracked_or_descendant(WRAPPER, WRAPPER) is True
+        assert health._pid_ancestry_walk(WRAPPER, WRAPPER) == (True, 0)
+
+    def test_child_of_tracked_pid_is_ours_at_depth_one(self, procs):
         """THE INCIDENT SHAPE: port owner 15706, sparkrun tracks 15701 — and
         15706 is 15701's litellm child. That is our proxy, not an orphan."""
-        assert health._proxy_owner_is_tracked_proxy(LITELLM_CHILD, WRAPPER) == \
-            (True, 1)
+        assert health._pid_is_tracked_or_descendant(LITELLM_CHILD,
+                                                    WRAPPER) is True
+        assert health._pid_ancestry_walk(LITELLM_CHILD, WRAPPER) == (True, 1)
 
-    def test_grandchild_matches_at_depth_two(self, procs):
-        assert health._proxy_owner_is_tracked_proxy(GRANDCHILD, WRAPPER) == \
-            (True, 2)
+    def test_grandchild_is_ours_at_depth_two(self, procs):
+        assert health._pid_is_tracked_or_descendant(GRANDCHILD,
+                                                    WRAPPER) is True
+        assert health._pid_ancestry_walk(GRANDCHILD, WRAPPER) == (True, 2)
 
-    def test_foreign_pid_never_matches(self, procs):
+    def test_foreign_pid_is_proven_not_ours(self, procs):
         """THE CONTROL: widening identity to the proxy's own tree must not
-        become widening it to any pid. A squatter stays unmatched."""
-        assert health._proxy_owner_is_tracked_proxy(FOREIGN, WRAPPER) == \
-            (False, None)
+        become widening it to any pid. A squatter stays PROVEN foreign — the
+        tri-state has to be able to say NO, or the reaper can never act."""
+        assert health._pid_is_tracked_or_descendant(FOREIGN, WRAPPER) is False
+        assert health._pid_ancestry_walk(FOREIGN, WRAPPER) == (False, None)
 
-    def test_child_of_an_unrelated_pid_does_not_match(self, procs):
+    def test_child_of_an_unrelated_pid_is_not_ours(self, procs):
         """A descendant of SOMEONE ELSE is not a descendant of the proxy: the
         child of a dev server on :4000 is still not our proxy."""
         squatter_child = 41001
         procs.table[FOREIGN] = [squatter_child]
-        assert health._proxy_owner_is_tracked_proxy(squatter_child, WRAPPER) == \
-            (False, None)
+        assert health._pid_is_tracked_or_descendant(squatter_child,
+                                                    WRAPPER) is False
 
-    def test_missing_owner_or_missing_tracked_pid_never_matches(self, procs):
-        assert health._proxy_owner_is_tracked_proxy(None, WRAPPER) == \
-            (False, None)
-        assert health._proxy_owner_is_tracked_proxy(LITELLM_CHILD, None) == \
-            (False, None)
-        assert health._proxy_owner_is_tracked_proxy(0, 0) == (False, None)
+    def test_missing_owner_or_tracked_pid_is_not_evaluable(self, procs):
+        """The old ``(False, None)`` answer becomes ``None``, and that is not a
+        weakening: with nothing to compare against the walk never STARTS, so it
+        has PROVED NOTHING. Every consumer reads ``None`` as "not green, and no
+        licence to signal" — the same thing ``(False, None)`` was used for, now
+        said honestly. The verdicts that carry it are
+        :meth:`TestRepairVerdictUsesTheTree.test_unreadable_table_verifies_nothing`
+        here and the reap-level refusal in
+        test_proxy_reap_descendant_guard_t_af7d5486.py."""
+        assert health._pid_is_tracked_or_descendant(None, WRAPPER) is None
+        assert health._pid_is_tracked_or_descendant(
+            LITELLM_CHILD, None) is None
+        assert health._pid_is_tracked_or_descendant(0, 0) is None
+        assert health._pid_ancestry_walk(LITELLM_CHILD, None) == (None, None)
 
-    def test_unreadable_process_table_fails_closed(self, monkeypatch):
-        """A `ps` that answers nothing is NOT a licence to credit a foreign pid
-        — and it is the conftest default, so a test that forgot to install a
-        process table cannot accidentally pass."""
-        monkeypatch.setattr(health, "_proc_children", lambda pid: [])
-        assert health._proxy_owner_is_tracked_proxy(LITELLM_CHILD, WRAPPER) == \
-            (False, None)
+    def test_unreadable_process_table_is_not_evaluable(self, procs):
+        """RE-PINNED FROM ``test_unreadable_process_table_fails_closed``, a name
+        that celebrated the exact posture this lane exists to delete: the BFS
+        answered ``(False, None)``, "not ours", for a table it had never read,
+        and the kill path read that as a licence to SIGKILL the gateway. The
+        honest answer is NOT-EVALUABLE, and not-evaluable refuses. The conftest
+        default is this same shape (no parent readable), so a test that forgot
+        to install a process table still cannot accidentally pass."""
+        procs.unreadable()
+        assert health._pid_is_tracked_or_descendant(LITELLM_CHILD,
+                                                    WRAPPER) is None
+        assert procs.calls == [LITELLM_CHILD], \
+            f"an unreadable parent must stop the walk at once: {procs.calls}"
 
-    def test_walk_stops_at_the_depth_cap(self, procs):
-        """BOUNDED, not open-ended: a descendant below the cap is not credited,
-        and the walk costs one lookup per level it visited."""
+    def test_walk_stops_at_the_hop_budget(self, procs):
+        """BOUNDED, not open-ended: a descendant further up than the budget is
+        not credited, and the walk costs at most ``max_hops`` lookups. Same
+        guarantee as the BFS's depth cap, in the one budget unit left."""
         root = 20000          # a clean root: one child per level, no branching
-        deepest = procs.chain(root, health.PROXY_TRACKED_TREE_MAX_DEPTH + 2)
-        matched, _depth = health._proxy_owner_is_tracked_proxy(deepest, root)
-        assert matched is False, "the walk is unbounded — any descendant matches"
-        assert len(procs.calls) <= health.PROXY_TRACKED_TREE_MAX_DEPTH, \
-            f"the walk did not stop at the cap: {len(procs.calls)} lookups"
+        deepest = procs.chain(root, health.PROXY_ANCESTRY_MAX_HOPS + 2)
+        assert health._pid_is_tracked_or_descendant(deepest, root) is None, \
+            "the walk is unbounded — any descendant is credited"
+        assert len(procs.calls) <= health.PROXY_ANCESTRY_MAX_HOPS, \
+            f"the walk did not stop at the budget: {len(procs.calls)} lookups"
 
-    def test_walk_stops_at_the_pid_budget(self, procs):
-        """A chatty parent (a supervisor with hundreds of children) must not
-        turn a bounded DEPTH into an unbounded scan."""
-        fan = health.PROXY_TRACKED_TREE_MAX_PIDS + 50
+    def test_a_wide_process_table_costs_no_extra_walk(self, procs):
+        """RE-PINNED FROM ``test_walk_stops_at_the_pid_budget``: the BFS needed a
+        PID budget because it FANNED OUT, and an upward walk has no fan-out to
+        bound. The equivalent guarantee is that table width cannot cost one
+        extra lookup — and cannot change an answer, either."""
+        fan = 64 + 50         # what PROXY_TRACKED_TREE_MAX_PIDS used to cap
         procs.table[WRAPPER] = [WRAPPER + 100000 + i for i in range(fan)]
         far = WRAPPER + 100000 + fan - 1
-        matched, _depth = health._proxy_owner_is_tracked_proxy(far, WRAPPER)
-        assert matched is False, "the PID budget is not enforced"
-        assert len(procs.calls) <= 2, \
-            f"the walk kept scanning past its budget: {len(procs.calls)} lookups"
+        procs.calls.clear()
+        assert health._pid_is_tracked_or_descendant(far, WRAPPER) is True
+        assert len(procs.calls) == 1, \
+            f"the walk fanned out over the table: {procs.calls}"
+        stranger = WRAPPER + 999999      # NOT among the wrapper's children
+        procs.calls.clear()
+        assert health._pid_is_tracked_or_descendant(stranger, WRAPPER) is False
+        assert len(procs.calls) == 1, \
+            f"a foreign tree was not settled in one hop: {procs.calls}"
 
 
 # ── fix 1 applied — the repair verdict ────────────────────────────────────
@@ -366,6 +415,29 @@ class TestRepairVerdictUsesTheTree:
         assert res["verified"] is False and res["ok"] is False
         assert res["healthy"] is False
         assert any("UNVERIFIED" in m for _l, m in logs)
+
+    def test_unreadable_table_verifies_nothing(self, monkeypatch, port, procs,
+                                               logs):
+        """THE COLLAPSE'S SAFETY BAR (t_0df7fc35). The verifier now asks the SAME
+        predicate the kill path asks, so it must inherit the third state too: a
+        ``ps`` that cannot be read is UNVERIFIED — not green (the streak stays
+        armed), and NOT a statement that someone else owns the port. The BFS
+        could not express that distinction, which is exactly what made an
+        unreadable table a licence to signal on the next tick."""
+        port.set_owner(LITELLM_CHILD)
+        procs.unreadable()
+        monkeypatch.setattr(health, "log",
+                            lambda m, lvl="INFO": logs.append((lvl, m)))
+        res = self._repair(monkeypatch)
+        assert res["verified"] is False and res["healthy"] is False
+        assert res["ok"] is False and res["owner_depth"] is None
+        assert res["proxy_down"] is False, \
+            "an unreadable table is not an outage — something IS on the port"
+        unverified = [m for _l, m in logs if "UNVERIFIED" in m]
+        assert unverified and "could not be read" in unverified[0], \
+            f"the log must say WHICH kind of unverified this is: {unverified}"
+        assert not any("PROVEN FOREIGN" in m for _l, m in logs), \
+            f"not-evaluable was reported as proven foreign: {logs}"
 
     def test_tracked_owner_still_verifies(self, monkeypatch, port, procs):
         """The pre-fix equality case keeps working — this widens, it does not
