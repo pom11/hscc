@@ -705,14 +705,14 @@ def test_run_gate_starts_its_gate_in_its_own_session(tmp_path, monkeypatch):
     assert calls[0][1].get("start_new_session") is True, calls[0][1]
 
 
-def test_an_unconfigured_timeout_s_still_gates_on_the_1800s_default(tmp_path,
+def test_an_unconfigured_timeout_s_still_gates_on_the_3600s_default(tmp_path,
                                                                     monkeypatch):
-    """A registry that says nothing about the budget still gets 1800 s.
+    """A registry that says nothing about the budget still gets 3600 s.
 
     The default lives in `process_entry` (`cfg.get("timeout_s") or
     DEFAULT_GATE_TIMEOUT_S`), *above* `_run_gate`, so it is pinned through a real
     tick whose injected runner records the budget it was handed.  Two halves
-    matter: the queue must still pass 1800 down, and the leg must actually be
+    matter: the queue must still pass 3600 down, and the leg must actually be
     told it — a gate started with no budget is a gate that can run forever.
     """
     pair = _repo_pair(tmp_path)
@@ -734,8 +734,8 @@ def test_an_unconfigured_timeout_s_still_gates_on_the_1800s_default(tmp_path,
 
     row = result["processed"][0]
     assert row["result"] == "gate-timeout", row
-    assert row["timeout_s"] == 1800, row
-    assert mq.DEFAULT_GATE_TIMEOUT_S == 1800, mq.DEFAULT_GATE_TIMEOUT_S
+    assert row["timeout_s"] == 3600, row
+    assert mq.DEFAULT_GATE_TIMEOUT_S == 3600, mq.DEFAULT_GATE_TIMEOUT_S
     budgets = calls[0][2].budgets
     # The leg was told where its budget was.  The second, budget-less call is
     # the reaping `communicate()` after the SIGKILL — it must not carry one.
@@ -1184,6 +1184,84 @@ def test_default_hscc_gates_add_build_check_for_app_changes(tmp_path):
     assert "bash scripts/run_tests.sh" in gates
     assert "bash ios-app/scripts/build_check.sh" in gates
     assert "bash macos-app/scripts/build_check.sh" not in gates
+
+
+# ── local gate narrowing (t_0763da12) ──────────────────────────────────────
+
+LOCAL_LEG_ROSTER = ("hscc-bootstrap", "hscc_daemon", "hscc-api", "scripts",
+                    ".github/scripts")
+
+
+def _write_leg_roster(worktree, legs=LOCAL_LEG_ROSTER):
+    """The worktree the queue reads its leg roster from."""
+    path = worktree / "scripts" / "run_tests.sh"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("DIRS=(" + " ".join(legs) + ")\n", encoding="utf-8")
+    return path
+
+
+def _diff_git(*paths):
+    """A fake git runner whose diff is exactly ``paths`` (hermetic)."""
+    def fake_git(argv, cwd=None, **kwargs):
+        assert argv[:3] == ["git", "diff", "--name-only"], argv
+        return SimpleNamespace(returncode=0,
+                               stdout="\n".join(paths) + "\n", stderr="")
+
+    return fake_git
+
+
+def test_local_gate_runs_only_the_touched_leg(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git("hscc_daemon/merge_queue.py",
+                  "hscc_daemon/tests/test_merge_queue.py",
+                  "changelog.d/t_0763da12.md"))
+
+    assert gates[0] == "python3 scripts/address_guard.py --tracked"
+    assert gates[1] == 'HSCC_TEST_LEGS="hscc_daemon" bash scripts/run_tests.sh'
+    assert len(gates) == 2
+
+
+def test_local_gate_runs_every_touched_leg_in_roster_order(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git("hscc-api/x.py", "hscc_daemon/y.py", "scripts/tests/z.py"))
+
+    assert gates[1] == ('HSCC_TEST_LEGS="hscc_daemon hscc-api scripts" '
+                        'bash scripts/run_tests.sh')
+
+
+@pytest.mark.parametrize("shared", [
+    "scripts/run_tests.sh",
+    "conftest.py",
+    ".github/workflows/pytest-legs.yml",
+    "scripts/changelog_fragments.py",
+])
+def test_shared_file_change_falls_back_to_the_full_suite(tmp_path, shared):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("hscc_daemon/x.py", shared))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+def test_more_than_three_legs_falls_back_to_the_full_suite(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git(*[f"{leg}/x.py" for leg in LOCAL_LEG_ROSTER]))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+def test_a_diff_outside_every_leg_falls_back_to_the_full_suite(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("docs/readme.md"))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
 
 
 # ── read-only view (kanban monitor + GET /v1/merge-queue) ──────────────────
