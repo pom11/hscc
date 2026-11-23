@@ -216,6 +216,20 @@ endpoints (confirm-gated, see below).
 | GET | `/v1/review/{card_id}` | **Dry-run** review facts for one card (branch state, merge conflicts, the VERIFY line). Read-only — never merges, never closes. `404` if the card does not resolve to a reviewable branch. | read |
 | GET | `/v1/qa/queue` | The pre-merge QA queue + the manual-QA store. Returns `{queue, manual_qa, speak}`. | read |
 
+### Templates (read)
+
+The cluster template engine's read verbs (`hscc-cluster`), served verbatim the
+way `hscc template …` runs them — never a second implementation. `validate`
+answers the same two-layer verdict `hscc template validate` prints. All four are
+read-only; the mutating `apply` is the confirm-gated POST in the Actions table.
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/template/list` | Available cluster templates. Returns `{count, templates, speak}`. | read |
+| GET | `/v1/template/status` | Which template is currently applied. Returns `{applied, speak}`. | read |
+| GET | `/v1/template/preview/{name}` | Dry-run: what applying `name` would change. `404 not_found` if unknown. | read |
+| GET | `/v1/template/validate/{name}` | Preflight `name` — is it deployable? Returns `{template, structural: {ok, errors, warnings}, placement: {ok, errors, warnings}, ok, speak}` (the CLI's two-layer verdict). A missing template returns `ok: false` (not `404`) — the verdict itself is the answer. Optional `?structural-only=1` skips the live placement layer. | read |
+
 ### Actions (mutating — confirm-gated)
 
 All mutating endpoints require `"confirm": true` in the JSON body and return

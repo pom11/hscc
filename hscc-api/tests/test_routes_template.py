@@ -16,6 +16,7 @@ Coverage per endpoint:
 
 import http.client
 import json
+import re
 import threading
 import types
 
@@ -272,3 +273,87 @@ def test_backing_template_validate_plugin_missing(monkeypatch):
     monkeypatch.setattr(routes_template, "_load_template_cli", lambda: None)
     assert routes_template._backing_template_validate("dev") == {
         "error": "hscc-cluster plugin not found"}
+
+
+# --------------------------------------------------------------------------- #
+# Verb-set parity across the three surfaces (audit F4 / D5 acceptance):
+#   route  +  slash `args_hint`  +  the /v1/commands-source `description`
+# must all agree on the FULL template verb set. A verb missing from any one is
+# the F4 bug: unreachable through that surface while present on another.
+# --------------------------------------------------------------------------- #
+
+# The canonical verb set for the template family (mutating apply included).
+_TEMPLATE_VERBS = {"list", "status", "validate", "preview", "apply"}
+
+
+def _route_verbs():
+    """Verbs the HTTP route family actually serves, parsed from the compiled
+    patterns (GET reads in routes_template + the POST apply in routes_actions).
+    Structural parse, not a substring check: a stale route table cannot hide a
+    verb behind a longer path."""
+    import routes_actions
+
+    verbs = set()
+    for _method, pattern, _handler in list(routes_template.ROUTES) + list(routes_actions.ROUTES):
+        p = pattern.pattern
+        seg = re.match(r"\^/v1/template/([a-z]+)", p)
+        if seg:
+            verbs.add(seg.group(1))
+    return verbs
+
+
+def _registration_verbs():
+    """(slash args_hint verbs, /v1/commands description verbs) read from the
+    AUTHORITATIVE hscc-commands register() — the same source /v1/commands serves.
+    Loaded as a real package (repo root on sys.path, so its own
+    ``from . import cmdlib`` resolves) exactly as routes_commands loads it, after
+    popping any fake a sibling test injected."""
+    import importlib
+    import sys as _sys
+
+    import routes_commands
+    plugin_dir = routes_commands._plugin_dir()
+    assert plugin_dir is not None, "hscc-commands plugin not resolvable in-repo"
+    if str(plugin_dir) not in _sys.path:
+        _sys.path.insert(0, str(plugin_dir))
+    _sys.modules.pop("hscc-commands", None)          # drop any injected fake
+    mod = importlib.import_module("hscc-commands")   # package parent -> relative import works
+
+    recs = []
+
+    class _Ctx:
+        def register_command(self, **kw):
+            recs.append(kw)
+
+    mod.register(_Ctx())
+    tpl = next((r for r in recs if r.get("name") == "template"), None)
+    assert tpl is not None, "template command not registered"
+
+    # Slash hint: tokens before '|' -> leading word (drop '<name>'/'[confirm]').
+    hint = tpl.get("args_hint", "")
+    hint_verbs = {tok.strip().split()[0] for tok in hint.split("|") if tok.strip()}
+
+    # Description: the leading slash-list "List/status/.../apply" before a space.
+    desc = tpl.get("description", "")
+    head = desc.split()[0] if desc.split() else ""
+    desc_verbs = {w.lower() for w in head.split("/") if w}
+    return hint_verbs, desc_verbs
+
+
+def test_template_verb_set_agrees_across_route_slash_and_commands():
+    """The route family, the slash `args_hint`, and the /v1/commands-source
+    `description` all name the SAME full verb set (audit F4: a verb absent from
+    one surface was unreachable there). Each verb must be present on every
+    surface, and no surface may advertise a verb the others lack."""
+    route_verbs = _route_verbs()
+    hint_verbs, desc_verbs = _registration_verbs()
+
+    assert route_verbs == _TEMPLATE_VERBS, (
+        f"route family verbs {sorted(route_verbs)} != {sorted(_TEMPLATE_VERBS)}")
+    assert hint_verbs == _TEMPLATE_VERBS, (
+        f"slash args_hint verbs {sorted(hint_verbs)} != {sorted(_TEMPLATE_VERBS)}")
+    assert desc_verbs == _TEMPLATE_VERBS, (
+        f"/v1/commands description verbs {sorted(desc_verbs)} != "
+        f"{sorted(_TEMPLATE_VERBS)}")
+    # And the three agree with each other (the actual acceptance).
+    assert route_verbs == hint_verbs == desc_verbs
