@@ -99,14 +99,14 @@ at all (CLI = operator terminal, chat surface = operator, tool = you, route = th
 HTTP API). Every row's implementation is named in its first cell; the claims were
 read off that code, not off a help text.
 
-### The `heal` family — two verbs about a ledger, three about running units
+### The `heal` family — two verbs and one read tool about a ledger, three about running units
 
 | capability (and where it lives) | what it actually does | what it does NOT do | often confused with |
 |---|---|---|---|
-| `hscc heal-status` (CLI, read-only; `hscc_daemon/cli.py::cmd_heal(status_only=True)`) | prints the daemon's heal-**breaker** ledger: repair actions recorded per node inside the window, and whether that node is heal-suspended right now (`~/.hscc/heal-breaker.json`) | restarts, heals and clears nothing; a node parked by `hscc node pause` shows **no** strikes — the pause overlay suppresses accrual, so "empty" is not "healthy" | `/heal`; `hscc heal-clear` |
+| `hscc heal-status` (CLI, read-only; `hscc_daemon/cli.py::cmd_heal(status_only=True)`) and the `heal_status` agent tool (read-only; same state through `heal_breaker.snapshot()`) | prints/returns the daemon's heal-**breaker** ledger: repair actions recorded per node inside the window, their age, and whether that node is heal-suspended right now and for how long (`~/.hscc/heal-breaker.json`) | restarts, heals and clears nothing; a node parked by `hscc node pause` shows **no** strikes — the pause overlay suppresses accrual, so "empty" is not "healthy" | `/heal`; `hscc heal-clear` |
 | `hscc heal-clear <node> [reason…]` (CLI, mutates; same function, `heal_breaker.clear` + `reset_alert`) | drops that one node's strikes and re-arms its alert latch, so the daemon's repair paths may act on it again immediately; the reason is kept under `_cleared` | touches no unit, no other node and no node pause. **Usually unnecessary**: a suspension self-expires as its strikes age out of the window — clearing is how you stop waiting after investigating, and the breaker's own alert names this verb | `hscc heal-status`; `node resume` (which clears the node's strikes as a side effect) |
 | `/heal` → `/heal confirm` (operator chat surface; `hscc-commands/__init__.py::cmd_heal`) | probes the model endpoint of every worker unit in `serving.json`, lists the unhealthy ones, and on `confirm` stop+runs each of them (`cmdlib.restart_one`); if the orchestrator endpoint is also down it only *advises* `/cluster-restart confirm` | reads and clears no strike (the two are pinned apart by `hscc_daemon/tests/test_heal_cli_help.py`); never restarts the orchestrator unit (that is `/orch-restart`) or re-applies the template (`/cluster-restart`); no agent tool calls it | `hscc heal-status` / `heal-clear`; the `restart_model` tool (the same sparkrun stop+run, per-model, agent-callable) |
-| the four **heal-category agent tools** — `restart_model`, `remount_nas`, `repair_nas_export`, `reap_orphans` (agent toolset; `hscc-cluster/__init__.py::_HEAL_TOOLS`) | four individual repair actions, each `confirm=true`-guarded and target-scoped (one model, one mount, one export set, one orphan sweep) | no health sweep and no "what is unhealthy" judgement (that is `/heal`, or `model_health` per node); no access to the strike ledger | `/heal`; `hscc heal-*` |
+| the four **heal-category agent tools** — `restart_model`, `remount_nas`, `repair_nas_export`, `reap_orphans` (agent toolset; `hscc-cluster/__init__.py::_HEAL_TOOLS`) | four individual repair actions, each `confirm=true`-guarded and target-scoped (one model, one mount, one export set, one orphan sweep) | no health sweep and no "what is unhealthy" judgement (that is `/heal`, or `model_health` per node); no strike-ledger read (that is `heal_status`) and no clear | `/heal`; `hscc heal-*`; `heal_status` |
 | the daemon's **auto-heal loop** (no verb; `hscc_daemon/health.py`, guarded by `heal_lease.py` + `heal_breaker.py`) | the unattended repair paths — worker relaunch, keepalive, proxy relaunch, engine-wedge recovery — serialised by the heal **lease** (`~/.hscc/heal-lease.json`, bounded TTL, one repair in flight) and bounded per node by the heal **breaker**: more than 6 actions on one node inside 900 s stops healing that node, logs one critical alert naming `hscc heal-clear <node>`, and waits | is not callable and has no verb of its own; skips paused nodes; does not reset itself on daemon restart (the ledger is durable on purpose) | `/heal` — an operator-initiated pass, not the loop |
 
 ### The `orch` family — five verbs on one prefix, plus the pane owner
@@ -307,12 +307,12 @@ intent): topology, families, per-node request caps, kanban caps, balancer
 `reap_orphans`, so a stale copy makes a live workload reapable: double-check
 `serving.json` against reality before reaping anything (audit F13).
 
-## The `hscc-cluster` agent tools (29)
+## The `hscc-cluster` agent tools (30)
 
 Registered in `hscc-cluster/__init__.py` in seven families — reads:
 `cluster_status`, `list_recipes`, `pick_node`, `discovery_status`,
 `nas_status`, `node_paused`, `autodown_status`, `merge_queue_status`,
-`doctor` ·
+`doctor`, `heal_status` ·
 ops: `provision_model`, `stop_model`, `model_health`, `node_pause`,
 `node_resume` · debug: `vllm_logs`, `node_diagnostics`, `nas_diagnose` ·
 heal: `restart_model`, `remount_nas`, `repair_nas_export`, `reap_orphans` ·

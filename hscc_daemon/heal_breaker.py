@@ -217,6 +217,19 @@ def note_heal(node, now=None, window=None, directory=None):
             "paused": False, "paused_reason": ""}
 
 
+def _suspended_from(strikes, now, window):
+    """Seconds left of suspension for an already-windowed strike list.
+
+    The ONE suspension arithmetic: ``suspended()`` and ``snapshot()`` both call
+    it, so the CLI, the agent tool and the heal paths cannot disagree about
+    when a node resumes.
+    """
+    if len(strikes) <= HEAL_BREAKER_MAX:
+        return 0.0
+    # Oldest surviving strike defines when the count drops back under the cap.
+    return max(0.0, (min(strikes) + window) - now)
+
+
 def suspended(node, now=None, window=None):
     """Seconds left of suspension for `node`, or 0.0 when healing is allowed.
 
@@ -228,10 +241,59 @@ def suspended(node, now=None, window=None):
     now = _now() if now is None else now
     window = HEAL_BREAKER_WINDOW_S if window is None else float(window)
     strikes = _recent(_load().get(str(node or "?")), now, window)
-    if len(strikes) <= HEAL_BREAKER_MAX:
-        return 0.0
-    # Oldest surviving strike defines when the count drops back under the cap.
-    return max(0.0, (min(strikes) + window) - now)
+    return _suspended_from(strikes, now, window)
+
+
+def snapshot(now=None, window=None):
+    """Read-only, machine-readable view of the strike ledger.
+
+    This is the ONE state read behind both ``hscc heal-status`` (prose) and the
+    ``heal_status`` agent tool (JSON): same file, same rolling window, same cap
+    and — through :func:`_suspended_from` — the same suspension arithmetic. It
+    never writes the ledger, never resets an alert and never consults the
+    pause overlay; clearing strikes (:func:`clear`) is deliberately not part of
+    this surface.
+
+    Every real node key gets one row. ``strikes`` counts the ones still inside
+    the window (what the breaker will act on), ``recorded`` keeps the raw list
+    length because the file prunes only on the next strike, and the ages are
+    seconds since each surviving strike. ``file_age_s`` is how long ago the
+    ledger was written (``None`` when absent), so a reader can tell "no strikes
+    recorded" from "this host has no ledger yet".
+    """
+    now = _now() if now is None else now
+    window = HEAL_BREAKER_WINDOW_S if window is None else float(window)
+    data = _load()
+    nodes = []
+    for key in sorted(data):
+        raw = data.get(key)
+        if key.startswith("_") or not isinstance(raw, list):
+            continue
+        strikes = _recent(raw, now, window)
+        suspended_s = _suspended_from(strikes, now, window)
+        ages = sorted(now - t for t in strikes)
+        nodes.append({
+            "node": key,
+            "strikes": len(strikes),
+            "recorded": len(raw),
+            "strike_ages_s": ages,
+            "oldest_age_s": ages[-1] if ages else None,
+            "newest_age_s": ages[0] if ages else None,
+            "suspended": suspended_s > 0.0,
+            "suspended_s": suspended_s,
+        })
+    try:
+        file_age_s = max(0.0, now - os.stat(HEAL_BREAKER_FILE).st_mtime)
+    except OSError:
+        file_age_s = None
+    return {
+        "file": HEAL_BREAKER_FILE,
+        "window_s": window,
+        "max_strikes": HEAL_BREAKER_MAX,
+        "file_age_s": file_age_s,
+        "count": len(nodes),
+        "nodes": nodes,
+    }
 
 
 def strike_count(node, now=None, window=None):

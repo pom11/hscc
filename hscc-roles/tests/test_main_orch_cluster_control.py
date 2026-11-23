@@ -451,13 +451,15 @@ def test_the_named_read_tools_include_the_two_read_only_additions():
     """The read tools the recent waves added are mapped by name.
 
     ``autodown_status`` / ``merge_queue_status`` from the audit wave,
-    ``doctor`` from t_7f570861. The parametrized coverage test above derives its
+    ``doctor`` from t_7f570861, ``heal_status`` from t_14b86753. The
+    parametrized coverage test above derives its
     cases from the registry and would also pass if a later diff moved a mapped
     tool into its exclusion set; this one is the static pin that keeps these
     reads named whatever the registry does.
     """
     section = _section_only(orchestrators.main_cluster_control_block())
     for tool in ("autodown_status", "merge_queue_status", "doctor",
+                 "heal_status",
                  "node_paused", "node_pause", "node_resume", "orch_message"):
         assert f"`{tool}`" in section, f"{tool} is not mapped to a job"
 

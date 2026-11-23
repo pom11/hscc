@@ -72,7 +72,7 @@ DECIDED_AGAINST = [
     ("hscc cluster up", "D3"),               # fleet-wide power stays operator + confirm-gated route
     ("kanban_paused", "D6"),                 # a board brake an agent can pull is not a brake
     ("merge-queue add", "D8"),               # an agent-writable merge door is a self-merge path
-    ("heal_status", "D4"),                   # read-only tool recommended, NOT yet registered
+    ("heal-clear", "D4"),                    # the read landed as heal_status; clear stays operator-only
     ("template validate", "D5"),             # route + slash hint recommended, no tool
     ("hscc notify", "D7"),                   # an agent that can page the operator trains them to ignore pages
     ("hscc main status", "D9"),              # dashboards get a read ROUTE, not an agent tool
