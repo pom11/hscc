@@ -208,7 +208,7 @@ def read_wake_subs(boards: Mapping[str, str]) -> tuple:
     """
     subs: List[Dict[str, Any]] = []
     unreadable: List[str] = []
-    modes = wake_modes()
+    modes = tuple(m.lower() for m in wake_modes())
     placeholders = ",".join("?" * len(modes))
     cols = ", ".join(_SUBS_COLUMNS)
     for slug in sorted(boards):
@@ -228,7 +228,7 @@ def read_wake_subs(boards: Mapping[str, str]) -> tuple:
                 unreadable.append(slug)
                 continue
             rows = conn.execute(
-                "SELECT %s FROM %s WHERE delivery_mode IN (%s)"
+                "SELECT %s FROM %s WHERE LOWER(delivery_mode) IN (%s)"
                 % (cols, SUBS_TABLE, placeholders), modes).fetchall()
         except sqlite3.Error:
             unreadable.append(slug)
@@ -424,11 +424,16 @@ def doctor_check(hermes_home: Optional[str] = None, *,
 
     A pytest process that injects nothing gets :func:`refused`: a suite must not
     decide its assertions from the operator's live boards, and must not open them.
+    Precisely, a *live* read is the ambient board enumeration (no ``boards=`` and
+    no ``subscriptions=``) or the ambient lease files (no ``registry=``). Paths a
+    test created itself are not live, so a suite may exercise the real read path
+    against tmp boards.
     """
     live_boards = boards is None
     live_subs = subscriptions is None
     live_registry = registry is None
-    if "pytest" in sys.modules and (live_boards or live_subs or live_registry):
+    ambient_boards = live_boards and live_subs
+    if "pytest" in sys.modules and (ambient_boards or live_registry):
         return refused()
 
     modes = wake_modes()
