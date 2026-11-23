@@ -535,9 +535,9 @@ def _timeout_popem(stdout=b"", stderr=b"", *, pid=None):
     return build
 
 
-def _exit_popem(code, stderr=""):
+def _exit_popem(code, stderr="", stdout=""):
     def build(argv, kwargs):
-        return _FakeGateProc(returncode=code, stdout="", stderr=stderr)
+        return _FakeGateProc(returncode=code, stdout=stdout, stderr=stderr)
     return build
 
 
@@ -956,6 +956,218 @@ def test_a_real_red_gate_still_drops_the_entry(tmp_path, monkeypatch):
     assert ps["in_flight"] is None
     assert ps["last"]["result"] == "red-gate", ps["last"]
     assert gh.merged == []
+
+
+# ── the failing TEST NAME must survive the tail ────────────────────────────
+#
+# Measured on main 2026-11-23: PR #673 came back `red-gate` and its handback
+# named no test at all.  It was not a truncated write — the CLI comment path
+# stores what it is given (`--max-len` is opt-in and the queue never passes it)
+# — it was `_tail(text, 40)`: `scripts/run_tests.sh` runs 12 legs and the failed
+# leg's pytest short summary (`FAILED path::test - reason`) sits ~60 lines above
+# the end of the run, because the legs that ran *after* it plus the trailing
+# stderr noise the API appends push it out of the window.  The most the author
+# and the orchestrator could read was `✗ hscc-api (pytest exit 1)`, which says a
+# leg went red but not which test — so flake-vs-real needed a manual
+# `gh pr checks` plus an Actions crawl of a 22-minute log.
+#
+# The digest below is taken from the FULL output and leads the handback; the
+# tail itself is untouched, so a green gate's output is byte-identical.
+
+#: The line the 40-line tail lost, spelled exactly as pytest prints it.
+_FAILED_TEST = ("FAILED hscc-api/tests/test_ws_relay.py::"
+                "test_writer_restarts_after_kill - assert 0 == 1")
+
+#: The only line in the old handback that hinted anything was red.
+_RED_LEG_ROW = "  ✗ hscc-api (pytest exit 1)"
+
+
+def _multi_leg_gate_output():
+    """`run_tests.sh`-shaped output whose failure is NOT in the last 40 lines.
+
+    The distance is the whole bug: every line after `_FAILED_TEST` is filler the
+    tail window kept, and there are >40 of them ON PURPOSE, so this case fails
+    without the digest instead of passing by luck of a short suite.
+    """
+    rows = ["━━━ hscc_daemon ━━━", "................ [100%]",
+            "649 passed, 5 skipped in 1358.65s (0:22:38)",
+            "━━━ hscc-api ━━━", "....F.... [ 42%]",
+            "========== short test summary info ==========", _FAILED_TEST,
+            "1 failed, 412 passed in 300.12s"]
+    for leg in ("memori_byodb", "scripts", ".github/scripts",
+                "comfyui-sparkrun"):
+        rows.append(f"━━━ {leg} ━━━")
+        rows += [f"......... {leg} progress {i} [ 50%]" for i in range(13)]
+        rows.append("134 passed in 40.54s")
+    rows += ["", "━━━ Summary ━━━", "  ✓ hscc_daemon", _RED_LEG_ROW,
+             "  ✓ comfyui-sparkrun", "FAILURES ABOVE"]
+    return "\n".join(rows)
+
+
+#: The stderr that ran_tests.sh's consumers append after stdout, which lands
+#: *behind* every pytest line in the combined tail (the concatenation in
+#: `_run_gate` puts stderr last).
+_GATE_STDERR_NOISE = "\n".join(
+    f"client 127.0.0.1 disconnected mid-request (BrokenPipeError)"
+    for _ in range(5))
+
+
+def test_a_failing_legs_test_line_survives_the_40_line_tail(tmp_path,
+                                                            monkeypatch):
+    """A red leg's `FAILED path::test` must reach the handback, verbatim.
+
+    PR #673 is the case: the tail window held the later legs' dots and the
+    summary block, so the comment proved the suite was red and nothing else.
+    """
+    fake, _calls = _fake_subprocess(
+        popem=_exit_popem(7, stderr=_GATE_STDERR_NOISE,
+                          stdout=_multi_leg_gate_output()))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "fail", verdict
+    assert _FAILED_TEST in output, output
+    assert _RED_LEG_ROW.strip() in output, output
+    # The tail is still there: the digest is added, never substituted.
+    assert "FAILURES ABOVE" in output, output
+    assert output.index(_FAILED_TEST) < output.index("FAILURES ABOVE"), output
+
+
+def test_a_green_gate_hands_back_the_plain_tail_unchanged(tmp_path,
+                                                          monkeypatch):
+    """Nothing may shift for a leg that passed — the digest is for failures.
+
+    Pinning byte-equality here is what keeps the fix from quietly reformatting
+    every green run's evidence (and from scanning 12 green legs for markers).
+    """
+    text = "━━━ scripts ━━━\n......... [100%]\n649 passed in 1358.65s\n"
+    fake, _calls = _fake_subprocess(popem=_exit_popem(0, stdout=text))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   42)
+
+    assert verdict == "pass", verdict
+    assert output == mq._tail(text), repr(output)
+
+
+def test_failure_lines_are_verbatim_deduped_and_capped():
+    """The digest is the gate's own lines, capped — not a rewrite, not a dump.
+
+    Capping is what makes it safe to read the FULL output: a branch whose
+    fixture blew up can print hundreds of `FAILED` rows, and a card comment is
+    not a log file.
+    """
+    many = "\n".join(
+        [f"FAILED tests/test_a.py::test_{i} - boom {i}"
+         for i in range(mq.MAX_FAILURE_LINES + 5)]
+        # A duplicate short-summary line (same line twice) must appear once.
+        + ["FAILED tests/test_a.py::test_0 - boom 0",
+           # Noise the matchers must NOT pick up: a progress line, a mention
+           # mid-line, and a `✗` that is not a red-leg row.
+           "FAILED is what the fixture text mentions inline",
+           "........ [ 50%]", "  ✓ hscc-daemon", ""]
+        + [f"  ✗ leg-{i} (pytest exit 1)" for i in range(3)]
+        + ["3 failed, 900 passed in 12.3s"])
+
+    lines = mq._failure_lines(many)
+
+    # The rows naming the leg lead, and the cap may never cost them their place:
+    # `scripts/run_tests.sh` prints them LAST, so a cap that respected print order
+    # would drop the one line saying WHICH leg went red first.
+    assert lines[0] == "✗ leg-0 (pytest exit 1)", lines[0]
+    assert "✗ leg-2 (pytest exit 1)" in lines, lines
+    assert "3 failed, 900 passed in 12.3s" in lines, lines
+    # Then the failing tests, in the order pytest printed them, de-duplicated.
+    assert lines.index("FAILED tests/test_a.py::test_0 - boom 0") < \
+        lines.index("FAILED tests/test_a.py::test_1 - boom 1"), lines
+    assert lines.count("FAILED tests/test_a.py::test_0 - boom 0") == 1, lines
+    assert "........ [ 50%]" not in lines, lines
+    assert "FAILED is what the fixture text mentions inline" not in lines, lines
+    assert "  ✓ hscc-daemon" not in lines, lines
+    # Capped, and the cap says how many it hid rather than silently cutting.
+    shown = [ln for ln in lines if not ln.startswith("…")]
+    assert len(shown) <= mq.MAX_FAILURE_LINES, len(shown)
+    assert "FAILED tests/test_a.py::test_24 - boom 24" not in lines, lines
+    assert any("more failure line(s) not shown" in ln for ln in lines), lines
+
+
+def test_a_long_failure_line_is_capped_not_dropped():
+    """A 2 KB failure reason may not eat the comment; the test id is the point."""
+    long_line = "FAILED tests/test_ws.py::test_long - " + "x" * 5000
+
+    lines = mq._failure_lines(long_line)
+
+    assert len(lines) == 1, lines
+    assert len(lines[0]) <= mq.MAX_FAILURE_LINE_CHARS, len(lines[0])
+    assert lines[0].startswith("FAILED tests/test_ws.py::test_long"), lines[0]
+
+
+def test_the_red_gate_handback_names_the_test_the_leg_and_the_attempt(
+        tmp_path, monkeypatch):
+    """The card comment alone must be enough to decide re-queue vs fix.
+
+    This is the deliverable: leg name, attempt, and the verbatim `FAILED`
+    lines, on the card — so the driver never has to open the Actions log to
+    tell a flake from a real break.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["bash scripts/run_tests.sh"], timeout_s=42)
+    gh = FakeGh({34: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    handed = []
+    mq.add_to_queue("alpha", 34, card="t_red_named", assignee="worker",
+                    path=_state(tmp_path))
+    fake, _calls = _fake_subprocess(
+        popem=_exit_popem(1, stderr=_GATE_STDERR_NOISE,
+                          stdout=_multi_leg_gate_output()))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    result = mq.tick(
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        handback=lambda card, assignee, msg: handed.append(
+            (card, assignee, msg)) or True)
+
+    assert result["processed"][0]["result"] == "red-gate", result
+    card, assignee, body = handed[0]
+    assert (card, assignee) == ("t_red_named", "worker"), handed
+    assert _FAILED_TEST in body, body
+    assert _RED_LEG_ROW.strip() in body, body
+    # The attempt is 1-based: `attempts` counts retries already spent, so a
+    # first-pass bounce reads `Attempt: 1`, never `Attempt: 0`.
+    assert "Attempt: 1" in body, body
+    # Evidence leads: the failing line is above the resolve boilerplate.
+    assert body.index(_FAILED_TEST) < body.index(
+        "Resolve it as this card's worker"), body
+    # The PR comment is the same text, not a thinner copy.
+    comment = " ".join(gh.comments[0])
+    assert _FAILED_TEST in comment, comment
+
+
+def test_a_real_gate_run_carries_its_failure_lines(tmp_path):
+    """The fake-Popen proof, replayed through a gate the OS actually ran.
+
+    A fake `Popen` hands back exactly the strings the test wrote, so on its own
+    it cannot show that the real `communicate()` output reaches the digest
+    through the real argv.  This runs a `sh` that prints the same 12-leg shape
+    and exits 1: milliseconds, no repo, no network, no wall-clock claim.
+    """
+    script = tmp_path / "fake_gate.sh"
+    script.write_text("#!/bin/sh\ncat <<'HSCCEOF'\n"
+                      f"{_multi_leg_gate_output()}\n"
+                      "HSCCEOF\n"
+                      "printf 'client disconnected (BrokenPipeError)\\n' >&2\n"
+                      "exit 1\n")
+
+    verdict, output = mq._run_gate(f"sh '{script}'", str(tmp_path), 60)
+
+    assert verdict == "fail", (verdict, output)
+    assert _FAILED_TEST in output, output
+    assert _RED_LEG_ROW.strip() in output, output
 
 
 def test_a_timed_out_gate_stamps_the_timeout_stage_on_the_health_stream(
