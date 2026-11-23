@@ -434,15 +434,17 @@ def _operator_down_verdict(deliberately_down_fn=None):
     in memory: the record is on disk or it does not exist.
 
     WHICH WRITERS THIS TREATS AS A STAY-DOWN (decided here, never by string
-    match): ``post_boot.clear_expected_up(reason)`` has three sanctioned callers
-    — ``hscc-cluster/hscc.py`` (``"hscc cluster down"``, the operator),
-    ``hscc-commands`` (``"/cluster-down"``, the same instruction on another
-    surface) and ``autodown.py`` (``"autodown: intentional idle teardown"``,
-    the fleet went idle) — so the record means "someone deliberately cleared the
-    footprint", NOT "an operator typed the verb". ALL THREE are honoured, and
-    the ``reason`` TEXT is copied into the label and nowhere else: no substring
-    of it is ever tested, because that would make an operator-chosen string a
-    safety property. Pinned verbatim in
+    match): ``post_boot.clear_expected_up(reason)`` is called from two places —
+    ``hscc-cluster/hscc.py`` (the fleet-down engine) and ``autodown.py``
+    (``"autodown: intentional idle teardown"``, the fleet went idle) — but THREE
+    surfaces stamp it, because ``/cluster-down`` (``hscc-commands``) delegates to
+    the engine and passes its own ``"/cluster-down"`` reason since t_bf8577f9
+    (it used to call ``clear_expected_up`` itself). So the record means "someone
+    deliberately cleared the footprint", NOT "an operator typed the verb", and
+    the reason text names which surface did. ALL THREE are honoured, and the
+    ``reason`` TEXT is copied into the label and nowhere else: no substring of it
+    is ever tested, because that would make an operator-chosen string a safety
+    property. Pinned verbatim in
     tests/test_verify_stay_down.py::test_every_record_producer_wording_excuses.
 
     INDEPENDENT of the autodown window above (D2): a manual `cluster down`

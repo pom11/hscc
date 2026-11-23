@@ -1,19 +1,36 @@
-"""/cluster-down must claim the stay-down intent and tell the truth per node.
+"""`/cluster-down` is a SURFACE on the engine now, not a second fleet-down.
 
-t_3a0bdca9 (D1/D5/D6). This is the SECOND `cluster down` surface (the slash
-verb, as opposed to the `hscc cluster down` CLI verb in hscc-cluster/hscc.py).
-Before this card it ran `sparkrun stop --all` per node and cleared NOTHING, so
-`check_workers`/`check_proxy` resurrected the fleet it had just stopped, and a
-node with nothing running was reported as `❌ … stopped — <err>`.
+t_bf8577f9 (audit F5) rewrote this suite. Its previous subject was t_3a0bdca9
+(D1/D5/D6), which had given the slash verb its own per-node `sparkrun stop --all
+--hosts <node>` loop, its own already-down markers and its own marker stamp.
+That made two implementations of one destructive verb, and the two disagreed:
+measured side by side (NOTES-t_bf8577f9.md — fake sparkrun, identical output),
+rc 1 carrying both `No running workload matches intent …` and `Error: could not
+query <host>: ssh: Permission denied` renders ERROR on the CLI verb, and rendered
+`○ … nothing running` plus "All units stopped." here.
 
-Fakes follow this dir's existing style (test_commands.py): `cmdlib.read_units`
-and `cmdlib._run` are monkeypatched on the module the plugin itself uses, and
-the marker is reached through the plugin's own fail-soft seam. The autouse
-sparkrun fence from conftest.py stays armed — no test here can reach the live
-CLI, and no test writes the operator's real ~/.hscc/expected-up.json.
+These pins are what replaced that loop:
+
+  1. a real down calls the engine EXACTLY ONCE with `dry_run=False` and this
+     surface's own marker reason (provenance survives delegation);
+  2. the rendered verdict comes from the engine's dict — ✅ / ○ (never claimed
+     as a stop) / ❌ with the error tail — and the surface never declares
+     "all units stopped" on its own authority;
+  3. the stay-down summary appears only when the engine reports the record was
+     claimed; the un-claimed path keeps its ⚠️ warning;
+  4. the plan (bare call AND `dry-run`) issues nothing and shows the exact
+     command the engine will run;
+  5. with the engine unavailable the verb REFUSES — no fallback to a different
+     stop, and no sparkrun process reached at all.
+
+Fakes only: 192.0.2.x unit nodes, a fake engine module, and a fake `sparkrun`
+script on PATH recording any call it receives. The autouse fence from
+conftest.py stays armed, so the operator's live CLI remains unreachable here,
+and no test writes the operator's real ~/.hscc/expected-up.json.
 """
 
-import sys
+import os
+import shutil
 
 import cmdlib
 import __init__ as plugin
@@ -31,184 +48,283 @@ SERVING = {
     ],
 }
 
-# Verbatim shapes the installed sparkrun stop path emits for "nothing to stop"
-# (sparkrun/cli/_stop_logs.py:123-125 stderr+exit 1, :217 stdout+exit 0).
-NOTHING_RUNNING_STDERR = ("Error: No running workload matches intent "
-                          "all on hosts 192.0.2.2")
-NOTHING_RUNNING_STDOUT = "No sparkrun containers running."
-# The discovery-failure shape must NOT read as "nothing running" (:215 prints
-# it next to `Error: could not query <host>`, and that host may still be up).
-def query_failed(node):
-    return (f"Error: could not query {node}: ssh: "
-            "Connection timed out during banner exchange")
+FLEET_DOWN = ["sparkrun", "stop", "--all", "--cluster", "hscc"]
+
+# What the engine prints around a real stop. This surface renders its own
+# command line and its own stay-down summary, so neither line may leak through.
+ENGINE_WILL_RUN = "Will run: " + " ".join(FLEET_DOWN)
+ENGINE_CONFIRM = ("fleet marked deliberately down — the daemon will not relaunch "
+                  "workers, the proxy or the notifier until `hscc cluster up`")
 
 
-class FakePostBoot:
-    """Stands in for hscc_daemon.post_boot, recording every clear_expected_up."""
+class FakeEngine:
+    """Stands in for `hscc-cluster/hscc.py::cmd_cluster_down`, recording calls."""
 
-    def __init__(self, raises=None):
+    STAY_DOWN_CONFIRMATION = ENGINE_CONFIRM
+
+    def __init__(self, res=None, prints=()):
         self.calls = []
-        self.raises = raises
+        self.prints = list(prints)
+        self.res = dict(res if res is not None else {
+            "success": True, "returncode": 0, "command": list(FLEET_DOWN),
+            "output": "Stopped 3 job(s), 3 container(s) across 3 host(s).",
+            "error": "",
+            "stay_down_marker": {"cleared": True, "reason": "/cluster-down",
+                                 "error": None},
+        })
 
-    def clear_expected_up(self, reason, path=None):
-        self.calls.append(reason)
-        if self.raises is not None:
-            raise self.raises
+    class _Serving:
+        @staticmethod
+        def fleet_down_cmd():
+            return list(FLEET_DOWN)
+
+    def _load_daemon_serving(self):
+        return self._Serving
+
+    def cmd_cluster_down(self, dry_run=False, reason=None):
+        self.calls.append({"dry_run": dry_run, "reason": reason})
+        for line in self.prints:
+            print(line)
+        return dict(self.res)
 
 
-def _fakes(monkeypatch, per_node, raises=None, marker=True):
-    """Install read_units/_run/post_boot fakes. Returns (runs, post_boot).
-
-    ``marker=False`` leaves the plugin's REAL fail-soft import seam untouched —
-    for the test that wants to prove the tolerance path itself works.
-    """
+def _fakes(monkeypatch, engine):
+    """Fake serving.json + the plugin's engine seam. Returns the engine fake."""
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
-    runs = []
-
-    def fake_run(args, timeout=0):
-        runs.append(list(args))
-        return per_node(args[args.index("--hosts") + 1])
-
-    monkeypatch.setattr(cmdlib, "_run", fake_run)
-    pb = FakePostBoot(raises=raises)
-    if marker:
-        monkeypatch.setattr(plugin, "_post_boot_module", lambda: pb)
-    return runs, pb
+    monkeypatch.setattr(plugin, "_cluster_engine", lambda: engine)
+    return engine
 
 
-# ── the marker (D1/D5) ───────────────────────────────────────────────────────
+# ── 1. delegation, and the marker provenance that survives it ────────────────
 
-def test_confirmed_down_stamps_the_record_once_with_the_card_reason(monkeypatch):
-    def per_node(node):                       # everything really did stop
-        return True, "Stopped 1 job(s), 1 container(s) across 1 host(s).", ""
+def test_confirmed_down_calls_the_engine_once_with_this_surfaces_reason(monkeypatch):
+    eng = _fakes(monkeypatch, FakeEngine())
+    plugin.cmd_cluster_down("confirm")
 
-    runs, pb = _fakes(monkeypatch, per_node)
+    assert eng.calls == [{"dry_run": False, "reason": "/cluster-down"}]
+
+
+def test_the_marker_reason_is_this_surfaces_string_not_the_cli_default(monkeypatch):
+    """`/cluster-down` still stamps its OWN reason: the record's presence is the
+    safety signal, its text is provenance (see hscc_daemon/verify.py)."""
+    eng = _fakes(monkeypatch, FakeEngine())
+    plugin.cmd_cluster_down("confirm")
+
+    assert eng.calls[0]["reason"] == plugin.STAY_DOWN_REASON == "/cluster-down"
+
+
+def test_the_real_seam_reaches_the_real_engine_module():
+    """No patched seam: `cmdlib._import_cluster_module('hscc')` must genuinely
+    resolve the sibling plugin, or every confirmation would hit the refusal."""
+    eng = plugin._cluster_engine()
+
+    assert eng is not None, "engine seam did not resolve hscc-cluster/hscc.py"
+    assert callable(getattr(eng, "cmd_cluster_down", None))
+    assert eng.STAY_DOWN_REASON == "hscc cluster down"
+
+
+# ── 2. the verdict is the engine's, not a second opinion ─────────────────────
+
+def test_clean_stop_renders_ok_and_does_not_claim_units_stopped(monkeypatch):
+    eng = _fakes(monkeypatch, FakeEngine(prints=[ENGINE_WILL_RUN, ENGINE_CONFIRM]))
     out = plugin.cmd_cluster_down("confirm")
 
-    assert pb.calls == ["/cluster-down"]      # D5's verbatim reason, ONE stamp
-    assert "fleet marked deliberately down" in out
-    assert len(runs) == 3                     # orch + 2 workers, one stop each
+    assert "✅ fleet down — sparkrun exited 0" in out
+    assert "❌" not in out
+    # The pre-F5 surface ended with "All units stopped." on its own authority.
+    assert "All units stopped" not in out
+    # sparkrun's per-host text lives in the RESULT (`run_cmd` captures both
+    # streams; the engine prints only its own echo), so the renderer must read
+    # it from there — passing through only printed lines would show the operator
+    # nothing about what actually stopped.
+    assert "  sparkrun:" in out
+    assert "Stopped 3 job(s)" in out
+    # The engine's `Will run:` echo is not repeated next to `command:`.
+    assert out.count(" ".join(FLEET_DOWN)) == 1
+    # The stay-down line appears ONCE: this surface's STAY_DOWN_SUMMARY (which
+    # extends the engine's wording to name the missing `/cluster-up` verb), not
+    # the engine's printed confirmation echoed on top of it.
+    assert out.count("fleet marked deliberately down") == 1
 
+
+def test_sparkruns_stderr_reaches_the_operator(monkeypatch):
+    """The per-host failure text is in `res["error"]`; a chat surface that
+    dropped it would leave the operator with an exit code and nothing to act on."""
+    _fakes(monkeypatch, FakeEngine(res={
+        "success": False, "returncode": 1, "command": list(FLEET_DOWN),
+        "output": "Stopped 2 job(s), 2 container(s) across 2 host(s).",
+        "error": "Error: could not query 192.0.2.3: ssh: Connection refused",
+        "stay_down_marker": {"cleared": True, "reason": "/cluster-down",
+                             "error": None},
+    }))
+    out = plugin.cmd_cluster_down("confirm")
+
+    assert "  sparkrun (stderr):" in out
+    assert "could not query 192.0.2.3: ssh: Connection refused" in out
+    assert "❌ fleet down FAILED (sparkrun exit 1)" in out
+
+
+def test_already_down_is_not_rendered_as_a_stop(monkeypatch):
+    _fakes(monkeypatch, FakeEngine(res={
+        "success": False, "returncode": 1, "command": list(FLEET_DOWN),
+        "output": "Stopped 2 job(s), 2 container(s) across 2 host(s).",
+        "error": "Error: No running workload matches intent all on hosts 192.0.2.3",
+        "benign_no_workloads": True,
+        "benign_note": "nothing to stop — the fleet was already down "
+                       "(sparkrun exited nonzero on an already-down host)",
+        "stay_down_marker": {"cleared": True, "reason": "/cluster-down",
+                             "error": None},
+    }))
+    out = plugin.cmd_cluster_down("confirm")
+
+    assert "○ fleet down —" in out and "already down" in out
+    assert "✅" not in out and "❌" not in out
+
+
+def test_a_real_failure_keeps_the_error_tail_and_says_failed(monkeypatch):
+    """The regression this card exists for. The old classifier called THIS exact
+    output `○ nothing running`, because an already-down line rode along with it
+    and there was no real-failure denylist here (the engine has one)."""
+    _fakes(monkeypatch, FakeEngine(res={
+        "success": False, "returncode": 1, "command": list(FLEET_DOWN),
+        "output": "Stopped 2 job(s), 2 container(s) across 2 host(s).",
+        "error": "Error: could not query 192.0.2.3: ssh: Permission denied "
+                 "(publickey)\nError: No running workload matches intent all "
+                 "on hosts 192.0.2.4",
+        "stay_down_marker": {"cleared": True, "reason": "/cluster-down",
+                             "error": None},
+    }))
+    out = plugin.cmd_cluster_down("confirm")
+
+    assert "❌ fleet down FAILED (sparkrun exit 1)" in out
+    assert "could not query 192.0.2.3: ssh: Permission denied" in out
+    assert "○" not in out and "nothing running" not in out
+    assert "Nothing is marked cleanly down" in out
+
+
+# ── 3. the stay-down record, rendered from the engine's report ────────────────
 
 def test_summary_line_names_the_way_back_up_in_the_same_line(monkeypatch):
-    _fakes(monkeypatch, lambda node: (True, "Stopped", ""))
+    _fakes(monkeypatch, FakeEngine())
     line = [l for l in plugin.cmd_cluster_down("confirm").splitlines()
             if "fleet marked deliberately down" in l][0]
-    # Pinned wording (card body), plus the escape hatch in the SAME line —
-    # there is no /cluster-up verb, so saying only "cluster up" would mislead.
+
+    # Pinned wording (t_3a0bdca9 D5), plus the escape hatch in the SAME line:
+    # there is no /cluster-up verb, so naming only "cluster up" would mislead.
     assert ("the daemon will not relaunch workers, the proxy or the notifier "
             "until `hscc cluster up`") in line
     assert "/cluster-up" in line
 
 
-def test_record_is_stamped_even_when_a_node_stop_failed(monkeypatch):
-    """Fail-safe direction: a deliberate down wins over a failed stop.
-
-    Same reading hscc-cluster/hscc.py:530-535 documents for the CLI verb —
-    "down, no relaunch" is always the safe state after the operator asked for
-    a fleet down, even if one node refused to stop.
-    """
-    def per_node(node):
-        if node == "192.0.2.2":
-            return False, "", "Error: failed to stop containers on 192.0.2.2: docker: error"
-        return True, "Stopped", ""
-
-    _fakes(monkeypatch, per_node)
+def test_uncleared_record_warns_and_offers_the_cli_verb(monkeypatch):
+    """Fail-soft stays: a marker problem never breaks the verb, and the operator
+    is never told the fleet is marked down when it is not."""
+    _fakes(monkeypatch, FakeEngine(res={
+        "success": True, "returncode": 0, "command": list(FLEET_DOWN),
+        "output": "Stopped", "error": "",
+        "stay_down_marker": {"cleared": False, "reason": "/cluster-down",
+                             "error": "Read-only file system: '/Users'"},
+    }))
     out = plugin.cmd_cluster_down("confirm")
 
-    assert "❌ 192.0.2.2: stopped — Error: failed to stop containers" in out
-    assert "fleet marked deliberately down" in out
+    assert "⚠️" in out
+    assert "stay-down marker could NOT be written (Read-only file system" in out
+    assert "the daemon MAY relaunch these units" in out
+    assert "`hscc cluster down`" in out
+    assert "fleet marked deliberately down" not in out
 
 
-# ── truthful per-node marks (D6) ─────────────────────────────────────────────
-
-def test_all_nodes_nothing_running_reports_no_failure_anywhere(monkeypatch):
-    """The bug's everyday shape: sparkrun exits nonzero when nothing matched.
-
-    Every node used to read `❌ … stopped — Error: No running workload matches
-    intent …`, which is both a lie about a failure and a lie about a stop.
-    """
-    def per_node(node):
-        return False, "", NOTHING_RUNNING_STDERR.replace("192.0.2.2", node)
-
-    _fakes(monkeypatch, per_node)
+def test_a_surface_with_no_marker_report_says_so_rather_than_claiming_it(
+        monkeypatch):
+    """An engine with no `stay_down_marker` key (an install older than this card)
+    must not be rendered as though the record had been claimed."""
+    _fakes(monkeypatch, FakeEngine(res={
+        "success": True, "returncode": 0, "command": list(FLEET_DOWN),
+        "output": "Stopped", "error": "",
+    }))
     out = plugin.cmd_cluster_down("confirm")
 
-    assert "❌" not in out
-    for node in ("192.0.2.1", "192.0.2.2", "192.0.2.3"):
-        assert f"○ {node}: nothing running" in out
-    assert "fleet marked deliberately down" in out
+    assert "could NOT be written" in out
+    assert "fleet marked deliberately down" not in out
 
 
-def test_exit_zero_no_containers_shape_is_also_not_a_stop(monkeypatch):
-    """sparkrun's other already-down spelling (`--all`, stdout, exit 0).
+# ── 4. the plan paths touch nothing and show the real argv ───────────────────
 
-    `✅ … stopped` there claims a stop that never happened, so the honest mark
-    is ○ on the success path too — not only on the failing one.
-    """
-    _fakes(monkeypatch, lambda node: (True, NOTHING_RUNNING_STDOUT, ""))
-    out = plugin.cmd_cluster_down("confirm")
-
-    assert "❌" not in out and "✅" not in out
-    assert "○ 192.0.2.1: nothing running" in out
-
-
-def test_a_real_error_keeps_the_cross_and_the_error_tail(monkeypatch):
-    """Already-down detection must never swallow a genuine failure."""
-    def per_node(node):
-        if node == "192.0.2.3":
-            return False, "", query_failed(node)
-        return True, "Stopped", ""
-
-    _fakes(monkeypatch, per_node)
-    out = plugin.cmd_cluster_down("confirm")
-
-    assert "❌ 192.0.2.3: stopped — Error: could not query 192.0.2.3: ssh" in out
-    assert "○ 192.0.2.3" not in out            # unqueried != nothing running
-    assert "✅ 192.0.2.1: stopped" in out
-
-
-# ── the unconfirmed preview still touches nothing ────────────────────────────
-
-def test_unconfirmed_invocation_issues_no_stop_and_writes_no_marker(monkeypatch):
-    runs, pb = _fakes(monkeypatch, lambda node: (True, "Stopped", ""))
+def test_unconfirmed_invocation_issues_nothing(monkeypatch):
+    eng = _fakes(monkeypatch, FakeEngine())
     out = plugin.cmd_cluster_down("")          # no `confirm`
 
-    assert runs == []                          # cmdlib._run never called
-    assert pb.calls == []                      # marker untouched
-    assert "fleet marked deliberately down" not in out
+    assert eng.calls == []
     assert "Confirm" in out and "192.0.2.1" in out
-
-
-# ── fail-soft: the marker must never break the verb ──────────────────────────
-
-def test_unimportable_post_boot_still_completes_and_warns(monkeypatch):
-    """The REAL tolerance path (not a patched seam): poison the import.
-
-    `hscc_daemon` pinned to None in sys.modules makes `from hscc_daemon import
-    post_boot` raise on the first attempt AND on the repo-root fallback
-    (hscc-cluster/hscc.py:501-519's shape), so _post_boot_module() genuinely
-    returns None. The verb must still stop the fleet and say it could not
-    claim the stay-down intent.
-    """
-    runs, _pb = _fakes(monkeypatch, lambda node: (True, "Stopped", ""),
-                       marker=False)          # keep the REAL import seam
-    monkeypatch.setitem(sys.modules, "hscc_daemon", None)
-
-    out = plugin.cmd_cluster_down("confirm")
-
-    assert plugin._post_boot_module() is None  # the tolerance really is reached
-    assert "⚠️" in out and "stay-down marker could NOT be written" in out
-    assert "fleet marked deliberately down" not in out   # never claim what failed
-    assert len(runs) == 3                      # the stops still happened
-    assert "All units stopped." in out
-
-
-def test_a_raising_clear_expected_up_warns_instead_of_breaking(monkeypatch):
-    _fakes(monkeypatch, lambda node: (True, "Stopped", ""),
-           raises=OSError("Read-only file system: '/Users'"))
-    out = plugin.cmd_cluster_down("confirm")
-
-    assert "⚠️" in out and "Read-only file system" in out
     assert "fleet marked deliberately down" not in out
-    assert "✅ 192.0.2.1: stopped" in out
+
+
+def test_dry_run_prints_the_plan_and_issues_nothing(monkeypatch):
+    """Parity with `hscc cluster down --dry-run`, which the slash verb lacked."""
+    eng = _fakes(monkeypatch, FakeEngine())
+    out = plugin.cmd_cluster_down("dry-run")
+
+    assert eng.calls == []
+    assert "dry run (nothing executed)" in out
+    assert " ".join(FLEET_DOWN) in out
+
+
+def test_the_plan_shows_the_same_command_the_engine_will_run(monkeypatch):
+    """The audit had to read two source files to compare the plans; the two
+    surfaces now show the same argv, read from the same builder."""
+    eng = _fakes(monkeypatch, FakeEngine())
+    plan = plugin.cmd_cluster_down("dry-run")
+
+    assert " ".join(eng._load_daemon_serving().fleet_down_cmd()) in plan
+
+
+def test_a_dry_run_token_beats_confirm(monkeypatch):
+    """`/cluster-down dry-run confirm` previews, it does not stop: the safe
+    reading of a call asking for both (same doctrine as `--yes` vs `--dry-run`)."""
+    eng = _fakes(monkeypatch, FakeEngine())
+    out = plugin.cmd_cluster_down("dry-run confirm")
+
+    assert eng.calls == [] and "nothing executed" in out
+
+
+# ── 5. no engine, no stop — and no secret second implementation ──────────────
+
+def test_engine_unavailable_refuses_and_stops_nothing(monkeypatch, tmp_path):
+    """Refusal, not fallback: running a *different* fleet-down is the defect."""
+    logged = tmp_path / "sparkrun-calls.log"
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    script = fakebin / "sparkrun"
+    script.write_text(f"#!/bin/sh\necho \"$*\" >> {logged}\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fakebin}{os.pathsep}{os.environ['PATH']}")
+    found = shutil.which("sparkrun")
+    assert found and os.path.realpath(found) == os.path.realpath(script)
+
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(plugin, "_cluster_engine", lambda: None)
+
+    out = plugin.cmd_cluster_down("confirm")
+
+    assert "REFUSED" in out and "nothing was stopped" in out
+    assert "`hscc cluster down`" in out
+    assert not logged.exists(), "the surface reached a sparkrun process on its own"
+
+
+def test_the_plugin_holds_no_sparkrun_stop_of_its_own():
+    """Structural gate for F5: the second implementation must not creep back.
+
+    `cmd_cluster_down` and its helpers may not build a stop argv or fan one out
+    per node — the ONLY fleet-down lives in hscc-cluster/hscc.py. A source-level
+    pin is deliberate: the behavioural test above proves only the path a test
+    reached, not the absence of a parallel one.
+    """
+    import inspect
+
+    src = (inspect.getsource(plugin.cmd_cluster_down)
+           + inspect.getsource(plugin._down_preview)
+           + inspect.getsource(plugin._fleet_down_command)
+           + inspect.getsource(plugin._cluster_engine))
+    for banned in ("SPARKRUN", "cmdlib._run", '"stop"', "--hosts",
+                   "ThreadPoolExecutor", "subprocess"):
+        assert banned not in src, f"/cluster-down grew its own stop path: {banned!r}"

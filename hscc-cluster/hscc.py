@@ -585,6 +585,14 @@ STAY_DOWN_CONFIRMATION = (
     "fleet marked deliberately down — the daemon will not relaunch workers, "
     "the proxy or the notifier until `hscc cluster up`")
 
+#: The reason text THIS surface stamps into the post-boot stay-down record.
+#: A DEFAULT, not a constant: `/cluster-down` (hscc-commands) passes its own so
+#: the record still names which surface claimed the stay-down, while the marker
+#: itself stays the ONE shared record. `hscc_daemon/verify.py` documents that no
+#: substring of this text is ever a safety property, so rewording it here is
+#: cosmetic — but the CLI wording is pinned verbatim, so it stays as-is.
+STAY_DOWN_REASON = "hscc cluster down"
+
 
 def _benign_no_workloads_note(res):
     """Short note when a nonzero sparkrun exit only says "already down".
@@ -618,13 +626,26 @@ def _benign_no_workloads_note(res):
             "(sparkrun exited nonzero on an already-down host)")
 
 
-def cmd_cluster_down(dry_run=False):
+def cmd_cluster_down(dry_run=False, reason=STAY_DOWN_REASON):
     """Stop ALL sparkrun workloads across the fleet. ``[--dry-run]``.
 
     The single source of truth for a full fleet down: issues ONE
     ``sparkrun stop --all`` built by ``serving.fleet_down_cmd()``, scoped to
     the configured cluster. Prints the exact command; ``--dry-run`` prints
     without executing. autodown.teardown() uses this same builder.
+
+    t_bf8577f9 (audit F5): ``/cluster-down`` (hscc-commands) now DELEGATES here
+    instead of running its own per-node ``sparkrun stop --all --hosts <node>``
+    loop, so the slash surface and this one cannot disagree again — same host
+    scope (sparkrun's cluster, not whatever serving.json happened to list), same
+    benign-``already down`` classification, same marker bookkeeping. ``reason``
+    exists so the delegating surface can still record WHICH surface claimed the
+    stay-down; the CLI default keeps the CLI's marker wording byte-identical.
+    The marker outcome is also reported in the ADDITIVE ``stay_down_marker`` key
+    (``{"cleared", "reason", "error"}``), the same pattern as ``benign_*``:
+    ``success`` still means "sparkrun exited 0" for ``--json`` consumers, and a
+    caller that renders its own text (the slash verb) does not have to re-read
+    this function's ``print`` output to know whether the record was claimed.
 
     t_576964d5: a real (non-dry-run) down ALSO clears the post-boot
     expected_up marker — this verb IS the operator's "stay down" intent, so
@@ -663,12 +684,20 @@ def cmd_cluster_down(dry_run=False):
         res["benign_note"] = note
     pb = _post_boot_module()
     cleared = False
-    if pb is not None:
+    marker_error = None
+    if pb is None:
+        marker_error = "hscc_daemon.post_boot is not importable from this install"
+    else:
         try:
-            pb.clear_expected_up("hscc cluster down")
+            pb.clear_expected_up(reason)
             cleared = True
         except Exception as e:
+            marker_error = str(e)
             print(f"WARN: expected_up marker clear failed: {e}")
+    # Additive (t_bf8577f9): the record's outcome, for a caller that renders its
+    # own text. Nothing here changes `success` — see the docstring.
+    res["stay_down_marker"] = {"cleared": cleared, "reason": reason,
+                               "error": marker_error}
     if cleared:
         print(STAY_DOWN_CONFIRMATION)
     return res

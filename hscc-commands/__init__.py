@@ -388,91 +388,139 @@ STAY_DOWN_SUMMARY = (
 )
 
 
-def _post_boot_module():
-    """Import the daemon's post_boot module, or None when unavailable.
+# ── ONE fleet-down implementation (audit F5, t_bf8577f9) ───────────────────
+#
+# WHY THIS DELEGATES
+# ------------------
+# Until t_bf8577f9 this verb ran its OWN `sparkrun stop --all --hosts <node>`
+# loop — one call per serving.json unit node — with its own already-down
+# markers. The card measured both surfaces against the SAME fake sparkrun output
+# and they disagreed. Given rc 1 with `No running workload matches intent …`
+# riding along with `Error: could not query <host>: ssh: Permission denied`, the
+# CLI verb renders ERROR (it refuses to call a host it could not query "nothing
+# was running" — see `_benign_no_workloads_note` in hscc-cluster/hscc.py) while
+# this surface printed `○ … nothing running` for every node plus "All units
+# stopped." A destructive verb that hides a real failure is the bug. The second
+# one was scope: this loop stopped only the nodes serving.json listed, so a
+# workload running somewhere else was left up by `/cluster-down` and stopped by
+# `hscc cluster down` — one operator intent, two answers (audit S2/F5).
+#
+# Both halves are fixed the same way: the stop, the benign-`already down`
+# classification and the post-boot marker bookkeeping live in
+# `hscc-cluster/hscc.py::cmd_cluster_down`, and this handler renders its result.
+# `reason` still names THIS surface, so the durable record keeps its provenance
+# (presence is the signal, never the text — see hscc_daemon/verify.py).
+#
+# THE "WORKS WHEN THE LLM IS WEDGED" CONSTRAINT IS NOT A REASON FOR THE LOOP
+# --------------------------------------------------------------------------
+# The engine is an in-process Python call whose only external dependency is
+# `sparkrun` on PATH — the same dependency the loop had. No LLM and no gateway
+# round-trip sits between this handler and the stop, so the incident-response
+# property that justified the loop is preserved. What delegation costs is the
+# per-node emoji rendering, replaced by sparkrun's own per-host output: the
+# tool's words rather than a second interpretation of them.
 
-    Best-effort on purpose, copied from the sanctioned style in
-    ``hscc-cluster/hscc.py`` (`_post_boot_module`): the stay-down marker is an
-    ENHANCEMENT to this verb — a post_boot import failure must never break
-    `/cluster-down`. The caller reports the missing marker instead of failing.
+#: Tokens that ask for the plan without executing it — the same meaning
+#: `hscc cluster down --dry-run` has (t_bf8577f9: the slash surface had no
+#: dry-run at all, so an operator could not compare the two plans).
+_DRY_RUN_WORDS = {"dry-run", "--dry-run"}
+
+
+def _cluster_engine():
+    """The hscc-cluster engine module, or None when that plugin is unavailable.
+
+    Reached through cmdlib's existing by-path loader (the same seam discovery
+    and the template tools use) because `hscc-cluster` is a dashed directory,
+    not an importable package name. Fail-soft to None BY CONTRACT: the caller
+    REFUSES when it gets None — it never falls back to a second fleet-down,
+    which is precisely the thing this card deleted.
     """
-    try:
-        from hscc_daemon import post_boot
-        return post_boot
-    except Exception:
-        try:
-            import os
-            import sys
-            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if repo_root not in sys.path:
-                sys.path.insert(0, repo_root)
-            from hscc_daemon import post_boot
-            return post_boot
-        except Exception:
-            return None
-
-
-def _claim_stay_down():
-    """Stamp the deliberate-down record for this surface. Return None, or the
-    error text when the marker could NOT be written.
-
-    Fail-safe in the direction the CLI verb already documents
-    (``hscc-cluster/hscc.py``:530-535): the marker is written even when a node's
-    stop failed — ``/cluster-down`` IS the operator's "stay down" intent, and
-    "down, no relaunch" is always the safe reading of it. The only thing that
-    stops the stamp is post_boot itself being unavailable.
-    """
-    pb = _post_boot_module()
-    if pb is None:
-        return "hscc_daemon.post_boot is not importable from this install"
-    try:
-        pb.clear_expected_up(STAY_DOWN_REASON)
+    mod = cmdlib._import_cluster_module("hscc")
+    if mod is None or not callable(getattr(mod, "cmd_cluster_down", None)):
         return None
-    except Exception as e:  # marker problem must never break the verb
-        return str(e)
+    return mod
 
 
-# The shapes sparkrun's own stop path uses for "there was nothing to stop",
-# evidenced against the installed CLI (sparkrun/cli/_stop_logs.py):
-#   :123-125  JobNotFound -> `Error: No running workload matches intent <id>
-#             on hosts <hosts>` on stderr, exit 1 (what `--all` hits on a node
-#             whose containers already went away);
-#   :217      `No <app> containers running.` on stdout, exit 0.
-# Deliberately NOT matched: `No <app> containers found on the hosts that could
-# be queried.` (:215, exit 1) — that one prints alongside
-# `Error: could not query <host>: …`, and a host that could not be queried may
-# still be running containers, so calling it "nothing running" would be a lie.
-_ALREADY_DOWN_MARKERS = (
-    "no running workload matches intent",
-    "no running workload matched",
-    "no sparkrun containers running",
-)
+def _fleet_down_command(engine):
+    """The ONE fleet-down argv for the preview, or None when unresolvable.
 
-
-def _was_already_down(out, err):
-    """True when this node's stop output says there was nothing to stop.
-
-    Checked on BOTH successful and failed stops: a node with nothing running was
-    not "stopped", and the honest mark for it is `○ … nothing running` rather
-    than `❌` (a failure the operator has to chase) or `✅` (a stop that did not
-    happen) — D6's output-truthfulness rule.
+    Read THROUGH the engine rather than rebuilt here: a plan that shows a
+    different command than the verb issues is the failure mode `--dry-run`
+    exists to prevent, and this function has no other reason to exist.
     """
-    blob = f"{out}\n{err}".lower()
-    return any(m in blob for m in _ALREADY_DOWN_MARKERS)
+    try:
+        serving = engine._load_daemon_serving()
+        return list(serving.fleet_down_cmd()) if serving else None
+    except Exception:
+        return None
+
+
+def _down_preview(nodes, engine, dry_run=False):
+    """The confirm-first preview (and the dry-run plan): shows the real argv.
+
+    Shows the exact command the engine will run, not just the nodes — a plan
+    that lists hosts without naming the command cannot be compared against
+    `hscc cluster down --dry-run`, which is what the F5 audit had to do by
+    reading two source files instead.
+    """
+    lines = ["🔍 *Cluster down — dry run (nothing executed)*" if dry_run
+             else "⚠️ *Confirm cluster down*", ""]
+    for role, n in nodes:
+        lines.append(f"  • {role} {n}")
+    if not nodes:
+        lines.append("  (serving.json lists no units — the scope note below "
+                     "still applies)")
+    lines.append("")
+    cmd = _fleet_down_command(engine) if engine is not None else None
+    if cmd:
+        lines.append("Runs the ONE fleet-down command the CLI verb uses:")
+        lines.append(f"  {' '.join(str(t) for t in cmd)}")
+        lines.append("Scoped by sparkrun's cluster, so anything still running in it")
+        lines.append("is stopped even when serving.json above does not list its node.")
+        lines.append("Hosts stay up.")
+    else:
+        lines.append("⚠️ the fleet-down engine (`hscc-cluster/hscc.py`) is not "
+                     "importable from")
+        lines.append("   this install: this verb cannot show or run the stop. Use "
+                     "`hscc cluster down`.")
+    lines.append("")
+    # Prospective wording, deliberately NOT STAY_DOWN_SUMMARY: a plan must not
+    # contain the claim phrase itself, or an operator (or a log grep) could not
+    # tell a preview from a down that happened — the same reason an unconfirmed
+    # call has to claim nothing (t_3a0bdca9 D5).
+    lines.append("A real run ALSO claims the stay-down record: the daemon will "
+                 "not relaunch workers, the proxy or the notifier until "
+                 "`hscc cluster up` (no `/cluster-up` slash verb exists; that "
+                 "CLI command is what clears the record).")
+    lines.append("Workflow: /cluster-down → /cluster-docker-prune → /cluster-restart.")
+    lines.append("Dry run: nothing was executed. Run `/cluster-down confirm` to "
+                 "execute." if dry_run else
+                 "Run `/cluster-down confirm` to execute.")
+    return "\n".join(lines)
 
 
 def cmd_cluster_down(raw_args):
-    """Stop all vLLM units across the cluster — leaves hosts up. Confirm-first.
+    """Stop the whole serving layer — hosts stay up. Confirm-first.
 
-    Uses sparkrun stop per node (parallel). Pairs with /cluster-docker-prune +
-    /cluster-restart for a clean recycle without a full reboot.
+    Thin surface on `hscc-cluster/hscc.py::cmd_cluster_down` (see the block
+    above): ONE `sparkrun stop --all --cluster <cluster>` built by
+    `serving.fleet_down_cmd()`, classified by the engine's benign-`already
+    down` rules, then the post-boot stay-down record this surface must claim or
+    `check_workers`/`check_proxy` relaunch what it just stopped (t_3a0bdca9).
+    Pairs with /cluster-docker-prune + /cluster-restart for a clean recycle
+    without a full reboot.
 
-    t_3a0bdca9 (D1/D5/D6): a real (confirmed) down ALSO claims the stay-down
-    intent, exactly like the `hscc cluster down` CLI verb — without it this
-    surface left no record on disk and `check_workers`/`check_proxy` relaunched
-    the fleet it had just stopped. Fail-soft and after the stops; the
-    unconfirmed/--dry-run preview path touches nothing. Marks are truthful: a
-    node that had nothing running reports `○ … nothing running`, not `❌`.
+    Tokens: `confirm`/`yes`/`y` executes; `dry-run`/`--dry-run` prints the plan
+    and executes nothing (parity with `hscc cluster down --dry-run`); a bare
+    call shows the same plan and asks. A dry-run token always wins over a
+    confirm token — the safe reading of a call that asks for both.
+
+    Marks are the engine's, not a second opinion: ✅ sparkrun exited 0, ○ the
+    engine's own "already down" note (nothing was running, so nothing was
+    stopped — never claimed as a stop), ❌ a real failure with the engine's
+    error tail, which the pre-F5 classifier could bury under `○ nothing
+    running`. The summary never claims "all units stopped" when the engine did
+    not say so.
     """
     units = cmdlib.read_units()
     orch = cmdlib.orchestrator_unit(units)
@@ -487,55 +535,108 @@ def cmd_cluster_down(raw_args):
         if n:
             nodes.append(("worker", n))
 
-    if not nodes:
-        return "⚠️ No nodes in serving.json — nothing to stop."
+    tokens = set((raw_args or "").lower().split())
+    dry_run = bool(_DRY_RUN_WORDS & tokens)
+    engine = _cluster_engine()
 
-    if not _confirmed(raw_args):
-        lines = ["⚠️ *Confirm cluster down*", ""]
-        for role, n in nodes:
-            lines.append(f"  • {role} {n}")
-        lines.append("")
-        lines.append("Stops all vLLM units (sparkrun stop --all) on each node, "
-                     "parallel. Hosts stay up. Workflow: /cluster-down → "
-                     "/cluster-docker-prune → /cluster-restart.")
-        lines.append("Run `/cluster-down confirm` to execute.")
-        return "\n".join(lines)
+    # The plan path — the only one reachable without `confirm`, and the one a
+    # dry-run never leaves. Issues no stop and writes no marker.
+    if dry_run or not _confirmed(raw_args):
+        return _down_preview(nodes, engine, dry_run=dry_run)
 
-    # Parallel sparkrun stop per node
-    from concurrent.futures import ThreadPoolExecutor
-    lines = ["🛑 *HSCC cluster down*", ""]
-    node_list = [n for _r, n in nodes]
+    if engine is None:
+        return (
+            "❌ *HSCC cluster down* — REFUSED, nothing was stopped.\n\n"
+            "The fleet-down engine (`hscc-cluster/hscc.py::cmd_cluster_down`) is "
+            "not importable from this install, and this verb will not run a "
+            "*different* fleet-down: two implementations of one destructive "
+            "action, disagreeing about which hosts are down and about whether "
+            "the stop succeeded, is the defect this surface used to be "
+            "(audit F5).\n"
+            "Use `hscc cluster down` (CLI) or `POST /v1/cluster/down`.")
 
-    def _stop(node):
-        return node, cmdlib._run(
-            [cmdlib.SPARKRUN, "stop", "--all", "--hosts", node], timeout=90,
-        )
+    import io as _io
+    from contextlib import redirect_stdout as _redirect
+    buf = _io.StringIO()
+    with _redirect(buf):
+        res = engine.cmd_cluster_down(dry_run=False, reason=STAY_DOWN_REASON)
 
-    with ThreadPoolExecutor(max_workers=max(1, len(node_list))) as pool:
-        results = list(pool.map(_stop, node_list))
+    if not isinstance(res, dict):
+        return ("❌ *HSCC cluster down* — the engine returned no result: "
+                + str(res)[:400])
+    if res.get("error") and "returncode" not in res:
+        # The engine's own pre-flight refusal (it returns a bare
+        # `{"error": …}` when hscc_daemon.serving cannot be imported). A real
+        # run's `error` key is sparkrun's STDERR and must be rendered, not
+        # mistaken for a refusal — that mistake would turn every honest
+        # failure report into "the engine could not issue the stop".
+        return ("❌ *HSCC cluster down* — the engine could not issue the stop:\n  "
+                + str(res.get("error"))[:400])
 
-    # D1/D5: claim the stay-down intent BEFORE the summary is rendered, so the
-    # operator's output and the disk agree by the time they read the first
-    # line. Fail-soft — a marker problem is reported, never fatal.
-    marker_error = _claim_stay_down()
+    cmd = res.get("command") or []
+    cmdline = (" ".join(str(t) for t in cmd) if isinstance(cmd, (list, tuple))
+               else str(cmd))
+    ok = bool(res.get("success"))
+    benign = (not ok) and bool(res.get("benign_no_workloads"))
 
-    for node, (ok, out, err) in results:
-        if _was_already_down(out, err):
-            # D6: nothing was running here — not a failure, and not a stop.
-            lines.append(f"  ○ {node}: nothing running")
-            continue
-        mark = "✅" if ok else "❌"
-        tail = "" if ok else f" — {err[:140]}"
-        lines.append(f"  {mark} {node}: stopped{tail}")
+    # sparkrun's per-host text arrives in the RESULT, not on stdout: the engine
+    # captures both streams (`_run_or_print` → `run_cmd`) instead of letting them
+    # inherit the terminal, so a renderer that passed through only what the
+    # engine `print`s would tell the operator nothing about what stopped. What
+    # the engine does print is its `Will run:` echo (rendered as `command:`
+    # below) and its confirmation (STAY_DOWN_SUMMARY replaces it, because only
+    # this surface can name the missing `/cluster-up` verb) — anything else it
+    # printed is a WARN from the marker path and is kept verbatim.
+    printed = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+    skip = {f"Will run: {cmdline}".strip(),
+            str(getattr(engine, "STAY_DOWN_CONFIRMATION", "")).strip()}
+    warn = [ln for ln in printed if ln.strip() not in skip]
+
+    def _block(title, text, cap):
+        rows = [ln for ln in str(text or "").splitlines() if ln.strip()]
+        if not rows:
+            return []
+        shown = rows[:cap]
+        out = [f"  {title}:"] + [f"    {ln}" for ln in shown]
+        if len(rows) > cap:
+            out.append(f"    … +{len(rows) - cap} more line(s)")
+        return out
+
+    lines = ["🛑 *HSCC cluster down*", "", f"  command: {cmdline}"]
+    lines += _block("sparkrun", res.get("output"), 12)
+    lines += _block("sparkrun (stderr)", res.get("error"), 8)
+    if warn:
+        lines.append("  engine:")
+        lines.extend(f"    {ln}" for ln in warn)
     lines.append("")
-    if marker_error:
-        lines.append(f"⚠️ stay-down marker could NOT be written ({marker_error}) "
-                     "— the daemon MAY relaunch these units. `hscc cluster down` "
-                     "(the CLI verb) writes the same marker.")
+    if ok:
+        lines.append("  ✅ fleet down — sparkrun exited 0")
+    elif benign:
+        lines.append("  ○ fleet down — "
+                     + (res.get("benign_note")
+                        or "nothing was running (sparkrun exited nonzero on an "
+                           "already-down host)"))
     else:
+        lines.append("  ❌ fleet down FAILED (sparkrun exit "
+                     f"{res.get('returncode')}) — see the output above")
+
+    marker = res.get("stay_down_marker") or {}
+    lines.append("")
+    if marker.get("cleared"):
         lines.append(STAY_DOWN_SUMMARY)
-    lines.append("All units stopped. Next: `/cluster-docker-prune confirm` then "
-                 "`/cluster-restart confirm`.")
+    else:
+        lines.append(
+            "⚠️ stay-down marker could NOT be written "
+            f"({marker.get('error') or 'the engine reported no marker outcome'}) "
+            "— the daemon MAY relaunch these units. `hscc cluster down` (the CLI "
+            "verb) writes the same marker.")
+    lines.append("")
+    if ok or benign:
+        lines.append("Next: `/cluster-docker-prune confirm` then "
+                     "`/cluster-restart confirm`.")
+    else:
+        lines.append("Nothing is marked cleanly down — fix the failing host and "
+                     "re-run `/cluster-down confirm`.")
     return "\n".join(lines)
 
 
