@@ -55,7 +55,7 @@ Cluster shape (documented placeholders, TEST-NET): gateway/orchestrator node
 `~/.hscc/` (root override: `HSCC_DIR`; never paste a real tailnet/LAN address
 into a doc or commit — the repo is public).
 
-## The CLI surface (33 verbs)
+## The CLI surface
 
 The authoritative verb list is `TOP_LEVEL_COMMANDS` in `hscc_daemon/hscc.py`;
 `hscc nosuchverb` prints it. `hscc help [topic]` and `hscc <group> --help` are
@@ -71,12 +71,12 @@ F3; trust the group `--help`).
 | `hscc kanban blocked [--recover <id>]\|stale [--archive <id>]\|monitor\|pause <board>…\|resume\|paused\|enforce` | board hygiene + board brake; the pause family is **CLI-only by operator ruling (audit D6)** |
 | `hscc cards monitor [--live] [--interval <s>] [--board <slug>] [--tools]` | interactive per-card transcript panel (keys tab/enter/t/p/q); TTY-only |
 | `hscc merge-queue status\|list\|add\|remove\|pause\|resume\|enable\|disable` | local merge queue; see "Merge queue" |
-| `hscc orch inject <profile> "<msg>" [--mode auto\|plain\|queue\|steer] [--dry-run] [--json] [--pane <t>]` \| `orch waker status\|enable\|disable` | live tmux-pane steering — **CLI-only**; the agent path is the `orch_message` tool |
+| `hscc orch inject <profile> "<msg>" [--mode auto\|plain\|queue\|steer] [--dry-run] [--json] [--pane <t>]` \| `orch waker status\|enable\|disable` | live tmux-pane steering — **CLI-only**; the agent path is the `orch_message` tool — every `orch`-named capability is tabulated under "Naming traps" |
 | `hscc main start\|status [--json]\|wakeups list\|set <name> <sched>\|enable\|disable <name>` | the main orchestrator's pane + daemon-fired wake-ups |
 | `hscc node pause <host> [--reason <t>] [--until <dur>] [--force] [--yes] [--dry-run]` \| `node resume <host> [--yes] [--dry-run]` \| `node paused [--json]` | the node-pause overlay; rules below |
 | `hscc verify [--json] [--chat]` | full compatibility/health smoke-test; `--chat` fires a real prompt (~600 s) |
 | `hscc stats [days]` · `throughput` · `autoscale` · `escalate` | reads: kanban activity, vLLM tokens/queue depth, advisory scale decision (never scales), pending escalations (dry-run) |
-| `hscc heal-status` · `heal-clear <node>` | heal-BREAKER strikes (read / clear). Different subsystem from the `/heal` slash command (audit F7 naming trap) |
+| `hscc heal-status` · `heal-clear <node>` | heal-BREAKER strikes (read / clear). Different subsystem from the `/heal` slash command (audit F7 naming trap) — the whole `heal*` family is tabulated under "Naming traps" |
 | `hscc notify <title> <body> [--level …] [--key …]` · `notify list` · `notify ack <id>` | operator alert feed (`~/.hscc/alerts.json`) |
 | daemon/service: `start stop status check watch triggers log plist install uninstall bootstrap update start-daemon` | service-manager verbs; `status` = daemon + every health stream; `check --repo <path>` = address-guard posture of a checkout |
 | `hscc api start\|stop\|status\|install-service\|uninstall-service` · `hscc profiles` · `hscc project <verb>` | API self-hosting (cannot stop itself over its own transport), per-profile running-card counts, flightdeck project commands (~25, delegated surface) |
@@ -90,6 +90,43 @@ operator scope); `main start` (spawns the operator's orchestrator pane);
 `cluster up|down` (no fleet-power tool — D3); `notify` (no tool — D7: an agent
 that can page the operator trains the operator to ignore pages); `orch inject`
 (live pane steering stays CLI — the agent path is `orch_message`).
+
+## Naming traps: `heal*` and `orch*` each name several capabilities (audit F7)
+
+Both prefixes are shared. Pick by what the operation **does** to the fleet, never
+by the prefix — and if you are an agent, by which surface you are allowed to call
+at all (CLI = operator terminal, chat surface = operator, tool = you, route = the
+HTTP API). Every row's implementation is named in its first cell; the claims were
+read off that code, not off a help text.
+
+### The `heal` family — two verbs about a ledger, three about running units
+
+| capability (and where it lives) | what it actually does | what it does NOT do | often confused with |
+|---|---|---|---|
+| `hscc heal-status` (CLI, read-only; `hscc_daemon/cli.py::cmd_heal(status_only=True)`) | prints the daemon's heal-**breaker** ledger: repair actions recorded per node inside the window, and whether that node is heal-suspended right now (`~/.hscc/heal-breaker.json`) | restarts, heals and clears nothing; a node parked by `hscc node pause` shows **no** strikes — the pause overlay suppresses accrual, so "empty" is not "healthy" | `/heal`; `hscc heal-clear` |
+| `hscc heal-clear <node> [reason…]` (CLI, mutates; same function, `heal_breaker.clear` + `reset_alert`) | drops that one node's strikes and re-arms its alert latch, so the daemon's repair paths may act on it again immediately; the reason is kept under `_cleared` | touches no unit, no other node and no node pause. **Usually unnecessary**: a suspension self-expires as its strikes age out of the window — clearing is how you stop waiting after investigating, and the breaker's own alert names this verb | `hscc heal-status`; `node resume` (which clears the node's strikes as a side effect) |
+| `/heal` → `/heal confirm` (operator chat surface; `hscc-commands/__init__.py::cmd_heal`) | probes the model endpoint of every worker unit in `serving.json`, lists the unhealthy ones, and on `confirm` stop+runs each of them (`cmdlib.restart_one`); if the orchestrator endpoint is also down it only *advises* `/cluster-restart confirm` | reads and clears no strike (the two are pinned apart by `hscc_daemon/tests/test_heal_cli_help.py`); never restarts the orchestrator unit (that is `/orch-restart`) or re-applies the template (`/cluster-restart`); no agent tool calls it | `hscc heal-status` / `heal-clear`; the `restart_model` tool (the same sparkrun stop+run, per-model, agent-callable) |
+| the four **heal-category agent tools** — `restart_model`, `remount_nas`, `repair_nas_export`, `reap_orphans` (agent toolset; `hscc-cluster/__init__.py::_HEAL_TOOLS`) | four individual repair actions, each `confirm=true`-guarded and target-scoped (one model, one mount, one export set, one orphan sweep) | no health sweep and no "what is unhealthy" judgement (that is `/heal`, or `model_health` per node); no access to the strike ledger | `/heal`; `hscc heal-*` |
+| the daemon's **auto-heal loop** (no verb; `hscc_daemon/health.py`, guarded by `heal_lease.py` + `heal_breaker.py`) | the unattended repair paths — worker relaunch, keepalive, proxy relaunch, engine-wedge recovery — serialised by the heal **lease** (`~/.hscc/heal-lease.json`, bounded TTL, one repair in flight) and bounded per node by the heal **breaker**: more than 6 actions on one node inside 900 s stops healing that node, logs one critical alert naming `hscc heal-clear <node>`, and waits | is not callable and has no verb of its own; skips paused nodes; does not reset itself on daemon restart (the ledger is durable on purpose) | `/heal` — an operator-initiated pass, not the loop |
+
+### The `orch` family — five verbs on one prefix, plus the pane owner
+
+| capability (and where it lives) | what it actually does | what it does NOT do | often confused with |
+|---|---|---|---|
+| `hscc orch inject <profile> "<msg>" [--mode auto\|plain\|queue\|steer] [--dry-run] [--pane <t>]` (CLI, operator-only; `hscc-cluster/hscc.py::cmd_orch_inject` over `hscc-api/repl_inject.py`) | tmux bracketed-paste into a **running** Hermes REPL pane for `<profile>`; exactly-one-pane (a missing *or* ambiguous pane is a refusal, never a guess); `auto` = `/queue` while the target is busy, plain when idle; `--dry-run` resolves the pane and sends nothing | cannot reach a profile with no pane; does not sign, rate-limit or audit the message; cannot restart or serve anything | `orch_message`; `hscc main start` (it owns the pane this types into) |
+| `hscc orch waker status\|enable\|disable [--json]` (CLI, operator-only; `cmd_orch_waker` over `hscc_daemon/orch_waker.py`) | the daemon-resident orchestrator **waker** (one tick every 30 s): `status` prints enabled, last tick + its age, per-board last-id and pending count and the last 5 audit lines; `enable`/`disable` flip `orch_waker.enabled` through the daemon's own atomic writer | sends no message to anyone and wakes nothing on demand; it is not `hscc main wakeups` (a separate schedule of daemon-fired wake-ups) | `orch_message`; `hscc main wakeups` |
+| `orch_message` (agent tool; `hscc-cluster/orch_message.py`) | the policed nudge channel between orchestrators: both ends must be `*-orch` or the main orchestrator resolved by `hscc-roles/main_orch.py`; queue-only (`mode=auto`, never `steer`); signed `[from <sender>]` plus `re: t_xxxx` with a ref card; ≤6/h per (sender, to) pair; every call — sent *and* refused — appends to `~/.hscc/state/orch_messages.jsonl`, and if that line cannot be written the message is **not** sent | never interrupts a running turn; refuses worker profiles and `default`; cannot target a pane of your choosing; cannot deliver to a profile with no pane | `hscc orch inject`; `/orch-restart`; `POST /v1/orchestrator/chat` |
+| `/orch-restart` → `confirm` (operator chat surface; `hscc-commands/__init__.py::cmd_orch_restart`) | stops and relaunches the **one orchestrator vLLM unit** named in `serving.json` on its node (~5–7 min of serving downtime while the model loads) | has nothing to do with Hermes panes, profiles or messages despite the prefix; is not `/cluster-restart`, which re-applies the whole template | `hscc orch inject`; `/cluster-restart` |
+| `POST /v1/orchestrator/chat` + `GET /v1/orchestrator/chat/{id}` + `POST …/{id}/stop` (HTTP; `hscc-api/routes_orchestrator.py`) | one async orchestrator **chat turn**: resolves project → orchestrator through `hscc-roles/orchestrators.py`, spawns `hermes -p <profile> chat -Q --continue <session>` on a background thread, answers 202 with a `job_id` at once, and the reply is polled (`queued`/`running`/`done`) or cancelled. It is a mutation, so it requires `"confirm": true` (409 otherwise) | does **not** type into the operator's live pane (it starts its own hermes process); no token streaming, by design; restarts nothing; the 600 s timeout is a wedge backstop, not a reply deadline | `orch_message` (a queued nudge that never runs a turn); `/orch-restart` |
+| `hscc main start\|status [--json]\|wakeups list\|set <name> <sched>\|enable\|disable <name>` (CLI; `hscc_daemon/hscc.py`) | the **main orchestrator's** own lifecycle: `start` ensures exactly one pane runs `hermes -p <main> chat`, `status` reports name/board/pane/busy through the same `repl_inject` discovery `orch inject` uses, `wakeups` edits `~/.hscc/main_wakeups.json` | is not a message channel and not a restart: it creates the pane the other two talk to; `wakeups` ≠ `orch waker` | `hscc orch inject`; `hscc orch waker` |
+
+Choosing, in one line each: to **say something** to a running orchestrator —
+`orch_message` if you are an agent, `hscc orch inject` if you are the operator at
+a terminal, the chat route if you want a whole turn that may dispatch real work.
+To **restart serving** — `restart_model` if you are an agent, `/heal confirm` (a
+sweep) or `/orch-restart` (the orchestrator unit) if you are the operator. To
+know **why the daemon refuses to repair a node** — `hscc heal-status`; to stop
+waiting on that node — `hscc heal-clear <node>`.
 
 ## Node pause (`hscc node pause|resume|paused`)
 
@@ -178,8 +215,10 @@ env `HSCC_ORCH_MSG_MAX_PER_HOUR`); the reply loop guard refuses answering a
 signed nudge with another `orch_message`; every call (sent and refused)
 appends to `~/.hscc/state/orch_messages.jsonl`, and if the audit line cannot
 be written the message is NOT sent (fail-closed). Naming trap (audit F7):
-`orch inject` / `orch_message` / `/orch-restart` (restarts the orchestrator
-vLLM) / `POST /v1/orchestrator/chat` are four different capabilities.
+five different capabilities answer to `orch` — `orch inject`, `orch waker` (added
+to the router after the audit was written), `orch_message`, `/orch-restart` and
+`POST /v1/orchestrator/chat`. What each one does is tabulated once under "Naming
+traps"; keep that table the single source instead of re-listing them here.
 
 ## Merge queue (`hscc merge-queue`)
 
