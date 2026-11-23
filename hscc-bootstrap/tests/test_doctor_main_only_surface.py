@@ -292,6 +292,48 @@ def test_identity_is_resolved_not_hardcoded(tmp_path):
     assert dmo.main_profile_name(str(hscc)) == "beta-orch"
 
 
+def test_dot_dirs_are_not_profiles(tmp_path):
+    """The 53-vs-54 denominator correction (operator re-measure, 2026-11-23).
+
+    ``~/.hermes/profiles/.deleted`` is a recycle dir (dated Oct 26, holding two
+    ``probe-*`` markers), not a profile — a ``find -maxdepth 1 -type d``-style
+    glob counts it, and the audit's §5.1 denominator went 53 → 54 that way. A
+    sweep that treated it as a home would ask for plugins on a directory no
+    process can select as ``HERMES_HOME`` and report the same false finding on
+    every future run, which is the failure mode this pins out. The exclusion is
+    ``skill_guard.discover_profiles``' own rule (dot-dir or not-a-dir → not a
+    profile), inherited by delegating rather than globbing again.
+    """
+    home, hscc = clean_posture(tmp_path)
+    # A recycle dir full of drift: every tool plugin enabled, all three cluster
+    # skills present. If it counted as a home, two findings would fire.
+    mk_profile(home, ".deleted", enabled=list(ALL_THREE),
+               skills=CLUSTER_SKILLS)
+    os.makedirs(os.path.join(str(home), "profiles", ".deleted",
+                             "probe-20261026-a"), exist_ok=True)
+    assert dmo.doctor_check(str(home), str(hscc))["ok"] is True
+    found = [name for name, _ in dmo.discover_profiles(str(home))]
+    assert found == sorted([MAIN, WORKER, CLEAN]), \
+        "the denominator is the real profile dirs, not every dir under profiles/"
+    # A dot-file too, since a glob over entries sees those as well.
+    open(os.path.join(str(home), "profiles", ".keep"), "w").close()
+    assert dmo.doctor_check(str(home), str(hscc))["ok"] is True
+
+
+def test_a_home_with_no_config_yet_is_not_invented(tmp_path):
+    """A profile dir with no ``config.yaml`` declares nothing, so it must not be
+    reported for the plugins half — but its skills tree is still its own."""
+    home, hscc = clean_posture(tmp_path)
+    mk_profile(home, "brand-new", enabled=None, skills=("hscc-cluster",))
+    res = dmo.doctor_check(str(home), str(hscc))
+    findings = dmo.home_findings(str(home), main_name=MAIN,
+                                 tool_plugins=list(dmo._FALLBACK_TOOL_PLUGINS),
+                                 skills=list(CLUSTER_SKILLS))
+    assert [(f["profile"], f["surface"]) for f in findings] == [
+        ("brand-new", "skills")]
+    assert "brand-new" in res["detail"]
+
+
 def test_module_source_carries_no_hardcoded_identity():
     """R2/D-A as a text pin: the retired fallback identity never appears in the
     module, so the resolver stays the only owner of it."""
