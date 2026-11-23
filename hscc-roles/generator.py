@@ -465,12 +465,24 @@ def _worker_compaction(existing_compression=None):
     }}
     return out
 
+#: The one-line cluster rule every NON-MAIN SOUL carries (operator ruling R4,
+#: 2026-11-23). It says who may act; it deliberately says nothing about what any
+#: config contains, because the enforcement lives in the bootstrap/skills cards
+#: and a present-tense config claim would go stale the moment they move.
+CLUSTER_ACTIONS_RULE = (
+    "cluster actions go through the main orchestrator (board card or orch message)")
+
 _WORKER_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** role on a worker GPU node of the cluster, "
     "executing a single kanban task in your own git worktree. The task "
     "lifecycle (claim, heartbeat, complete or block-for-review) is provided to "
     "you at runtime — follow it exactly.\n"
+    "\n"
+    "## Cluster actions\n\n"
+    "Fleet rule: " + CLUSTER_ACTIONS_RULE + ". The cluster surface is not "
+    "yours; fleet facts come to you through the hscc routes and the CLI read "
+    "surface, never through a cluster toolset.\n"
     "\n"
     "## Stay small — commit slices, hand off early\n\n"
     "Every model call re-reads your whole conversation. At 20K tokens a call "
@@ -496,7 +508,7 @@ _WORKER_OPS = (
 _ORCH_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** on the gateway node. You route work through the "
-    "native kanban board and hold sole authority over the physical cluster.\n"
+    "native kanban board; " + CLUSTER_ACTIONS_RULE + ".\n"
 )
 
 # Anti-churn rules (operator 2026-11-19). ONE block, appended to both the main
@@ -636,8 +648,11 @@ _PROJECT_ORCH_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** on the gateway node. You route that project's "
     "work through its kanban board and hold sole authority over that board, "
-    "but you do NOT hold authority over the physical cluster (only the "
-    "cluster-wide `orchestrator` role does).\n"
+    "but you do NOT hold authority over the physical cluster.\n"
+    "\n"
+    "Fleet rule: " + CLUSTER_ACTIONS_RULE + ". The cluster surface is not "
+    "yours; fleet facts come to you through the hscc routes and the CLI read "
+    "surface, never through a cluster toolset.\n"
     "\n"
     "## How you manage work\n\n"
     "1. **Sub-atomic cards.** One card = one small change a reviewer can check "
