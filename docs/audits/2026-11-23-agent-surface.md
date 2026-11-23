@@ -427,7 +427,35 @@ stale source, and leaves orphans behind.
 | **F12** | Orphan/mis-listed skills: `hscc-master-knowledge` installed but not bundled; `hscc-lessons` bundled but not listed → neither is ever updated *or* removed | `hscc-skills/hscc.py:59-83` vs `ls install/hscc-skills` | Low-Medium |
 | **F13** | `reap_orphans` decides "orphan" from `serving.json`, which has ≥3 writers; a stale `serving.json` makes a live workload reapable | §4 table | Medium (guard note / confirmation text) |
 
+**Ownership (finding → card, as cut after the §12 verdict).**
+
+- **F1 / F11** → bundled content: `t_268609d6` · `t_cb167686` · `t_ed77d757` (skill
+  refresh); installer update path + profile trees: `t_45fa38e2`.
+- **F2** `t_3df8595c` · **F3** `t_46d03105` · **F5** `t_bf8577f9` (LEFT-3's dry-run
+  side-by-side is its first, blocking leg) · **F6** `t_4a149f2f` · **F7** `t_1a5a4a8c` ·
+  **F8** `t_3a0ade78` · **F9** `t_787930b5` (same card as D10) · **F12** `t_b38df592`
+  (docs) + `t_45fa38e2` (the `BUNDLED_SKILLS` code seam, kept off the docs card to avoid
+  a same-file collision) + `t_60d2ef4e` (retire `hscc-master-knowledge`) · **F13**
+  `t_96ae8add` · **LEFT-4 gates** `t_c13de3cc`.
+- **F4** has no card of its own: the operator folded it into D5's card `t_852a32e6`, whose
+  acceptance is now "route + slash hint + `/v1/commands` all agree on the full verb set".
+  **F10** likewise: its route + slash-hint halves ride `t_852a32e6` too.
+- Decision cards: **D4** `t_14b86753` · **D5** `t_852a32e6` · **D9** `t_ea650e4e` ·
+  **D10/F9** `t_787930b5`. Rest of the wave: the new-tool cards `t_c036808c` ·
+  `t_df65e4b8` · `t_96134d32` · `t_7f570861` · `t_c920b0ca`, the main-orchestrator profile
+  card `t_d0a3ab8a`, QA `t_b384fd53`.
+- **Duplicate ids to check before starting.** The five low-priority findings were cut
+  twice: the ids above are the hscc-board cards, and the same five findings were re-cut on
+  the general board as F2 `t_34804e61` · F6 `t_01ce22cd` · F7 `t_328bfa22` · F8
+  `t_28cc4de5` · F13 `t_b21a939e`. F8's doc line from the general-board card is verifiably
+  on main (`f59c0bdd`); the general-board F7/F13 cards report done, so at least two of
+  these five pairs are already answered — check both ids before spending a card.
+
 ## 10. Decisions this card asks the operator to make
+
+> **SUPERSEDED BY §12** — the answers below were **ACCEPTED as written**; the
+> recommendation text is unchanged on purpose so the audit trail shows what was
+> decided. Read §12 for the ruling, and do not re-open a question that has a row there.
 
 The matrix cannot be finished without these, and each is a judgement, not a
 measurement. Recommended answer in **bold**.
@@ -477,6 +505,88 @@ measurement. Recommended answer in **bold**.
   `COMMAND_HELP`" or "every `BUNDLED_SKILLS` name exists on disk and every dir under
   `install/hscc-skills` is listed". Both are cheap gates that would have caught F3 and
   F12. This card documents the gap; it does not add the gates (one-doc-only scope).
+
+---
+
+## 12. Operator verdict (2026-11-23, recorded on t_4c12ff7f)
+
+**Status: decided, and the gate has run.** The operator ruled on §10 at 00:54 on
+2026-11-23 in a comment on card `t_4c12ff7f`. PR #638 was squash-merged as `3fdb1495`
+and the card completed, releasing the 13 parented cards — the merge landed while the
+verdict text was still being written, so §2–§11 shipped as *recommendations*. This
+section, folded in afterwards by `t_64a6621b`, is the ruling. Nothing in §2–§11 was
+rewritten: the recommendation text stays exactly as audited so the trail reads
+**recommendation (§10) → decision (§12)**, and a reader can see that every
+recommendation survived intact. The footer's gate condition — verdict recorded on the
+board — is satisfied.
+
+### 12.1 The ruling, verbatim
+
+Character-for-character from the verdict comment on `t_4c12ff7f` (the operator's driver
+session, 2026-11-23 00:54). That comment is the authoritative text; the tables below are
+a reading aid, not a replacement for it.
+
+```text
+OPERATOR VERDICT (recorded by the operator's driver session, 2026-11-23 00:5x) on docs/audits/2026-11-23-agent-surface.md (PR #638):
+
+D1-D11: ACCEPT every recommended answer as written. D1 keep verify parity; D2 no cluster_monitor tool (document cluster_status + discovery_status(probe=true)); D3 no fleet up/down tool; D4 heal_status read tool yes, clear stays CLI; D5 add GET /v1/template/validate/{name} + slash hint; D6 kanban pause/resume/paused/enforce CLI-only; D7 no notify tool; D8 merge-queue mutations closed; D9 read routes for main status + orch waker status; D10 add GET /v1/node-pauses read only, mutations stay agent-tool + CLI; D11 doctor stays project doctor, no route.
+
+F1/F11 direction: FIX, do not accept drift. (a) Bring the bundled install/hscc-skills content up to the current CLI + all 26 tools (the skill-refresh cards). (b) Bootstrap/install-skills must ALSO update hscc-owned skills inside every ~/.hermes/profiles/<p>/skills tree (backup before overwrite, only hscc-owned skill dirs, never touch profile-authored skills). Fold profile-curated knowledge that is better than the bundled copy back into the bundled source. The operator's goal: every profile, especially the main orchestrator, has all the cluster-control info we have.
+F12: retire hscc-master-knowledge (t_60d2ef4e) and list hscc-lessons in BUNDLED_SKILLS.
+F3/F4/F5/F10 + LEFT-4 gates: each gets its own atomic card. F5: do LEFT-3 field check first (dry-run side by side), keep the slash path's wedge-safety but it must clear the post-boot marker.
+F2/F6/F7/F8/F13: cards, low priority, after the above.
+
+Merge #638 (CI green), complete this card to release the children. Children run atomic, caps 6/2 respected.
+```
+
+### 12.2 Per-item ruling (D1–D11)
+
+**Every §10 recommendation was accepted as written** — the ruled column restates the
+answer §10's bold text already gave; not one answer changed. The owning card for each is
+in §9's ownership line.
+
+| # | the §10 question | ruled |
+|---|---|---|
+| D1 | `verify` — keep the route+tool parity or retire the route | **Keep parity.** Route and tool both stay |
+| D2 | add a `cluster_monitor` tool? | **No tool.** `cluster_status` + `discovery_status(probe=true)` are the answer for a worker; the route covers dashboards. Document that instead |
+| D3 | an agent tool that brings the fleet up/down? | **No tool.** Fleet-wide `cluster up\|down` stay operator-driven + confirm-gated |
+| D4 | expose `heal-*` to agents? | **Yes, read-only first**: a `heal_status` tool. `heal-clear` stays CLI |
+| D5 | add `GET /v1/template/validate/{name}` + the slash hint? | **Yes** — safe read, completes the family (card also carries F4's stale `/template` hint) |
+| D6 | `kanban pause/resume/paused/enforce` | **CLI-only**, confirmed |
+| D7 | an agent `notify` tool? | **No tool.** An agent that can page the operator can train the operator to ignore pages |
+| D8 | `merge-queue` mutations | **Closed** — no route, no tool |
+| D9 | read routes for `main status` + `orch waker status`? | **Yes**, reads only |
+| D10 | the `node pause/resume/paused` HTTP surface | **Add `GET /v1/node-pauses`, read only** (that is F9's gap); mutations stay agent-tool + CLI |
+| D11 | an HTTP route for `doctor`? | **No route.** It stays `hscc project doctor` (it reads this host's trees). The read-only agent *tool* is a different surface and stands — D11 was about the route |
+
+### 12.3 Findings direction
+
+- **F1 / F11 — FIX; drift is not accepted.** Two legs, both required:
+  (a) bring the bundled `install/hscc-skills` content up to the current CLI + all the
+  registered tools; (b) make bootstrap + `install-skills` update the **hscc-owned** skills
+  inside every profile skills tree as well as the default home — back up before
+  overwriting, touch only hscc-owned skill dirs, never a profile-authored skill. Profile
+  knowledge that beats the bundled copy is folded **back into the bundled source**, not
+  left as per-profile drift. Stated goal: every profile, the main orchestrator above all,
+  holds all the cluster-control info the project has.
+- **F12** — retire `hscc-master-knowledge` **and** list `hscc-lessons` in
+  `BUNDLED_SKILLS`; both halves are required.
+- **F3 / F4 / F5 / F10 + the LEFT-4 gates** — one atomic card each. F5 additionally: the
+  LEFT-3 field check runs **first** (dry-run side by side), the slash path keeps its
+  wedge-safety, and it **must clear the post-boot marker**.
+- **F2 / F6 / F7 / F8 / F13** — cards, low priority, after the above.
+
+### 12.4 Two notes for anyone picking this up cold
+
+- §2–§9 stay the measurement at `cf6ef9c4`; this section does not re-measure the matrix.
+  Where a verdict card has since landed it can legitimately move a count: `hscc-cluster`
+  now registers **28** tools where §0/§4 counted **26**, the additions being
+  `autodown_status` and `merge_queue_status` (`hscc-cluster/__init__.py:32-66`). Both are
+  read-only by construction and each carries its own refusal to mutate in the registry
+  comment — the merge-queue one is D8 behaving as ruled (read open, mutations closed), not
+  a drift to reconcile.
+- Ownership — including the pair of findings that currently have **two** cards — is in
+  §9's ownership line, not here.
 
 ---
 
