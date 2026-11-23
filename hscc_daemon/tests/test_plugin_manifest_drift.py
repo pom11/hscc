@@ -191,7 +191,7 @@ def test_every_tools_table_reaches_the_register_loop(plugin_dir):
     )
 
 
-def test_cluster_manifest_is_exactly_the_29_registered_tools():
+def test_cluster_manifest_is_exactly_the_30_registered_tools():
     """The concrete GAP-A-7 receipt: the manifest and the registry are the same
     set, at the count that set currently has. If this count changes
     intentionally, the per-table tests above are the generic contract — update
@@ -220,10 +220,15 @@ def test_cluster_manifest_is_exactly_the_29_registered_tools():
     stays CLI-only. Note §12.2's ruling on D11 — the *HTTP route* was refused
     ("it reads this host's trees"); "the read-only agent *tool* is a different
     surface and stands", which is what this row now counts.
+
+    Amended 29 -> 30 by t_14b86753: `heal_status` (in `_READ_TOOLS`), the
+    read-only agent half of `hscc heal-status`. `heal-clear` is deliberately
+    NOT in the count — clearing a breaker re-arms the daemon's repair paths, so
+    it stays an operator CLI verb (docs/audits/2026-11-23-agent-surface.md D4).
     """
     declared = _manifest_tools(str(REPO / "hscc-cluster"))
     assert len(declared) == len(_registered_names(
-        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 29
+        (REPO / "hscc-cluster" / "__init__.py").read_text())) == 30
     for previously_missing in ("orch_message", "apply_template", "list_templates",
                                "preview_template", "fleet_stats", "cluster_verify",
                                "cluster_throughput", "autoscale_advice",
@@ -266,6 +271,14 @@ def test_cluster_manifest_is_exactly_the_29_registered_tools():
             f"{mutating} would be the doctor's repair side (config.yaml rewrite "
             "via enable_plugins.enable) — CLI + `--fix` only, per "
             "docs/audits/2026-11-23-agent-surface.md §12.2 D11")
+    # The heal-breaker read is part of the manifest, and its clear half must
+    # stay out (audit D4: clearing re-arms the daemon's repair paths, so it is
+    # an operator decision, not a per-turn agent call).
+    assert "heal_status" in declared, \
+        "t_14b86753 regression: heal_status missing from the manifest"
+    assert "heal_clear" not in declared, (
+        "heal_clear is an operator mutation — CLI only, per "
+        "docs/audits/2026-11-23-agent-surface.md D4")
 
 
 @pytest.mark.parametrize("plugin_dir", MANIFESTED,
