@@ -11,6 +11,2073 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.17.4] - 2026-11-23
+
+### Added
+* `hscc-cluster` gained one read-only agent tool, `heal_status`: per node, how
+  many heal-breaker actions landed inside the rolling window, the age of each
+  strike, whether the daemon is refusing to heal that node and for how long, and
+  the `hscc heal-clear <node>` verb it deliberately does NOT expose. The result
+  names the ledger path, its age, the window and the cap, so an agent can quote
+  the breaker's own policy instead of guessing at a strike count.
+* The write half stays CLI-only. `heal-clear` re-arms the daemon's repair paths
+  immediately, which is an operator decision after investigating the hardware,
+  not a per-turn agent call (agent-surface audit D4,
+  docs/audits/2026-11-23-agent-surface.md): clearing is how an operator stops
+  waiting after investigating, and the breaker's own alert already names the
+  verb. `heal_status` returns `clear_verb` and `clear_tool: null` so the agent
+  can hand the operator the exact command without being able to run it.
+* One state source, not two: `heal_breaker.snapshot()` is the new read function
+  behind both the tool and `hscc heal-status`, and it shares the rolling window
+  and the suspension arithmetic with `heal_breaker.suspended()` — the predicate
+  every heal path consults. `cmd_heal(status_only=True)` now renders from that
+  snapshot, so an aged-out strike can no longer print as a live strike in the
+  CLI while the breaker counts zero. `heal_breaker.snapshot()` writes nothing;
+  it never touches the pause overlay, the alert latch or a node.
+* **`GET /v1/node-pauses` — the read half of the node-pause trio, and only the
+  read half.** The mobile app and dashboards could see a node painted `paused`
+  on `/v1/cluster/monitor` but had no route that said *why*, since when, until
+  when, or which record owns a spanned node (audit F9). The route reads the
+  durable `~/.hscc/node_pauses.json` overlay through the same
+  `hscc_daemon.node_pauses` store `hscc node paused --json` and the
+  `node_paused` agent tool read — no second reader, no fleet sweep — and returns
+  one row per record (`host`, `owner`, the recorded `units`, `reason`, `since`,
+  `until`, `span_nodes`, `stopped`) plus `count` and a `speak` sentence. A
+  missing overlay is an honest empty set; a reader failure is a degraded
+  `{"error", "speak"}` rather than a clean zero. `pause`/`resume` stay
+  CLI + agent-tool only: they stop live models behind a printed plan and a y/N
+  gate that an HTTP mutation route would bypass (audit D10).
+* `hscc-cluster`: new read-only `doctor` agent tool — every HSCC preflight
+  doctor check as structured findings (`checks[]` rows of `name` / `ok` /
+  `detail` (one-line cause) / `fix` / `fatal`, plus `ok` and `fatal_failures`).
+  Its handler runs the operator's own door — `python3 hscc-bootstrap/doctor.py
+  --json`, the command `bootstrap.sh` Stage 1 execs — as a subprocess and
+  relays its payload, so the tool and the CLI cannot disagree and no verdict is
+  computed a second time. It runs the script rather than importing it because
+  `doctor.py`'s module-level imports are flat siblings (`_theme`, `doctor_rows`,
+  `main_board`, …): an in-process import would put ~30 hyphenated-dir module
+  names in the agent host's global namespace, and a bootstrap dir that is not
+  reachable at call time makes the node-pause row "not deployed" and the GPU
+  clock row RED — findings the operator's own run does not print. The read-only
+  *tool* is what §12.2's ruling on D11 keeps ("the route was refused because
+  doctor reads this host; the read-only agent tool is a different surface and
+  stands"). The repair side stays CLI-only: `--fix` calls `run_doctor_fix` →
+  `enable_plugins.enable` and rewrites the operator's `config.yaml`, so there is
+  no `doctor_fix` tool and the handler hands a fixed `["--json"]` argv a caller
+  cannot steer.
+* `hscc-cluster`: new read-only `merge_queue_status` agent tool — per-project
+  local merge-queue state (enabled + why-off reason, paused, queue depth and
+  entries, waiting head, in-flight PR, last outcome). Its handler calls the
+  CLI's own verb `hscc merge-queue status --json` in-process and reports what
+  it printed, so the tool, the CLI and `GET /v1/merge-queue` share one
+  projection of the ledger and cannot disagree (no second queue-bookkeeping
+  implementation). The six mutating verbs (`add`/`remove`/`pause`/`resume`/
+  `enable`/`disable`) stay CLI-only: the queue force-pushes and squash-merges,
+  so an agent-writable merge door would be a self-merge path (agent-surface
+  audit D8, docs/audits/2026-11-23-agent-surface.md).
+* `hscc-cluster` gained one read-only agent tool, `autodown_status`: the agent
+  can now ask whether idle autodown is armed, what state the serving layer is
+  recorded in (reconciled against the live probe), when activity last happened
+  and which interlock (kanban work, PR/CI, watchdog block) is holding a teardown
+  off. It calls the CLI's own read-only verb `autodown_cli._cmd_status` with the
+  verb's `--json` flag and returns that payload verbatim, so the CLI, the agent
+  tool and `GET /v1/autodown/status` share ONE builder
+  (`autodown.status_snapshot()`) — there is no second source of truth for the
+  state and no field the tool can drop or invent.
+* The four MUTATING verbs (`enable`/`disable`/`wake`/`cancel`) stay CLI-only (and
+  confirm-gated on the route): arming or disarming fleet power is daemon/operator
+  scope, not a per-turn agent call, per the agent-surface audit
+  (docs/audits/2026-11-23-agent-surface.md §2.4). Pinned by
+  `test_cluster_manifest_is_exactly_the_27_registered_tools`, which fails if a
+  mutating autodown tool is ever declared, and by
+  `hscc-cluster/tests/test_autodown_status_tool.py`, which proves the tool cannot
+  write `~/.hscc/autodown.json` or the watchdog block.
+* `hscc_daemon/tests/test_surface_coverage_gates_t_c13de3cc.py` (new, 6 tests
+  green) — the two LEFT-4 coverage gates from the agent-surface audit
+  (`docs/audits/2026-11-23-agent-surface.md` §11). Gate 1 walks dispatch in
+  both shapes the CLI has: top-level verbs parsed from `main()`'s own
+  `cmd`/`cmd_lower` branches and the `DAEMON_COMMANDS`/`advanced_cmds`
+  membership tables it dispatches through, then every group leaf from that
+  group's own registry (`CLUSTER_SUBCOMMANDS`, `_NODE_SUBCOMMAND_HELP`,
+  `VALID_SUBCOMMANDS`, `SUBCOMMAND_HELP` keys) plus the branch-parsed `cards`
+  and `orch` routers and the four `main wakeups` leaves. Every dispatched verb
+  must be named in `COMMAND_HELP`; exemptions are explicit and named
+  (`unit-emit` with its reason; F3's kanban verbs are now advertised, so the
+  exemption table is empty). Gate 2 parses `BUNDLED_SKILLS`
+  and checks `install/hscc-skills/` in both directions: every listed name is a
+  real directory with a `SKILL.md` beneath it, and every directory is listed
+  (duplicates and path-shaped names fail too). No live state, fleet, launchd
+  or network access.
+* `hscc-cluster`: new read-only `main_status` agent tool — the configured main
+  orchestrator (name/profile/board) plus its live shape: the tmux pane and
+  busy/idle/not-running/ambiguous state, and the daemon waker's
+  enabled/freshness/board state. The main half calls the CLI's own verb
+  `hscc_daemon.main_cli.cmd_main(["status", "--json"])`, so the tool and
+  `hscc main status` cannot disagree about the pane or the identity; that identity
+  comes from the ONE resolver `hscc-roles/main_orch.py` (the module
+  `hscc main status` and `orch_message` read), never a hard-coded name. The
+  `waker` block is `orch_waker.waker_status()`, the function the
+  `hscc orch waker status` verb renders. Lifecycle stays CLI/operator-only:
+  there is no tool for `hscc main start`, `hscc main wakeups` or a rename.
+* `hscc doctor` gains the **main-only cluster surface** row (and the read-only
+  `doctor` agent tool inherits it, because its door is `doctor.py --json` and it
+  forwards every check verbatim): it names each non-main profile home whose
+  `plugins.enabled` carries a cluster TOOL plugin (`hscc-commands`,
+  `sparkrun-hermes`) or whose skills tree carries an hscc-owned cluster skill
+  (`hscc`, `hscc-cluster`, `hscc-model-onboard`), plus the reverse gap where the
+  main orchestrator's own home is missing them. The verdict says which profile,
+  which surface and which repair; the main profile's NAME is read through
+  `hscc-roles/main_orch.main_name()` and is never hardcoded (driver ruling D-A).
+  Hook presence is NOT drift — `hscc-cluster` stays enabled in every home so its
+  six hooks keep firing (driver ruling D-C) — and the root home, an on-disk
+  plugin directory and a cosmetic `toolsets:` entry are out of scope for the same
+  reason. Warn on every posture, never fatal: doctor is bootstrap's Stage-1 gate.
+* `hscc-skills/hscc.py` declares `CLUSTER_SKILLS` — the owned-skill subset the
+  installer itself keeps main-only. The doctor row parses that declaration
+  instead of holding a second list, so installer and doctor cannot disagree about
+  which skills are hscc's.
+* **The main orchestrator's SOUL gets a `## Controlling the cluster` section —
+  the audit's verdict table, in the one place the main actually reads.**
+  `hscc-roles/orchestrators.py` carries it next to `_MAIN_ASSISTANT_WORK`, on the
+  main-orchestrator identity, so `compose_soul` and bootstrap's own
+  `ensure_orchestrator` both emit it and a regeneration cannot drop it (the same
+  carriage that keeps `## Work the way the operator's main assistant works`).
+  It maps WHICH TOOL FOR WHICH JOB across all 28 registered `hscc-cluster` tools
+  (measured from the registry, not from prose), each beside the CLI verb it
+  mirrors, and states the confirm-gate contract in the order the gate exists to
+  enforce: plan first, read it, then `confirm`. It names the guards that are
+  shipped, not a paraphrase — `node_pause`'s eligibility rule (a node parks only
+  when every model on it runs on that node alone, a span is refused with NO
+  override, `force` covers the orchestrator guard only) and `reap_orphans`'
+  refusal when `serving.json` is absent, unparseable, unit-less or silent about
+  the node. Where the operator-signed-off audit decided AGAINST a tool the
+  section says the absence is a decision, so nobody routes around the guard to
+  fill a gap they were never told about: no monitor tool (D2), no fleet-power
+  tool (D3), the board brake stays CLI (D6), the merge queue's write half stays
+  closed (D8), `doctor` stays CLI because it reads this host's trees (D11), and
+  the autodown write half is operator scope (audit section 2.4). It closes with
+  what is OPERATOR-ONLY — a LIVE publish, and arming or changing autodown — and
+  states the shipped release rule beside them rather than inventing a new gate.
+  The nudge/channel rules are NOT restated: `orch_message` is mapped to its job
+  and the guard list stays owned by the single `## Talking to orchestrators`
+  section (#644), because two copies of a guard list is how one goes stale.
+* **The section opens by stating the main-only cluster rule (operator,
+  2026-11-23 07:24).** The main orchestrator profile — named by the bootstrap
+  config, never spelled in the text — is the ONLY profile with cluster control:
+  the `hscc-cluster` tools, the `hscc` slash commands, the `sparkrun` passthrough
+  and the hscc skills live there alone, and a worker or project orchestrator asks
+  the main for a cluster action (a card on its board, or `orch_message`) instead
+  of taking it. No sentence in the section phrases cluster access as available to
+  another profile. That is the rule written down; scoping the plugins in
+  bootstrap and reversing the hscc-skill fan-out are the operator's own follow-up
+  cards from the same brief, and the worker/project-orch template sweep is
+  t_c3a29c37 — none of them is done here.
+
+### Changed
+- **The merge queue's local gate now runs only the pytest legs a PR touches.**
+  For hscc's built-in defaults, `_resolve_gates` reads the runner's own `DIRS`
+  roster from the queue worktree and rewrites the pytest gate to
+  `HSCC_TEST_LEGS="<legs>" bash scripts/run_tests.sh`, where `<legs>` are the
+  roster entries whose directories appear in `git diff --name-only
+  origin/<base>..HEAD` after the rebase. Shared harness changes
+  (`scripts/run_tests.sh`, `scripts/leg_heartbeat.sh`, root `conftest.py`,
+  `pytest.ini`, requirements, `install/`, `.github/`, `.githooks/`, changelog
+  tooling) widen to the full roster, as does a diff spanning more than three
+  legs, an empty/unknown-only diff, or a roster that cannot be parsed. App
+  build gates are unchanged: same diff, same prefixes. Nothing is lost by the
+  narrowing — GitHub CI runs the full suite on the pushed head, and
+  `_post_push_ready` still refuses to merge unless the PR's checks are green
+  on that exact SHA. The default gate budget is raised from 1800 s to 3600 s
+  for the all-legs fallback.
+* proxy health: ONE predicate now answers "is this PID ours". `hscc_daemon/health.py`
+  carried three spellings of the same question, and they disagreed about the case
+  that matters most. (1) `_pid_is_tracked_or_descendant` (t_af7d5486) — a tri-state
+  upward `ppid` walk, and `None` for "the walk could not be completed", which the
+  reap reads as REFUSE TO KILL. (2) `_proxy_owner_is_tracked_proxy` + its
+  `_proc_children` (t_640be7a2) — a DOWNWARD BFS returning `(matched, depth)`, whose
+  `_proc_children` returns an EMPTY LIST when `ps` cannot be consulted: an unreadable
+  process table answered `(False, None)`, i.e. "not ours", which is the fail-open
+  shape on the very path t_af7d5486 exists to close. (3) `_proxy_gateway_identity`'s
+  own inline `ppid` loop (t_f4ee3ce6), a third budget (`PROXY_TRACKED_TREE_DEPTH`)
+  with a fourth answer. All consumers now consult the tri-state upward walk:
+  the repair verifier `_proxy_repair_orphan` asks it once and reads `True` →
+  verified, `False` → UNVERIFIED (proven foreign), `None` → UNVERIFIED (not
+  evaluable — the log line says which, and neither is green nor a licence to
+  signal); `_proxy_gateway_identity` gets its `child` kind from it, where both
+  `None` and `False` answer `foreign` = "not adopted, not trusted, and NOT killed"
+  (the only signalling path is the reap, which refuses on `None`).
+  `_proxy_owner_is_tracked_proxy`, `_proc_children`,
+  `PROXY_TRACKED_TREE_MAX_DEPTH` / `HSCC_PROXY_TRACKED_TREE_MAX_DEPTH`,
+  `PROXY_TRACKED_TREE_MAX_PIDS` / `HSCC_PROXY_TRACKED_TREE_MAX_PIDS` and
+  `PROXY_TRACKED_TREE_DEPTH` are deleted; `PROXY_ANCESTRY_MAX_HOPS` / `max_hops`
+  is the single budget. t_640be7a2's depth-carrying log line survives — depth now
+  comes from `_pid_ancestry_walk`, the one walk that already computed it, and the
+  tri-state return is unchanged (`_pid_is_tracked_or_descendant` is that value with
+  the depth dropped, so the two can never disagree). No verdict changed: a foreign
+  listener is still reaped, the uvx wrapper/child pair is still left alone, and a
+  hollow tracked PID still heals.
+- **The main orchestrator's SOUL now names `orch_message`, not only the CLI verb.** The generated `## Talking to orchestrators` section in `hscc-roles/generator.py` still read "Talk to other orchestrators only through `hscc orch inject` and the board tools" — text written before #635 made `orch_message` accept the CONFIGURED main orchestrator as sender and as target. The one profile whose tool this is therefore kept shelling out to the CLI verb and forfeited the guards the tool adds: the hourly per-`(sender, to)` rate limit, the `[from ` reply-loop guard, the exactly-one-pane rule inherited from `repl_inject`, and the signed, fail-closed audited send. The section now leads with `orch_message` as the agent path (queue-only — never an interrupt; rate-limited; auto-signed; audited; an orchestrator at either end, a worker or `default` refused) and keeps `hscc orch inject` as the CLI verb beside it: `--dry-run` to probe which pane a name resolves to, and the fallback when the tool is not on the profile. Nothing else in the section moved — steer-when-busy / plain-when-idle, send in English, no `~/bin` scripts and no side channels, and a nudge is not a work order: work belongs on a card on the right board, all still verbatim. No name is spelled: the section stays resolver-driven, so a renamed main is followed. No live SOUL is rewritten by the card — role text lands on the next role regeneration (`hscc-roles/hscc.py orch-all`, bootstrap's role stage, which carries operator sections over), never by hand-editing a profile; `orch-sync` deliberately does not reach the main profile (`orch_sync.orchestrator_dirs` keeps `_is_project_orchestrator`, which excludes it).
+- **`scripts/run_tests.sh` now seals `HOME` for every leg** (roster-wide, placed after
+  the two lines that derive a value from `HOME` and before the leg loop):
+  `HOME`+`USERPROFILE` = a fresh empty `mktemp -d` dir under a **literal** root — `/tmp`,
+  or `/var/tmp` when `/tmp` IS the login home — never `$TMPDIR`, and never inside the
+  login home (still refused with rc 3, because hermes resolves a home under `~/.hermes`
+  back to the live root, t_d39c720e). The runner **prints the root and the path it
+  sealed**, so a `11614 passed` line in a redirected roster log is attributable to the
+  seal rather than to whatever else the machine looked like, and `HSCC_TEST_NO_SEAL=1`
+  restores the operator's HOME in one env var. `SPARKRUN_SRC`, `HERMES_AGENT_PATH` and
+  `HSCC_TAP_DIR` are **declared** from this machine's own checkouts when the operator did
+  not set one — the three paths hscc-cluster's source cross-checks, the live-hermes cases
+  and the formula-drift guard resolve through `~` by default, exported as paths and never
+  as the home, so the seal does not quietly retire them as skips (measured at `96a9f38a`
+  without the third declaration: `scripts` went `601 passed / 5 skipped` → `598 / 8`).
+- **The root is decided before `mktemp`, from the login home alone** (t_9c1ff8e1, which
+  this card's own CI caught: `leg scripts` red at `58653473`/`962ea063` while main was
+  green). On the Linux/CI default host `HOME` **is** `/tmp`, so "create it under /tmp"
+  and "never inside the login home" have no answer — the runner exited 3 before leg
+  selection, no leg could run at all, and a typo'd leg name lost its contracted 64. The
+  fallback picks the other literal root up front; the refusal still applies to whatever
+  `mktemp` returns, so a host that contains both roots still fails closed rc 3. The
+  fallback is deliberately NOT triggered by "mktemp answered inside the login home" —
+  that swallows the refusal and would let the containment guard survive its own mutation
+  probe. Pinned from both sides: a `HOME=/tmp` case that seals under `/var/tmp` and names
+  the root in the banner, and a `mktemp`-shim case at `HOME=/tmp` that still refuses rc 3.
+- **Measured two-arm at `0cee5d49`** (sealed vs `HSCC_TEST_NO_SEAL=1`, same sha,
+  back-to-back, canonical runner, one pytest process per leg dir): **`11614 passed,
+  10 skipped, 0 failed` in BOTH arms**, 12/12 legs rc 0, item counts identical, zero
+  passed→skipped moves, every leg's wall ratio ≈1.0 (worst deviations `bootstrap` 0.954
+  and `scripts` 1.067, in opposite directions = noise) — the seal costs no coverage and
+  buys no speed. CI's 12-leg run IS a sealed arm: nothing in the repo sets
+  `HSCC_TEST_NO_SEAL`. Pinned by `scripts/tests/test_run_tests_home_seal.py` (15 executed
+  cases: the block's text and its position in the file, the executed seal, the escape
+  hatch, both fail-closed refusals via a `mktemp` shim, `TMPDIR` cannot move it, the three
+  declarations' win/lose arms, and the `HOME=/tmp` posture on both sides of the fallback).
+* `hscc profiles` has one named canonical route: `GET /v1/profiles`
+  (`routes_ops.PROFILES_STATUS_ROUTE`), with the profile roster explicitly
+  pointed at as the *other* question (`GET /v1/profiles/list`,
+  `routes_profiles.PROFILES_ROSTER_ROUTE`). Agent-surface audit F2
+  (`docs/audits/2026-11-23-agent-surface.md:186`) recorded this as "two routes
+  answer `hscc profiles` — pick one canonical, alias the other". Measured
+  against the payloads the audit's premise needed correcting: the two routes
+  answer two different questions. `GET /v1/profiles` carries `counts` /
+  `total_running` / `profiles` (a list of NAMES) and reaches
+  `cluster_engine.cmd_profile_status()`, which is the exact call the CLI verb
+  `hscc profiles` renders — one implementation, two doors.
+  `GET /v1/profiles/list` carries `count` / `profiles` (a list of per-profile
+  OBJECTS) plus the config whitelist from `hermes_cli.profiles.list_profiles()`;
+  it counts nothing, and the iOS create-card assignee picker
+  (`ProfileListResponse`) has no other door to that data. So neither route is
+  deletable or aliasable without breaking a shipped decoder, and the card's
+  second option — deprecate the ambiguity with a pointer — is what landed. What
+  actually read as two answers to one question is a single key name,
+  `profiles`, carrying two meanings; that collision is now named in both
+  modules and pinned in a test rather than left for the next reader to trip
+  over. Each registration compiles its own pattern constant, so the name in
+  prose and the name in the dispatch table cannot drift apart. No payload key,
+  route set, status code or `speak` string changed.
+* **The main-only cluster rule in the main orchestrator's SOUL is now explicit
+  about WHICH profiles are excluded — and no longer states a mechanism the code
+  does not implement.** `orchestrators._MAIN_CLUSTER_CONTROL` opens by naming
+  the relationship the operator's 2026-11-23 07:24 rule is about: the
+  bootstrap-named main profile (never spelled) is the only profile with cluster
+  control, **a worker profile and a project orchestrator profile have none of it,
+  so they ask — they do not act**, and a request reaches the main as a card on
+  its own board or an `orch_message`. That half of the sentence is what the
+  parent section left implicit ("only the orchestrator profile"), and it is the
+  half a worker reads before deciding to shell a cluster verb itself. Three
+  present-tense claims the first draft carried are gone, because
+  `docs/audits/2026-11-23-main-only-surface.md` (t_1700dfc8, merged an hour
+  after that draft) measured each of them false of the shipped code: the cluster
+  skills do **not** "live here alone" (the installer's own `skill_dirs` writes
+  them into the root home and every profile tree); a project orchestrator is not
+  excluded from the cluster toolsets (`generator._is_orchestrator` matches any
+  `*-orch`, and `orchestrator_toolsets()` carries both of them into that
+  profile's config); and bootstrap does not "write the toolsets into this
+  profile's config" in any sense that loads a tool, because the gate that loads
+  a plugin is per-home `plugins.enabled` and nothing in this repo writes it into
+  a profile home. What the section now asserts is the POLICY it is entitled to
+  carry, plus the honest fallback ("if either does not resolve on this profile,
+  say so, work from the CLI verb") and a line that closes the loophole the
+  fan-out leaves open: a skill is a reading, not a licence, and reading about a
+  tool never entitles any profile to run it. Making the policy true in code is
+  the bootstrap, install-skills and doctor cards the same audit hands off to
+  (t_e98c6ad4, t_b52e70ba, t_caf98114) — this card changes no template outside
+  the main spec and enforces nothing beyond the wording.
+* `hscc-roles`: the main orchestrator's `## Controlling the cluster` section now
+  maps the `doctor` tool the same wave registered — read-only findings for the
+  main to call before it touches the fleet. It is answered that way because the
+  block's own coverage gate parametrizes over EVERY registered cluster tool
+  (`test_every_registered_tool_is_named_or_deliberately_excluded`), and the
+  exclusion set is for tools the main genuinely never calls: a tool the section
+  skips is a tool the main will not think to call.
+* The sentence the same block carried read "`hscc project doctor` reads this
+  host's trees, which is why it has no route and no tool (audit D11)". §12.2
+  falsified its second half the moment the tool landed ("the read-only agent
+  *tool* is a different surface and stands — D11 was about the route"), so the
+  line now names only the route as what D11 refused. The new row keeps the
+  decision that still holds: `doctor` reports and cannot repair, `--fix` stays
+  CLI, and a finding's fix text is advice to report, never an action to take.
+* The gate follows the ruling rather than the reverse: the `DECISIONS` key reads
+  "D11 (the doctor HTTP route stays refused)" (the pinned substring `audit D11`
+  is untouched), the module docstring stops listing D11 as a no-tool decision,
+  and `doctor` joins the static read-tool pin so a later diff cannot move a
+  mapped tool into the exclusion set silently.
+* the 14 per-card `NOTES-t_*.md` worker-scratch files no longer sit at the root of this public repo. They were tracked before `.gitignore` grew its "per-card worker working notes — never project documentation" rule, and gitignore cannot untrack a tracked file, so `git rm` was the only way out. Each file name is its kanban card id and the text is untouched in history: `git show bf36daf4^:NOTES-t_<id>.md` reads any one of them. The four live prose references to those paths (`hscc-roles/tests/test_main_orch.py`, `scripts/hscc_cli_help_audit.py`, `scripts/tests/test_cli_help_surface.py`, `docs/UPSTREAM-kanban-wake-once-gate.md`) now cite the card id instead; released text in `CHANGELOG.md` and `changelog.d/archive/` is left as published.
+* `hscc-skills install-skills` now installs/updates the cluster-control skills
+  (`hscc`, `hscc-cluster`, `hscc-model-onboard`) into the **main orchestrator's
+  profile only** — `<root>/profiles/<main_orch.main_name()>`, resolved through
+  the shared resolver so no code path hard-codes `general`. The ruling
+  (R4, 2026-11-23) has no "concept"/read-path carve-out for non-main homes.
+* Every existing copy of those three skills in the root home or any other
+  profile is **moved** into that home's `skills-backups/removed-<stamp>/`, a
+  sibling of the scanned `skills/` tree. The move is a same-filesystem rename:
+  nothing is deleted, no `shutil.rmtree` is involved, and a colliding backup
+  name gets a counter suffix instead of overwriting the earlier snapshot.
+  `/tmp`-style unrelated homes are not scanned; only the Hermes root and its
+  `profiles/*` children are.
+* Shared/work skills are unchanged: the generic set, `sdlc-review` and
+  `devops` still install at the caller's `HERMES_HOME/skills`, because the
+  review lane and worker authoring depend on them and they grant no cluster
+  control. Profile-authored skills are never touched.
+* `status` now resolves the main-only skills against the main profile (so it
+  cannot report "not installed" for a tree that moved there), `install` (full
+  bootstrap) routes through the same destination function as `install-skills`
+  so the two verbs cannot drift, and `uninstall` reverses both destinations
+  instead of missing the main-profile copies. An unreadable/tampered
+  main-orchestrator name fails closed before any write.
+- `hscc-cluster/hscc.py::cmd_cluster_down` gained `reason=STAY_DOWN_REASON` (default `"hscc cluster down"`, so the CLI's stamped text is byte-identical) so a delegating surface can still record WHICH verb claimed the stay-down, and reports the outcome in the ADDITIVE `stay_down_marker` key (`{"cleared", "reason", "error"}`) — same pattern as `benign_no_workloads`/`benign_note`, so `success` still means "sparkrun exited 0" for `--json` consumers and a caller that renders its own text does not have to re-read the verb's `print` output.
+- `/cluster-down` accepts `dry-run` / `--dry-run` (parity with `hscc cluster down --dry-run`, which the slash surface never had: the audit had to read two source files to compare the plans). A dry-run token always wins over `confirm`. The confirm preview now prints the exact argv the engine will run, read through the engine's own builder rather than rebuilt here.
+- `hscc_daemon/verify.py`: the stay-down writer docstring now says what is true after the delegation — two `clear_expected_up` call sites, three stamping surfaces (`"/cluster-down"` arrives through the engine, carrying its own reason). No behaviour change; `verify` still honours all three wordings and tests no substring of them.
+- `hscc-commands/README.md`: the sentence audit S2 asked for, in its post-fix form — which slash verbs are the engine and which still build their own argv, so a guard added to `cmd_cluster_*` is not silently assumed to cover `/cluster-restart`, `/cluster-reboot`, `/cluster-docker-prune`, `/cluster-apt-upgrade`, `/orch-restart`, `/heal` or `/workers-up`.
+- **Worker and project-orchestrator SOUL templates no longer present cluster
+  tools as their own.** `hscc-roles/generator.py` now carries one shared
+  `CLUSTER_ACTIONS_RULE` — "cluster actions go through the main orchestrator
+  (board card or orch message)" — appended to both `_WORKER_OPS` and
+  `_PROJECT_ORCH_OPS`. The project-orchestrator block stopped naming the retired
+  cluster-wide `orchestrator` role as the cluster authority; the rule is stated
+  as *who may act*, never as a present-tense config fact, because the config
+  enforcement lands in the sibling bootstrap/skills cards. The worker block also
+  says fleet facts arrive through the hscc routes/CLI read surface, never a
+  cluster toolset; no worker or project-orch section names a cluster tool or
+  toolset. Rule 11 (`orch_message` is a nudge, not a work order) stays in the
+  `*-orch` block only — the worker block never names the channel, matching the
+  tool's own refusal of workers.
+- **The ROOT home's SOUL stopped claiming to be the orchestrator.**
+  `hscc-bootstrap/install_soul.py` used to install a "Cluster ops = hscc-cluster
+  toolset" catalog (including the false "Only the orchestrator profile has this
+  toolset; workers do not" line) plus an orchestrator identity into the root
+  home — the operator's CLI/gateway/dispatcher, not the main profile. The root
+  block now states that the bootstrap-named main orchestrator is the ONLY
+  profile with cluster control and that cluster actions go through it; the tool
+  catalog and `sparkrun_exec` are gone from that block. The operator wedge-path
+  slash commands (`/cluster`, `/orch-restart`, `/cluster-restart`) stay because
+  they run in the gateway, not through the model. The main profile's own
+  cluster surface is `hscc-roles/orchestrators._MAIN_CLUSTER_CONTROL`, which
+  already states the exclusivity.
+* **The cluster surface is now decided by one fact: is this Hermes home the main
+  orchestrator's home?** `hscc-roles/main_orch.py` is the single owner of that
+  answer. It resolves the main profile name through its own store, so no plugin,
+  test or doc names a profile and no second resolver exists (ruling D-A).
+* Two surfaces, two answers, one resolver. The **tool catalog** — `hscc-cluster`'s
+  31 tools and `sparkrun-hermes`' `sparkrun_exec` — registers only where the home
+  resolves to `<main>` (`cluster_tools_allowed`). The **operator slash verbs** in
+  `hscc-commands` register at `<main>` *and* the operator/gateway root home
+  (`operator_commands_allowed`), because they are the wedge path and a human types
+  them into the gateway rather than a model calling them (ruling R3/D-B). The
+  audit's looser D-B wording would have handed a model chatting at the root the
+  whole catalog; the card's tightened wording is what the code follows.
+* `hscc-cluster`'s six hooks still register in **every** home — worker and
+  dispatcher lanes (`[budget]`, the per-profile tool ledger, kanban
+  completion/blocked observers) stay alive (ruling D-C). Hermes loads hooks and
+  tools as one all-or-nothing unit, so the split is made inside `register()`
+  (audit §7 G-1); a source-shape test pins the tool loop inside the gate and the
+  hook lanes outside it, and two more pin which wrapper each plugin may call.
+  `sparkrun_exec`'s reach is finally enforced — the SOUL has claimed
+  "orchestrator-only" since it shipped and the audit left the claim unenforced
+  (`LEFT-2`, closed here).
+* **Bootstrap now writes an explicit `plugins.enabled` into every home, tiered,
+  which is what defuses the `_migrate_to_21` landmine** (ruling R5). Hermes'
+  migration fills a key-less config with every manifest-bearing dir under
+  `$HERMES_HOME/plugins/`, and the audit measured the key present in 0 of 52
+  profile configs, so "no `plugins` key" was one migration away from handing
+  every worker the whole cluster surface. `enable()` sweeps the tree the way
+  `ensure_goal_judge_everywhere` does (root from the argument, never from
+  ambient `HERMES_HOME` — the t_267f9d88 class), never creates a config Hermes
+  owns, and prunes **only HSCC's own cluster names**, so a third-party entry an
+  operator enabled survives. `--home` keeps meaning "wire this one home
+  deliberately": it writes that profile's tier and nothing else.
+  `HSCC_CLUSTER_PLUGINS_MAIN_ONLY=0` restores the old flat shape for an operator
+  who disagrees, and a missing resolver falls back to it rather than to a
+  half-applied tier.
+* `hscc-roles/generator.py::generate_profile()` seeds the tier for a home it
+  creates, so a profile made after the last bootstrap is not left key-less (R5's
+  "seed NEW profiles the same way"). It is best-effort by design: profile
+  generation cannot fail because a sibling package would not load.
+* The root home's `plugins.enabled` is left exactly as §6 writes it (all three
+  names). Config and registration are now separate facts: the gate is what the
+  ruling controls, and pruning the root's config would delete the operator's
+  verbs from the one home R3 keeps them in.
+
+### Removed
+- **`hscc-master-knowledge` is retired from installs, not left as an
+  unmanaged orphan.** The July-era skill is present in `~/.hermes/skills/` but
+  is not vendored under `install/hscc-skills/`, so no bootstrap ever updated
+  it (audit t_4c12ff7f F12). A new `RETIRED_SKILLS` list in
+  `hscc-skills/hscc.py` names it, and both installer paths (`install` and the
+  `install-skills` stage `bootstrap.sh` runs) now move any copy out of the
+  scanned `skills/` tree into `<home>/skills-backups/removed-<stamp>/` —
+  a `os.rename`, never a delete, so operator edits made after July survive
+  byte-for-byte as a dated backup. One stamp per run; a same-second re-run
+  appends `-2` instead of overwriting. A clean home creates no directory, and
+  names outside `BUNDLED_SKILLS`/`RETIRED_SKILLS` stay untouched.
+
+### Fixed
+* **`hscc escalate`'s help no longer claims the verb never mutates (F6).**
+  `POST /v1/escalate` performs the escalation — reassign a repeatedly-failing
+  card to the strong tier, or alert a human — while its CLI twin advertised
+  "Show pending failure escalations (dry-run, no mutations)". Read as a property
+  of the *verb*, that sentence is false of the route, and the surface that
+  misleads is the one an agent actually reads (the audit's own §B matrix row for
+  the verb names the gap: "no confirm gate named in the verb"). `dry-run` is a
+  false friend here besides: everywhere else in this CLI `--dry-run` is a flag on
+  a *mutating* verb (`cluster up|down`, `node pause|resume`, `orch inject`), never
+  a property of a read. The route already carries the confirm contract the other
+  mutating routes carry (`hscc-api/routes_ops.py:501` `_require_confirm` → 409
+  `confirm_required`, the same gate as `/v1/triggers/run` and
+  `/v1/cluster/{up,down}`, in place since the endpoint was added in `67fc6de7`),
+  so the disagreement was the wording — and the wording is what changed.
+  `COMMAND_HELP["escalate"]`, the single source both `hscc help escalate` and
+  `hscc escalate --help` print, is now "Preview pending escalations — this verb
+  writes nothing. / POST /v1/escalate is the mutating half: confirm-gated, / it
+  reassigns a failing card or alerts a human."; the `hscc --help` entry is
+  "Preview escalations — POST /v1/escalate mutates". Naming the route inside a
+  verb's help is this CLI's existing disambiguation shape (`COMMAND_HELP["orch"]`
+  already points at `POST /v1/orchestrator/chat`). No behaviour change: the verb
+  still injects no-op `_reassign`/`_notify` (`hscc_daemon/hscc.py:2531`) and
+  writes nothing.
+- **Wedge lifecycle ledgers no longer vanish when `~/.hscc` is missing.**
+  `hscc-cluster/workflow.py` appended `blocked_tasks.jsonl` and
+  `task_completions.jsonl` inside a swallow-everything `try`, so on a worker
+  home without `~/.hscc` the append raised `FileNotFoundError` and the row was
+  dropped without a trace (QA t_035b1b0b F2). Both handlers now create the
+  ledger directory (`os.makedirs(..., exist_ok=True)`) before the append, and a
+  failure that remains is reported with one
+  `hscc: WARNING: could not append <path>: <error>` line on stderr instead of
+  being swallowed. The handlers still never raise.
+- **Three "far future" witnesses were pinned to 2099, so three cases were green
+  only while the real clock sat below it.** `test_alerts_node_pause_t_81de1863.py`
+  and `test_trigger_node_pause_t_81de1863.py` passed `now="2099-01-01T00:00:00+00:00"`
+  to `node_pauses.expiry_pass()` / `pending_resume()` to declare a `until="1h"` pause
+  past due; `test_sparkrun_resolution.py` planted `as_of="2099-01-01T00:00:00+00:00"`
+  to declare a fleet snapshot impossible. All three judgements are made against the
+  product's own clock, so at any clock past 2099 the pause simply is not expired and
+  the snapshot simply is old — and the cases go red on every host at once. None of the
+  three files owns a `datetime(20xx,` literal, so none is an anchor file and
+  `test_single_clock_rule.py` never ran them at any shift. Each witness is now derived
+  (`datetime.now(UTC) + 1 day`): what makes a pause past-due or a snapshot impossible
+  is the margin against the clock the producer reads, never the calendar year.
+  `test_daemon_singleton.py` stamped nothing at all and let the lock's mtime come from
+  the FILESYSTEM, which no clock harness can move, so "a lock written now is respected"
+  read as 173 years stale under a shifted clock — it now stamps the mtime from the same
+  `time.time()` the adjudicator reads. `test_verify_stay_down.py` pinned
+  `last_check="2020-01-01T00:00:00+00:00"` for a staleness case and is now derived too.
+* **the failure-escalation watcher no longer pages a human about a card the
+  orchestrator has retired.** `t_0f214ba0` crashed three runs in ~60 s each;
+  @hscc-orch dispositioned it out-of-band — re-cut byte-equivalent as
+  `t_1700dfc8`, commented `SUPERSEDED — DO NOT DISPATCH.` and froze it `blocked`
+  as the crash artifact of record — and `scripts/escalate_watcher_run.py` still
+  sent "HSCC task t_0f214ba0 needs a HUMAN: strong tier is also failing" at
+  2026-11-23 07:45, and would have kept sending it every 15-minute tick. A
+  frozen `blocked` card carrying a high `consecutive_failures` is exactly the
+  shape `escalate.decide_escalation` reads as "the strong tier is also failing",
+  so the watcher was paging about a card the dispatcher would never dispatch
+  again. `hscc_daemon/escalate_watcher.py` now skips a task whose own comments
+  carry that phrase, and skips it BEFORE the decision, so a retired card gets
+  neither the announce nor the reassign (reassigning it would dispatch it, which
+  `DO NOT DISPATCH` forbids). Comment text was not read by this pass at all
+  before now: it is read on the SAME connection as the failing-task query and
+  for the CANDIDATE set only (cards already failing and still dispatchable), so
+  an idle tick still costs one query and the extra read never scales with the
+  board. Retirement is per-card state, not a lifetime mute — a `task_runs` row
+  that FAILED after the marker's own `created_at` revives the card and
+  re-announces, because the crashes the orchestrator retired the card FOR
+  necessarily predate the comment recording the retirement, and only a newer
+  failure is evidence the card came back. Both new reads are advisory and fail
+  in the direction of escalating: with no readable `task_comments` nothing is
+  treated as retired (this watcher's pre-change behaviour — a false page is the
+  lesser error against a silent real failure), and with no readable `task_runs`
+  a marked card stays muted, because a card is un-muted only by positive
+  evidence of a newer failure. The failure threshold, the strong tier and the
+  `~/.hscc/escalated.json` dedupe are untouched.
+- **a pane-backed orchestrator no longer gets a gateway `notify+wake` subscription.**
+  Hermes' `kanban_create` auto-subscribe gate (`kanban.auto_subscribe_on_create`)
+  is now turned OFF for an orchestrator whose live REPL is in a tmux pane — the
+  pane plus the hscc orch-waker is its wake path, and a gateway sub is a SECOND
+  driver of the same identity. The 2026-11-23 incident was exactly that: 307
+  `notify+wake` subs targeted a gateway `local` session while the real
+  `hscc-orch` sat in a pane, so the gateway kept waking a duplicate orch that
+  worked the boards alongside it (~460M input tokens, duplicate cards such as
+  general `t_34804e61` next to hscc `t_3df8595c`).
+  `hscc-roles/orch_subscribe.py` resolves the pane from Hermes' own
+  active-session registry (`<profile>/runtime/active_sessions.json`, leases with
+  `surface="cli"`) and writes the profile's `kanban.auto_subscribe_on_create:
+  false` through the same preserve-every-key config writer the role generator
+  uses. The guard runs at orchestrator bootstrap (`ensure_orchestrator`), at the
+  main pane door (`hscc main start`, including a reused pane), and at
+  `hscc project chat` (including `--resume`), so a pane that appears after
+  bootstrap is covered too. Every unknown fails toward the old behaviour: an
+  unreadable registry is not proof of a pane, a paneless orchestrator's gate is
+  left exactly as the operator set it, and a missing/unparseable config is
+  reported, never created or replaced. No subscription is created, removed or
+  repointed by this change; the existing drift alarm is the separate doctor
+  card.
+* **A red gate now names the test that broke.** The handback a gate failure
+  leaves on the card carried only the last 40 lines of the gate's output
+  (`_tail(text, MAX_GATE_TAIL_LINES)`), and 40 lines of a 12-leg run cannot
+  contain a failure. `scripts/run_tests.sh` runs its legs in sequence, so the
+  `FAILED path::test - reason` row printed by the leg that went red sits
+  ~60 lines above the end of the run: the legs that passed *after* it, and the
+  stderr the API appends at the very end, are what filled the window. Measured
+  on main 2026-11-23 — PR #673 bounced at 10:40 UTC, and its handback named no
+  test at all; the whole red evidence was `✗ hscc-api (pytest exit 1)`, which
+  says a leg failed and nothing about which test. Telling a flake from a real
+  break then cost a manual `gh pr checks` plus a crawl of a 22-minute Actions
+  log, from a comment whose stated job was to make that decision.
+  It was not a truncated write either: `hermes kanban comment` stores the body
+  it is handed (`--max-len` is opt-in and the queue never passes it), and the PR
+  comment carried the same text — the loss was in what was *selected*, not in
+  what was *sent*.
+  A non-passing leg now goes through `_gate_report`, which reads the FULL output
+  and puts `_failure_lines` of it — the verbatim `FAILED`/`ERROR` rows, the
+  `✗ <leg> (pytest exit N)` summary row and the per-leg `N failed, M passed`
+  count line — ahead of the tail. Verbatim is the requirement: a paraphrase is
+  what the summary row already said. The leg rows lead the digest and may never
+  lose their place to a flood of `FAILED` lines, because they are printed LAST
+  by the runner and are therefore a print-order cap's first casualty. The digest
+  is capped (`MAX_FAILURE_LINES` distinct lines, `MAX_FAILURE_LINE_CHARS` per
+  line, with the hidden count stated) so a branch whose fixture blew up cannot
+  turn a card comment into a log file. A passing leg is untouched: it still gets
+  the plain `_tail`, byte for byte.
+* **The red-gate comment states which attempt bounced.** `Attempt: N`, 1-based
+  — `entry["attempts"]` counts retries *already spent* (0 on a first pass), so
+  the handback adds one rather than telling the author their first try was
+  attempt zero. The evidence also moved above the resolve script: the comment
+  used to bury the failure below six lines of rebase/force-push boilerplate.
+* `hscc-skills install-skills` (the stage `hscc bootstrap` runs) now UPDATEs an
+  hscc-owned skill instead of leaving it: every file the template ships is
+  written even when an installed copy already exists, so a stale copy cannot
+  survive a bootstrap. Before, two paths froze one: the collision guard in
+  `_guard_skips` refused any write whose name resolved from another path —
+  including a refresh of the stale copy sitting at the very target it was
+  asked to write, which is how July content outlived every bootstrap
+  (audit t_4c12ff7f §8, the `GUARDED collision` row) — and an existing copy
+  was never backed up, so the bytes being replaced were simply gone.
+* The guard now refuses only what would CREATE a collision: a name that
+  resolves from another path with nothing installed at the target is still
+  refused verbatim, while a copy that already exists there is refreshed (and
+  the report says so, pointing at `doctor.py --skills` to adjudicate).
+* A replaced owned copy is snapshotted first to `<home>/skills-backups/` —
+  a sibling of the scanned `skills/` dir, because hermes discovers skills at
+  any depth and a `.bak-*` left in place would register its frontmatter
+  `name:` and create the very collision `skill_guard` exists to prevent —
+  using the shared `.bak-<stamp>` shape and `HSCC_BACKUP_KEEP` retention
+  (`backup_util.prune_backup_dir`), so the pile stays self-limiting like every
+  other HSCC writer's. The snapshot is taken before the first write and the
+  update aborts with `BACKUP-FAILED` when `backup_util` cannot be imported: a
+  replacing write without a backup is a deletion.
+* Foreign and operator skills are untouched, and nothing is deleted: files the
+  template does not ship are operator content, not drift.
+- **`hscc help kanban` hid four of the seven verbs the group dispatches.**
+  `hscc kanban pause|resume|paused|enforce` were added to the group
+  dispatcher and advertised on `hscc kanban --help`, but the `COMMAND_HELP`
+  entry that `hscc help kanban` prints still listed only `blocked`, `stale`
+  and `monitor` — two help sources for one verb group, disagreeing. The entry
+  now names all seven verbs with their flags and points at
+  `hscc kanban --help` for each verb's full flag list. Help text only; no
+  verb's behaviour changed.
+* `hscc-api`'s foreground serve no longer answers a stop from inside a lock.
+  `serve_main`'s SIGTERM/SIGINT handler printed to stdout, set a
+  `threading.Event`, and started a thread to call `server.shutdown()`. A signal
+  handler runs on the thread it interrupts, and `_MultiServer.serve_forever`
+  asks `stop_event.is_set()` on every pass of its join loop — `Event.set()` and
+  `Event.is_set()` both take the event's internal non-reentrant lock, so a stop
+  landing during that poll had the handler waiting on a lock only its own thread
+  could release. Measured on both signals: the process printed
+  `hscc-api: signal 15, shutting down` and never came back — no return from the
+  serving loop, no `finally:`, no gateway-sidecar teardown, until the supervisor
+  escalated to SIGKILL (which skips that teardown too). The handler body is now
+  two plain writes and one call (`_last_signal = signum`, then `stopping.set()`
+  on a lock-free `_StopFlag`); `server.shutdown()` is out of the stop path
+  entirely (`BaseServer.shutdown()` waits for the loop the handler interrupts,
+  and on this path that loop IS the interrupted thread); and the operator's
+  `signal N, shutting down` / `stopped` lines moved to the `finally:` that a
+  cooperative stop always reaches — the shape t_56552ecc measured into the
+  sibling plugin's stop path, in the plugin that still had the old one.
+- **Session-lifecycle tmux callers now join the server the operator's panes
+  are on (t_4b3e3806), instead of aiming at tmux's default socket.** The
+  inject seam was fixed for this in t_4c5855a6, but `hscc main start` and the
+  flightdeck project-chat launcher still exec'd unqualified `tmux` argv. From
+  a fresh shell (`TMUX_TMPDIR` unset, export lives only in the interactive
+  rc) that made `list-sessions` miss the live server, so `main start` created
+  a detached session on a SECOND server — a duplicate REPL the operator could
+  not see — while the project-chat launcher created `hscc-<project>` on the
+  same parallel server. Both now prefix session calls with
+  `repl_inject.tmux_socket_args()`, the SAME resolver the inject path uses;
+  no discovery code is copied. A declared `TMUX`/`TMUX_TMPDIR` still adds no
+  argument (argv byte-identical), and the two-live-server refusal now
+  surfaces as `ambiguous_server` (its own reason code in `orch_message`;
+  previously it reused `ambiguous_pane`) and as a named branch-C refusal in
+  the project-chat launcher. `hscc main start` reports it as
+  `ambiguous-server` and says to name the server in `TMUX_TMPDIR`.
+- **`orch_message`'s tool-list entry no longer tells the main orchestrator it does not qualify.** The registry in `hscc-cluster/__init__.py` still stated the pre-#635 allow-list in both agent-facing places — the `_ORCH_TOOLS` comment ("refuses anything but a `*-orch` sender and a `*-orch` target") and the `DESCRIPTION` shown to the model ("Both ends must be *-orch") — three releases after #635 opened the second door in `orch_message.py` itself. The tool list is the surface a profile reads when deciding whether to call the tool at all, so the ONE profile whose nudge channel this is kept reading that it fails at both ends and reached for `hscc orch inject` instead, forfeiting the guards the tool adds. Both strings now state the shipped rule in the same words the module and the skills already use: either end may be a `*-orch` profile **or** the configured main orchestrator, with workers and `default` refused, beside the queue-only / signed / audited / rate-limited properties that make the call safe. No name is spelled and no guard logic is restated — `orch_message.py` owns the rule and `hscc-roles/main_orch.py` owns the name, so a renamed main is followed without an edit here. The disambiguation tail (`hscc orch inject`, `/orch-restart`, `POST /v1/orchestrator/chat`) is untouched, and the description stays length-capped: it rides on every orchestrator turn.
+* `hscc api stop` no longer orphans the live-gateway sidecar. `api_cli`'s
+  SIGTERM/SIGINT handler answered with `os._exit(0)`, and `os._exit` does not
+  run `finally:` blocks — so the `finally:` in `_serve` that owns the sidecar
+  teardown (`gateway_bridge.shutdown()`, then `clear_api_state()`) never ran on
+  the stop path. The supervised `hermes serve` survived, reparented, holding
+  the API process's token: the same stale-token 403 the handler was written to
+  prevent, reached from the other entry point, and produced by the ordinary
+  stop verb whenever the unit is not launchd-managed. The stop is now
+  cooperative — the shape `api_server.serve_main` got in #615: `_serve` honours
+  a stop flag before serving and inside the join loop, so returning from
+  `_serve` is the only way out of the serving process, and that one `finally:`
+  stays the only door. The API now also writes one closing `HSCC API stopped`
+  line to `~/.hscc/api.log` on both entry paths, so a stop that worked has a
+  line to be checked against.
+* The same stop had a second and a third door, both found while verifying the
+  first, and both in the handler — which is the lesson, since a signal handler
+  runs on the thread it interrupts and can therefore be waiting on a lock that
+  very thread holds:
+  * the handler used to open with `daemon_ops.log(...)`. `daemon_ops.log` holds
+    `daemon_ops._handlers_lock` — a plain, non-reentrant `threading.Lock` —
+    while it resolves the rotating handler, so a stop landing while the API was
+    writing a log line (it writes several on the way up, which is exactly when
+    `hscc api stop` arrives) left the handler waiting on a lock only its own
+    thread could release. It never returned, `_serve` never reached the
+    teardown, and `hscc api stop` escalated to SIGKILL, which skips the
+    teardown too. Latent in the old handler as well: it logged before it
+    hard-exited, so the same landing hung the process instead of orphaning the
+    sidecar.
+  * the fix for that door handed the log line to a helper thread.
+    `threading.Thread(...).start()` is not fire-and-forget: it takes threading's
+    own bookkeeping locks and waits for the new thread to report itself started,
+    so the handler was again doing something that can block, and the stop had
+    gained a dependency on a second thread existing at all. Measured three times
+    in a row on a loaded machine before it was removed.
+  * the flag is deliberately not a `threading.Event`: `Event.set()`/`is_set()`
+    take the event's internal lock, and the serving loop asks `is_set()` on
+    every pass, so an `Event` is the same trap with a different owner.
+
+  The handler is now two plain attribute writes and no calls at all: record the
+  signal, set the lock-free flag. The log line and the PID-file bookkeeping live
+  in `_serve`'s `finally:` — the block a cooperative stop always reaches — and
+  `server.shutdown()` is out of the stop path on purpose: `BaseServer.shutdown()`
+  waits for the serving loop to return, and on this path the serving loop IS the
+  interrupted thread.
+- **`cluster-template apply` truncated `litellm.log` as well — the preservation
+  seam had only been wired into the daemon.** `install_proxy`
+  (`hscc-cluster/cluster_template.py`) shells
+  `sparkrun proxy start --port <family port> --cluster hscc` straight into a
+  subprocess, and `apply_template`'s Step 4 calls it once per resolved family
+  that has a `proxy_port` — which the deployed template does (`proxy: true`,
+  port from `template_intent.resolve`'s `base_proxy_port=4000`). sparkrun opens
+  the gateway log in mode `"w"` on every launch
+  (`sparkrun/proxy/_supervisor.py::_launch_background`), and its gateway state
+  dir is the cache dir — GLOBAL, not per-port — so that argv truncates the same
+  file t_9713c765 protects on the repair path. It truncates whenever sparkrun
+  records no live gateway: `api/proxy/_ops.py` refuses a plain start with
+  `ProxyAlreadyRunning` when `engine.is_running()`, and `is_running` is
+  port-agnostic (it reads the shared state PID and asks `process_exists`). The
+  healthy-proxy case is therefore harmless; the crash / reboot / `proxy stop`
+  case — the one where that file is the only record of why the proxy went down
+  — was unprotected. `install_proxy` now takes the copy BEFORE the argv, with
+  the same copy-only, never-raises posture as
+  `health._archive_proxy_log_before_restart` and the SAME archiver
+  (`hscc_daemon.proxy_log_archive`, reached through the sanctioned
+  `fleet._daemon_mod` and guarded the way `_theme.theme()` guards `cli_theme`,
+  so a standalone hscc-cluster with no importable `hscc_daemon` warns and
+  proceeds instead of failing the apply). A lost copy logs one WARN naming the
+  reason and the start goes ahead — a missing log must not cost the fleet its
+  proxy. Exactly one copy is taken per apply whatever the family count, because
+  sparkrun keeps ONE gateway log for the whole state dir and the retention
+  window exists to hold *different* evidence. Census over the tree:
+  `'"proxy", "start"'` appears at exactly 4 sites — 3 in `health.py` (covered
+  by t_9713c765) and this one. The retirement plan is unchanged: if sparkrun
+  gains its own rotate, this call site goes with the module.
+* The foreground serve's stop is now BOUNDED, so a listener loop that cannot
+  return can no longer strand the teardown. `_MultiServer.serve_forever`'s
+  `stop_event` branch — since t_49f4c69b the ONLY thing that stops a foreground
+  `python -m api_server serve`, because the signal handler makes no call but the
+  flag's `set()` — used to end with a bare `self.shutdown()` on the serving
+  thread. `BaseServer.shutdown()` waits for that listener's own loop to return,
+  and the loop calls `service_actions()` on every pass, so one loop that could
+  not return meant `serve_forever` never returned, `serve_main`'s `finally:`
+  never ran, and the supervised gateway sidecar stayed up holding this process's
+  token — while the supervisor's escalation to SIGKILL skips that teardown too
+  (same family as t_ed2f1abe).
+* The bound is `_SHUTDOWN_WAIT_SECONDS` (5.0 s), placed in the branch the flag
+  already wakes up — never in the handler (t_56552ecc measured three ways that a
+  handler may make no call that can block). It sits inside the 10 s
+  `hscc api stop` gives the pid before SIGKILLing it, because a SIGKILL skips the
+  teardown exactly like the hang does; the healthy path never waits here, it
+  returns as soon as the loops come back.
+* `_MultiServer._shutdown_bounded()` asks every listener to stop on its own
+  waiter and returns the hosts that did not come back. The old sequential loop
+  let one wedged listener keep the healthy ones from ever being asked to stop,
+  and left the operator with no name. `serve_forever` now returns True when every
+  loop came back and False when it abandoned one; `serve_main` prints one loud
+  stderr line naming the listener and exits 1 instead of 0. A clean stop still
+  exits 0 and says nothing.
+* The bound is deliberately NOT inside `_MultiServer.shutdown()`: that method's
+  contract is "the loop has returned", and `server_close()` is only safe to call
+  afterwards because of it. Nothing in this plugin overrides `service_actions`
+  today (`grep -rn service_actions hscc-api` is empty), so this closes a
+  robustness gap on a path that has become load-bearing, not a live defect.
+- **`proxy repair` declared a HEALTHY proxy FAILED because sparkrun tracks
+  the launcher, not the socket owner.** For `uvx litellm` sparkrun's state
+  file holds the *wrapper* PID while the process bound to `:4000` is the
+  wrapper's litellm child — the same hollow-PID shape the escalation path
+  already knows about. The repair verifier compared the two with `==`, so the
+  2026-11-22 retest on a worker node logged `proxy repair UNVERIFIED … port owner
+  15706, sparkrun tracks 15701` and then `[ERROR] proxy repair on :4000
+  FAILED` over a proxy that answered every request: an ERROR line about a
+  working service, a spurious repair-failure record, and a streak that could
+  walk the tick into an escalation and a stall page for nothing. Verification
+  now accepts a port owner that is the tracked PID **or a descendant of it**
+  (breadth-first, capped at `HSCC_PROXY_TRACKED_TREE_MAX_DEPTH` levels /
+  `HSCC_PROXY_TRACKED_TREE_MAX_PIDS` processes), the orphan reap uses the same
+  rule so it can no longer SIGTERM the child that serves `:4000`, and a
+  verifiably served port is never reported as `FAILED` at ERROR — the narrow
+  shape where the proxy is healthy but `sparkrun` itself returned a failure
+  stays visible as a WARN and keeps `ok=False`, so the streak and escalation
+  machinery keep their arms. A port owner outside the tracked proxy's tree is
+  still UNVERIFIED: the rule widens identity to the proxy's own descendants,
+  never to any PID that happens to hold the port.
+- **Load tests now own their burners.** The 2026-11-23 load test spawned twelve
+  `while :; do :; done` burners and its `kill $BURNERS` never reached them:
+  they ran orphaned at ~90% CPU each and held the box at load 24 for 3h40m.
+  A PID list is not ownership, and cleanup after the command is not a trap — it
+  does not run when the test hangs or is interrupted. The new
+  `scripts/load_burners.sh` harness owns all three legs:
+  * every burner (and the command under test) is started under `set -m`, so
+    `$!` is a **process-group** id and cleanup uses `kill -- -PGID`, never a
+    bare PID;
+  * EXIT, INT, TERM and HUP all route through one idempotent cleanup that
+    TERMs each group, waits a bounded 0.2 s grace, then KILLs each group;
+  * a watchdog enforces a **hard timeout** and TERMs the harness. The command
+    runs in the background and is awaited with `wait` on purpose: a POSIX shell
+    defers a trap while waiting for a foreground child (measured here, TERM was
+    held for the full 30 s of a foreground `sleep`), so the obvious foreground
+    shape would let a hung test outlive its timeout and keep its burners.
+  Burner argv carries a unique tag (`HSCC_LOAD_BURNER_TAG`) so survivors are
+  greppable without matching unrelated processes. No other committed load test
+  spawned burners (`git grep BURNERS` was empty), so there was nothing to
+  convert; the guard below is what stops the next inline copy.
+- `scripts/tests/test_load_burners.py` (7 items) is the guard. It spawns the
+  real harness, first proves two tagged burners actually exist (each leading
+  its own PGID), then signals the harness and asserts `pgrep` finds zero
+  survivors for TERM/INT/HUP. It also pins the hard-timeout exit (124, bounded),
+  command-status propagation, and a static audit that fails if any file under a
+  `tests/` dir inlines `while :; do :; done` instead of using the harness.
+* hscc api: SIGINT/SIGTERM are now honoured even when the serving process inherited them BLOCKED. `signal.signal()` sets a disposition, not the thread's signal mask, and a mask survives fork/exec (`subprocess` restores ignored dispositions, never the mask) — so an API spawned by a process running with SIGINT blocked installed its handler, received the signal, and never dispatched it: the stop stayed pending, `_serve` served forever, and the supervised `hermes serve` sidecar was only torn down by the SIGKILL escalation, which skips the `finally:` that owns it. The handler install now clears the inherited mask (`_install_stop_handlers` in `api_cli.py`, the same clear in `api_server.serve_main`), and `_serve` clears it again on entry so a direct/embedded serve is equally stoppable.
+* the failure mode is the one the card measured: one full-leg run failed BOTH SIGINT arms of the two stop cases and neither SIGTERM arm. A child spawned with SIGINT blocked reproduces it deterministically — `_last_signal` stays None, the sidecar starts, and the trail stops after the startup lines. The new cases spawn exactly that child (blocked mask in the forking thread) for `_serve` and for `serve_main`; with the fix both go through the teardown and kill a real sidecar.
+* test hygiene: every child these stop-path suites spawn is now its own session (`start_new_session=True`) and is reaped by PROCESS GROUP in teardown, with a sandbox-level fallback for the double-forked server and its sidecar — the leaked harness children this host had orphaned for hours cannot outlive a failed case.
+* flightdeck `project list`: the table's REPO column no longer takes the whole console. `add_column("REPO", no_wrap=True)` gave that column a *minimum* width equal to its full content, so when a repo path is longer than the render width Rich cannot shrink REPO and shrinks NAME/BOARD/TOPIC/HEALTH to zero instead — and then clips REPO with an ellipsis anyway. On a 190-char pytest tmp root the entire human view was four empty columns plus one clipped path (`││ /private/…/… ││││`), so the operator lost the project name, the board and the health cell *and* the path tail — and the three asserts on that view (`HEALTH`, `ok`, the project name) were red from tmp root 158/174/187 with no normaliser able to recover a clip. REPO now folds (`overflow="fold"`), so the path continues on the next line and every label column keeps its content; all three cases are green at every reachable length 61..212 with their asserts unchanged and raw. No console width is involved — `_theme.make_console` still pins 200 for a non-tty.
+- **`orch_message` now accepts the configured main orchestrator at both ends.** The rule-1 gate was `ORCH_PROFILE_RE` alone — the per-project `*-orch` namespace — while the ONE main orchestrator's profile name is the chosen slug itself, with no suffix. The cluster's top orchestrator therefore failed its own core tool at the sender check and at the target check, and had to shell out to `hscc orch inject` to nudge anyone. `is_orch_profile()` now has a second door: a name qualifies when it matches `*-orch` **or** equals the main orchestrator read from `hscc-roles/main_orch.py` — the same resolver `hscc main status` reads (`main_orch.main_profile`), reached through the sibling-plugin loader rather than re-implemented here, so a renamed main is accepted without an edit in this plugin and the plugin never spells the name. Nothing else moved: the hourly per-`(sender, to)` rate limit, the `[from ` reply-loop guard, the exactly-one-pane rule inherited from `repl_inject`, the fail-closed audit pre-flight and the `to == sender` refusal are all as shipped. Two edges are deliberate: `default` stays refused at both ends even when a config names it as the main orchestrator (the resolver's own `validate_name` accepts any lowercase slug, and the operator's own REPL must stay unreachable), and an unreachable or raising resolver degrades to the `*-orch` rule alone rather than guessing a name. Refusal details and the `to` schema description now state which names qualify.
+* **A non-main orchestrator's SOUL no longer advertises a tool its home cannot
+  register.** The project-orchestrator work rules (``_PROJECT_ORCH_OPS`` rule 11)
+  told every `*-orch` profile to nudge a peer with the `orch_message` tool, but
+  the main-only tier leaves those homes with 0 cluster tools (QA F4 on
+  t_035b1b0b measured the generated `SOUL.md` line): the model was told to reach
+  for a tool that is not there. The rule now sends the peer nudge through the
+  main orchestrator, names no cluster tool, and keeps the two contract lines it
+  exists for — a nudge is not a work order, and work goes on a CARD on the right
+  board. The main orchestrator's SOUL keeps `orch_message`; only the non-main
+  half changed.
+* **The "28 tools" drift is corrected at its sources.** `hscc-cluster` declares
+  **31** tools (11 read, 5 ops, 3 debug, 4 heal, 4 fleet, 3 template, 1 orch),
+  and with `sparkrun-hermes`' `sparkrun_exec` the agent catalog is **32** — not
+  the 28 that PR #684 and the audit text repeated. The audit now states 31 and
+  attributes the 28 figure to its `3cb11669` snapshot; the 2.17.4 release note
+  says 31. The bundled skills already said 31; a test now derives that number
+  from the registry so the next tool move cannot leave the prose behind.
+* proxy health: an unreadable process table is no longer read as "not our
+  proxy", and the orphan reaper no longer kills on it. The `uv tool uvx` PID
+  split itself is already handled on main: t_640be7a2 taught
+  `_reap_orphan_proxy_listener` that sparkrun's state record is the WRAPPER
+  while the socket on `:4000` is held by the litellm CHILD, so a proxy whose
+  tree CAN be read is left alone. What remained is the fail-open half of that
+  same question. The guard answers with `_proxy_owner_is_tracked_proxy`, whose
+  `_proc_children` returns an EMPTY LIST when `ps` cannot be consulted, and
+  "found no children" was then taken as "not the tracked proxy's tree". The very
+  next guard only asks whether the cmdline mentions `litellm` — which the real
+  listener's does — so the function reached `SIGTERM` and then `SIGKILL` on the
+  fleet's only entrypoint and logged it as "reaping ORPHAN proxy listener", over
+  a process it had just failed to identify. An unreadable `ps` is not evidence of
+  foreignness, and a signal cannot be unsent. The guard now answers through a
+  tri-state `_pid_is_tracked_or_descendant` (bounded `ppid` walk upward, over the
+  `_proc_ppid` seam this module already trusts): PROVEN OURS → refuse, and name it
+  in the log as the tracked process's own descendant rather than as an orphan it
+  was killed for; PROVEN NOT OURS (the walk COMPLETED at a root without the
+  tracked PID) → reap it, exactly as before; NOT EVALUABLE (a parent could not be
+  read, or the hop budget ran out before a root was reached) → **refuse to kill**.
+  The blast-radius contract is untouched: the listener's cmdline must still
+  mention `litellm`, and with no tracked PID at all (hollow or absent state file)
+  the identity guard stands aside and the cmdline vetting still decides, so the
+  F4 orphan heal t_90958eb8 depends on still fires. The repair verifier keeps its
+  existing `_proxy_owner_is_tracked_proxy` answer for now — collapsing the two
+  predicates onto this one is t_0df7fc35, not this change.
+* `reap_orphans` no longer treats a serving.json it cannot read as "the fleet serves
+  nothing". The tool's whole notion of "orphan" is `~/.hscc/serving.json`, a file with
+  >=3 writers (bootstrap `serving_gen`, `template apply`, `onboard.py`) and no lock
+  against this reaper, and the reaper read it through the tolerant reader — the one
+  that answers `[]` for absent AND unparseable AND unit-less. "The file said nothing"
+  and "nothing is serving" were the same value, and the second one stops containers: on
+  a host where serving.json had simply never been written, every sparkrun container on
+  every worker was an orphan and `confirm=true` stopped them all (audit
+  docs/audits/2026-11-23-agent-surface.md §4 + §9 F13 — "the one tool where a stale
+  copy deletes work"). `hscc-cluster/clusterlib.py` gained `serving_snapshot()`, one
+  `open()` reporting content AND file state (`ok` / `absent` / `unparseable` /
+  `unreadable`, plus the mtime age) so a verdict and the node set it judges cannot come
+  from two versions of a multi-writer file; `hscc-cluster/heal.py` gained
+  `_serving_verdict()`, tri-state on the t_af7d5486 doctrine (trustworthy / stale /
+  not_evaluable, and not_evaluable takes the refusal branch — an evidence source that
+  could not be read is not evidence for a destructive action). It refuses, before the
+  confirm gate so even a PREVIEW says so, on: an absent/unreadable/unparseable file, a
+  file that parsed and declared zero units, and an orphan set covering every live
+  worker node (a leftover is local; a file that has fallen behind reality marks the
+  whole fleet, and the two are indistinguishable from here). It also re-reads the file
+  immediately before EACH stop and drops that stop if the file has claimed the node in
+  the meantime — the writer race, caught at the moment of harm — and reports it under
+  `skipped` with `ok=False` rather than as a clean reap. Coverage of the candidate
+  node is deliberately NOT the test: an orphan's node is absent from serving.json by
+  construction (that is how the list is built), so refusing on it would disable the
+  tool instead of guarding it. `force=true` lifts the two verdicts and says so loudly
+  in the preview ("GUARD OVERRIDDEN"); it cannot lift the head/orchestrator exemption
+  (not the guard's to give) and cannot lift the action-time re-read. The confirmation
+  text now quotes the file the stop is based on — path, age, and how many nodes it
+  names against how many are live — so the operator sees the freshness of the
+  definition before typing confirm. serving.json's OWNERSHIP is unchanged: this is a
+  guard, it reads and refuses, and writes nothing.
+* **A fresh install now always gives the main orchestrator its plugin
+  payload.** `hscc-bootstrap/install_payload.py` selected profiles only from
+  `~/.hscc/target_profiles.json`, defaulting to `DEFAULT_TARGET_PROFILES` —
+  a board-derived seed that never names `<main>` — so with no config file a
+  fresh host left the one home that must have the cluster surface with **zero**
+  hscc plugins (QA t_035b1b0b F1; only the live fleet's
+  `target_profiles.json = ["*"]` hid it). The resolved roster now always
+  includes the main profile, resolved through `hscc-roles/main_orch.py` (no
+  second copy of the identity rule): an explicit list without it, the default
+  seed, and the legacy `[]` spelling all still write `<main>`, while `["*"]`
+  keeps its all-homes meaning.
+* **The bootstrap payload stage reaches `<main>` on the first run.** Profile
+  creation (`hscc-roles generate` / `orch-all`) has to run *after* the payload
+  copy — it executes the installed `hscc-roles` — so the copy cannot see a
+  main profile that does not exist yet. Bootstrap now runs a targeted
+  `install_payload.py --main-only` pass right after provisioning, which
+  installs the payload into the newly created main home (and is a recorded
+  no-op when the profile is still absent, never fabricating one). The pass is
+  `--no-backup`: the first pass already preserved anything that differed and
+  this one copies that same payload.
+* Tests: `hscc-bootstrap/tests/test_install_payload.py` pins the allowlist
+  cases (explicit list, config door, legacy `[]`, the fresh-install two-pass
+  order, and the missing-profile no-op); the real isolated installer case in
+  `test_bootstrap_isolated.py` asserts `<main>` ends up with
+  `hscc-cluster`/`hscc-commands`/`sparkrun-hermes` from a temp
+  `HERMES_HOME`/`HSCC_DIR` with no `target_profiles.json`.
+- **`/cluster-down` was a second fleet-down, and it lied about a failed stop.** The slash verb built its own `sparkrun stop --all --hosts <node>` loop — one call per `serving.json` unit node — with its own already-down markers, while `hscc cluster down` and `POST /v1/cluster/down` both go through `hscc-cluster/hscc.py::cmd_cluster_down` → `serving.fleet_down_cmd()`. Measured side by side on the SAME fake sparkrun output (audit LEFT-3, run before any code): rc 1 carrying `No running workload matches intent …` *riding along with* `Error: could not query <host>: ssh: Permission denied` renders **ERROR** on the engine — which refuses to call a host it could not query "nothing was running" — and rendered **`○ … nothing running` for every node plus "All units stopped."** here, because `_was_already_down` had the already-down markers without the engine's `_REAL_FAILURE_MARKERS` denylist. An operator who ran `/cluster-down` on a partially unreachable fleet was told the fleet was down when a node had never been queried. Scope diverged the same way: the engine stops sparkrun's whole `hscc` cluster, the loop stopped only the nodes `serving.json` listed and never passed `--cluster` at all, so a workload running on an unlisted node survived `/cluster-down` and died under `hscc cluster down` — and 90 s per node versus the engine's fleet-op timeout settled the same question twice. `/cluster-down` now **delegates** to `cmd_cluster_down(dry_run=False, reason="/cluster-down")` through cmdlib's existing by-path loader and renders the engine's verdict (✅ / ○ for the engine's own already-down note / ❌ with sparkrun's stdout+stderr), so there is one stop, one host scope, one classification and one marker bookkeeping. The "works when the LLM is wedged" property is untouched: the engine is an in-process call whose only external dependency is `sparkrun` on PATH — the same dependency the loop had. If the engine module cannot be loaded the verb now **refuses** and names `hscc cluster down`; it never silently falls back to a different fleet-down. The card's own audit half was stale and is corrected here: the marker clear was NOT missing — `/cluster-down` has stamped the stay-down record since `4dc5599d` (t_3a0bdca9 / PR #256, released 2.15.6), before the 2026-11-23 audit that filed the finding.
+* The gates found three real `COMMAND_HELP` gaps on main and the list fixes are
+  in this change: `hscc help cluster` now names the dispatched `history` leaf,
+  and `hscc help api` now names `install-service` and `uninstall-service`
+  (re-flowed onto its own line inside the authored 76-column budget). Both
+  groups dispatched the verbs while `hscc help <group>` hid them — the audit's
+  F3 class, one group over.
+* `BUNDLED_SKILLS` now lists `hscc-lessons`, so the vendored tree and the
+  installer's list are the same 13 names and the F12 orphan is installed and
+  updated instead of being left on disk unowned. `install/README.md` and
+  `hscc-skills/README.md` now state vendored = installed and point at the gate.
+  Sandbox smoke (`HERMES_HOME` in a temp dir): `install-skills` wrote 13 skill
+  dirs (43 files) including `hscc-lessons`, and `status` reported all 13 OK.
+- **`hscc cluster up`'s pause-skip hint now names a host `hscc node resume`
+  actually accepts.** The line printed `hscc node resume {blocked[0]}`, the
+  first plan-ordered node of the parked unit, but the resume verb resolves a host
+  by the pause record's KEY and refuses any span-held node with "resume the
+  owner, not this node". A TP pause issued against the unit's SECOND plan node
+  (and the off-plan span record) therefore printed a command that could only
+  fail. `_pause_display_reason()` became `_pause_display()`, returning the
+  reason and the record's key from one `node_pauses.list_pauses()` read; the
+  skip decision, `paused`/`success`/`all-paused` contract and the
+  `cmd_cluster_up(dry_run, nodes)` signature are unchanged, and the hint still
+  carries no `--apply`. `test_cluster_up_pause_skip.py` gains the two refused
+  shapes beside the two accepted controls, asserting the hint host equals the
+  record key (21 -> 25 tests).
+- **A `flightdeck project new` orchestrator profile was provisioned unseeded, which
+  is the state `_migrate_to_21` exists to be defused against.** Step 6a of
+  `hscc-project/flightdeck/core/project_lifecycle.py` ran `hermes profile create`
+  and touched nothing else, so `<name>-orch` — a home that must hold hooks only — was
+  left without an explicit `plugins.enabled`. Measured against a sandboxed
+  `HOME`/`HERMES_HOME`: `hermes profile create` writes `.env`, `SOUL.md` and
+  `skills/` and **no `config.yaml` at all** (it calls
+  `_migrate_profile_config_if_outdated`, which returns when there is nothing to
+  migrate), and Hermes then creates that config on the profile's first run stamped
+  with the current `_config_version` — so `_migrate_to_21` never runs for that home
+  again and its `plugins` key is never filled by anything. Where the stored version
+  *is* old (a cloned or legacy home), that migration fills `plugins.enabled` with
+  every manifest-bearing dir under the home's own `plugins/`: **10 names** in a live
+  `<name>-orch` home, i.e. the whole cluster surface landing in a hooks-only home.
+- Step 6a now seeds the tier it creates, through `enable_plugins.py
+  --plugins-tier-only --home <dir>` as a subprocess on flightdeck's own injectable
+  `_run` seam (flightdeck runs in the isolated brew-keg venv and has no import path to
+  `hscc-bootstrap`, t_9a9aeab1). The narrow flag is used rather than the plain
+  `--home` wire on purpose: the full wire would provision a per-project orchestrator
+  with the main install's toolsets, kanban routing, delegation and hooks. Best-effort
+  and never fatal — the step's `created` | `skipped` contract and its
+  `LifecycleError` still mean only "the profile could not be created", and the seeding
+  outcome rides on the step's detail line instead of failing it.
+- `enable_plugins.py` gained the entry point that new-home seeding needs:
+  `ensure_plugins_tier_for_new_home()`. `ensure_plugins_tier_for_home()` correctly
+  declines a home with no `config.yaml` (Hermes owns that file) — but declining is what
+  left the create-time path unseeded, so the new function writes a tier-only config
+  when none exists. That is a deliberate exception to `enable()`'s
+  never-invent-a-config policy, recorded at the function, and it is self-defusing:
+  `_migrate_to_21` returns as soon as it sees `plugins.enabled`.
+- Both halves resolve the tier through `hscc-roles/main_orch.py` and nowhere else
+  (ruling D-A): neither `enable_plugins.py`'s new function nor flightdeck's step spells
+  a profile name or a plugin name, and a test pins that flightdeck never reaches the
+  resolver directly.
+* **The merge queue could not drain: `waiting` was only revisited when every
+  FIFO was empty.** `_pr_ready` required `mergeable == "MERGEABLE"`, so the
+  `UNKNOWN` GitHub reports for every open PR for a few seconds after the base
+  moves was treated as "not ready" and the entry was parked in `waiting`; the
+  only path back was auto-enqueue, which runs only on an empty FIFO. The same
+  trap caught every just-pushed PR, because its post-push CI is pending by
+  definition. Measured on the live host: 10:45–13:15 UTC with 14 PRs queued and
+  nothing landing. `process_entry` now re-polls `gh pr view` a bounded
+  3 x 5 s while `mergeable` is `UNKNOWN` and, if it still is, gives the entry
+  back at the HEAD of the FIFO (never `waiting`).
+* `waiting` is re-checked on EVERY tick with one cheap `gh pr view` per entry,
+  whether or not the FIFO is empty; green entries return to the queue in their
+  wait-list order. A pushed head whose CI is still pending now KEEPS its
+  in-flight claim at the new `ci-pending` stage — no re-rebase, no re-gate —
+  and is re-read each tick until green (merge that exact SHA), red (comment,
+  hand the card back as `red-ci`) or the 1800 s CI budget expires (release to
+  the rechecked wait list as `ci-timeout`, not a resolve).
+* `check_merge_queue` now passes the daemon log into the tick, so merge-queue
+  outcomes actually appear in `~/.hscc/daemon.log` (the previous default `log`
+  was a no-op lambda); the `ci-pending` stage renders in the monitor table.
+* Tests: `hscc_daemon/tests/test_merge_queue.py` 100 -> 109. New cases cover
+  UNKNOWN -> MERGEABLE re-poll, still-UNKNOWN keeping the FIFO head, a green
+  waiting PR draining while the FIFO is non-empty, a `ci-pending` claim resumed
+  without a second gate run, still-UNKNOWN after a push keeping the claim, red
+  CI handing back as resolve, the CI timeout releasing to `waiting`, the
+  tri-state checks verdict, and the daemon-log wiring. Existing post-push cases
+  were updated to the held-claim contract.
+* a SIGKILLed HSCC API process no longer orphans the live gateway sidecar.
+  ``gateway_bridge.start_serve`` spawns ``hermes serve`` under a new
+  ``gateway_serve_watchdog.py``, which holds the read end of a pipe whose write
+  end only the API process keeps: the kernel returns EOF to it the instant that
+  process is gone, whatever removed it — the SIGKILL escalation in
+  ``hscc api stop``, a crash, or a teardown that never ran — and the watchdog
+  then terminates the serve's process group and reaps it. macOS has no
+  ``PR_SET_PDEATHSIG``, so the ``os.getppid()`` reparenting poll stays as the
+  fallback for the case where no usable fd arrives. The API-side stop path is
+  unchanged: the signal handler still makes no calls and ``shutdown()`` stays
+  the cooperative door, not the only one.
+* `hscc-model-onboard`'s `scripts/onboard.py` no longer hand-builds a launch:
+  `launch` calls the sanctioned `hscc cluster down` then `hscc cluster up` door
+  instead of shelling `sparkrun run <recipe> --hosts <node>` per node. The old
+  argv carried no `--served-model-name`/`--tp`/`--ensure`, and sparkrun folds
+  those into the intent hash, so the workload it started could not be matched by
+  any later stop, pause, autodown or keepalive pass (`t_8ad06a53`), and a flag
+  divergence under `--ensure` answers with a parallel duplicate on the same port
+  (`t_e1ff0e8e`). Without `--yes` the phase now runs the door's `--dry-run` and
+  stops nothing; with no `hscc` on PATH it refuses rather than improvising, and
+  the unused `SPARKRUN_BIN`/`SPARKRUN_DIR` constants are deleted so a hand-rolled
+  launch no longer looks sanctioned.
+* The same script consulted nothing but `config.json`/`serving.json`, so it
+  rsynced gigabytes onto a node the operator had parked and relaunched vLLM on it
+  — the exact failure `hscc node pause` exists to remove. It now reads the
+  `~/.hscc/node_pauses.json` overlay through `hscc_daemon.node_pauses` (the one
+  reader): a parked node is not probed, not synced, never launched, and an
+  unreadable overlay fails open while saying so out loud. `parked_nodes` always
+  passes the directory explicitly, because `node_pauses.HSCC_DIR` is captured at
+  import and a bare call would have read the operator's live overlay from a
+  sandboxed run.
+* `verify` reported a parked node as `DOWN`. It now prints
+  `PAUSED — expected-absent`, runs no probe against it, takes no failure credit
+  for it, and states when every declared serving node is parked so an all-parked
+  fleet cannot read as a clean pass — the same posture
+  `health._proxy_backend_drift_sets` already takes toward a paused proxy backend,
+  which the two surfaces previously disagreed about on the same tick.
+* `wire` rewrote each unit's `model`/`recipe` and left `serve_cmd` describing the
+  launch that had just been replaced. The resume path prefers that record and
+  replays it with only `--served-model-name` re-normalized, so the stale argv
+  came back with its non-placement flags (e.g. `--tp`) intact, the serve_cmd
+  drift canary fired on every daemon tick afterwards, and the planner logged
+  `serve_cmd refused` on every plan. The record is now re-rendered from
+  `serving.fleet_up_plan` in the same write — after the fields are rewritten, so
+  it cannot be derived from the values being replaced — or cleared with a printed
+  reason when the builder is unreachable.
+* node resume: re-attaching a resumed node's backend to the worker proxy on :4000 no longer stops the proxy by hand. A MISSING-only backend drift (healthy unit, no backend for it in the live router, nothing in the router pointing at a dead unit) on a gateway sparkrun tracks is now applied with ONE `sparkrun proxy start --hosts … --restart`: sparkrun discovers and pre-views the new config while the old gateway still serves and breaks the listener only at the last moment, so the stop, the reap and the fleet discovery sweep are out of the refusal window every resumed node used to pay (~15 s of :4000 refusing connections, measured 2026-11-22). A dead backend in the live router, a foreign listener and a hollow PID record still take the existing stop + cmdline-vetted reap + start repair, and a `--restart` that cannot prove the gateway came back falls through to that repair in the same tick rather than sleeping a cooldown on a port it may have just broken.
+* proxy health: verifying a drift repair no longer demands that the process holding :4000 BE sparkrun's recorded PID. sparkrun launches the gateway through `uv tool uvx`, so its state record is the wrapper and the listener is the litellm child — and demanding equality reported a SUCCESSFUL drift repair as FAILED (the very next check tick was green) while feeding the consecutive-attempt streak that escalates to a bigger repair and the stall alarm. The listener is now trusted when it is the tracked PID, a descendant of it (bounded parent-chain walk), or — only when sparkrun's record is hollow — a litellm started from sparkrun's own generated config. A foreign listener is still never trusted: the F4 orphan posture is unchanged.
+
+### Verified
+* new `hscc-api/tests/test_escalate_surface_contract.py` (1 item) pins both
+  surfaces' semantics in ONE test, because a per-surface test can stay green
+  while the pair disagrees — and the disagreement is the finding. CLAIM: the
+  verb's help names `POST /v1/escalate`, names its confirm gate, carries no
+  unqualified "no mutations", and the `hscc --help` entry names the route too.
+  BEHAVIOUR: `hscc escalate` and `GET /v1/escalate` each inject substitute
+  `_reassign`/`_notify` (asserted distinct from the watcher's real
+  `_default_reassign`/`_default_notify`, then called for real against a relocated
+  HOME that must gain no file), while `POST /v1/escalate` injects nothing — so the
+  acting defaults bind — and is refused without `"confirm": true` by an `ApiError`
+  equal to the one `handle_cluster_down` raises (one contract, not a private
+  gate), the refusal landing before the watcher runs. Head: `1 passed`.
+* the pin bites — five mutations applied to a detached copy worktree, each run
+  against that one test: F6 wording restored (`rc=1`), the CLI verb stops
+  injecting substitutes (`rc=1`), the POST's `_require_confirm` deleted (`rc=1`),
+  the POST injects no-ops so it stops mutating (`rc=1`), the GET stops injecting
+  (`rc=1`); the same copy untouched: `rc=0`.
+* the help text has a coupled mirror, and it bit: `hscc --help` is also stored in
+  `scripts/tests/fixtures/hscc_help_landing.txt`, and
+  `scripts/tests/test_site_landing.py::test_fixture_is_the_repos_own_help`
+  compares that fixture against the repo's OWN rendered help — this card's
+  wording change reddened it (`1 failed, 66 passed, 2 skipped`) until the fixture
+  was refreshed from the repo's own render the way the test renders it (sandboxed
+  HOME, `PYTHONPATH`=repo, COLUMNS=80, NO_COLOR, TERM=dumb, HSCC_THEME=dark, ANSI
+  stripped). The fixture delta is exactly the escalate entry (the old 56-col
+  description pushed the pair to 79 cols, so it rendered as usage-alone + hanging
+  description; the new 47-col one fits one line), and
+  `scripts/gen_site_commands.py --help-file … --write` then reported
+  `site/index.html is up to date (46 commands, hscc 2.17.3)` — the page lists
+  command names, not descriptions. After the refresh:
+  `test_site_landing.py` + `test_cli_help_surface.py` → `67 passed, 2 skipped`.
+* the surfaces the diff touches, re-run on the merged tree: `hscc_daemon/tests`
+  `test_toplevel_cli_help_f5.py` (60 items — it carries the verbatim pin of the
+  one-line entry) + `test_cli_h_shortflag.py` + `test_cli_rich_handlers.py` →
+  `195 passed`; `hscc-api/tests` `test_escalate_surface_contract.py` +
+  `test_routes_ops.py` → `34 passed`.
+* leg totals, attributed honestly (one pytest process per leg dir, the runner's
+  interpreter and env, measured at `14e2e7af`): `hscc_daemon/tests`
+  `2 failed, 4952 passed, 1 skipped`; `hscc-api/tests` `3 failed, 1341 passed,
+  1 skipped`. All five reds are SIGINT / cooperative-stop ids in
+  `test_api_cli_stop_sidecar.py`, `test_api_server_stop_signal.py` and
+  `test_api_server_stop_bound.py` — three files this diff does not touch and which
+  are byte-identical to `origin/main` (`git diff --name-only
+  origin/main...HEAD` lists only the two source files and the new test). Each of
+  the three passes in isolation on this tree (`12 passed`, `13 passed`,
+  `8 passed`), and a pristine `origin/main` worktree run of
+  `test_api_cli_stop_sidecar.py` is red without this diff too (`1 failed,
+  11 passed in 184.88s` — the 180 s stall signature, on an id other than the two
+  that reddened the leg). The lane is stall-flaky on a loaded host; nothing in it
+  reads the escalate surface.
+* post-merge (head `1b49951c`, host idle, one pytest process per leg dir):
+  `hscc_daemon/tests` **`4954 passed, 1 skipped`, exit 0** — both pre-merge reds
+  came back green. `hscc-api/tests` `1 failed, 1360 passed, 1 skipped`; the single
+  red is
+  `test_gateway_serve_watchdog.py::test_watchdog_buries_its_child_when_the_parent_is_sigkilled`,
+  the SIGKILL-liveness test that landed with `t_ed2f1abe`, and it reddens without
+  this diff too: the same selection six times over two trees — pristine
+  `origin/main` `3 passed / 3 passed / 1 failed [poison]`, this tree
+  `1 failed [poison] / 3 passed / 3 passed` — with the whole-leg red a third
+  parametrization again.
+- `hscc-cluster/tests/test_lifecycle_hooks.py`: **45 passed**. New cases drive
+  both handlers against a `tmp_path` HSCC directory that does not exist yet and
+  pin that the row lands, plus an unwritable parent that pins the one-line
+  warning and the no-raise contract.
+- Verdict per module from the whole-leg absolute-freeze sweep (parent card
+  t_3b38aca4's `t3b3_freeze` plugin, byte-identical copy, `--frozen <iso>
+  --freeze-time`), cross-checked against the shipped relative harness
+  (`wallclock_shift`, `HSCC_WALL_SHIFT_DAYS`) at ±400 days and at the equivalent
+  travel to each frozen instant (−2518 / +63225 days), all on main `3c193cd5`.
+  **Real two-clock cases, fixed:** alerts/trigger expiry and sparkrun's future
+  snapshot (red at frozen 2200-01-01 AND at `+63225` days, green at ±400).
+  **Harness artefacts, documented in the file instead of "fixed":** the four
+  "two successive writes stamp differently" cases in `test_merge_queue.py`,
+  `test_engine_wedge.py::test_stalled_detail_reports_last_success`,
+  `test_autodown_cli.py::TestEnable::test_enable_arms_and_resets_idle_timer` — each
+  asks for ELAPSED time, which a clock frozen to one instant cannot produce; all are
+  green at every relative arm. `test_cron_watchers.py` is green at all seven arms
+  (#627's fix holds); `test_autodown.py`'s frozen-2020 red is the wake-seam floor
+  already fixed by #631 and was not re-landed.
+- Both-directions red is not the signature of a window: a window defect flips in ONE
+  direction, when the fixture literal crosses the clock. Red in both directions means
+  the assertion needs the clock to ADVANCE. That distinction is what separated the
+  artefacts from the defects here.
+- Counts: `test_alerts_node_pause_t_81de1863.py` 30 -> **32**,
+  `test_trigger_node_pause_t_81de1863.py` 36 -> **38**,
+  `test_sparkrun_resolution.py` 54 -> **56** (the +2 per file are the executable
+  guards: a source guard that reddens the moment a pinned instant is handed to the
+  product as `now=`/`as_of=`, plus a premise check against the product's own seam).
+  `test_daemon_singleton.py` 50 and `test_verify_stay_down.py` 83 — unmoved, so those
+  two were fixes, not additions. No product code changed, no xfail, no skip.
+- `hscc_daemon/tests/test_merge_queue.py`: **100 passed**, including the new
+  hermetic leg-selection cases — single leg, roster-ordered multi-leg,
+  shared-file fallback for the runner / root conftest / CI config / changelog
+  tooling, more than three legs, and a diff outside every leg. No case runs
+  the real queue, a real gate, or `gh`: the diff is an injected git runner and
+  the roster is a `scripts/run_tests.sh` written under `tmp_path`.
+- `python3 scripts/address_guard.py --tracked` clean. Read-only CLI smoke
+  under a temp `HSCC_HOME`: `python -m hscc_daemon merge-queue status` and
+  `merge-queue --help` both exit 0 and render; the live ledger is untouched.
+* `hscc_daemon/tests/test_escalate_watcher_retired_skip_t_0c602cd1.py` — 25 new
+  cases over sandboxed sqlite boards written under `tmp_path` and reached only
+  through an injected `_kb` (never the operator's live board; the doctrine is
+  `test_kanban_blocked.py::_FakeKb`'s). The fake executes REAL SQL against a
+  declared schema, so the two new queries are pinned on their column names and
+  their parameter binding rather than their intent:
+  `test_comments_are_read_for_the_candidate_set_only` asserts the comment query
+  binds ONLY the failing-and-still-dispatchable ids — a card with
+  `consecutive_failures = 0`, a `done` card and a `draft` card, each carrying the
+  marker, are never asked about — and `test_one_connection_for_the_whole_pass`
+  asserts no second connect. Red-before-green measured, not assumed: 17 of the
+  25 fail with the module change stashed; the 8 that stay green are exactly the
+  guards that have to hold on `main` as well — the incident card's state without
+  a marker still announces, an unreadable comment table still announces, and one
+  page per stuck episode is still one page.
+* The marker match is pinned from both sides. It mutes on the first sentence of
+  the real comment on `t_0f214ba0`, and does not mute on near-misses
+  ("`SUPERSEDED by t_1700dfc8, still needs review`", "`DO NOT DISPATCH this card
+  until CI is green`", "`SUPERSEDED — DO NOT DISPATCHING that worker again`" —
+  that last one is why the folded phrase is matched at word boundaries and not
+  by substring). Em dash, en dash and hyphen fold together and case /
+  line-wrapping are irrelevant, because one mistyped glyph re-creates the false
+  page this exists to stop, while the words themselves stay exact and ordered:
+  `test_the_phrase_is_the_one_the_orchestrator_writes` pins the phrase verbatim
+  so a source edit cannot silently un-mute every retired card on the board.
+* `hscc_daemon/tests/test_escalate_watcher.py` + `test_escalate.py` (47 cases)
+  run unmodified over the change — the threshold, the tier and the dedupe were
+  not touched, and the two suites are where those three would move if they had
+  been. Wider sweep at this branch (`hscc_daemon/tests` + `scripts/tests`,
+  venv python 3.14.10, `HERMES_DISABLE_LAZY_INSTALLS=1`): **5649 passed, 6
+  skipped, 0 failures** in 480 s, with the sparkrun and `gh` probe fences both
+  reporting nothing reached a real exec.
+* The two reap-level cases that are the behaviour-preservation proof keep their
+  verdicts with NO assertion changed:
+  `test_proxy_repair_pid_identity_t_640be7a2.py::TestRepairVerdictUsesTheTree::test_reap_never_signals_a_child_of_the_tracked_proxy`
+  (still `is False`, still `kill_sink == []`) and
+  `...::test_reap_still_reaps_a_foreign_litellm_orphan` (still `is True`, still
+  signals `FOREIGN` first). Only the fakes moved seams — the fixture no longer
+  installs a children table at all, because there is nothing left that reads one.
+* The three predicate-level cases that asserted the BFS contract were REWRITTEN
+  onto the tri-state with every old assertion re-pinned, not dropped:
+  `test_unreadable_process_table_fails_closed` →
+  `test_unreadable_process_table_is_not_evaluable` (`is None`, and the walk stops
+  at the first unreadable parent — one lookup), with its verdict half landing as
+  the new `test_unreadable_table_verifies_nothing` (verified False, healthy False,
+  `owner_depth` None, port not reported down, and the log says "could not be read"
+  rather than "PROVEN FOREIGN"); `test_walk_stops_at_the_depth_cap` →
+  `test_walk_stops_at_the_hop_budget` (not credited + ≤ `max_hops` lookups); and
+  `test_walk_stops_at_the_pid_budget` → `test_a_wide_process_table_costs_no_extra_walk`,
+  which keeps the guarantee in the only unit an upward walk has — a 114-child
+  fan-out costs exactly 1 lookup and does not change the answer either way.
+  `(True, d)` became `is True` plus the depth from `_pid_ancestry_walk`, so
+  `owner_depth` (0 for the tracked PID, 1 for the incident's wrapper/child pair)
+  stays pinned where it was.
+* The card's new case: `test_proxy_reattach_no_stop_t_f4ee3ce6.py::TestGatewayIdentity::test_the_child_verdict_never_consults_a_children_table`
+  — the uvx wrapper/child pair classifies as `child`, `_proc_ppid` was consulted
+  exactly ONCE and nothing else consulted, and the structural half asserts
+  `_proc_children` / `_proxy_owner_is_tracked_proxy` are gone so a second answer
+  to this question cannot quietly come back. `test_the_walk_is_bounded` moved from
+  the deleted `PROXY_TRACKED_TREE_DEPTH` onto `PROXY_ANCESTRY_MAX_HOPS` and now
+  pins the lookup count too, so the budget patch cannot be a no-op.
+* One process-table seam in the fixtures, not one per direction: the
+  `_hermetic_process_table` autouse fence in `hscc_daemon/tests/conftest.py`
+  fenced `_proc_children → []`; it now fences `_proc_ppid → None`, i.e. the
+  hermetic default is NOT-EVALUABLE — the direction that cannot turn a forgotten
+  fake green and cannot turn it into a kill either.
+* Suites, separate invocations at this head: guard
+  `test_proxy_reap_descendant_guard_t_af7d5486.py` 15 passed,
+  `test_proxy_repair_pid_identity_t_640be7a2.py` 23 passed (22 before, +1 the new
+  unreadable-verifier case), `test_proxy_reattach_no_stop_t_f4ee3ce6.py` 15 passed
+  (14 before, +1 the children-table case), together 53 passed, and
+  `test_health.py` 167 passed.
+* All fakes: injected `ppid_fn` / stubbed `_proc_ppid`, `_proxy_listener`,
+  `os.kill` and `log` — no real `lsof`, no real `ps`, no signal that could reach a
+  process. The live proxy's `<CACHE>/sparkrun/proxy/state.yaml` was never opened
+  for write; the sparkrun fence reported 0 calls resolved to the live CLI.
+* `hscc-cluster/tests/test_heal_status_tool.py` (new): **17 passed**. Pins the
+  breaker's own read (`strike_count`/`suspended`) as the parity oracle, the
+  in-window vs recorded distinction, strike ages and suspension expiry, private
+  ledger keys, corrupt entries, the CLI panel rendering from the same snapshot,
+  byte-identical ledger before/after (read-only), an AST ban on `clear`/
+  `_save`/`reset_alert`/transport names, the no-argument schema, and the
+  registry/manifest pins (`heal_status` present; no `heal_clear` anywhere).
+  Hermetic: the ledger path and clock are patched per test.
+* `pytest hscc_daemon/tests/test_heal_breaker.py
+  hscc_daemon/tests/test_heal_breaker_node_pause_t_e6ee7e60.py
+  hscc_daemon/tests/test_heal_cli_help.py
+  hscc_daemon/tests/test_plugin_manifest_drift.py
+  hscc_daemon/tests/test_skill_tool_coverage_t_cb167686.py
+  hscc_daemon/tests/test_verify_cluster_tools.py
+  hscc-roles/tests/test_main_orch_cluster_control.py
+  hscc-bootstrap/tests/test_skill_install_update.py hscc-cluster/tests/test_heal_status_tool.py`:
+  **248 passed**. The manifest/registry receipt moved 29 -> 30 with a D4 guard
+  (no `heal_clear` declared); the skill gate now documents `heal_status` and
+  keeps `heal-clear` in the decided-against table; the roles section maps the
+  new tool.
+* CLI smoke, in a throwaway `HOME` with a seeded `~/.hscc/heal-breaker.json`:
+  `python -m hscc_daemon heal-status` exits 0 and prints the per-node panel, and
+  `heal-status --help` stays inert (rc 0, ledger bytes/mtime unchanged). This
+  is the real verb whose rendering now calls `heal_breaker.snapshot()`.
+* `python3 scripts/address_guard.py --tracked` clean; `scripts/changelog_fragments.py
+  check` clean; `scripts/readme_lint.py --strict` findings 0.
+- **The brief's premise ("every profile inherits the root `plugins.enabled`")
+  is falsified by running the production gate.** Hermes has no root→profile
+  overlay: `load_config()` = `DEFAULT_CONFIG` + `get_hermes_home()/config.yaml`
+  only (`config.py:2215-2262`, `:433-435`), and the dispatcher injects
+  `HERMES_HOME=<profile dir>` into every worker
+  (`kanban_db_dispatch.py:2800-2808`). Swept profile configs (51 today, 52 at the first sweep): **0** carry a
+  `plugins` key, while **25** still name `hscc-cluster`+`sparkrun` in top-level
+  `toolsets:` and **53 of 54** profile homes carry the plugin trees (21 entries in each).
+  Re-swept 2026-11-23 10:06 +02:00 — the fleet churns, so the denominators carry a time. Running
+  `collect_directory_manifests` + `gate_manifest` + `_get_enabled_plugins`
+  against sandboxed copies: worker home → every `hscc-*` plugin `placeholder /
+  "not enabled in config"`; root home → `load` for exactly
+  `hscc-cluster`/`hscc-commands`/`sparkrun-hermes`. So the tools are already
+  absent for workers and project orchs — and for the main orchestrator too,
+  which starts as `hermes -p <main> chat` (`main_cli.py:8,61`).
+- **Landmine found while reading, not on the brief:** `_migrate_to_21`
+  (`config_migrations.py:300-325,328-347`) writes `plugins.enabled` = every
+  manifest-bearing dir under `$HERMES_HOME/plugins/` for any config missing the
+  key — so the next migration to touch a profile config hands every profile home
+  the full cluster surface. The current clean state is one migration old.
+- **Citations re-pointed to the repo tree by `t_66c77e6c`, base `3cb11669`.** The first
+  cut quoted the *deployed* `~/.hermes/plugins/` copies for the hscc plugin files while
+  labelling them repo-tree; the deployed trees lag main (deployed `hscc-cluster/__init__.py`
+  169 lines / 26 tools vs 196 / 28 in the repo), so the numbers did not resolve for anyone
+  opening the repo. Each re-pointed anchor was verified with `git show 3cb11669:<file>`.
+- **Read-only held.** No code, config, SOUL, skill or `~/.hscc` state was
+  written; probes ran against a sandbox `HERMES_HOME` with the live home opened
+  for reading only, and no `sparkrun`/`ssh`/`hscc-bootstrap` execution at all
+  (nolive rule). Raw tables + probe scripts named in the doc's §1.
+- **Docs guards.** `scripts/changelog_fragments.py check` → OK (52 entries).
+  The `readme_lint --strict` leg was **red** on the first push
+  (`DOC-UNLISTED` — a tracked `docs/` file with no entry in `docs/README.md`);
+  indexing the new doc fixes it, local re-run `docs-index: 226/226,
+  findings: 0`.
+- `hscc-roles/tests/test_generator.py`: 2 new functions (3 items — the section pin is parametrized over the default main name and a renamed one) assert on the text AFTER the `## Talking to orchestrators` heading, so a stray mention elsewhere in the SOUL cannot pass: `orch_message` named with the queue-only / rate-limited / audited properties, the main included at either end and `default` refused, `hscc orch inject` demoted to `--dry-run` probe + fallback, the pre-card sentence "only through `hscc orch inject`" asserted GONE, and the side-channel and not-a-work-order sentences still present. `hscc-roles/tests/test_main_orch_migration.py` adds `orch_message` to `CONTRACT_PHRASES`, so the phrase is pinned in the real `SOUL.md` a fresh install writes, not only in a composed string. Each case seals `HSCC_DIR` in a temp dir and stores the main name there — the live `~/.hscc` is never read.
+- Five mutation probes on the generator text, each reverted and re-verified: revert the section to the pre-card text (3 failed), drop `rate-limited` (2 failed), drop `--dry-run` from the CLI-verb clause (2 failed), rename the tool (3 failed), drop the no-side-channels sentence (2 failed). 5/5 bite; the worktree came back clean and green.
+- `hscc-roles` leg, sealed env, one pytest process: **372 passed, 0 failed, 0 skipped**, 3 back-to-back runs (5.79 s / 5.67 s / 5.73 s) at the merged head. Collection reconciles exactly: 369 at `origin/main` `6f404f9a` + 3 added, 0 removed.
+- `python3 scripts/readme_lint.py --strict`: **`findings: 0`**, byte-equal to the pristine `origin/main` baseline measured first in a `git archive` copy on the same interpreter (`files: 23  commands: 630  docs-index: 225/225  skipped: 2100  findings: 0`) — the counters do not move because SKILL.md is outside the README set, and `docs-index` is unchanged because the seam added no page.
+- `pytest hscc_daemon/tests/test_skill_tool_coverage_t_cb167686.py hscc_daemon/tests/test_heal_cli_help.py`: **44 passed**. The first is the gate that the `hscc-cluster` tool tables are exactly the registered tools (it parses any `| \`name\` |` row above the "deliberately do NOT exist" heading as a tool claim), so the rows added there are prose only and `heal_status` — the D4 "no tool yet" decision — is still not promised. The second still pins the F7 split this table describes: `/heal` restarts units (`restart_one`), `cli.cmd_heal` never does.
+- `pytest hscc-bootstrap/tests/test_skill_install_update.py hscc_daemon/tests/test_cli_orch_group.py hscc_daemon/tests/test_cli_orch_waker.py hscc_daemon/tests/test_toplevel_cli_help_f5.py`: **131 passed** — the installer still ships both edited skills, and no CLI-help wording budget moved.
+- Render sanity per file, before vs after: `hscc/SKILL.md` table rows **17 → 32** (+15 = 11 capability rows + 2 headers + 2 separators, exactly the rows intended); `hscc-cluster/SKILL.md` rows **71 → 71** and fences **24 → 24** (prose-only edits); doubled pipe-escapes **0** in both. `python3 scripts/address_guard.py --tracked` clean — the two families are described by name and path only, no host appears. No live cluster command was run (Nolive).
+* `hscc-api/tests/test_kanban_monitor_route_pointer.py`: 9 tests green, and they
+  bite — measured by mutation on a throwaway `--detach` worktree at the commit,
+  tree restored clean afterwards: removing the pointer from the verb help reddens
+  2 CLI-end tests, rewriting the handler's summary line to drop the verb name
+  reddens 1 route-end test, and registering a `POST` on `/v1/kanban/running`
+  reddens the GET-only test; the unmutated control is 9 green. (The verb name is
+  pinned on the docstring's SUMMARY line precisely because the old body prose
+  already mentioned `hscc kanban monitor --board` and F8 still happened — a
+  pairing buried in prose nobody opens is not a pointer.)
+* The naming is not allowed to be decorative: the shared-backing test drives
+  both doors — `kanban_cli._cmd_monitor --json` and the route handler — against
+  one spied `kanban_live.collect` and requires the identical call set
+  `board=<slug>, registered_only=True`, and a second test requires the handler to
+  reach collect through `_backing_collect` exactly once (a second hand-rolled
+  board read is how a parity pointer becomes a second source of truth, audit
+  F2's shape). Row-for-row equality stays `test_widget_route_parity_cards.py`'s
+  job and was not re-proved here.
+* No live anything: no board opened, no process enumerated (`_backing_list_running`
+  is stubbed), no host contacted; the leg's autouse `_isolate_hscc` fixture keeps
+  the real `~/.hscc` out of it.
+- `hscc_daemon/tests/test_heal_cli_help.py`: **41 passed** — 34 pre-existing plus a new `TestHealNameCoversTwoOperations` (7) that pins the F7 pair apart. It asserts the two `/heal` texts cannot be read as one operation: each names the other surface by name, the CLI entries' self-description may speak of strikes but never of restarting a worker, and the slash description's own clause never claims the breaker ledger. The rule is gated on its premise rather than on faith — a first test asserts `/heal` really does restart units (`restart_one` in the plugin) while `cli.cmd_heal` really does not touch one, so if the code paths ever merge the premise test fails and the class is deleted on purpose instead of being reworded around.
+- `python3 scripts/gen_site_commands.py --help-file scripts/tests/fixtures/hscc_help_landing.txt --write` regenerates clean, `scripts/tests/fixtures/hscc_help_landing.txt` refreshed from THIS repo's own `hscc --help` (not the installed bottle), and `pytest scripts/tests/test_site_landing.py`: **34 passed, 1 skipped** — the copy card, the generated command region and the CLI agree, and the page carries no private address.
+- Per-leg pytest, one process per plugin dir: `hscc_daemon` (heal help, top-level F5, orch group, orch waker) **159 passed**, `hscc-cluster` **1217 passed / 3 skipped**, `hscc-commands` **80 passed**. `python3 scripts/address_guard.py --tracked` clean; no live cluster command was run (Nolive).
+* `hscc-api/tests/test_profiles_route_canonical.py`: 19 tests green at
+  `81d4940d`, and they bite — measured by 10 in-place mutations of the two
+  route modules, each file restored byte-identically and the tree verified
+  clean of residue: adding `counts` / `total_running` to the roster payload
+  reddens 2 tests, registering the roster after the `(?P<name>[^/]+)` catch-all
+  reddens 2 (the pointer would send callers to `handle_show?name=list`), a
+  second `cmd_profile_status` call site inside `hscc-api` reddens 2, the roster
+  importing the count implementation reddens 1, a canonical handler that
+  recomputes the total reddens 1, a summary block losing the other route
+  reddens 1 each (both directions), a roster module docstring that names only
+  its own longer path reddens 1, and a registration pattern drifting from the
+  named route reddens 2. Two of those ten initially survived and are the
+  reason the assertions are what they are: a self-consistent fake cannot tell a
+  pass-through handler from a recomputing one, and `"/v1/profiles" in
+  roster_doc` is satisfied by the roster naming itself — the same prefix
+  collision that made F2 read as a duplicate answer.
+* One implementation, checked repo-wide rather than asserted: `get_profile_status`
+  has exactly one definition (`hscc-cluster/profile_status.py`), is referenced
+  outside it by exactly one module (the cluster-engine wrapper), and
+  `cmd_profile_status` is CALLED from exactly two non-test places — the
+  canonical route's `_backing_profiles` seam and the `hscc profiles` verb in
+  `hscc_daemon/hscc.py`. A third door (a second route, a tool, a daemon
+  projection) reddens the leg before it can drift.
+* Full `hscc-api` leg (the runner's own interpreter —
+  `run_tests.sh`'s `HSCC_TEST_PY` default, not a bare `python3` — runner
+  posture, one pytest process over `hscc-api/tests`): **1362 passed, 1
+  skipped** at the merged head `616d9594`, and the same at the pre-merge head
+  `81d4940d` — 19 of them this file (its collect-only count), so the rest of the
+  leg is 1343 items answering exactly as at the first commit of this branch
+  (`302f4a1b`: 1361 passed, 1 skipped with an 18-test file). A leg total that is
+  not baseline + my own test count is how a change leaks into a neighbouring
+  module; here the arithmetic closes. `changelog_fragments.py check` returns OK
+  and `scripts/tests/test_changelog_fragments.py` is 49 passed at the
+  fragment's own commit.
+* No live anything: both backings are monkeypatched on their own module, so no
+  test opens a kanban DB, imports `hermes_cli`, enumerates processes, reads the
+  operator's state home or contacts a host; the requests run over loopback HTTP
+  on port 0 so the router and the bearer gate are exercised, and the leg's
+  autouse `_isolate_hscc` fixture keeps the real state home out of it.
+* **The exclusivity claim is enforced, and the enforcement is proved to bite.**
+  `hscc-roles/tests/test_main_orch_cluster_control.py` grows 12 items (79 → 91
+  in this file; the `hscc-roles` leg is one pytest process, 463 passed / 0
+  failed at this head). `MAIN_ONLY_CLAUSES` is now 14 operative clauses checked
+  against the shipped constant AND against both render paths (`compose_soul` and
+  bootstrap's `ensure_orchestrator` -> `SOUL.md`), so a claim that survives the
+  constant but drops out of one renderer fails.
+* **A committed mutation probe, not a hand-run one.**
+  `test_deleting_the_claim_reddens_the_pin` deletes each of three claims from the
+  section text and asserts the same predicate the pin uses reports the deletion
+  (with a vacuity guard first, so the probe cannot pass on an already-thin
+  section). The parent card ran its probes by hand and reverted them; until now
+  nothing in the tree proved the pin still bites after an edit.
+* **`test_the_section_claims_nothing_the_code_falsifies` pairs each forbidden
+  sentence with the shipped code that falsifies it**, rather than forbidding it
+  by taste: `skill_dirs` is *run* against a tmp home (root + `general` +
+  `backend-engineer` + `demo-orch`, `.deleted` skipped) and `_is_orchestrator`
+  + `orchestrator_toolsets()` are read for the project-orch half. A positive
+  control (`test_the_falsified_claim_guard_can_fire`) proves the guard can fire.
+* Falsification measured from source and from running the installer's own
+  discovery in a tmp home — no fleet call, no real profile tree, no real
+  `~/.hermes`, no `sparkrun`/`ssh`, no bootstrap script executed even with
+  `--help` (nolive respected).
+* `hscc_daemon/tests/test_merge_queue.py` — 6 new cases, 98 passed under
+  `~/.hermes/hermes-agent/venv/bin/python`. The regression case feeds `_run_gate`
+  a `run_tests.sh`-shaped output in which everything printed *after* the failing
+  leg is filler — deliberately >40 lines, so the case fails without the digest
+  instead of passing by luck of a short suite — and asserts the verbatim
+  `FAILED hscc-api/tests/test_ws_relay.py::test_writer_restarts_after_kill`
+  line, the `✗ hscc-api (pytest exit 1)` row, and that the tail is still there
+  (the digest is added, never substituted). A second case drives the same output
+  through a real `tick()` and asserts the CARD comment alone carries test name +
+  leg + `Attempt: 1`, above the resolve boilerplate, and that the PR comment
+  carries the same text rather than a thinner copy.
+* Proven through the real argv too, not only a fake `Popen`: a `sh` script that
+  prints the same 12-leg shape and exits 1 is run by `_run_gate` for real
+  (milliseconds, no repo, no network), because a fake `Popen` returns exactly
+  the strings the test wrote and can never show that real `communicate()`
+  output reaches the digest.
+* Guard cases pin what did **not** change: a green leg's output is asserted
+  `== mq._tail(text)` byte for byte, so the fix cannot quietly reformat every
+  passing run's evidence; and the matcher tests pin the refusals — a dot
+  progress line, a `✓` row and prose that merely mentions `FAILED` mid-line may
+  not enter the digest. Capping is pinned as stated, not silent: beyond
+  `MAX_FAILURE_LINES` the digest ends with the count it hid, a duplicate
+  short-summary row appears once, and a 5 KB failure reason is shortened without
+  losing the `path::test` id.
+* New `hscc-bootstrap/tests/test_skill_install_update.py` (12 cases) drives the
+  installer as a subprocess with `HERMES_HOME` + `HSCC_SKILLS_SRC` pointed at
+  temp dirs — the same command `bootstrap.sh:417` runs. At the base sha
+  `39c887cf` 5 of the 12 fail (no backup anywhere, `GUARDED` froze the stale
+  flat copy, no retention/fail-closed seam); at this commit all 12 pass, and
+  the card's pin holds both ways: installed `SKILL.md` md5 equals the repo
+  template's after a run, and the stale bytes come back out of
+  `skills-backups/hscc.bak-<stamp>/SKILL.md`.
+* Two mutation probes on a copy, each caught by the test that should catch it:
+  guard-never-refuses -> `test_a_copy_that_does_not_exist_yet_is_still_refused`
+  (June's collision door stays shut); blanket-freeze-restored -> the
+  update/backup/refresh cases (5 red).
+* Read-only blast radius on this host's default home: all 11 top-level owned
+  skills report `matches repo`, so a bootstrap here writes nothing and mints no
+  backups; `sdlc-review` refreshes a copy that collides with the
+  hermes-managed `devops/sdlc-review` (content differs, so hermes still refuses
+  the bare name — reported, not silenced), and `devops` stays GUARDED because
+  `skills/devops/devops/` owns that name. `hscc-bootstrap` skills cluster
+  (`test_skill_guard`, `test_doctor_skill_findings`, `test_review_skill_stage_order`,
+  `test_skill_resolver_xval`, the new file): 89 passed.
+- `hscc_daemon/tests/test_kanban_help_honesty.py` (new, 20 cases): the verb
+  set is derived at runtime from the dispatcher's own unknown-verb refusal
+  line — never a literal — then both help surfaces must cover exactly it and
+  agree with each other, no surface may advertise a verb the dispatcher does
+  not route, and every rendered line stays inside 78 columns at `COLUMNS` 80
+  and 120. Red on the base tree for exactly the four missing verbs, green
+  after. The real-CLI probes run help argv only under a throwaway HOME with
+  recording PATH canaries: zero new files, zero trips.
+* premise, measured on the leg interpreter (3.14.10) and the framework one
+  (3.14.6), SIGTERM and SIGINT: `Event._cond._lock` is a plain non-reentrant
+  `threading.Lock`, and landing the stop while the same thread holds it hangs a
+  handler that calls `Event.set()` forever — reproduced with no hscc code in it.
+  The stdout door was probed the same way (stop landing while the same thread is
+  inside a `TextIOWrapper` write) and came back on this interpreter, so no
+  measured hang is claimed for it; the `print` still leaves the handler, because
+  a handler may not borrow a lock from someone else's design.
+* new `hscc-api/tests/test_api_server_stop_signal.py` (13 items): the
+  deterministic case that takes the stop flag's own lock and lands the signal
+  inside it (both signals), the no-hscc-code premise case, a cooperative-stop
+  case that asserts the operator lines and the sidecar teardown from a fake
+  bridge's marker file, and source pins — one call in the handler
+  (`_StopFlag.set()`), the flag is not an `Event`, both lines live in the
+  `finally:`, and `_MultiServer.serve_forever` still asks `stop_event` only
+  `is_set()` (t_6eff6258's contract, re-checked after the swap). Base arm
+  `6 failed, 7 passed`; head `13 passed in 23.5s`; the file adds 13 items to a
+  leg that collects 1323 (1310 pre-existing + 13), with no skip or xfail added.
+* `leg hscc-api` (one pytest process over `hscc-api/tests`, the runner's
+  interpreter and env) three back-to-back runs on the tree: `1322 passed,
+  1 skipped in 411.45s` at `479f8840`, then `1322 passed, 1 skipped in 403.58s`
+  and `1322 passed, 1 skipped in 403.85s` at `1d15597a` — all exit 0. The single
+  skip is `test_gateway_driver.py:210` ("captured corpus not present"), present
+  at the base of this card too. (The commit that appends these counts touches
+  only this file, so the runs above are the head's tree.)
+* the flagged sibling door, measured: `_MultiServer.serve_forever`'s flag branch
+  calls `self.shutdown()` on the serving thread, and `BaseServer.shutdown()` is
+  `__shutdown_request = True; __is_shut_down.wait()`. With a healthy listener
+  `shutdown()` returned in 0.09 s (poll_interval 0.1); with a listener whose
+  `service_actions` never returns it was STILL BLOCKED at 5.15 s, so that branch
+  would hang the `finally:`. Nothing in `hscc-api` overrides `service_actions`
+  (grep: no hits) and `server_close()` — the other call that waits — is not in
+  the stop path, so no blocker exists there today. Filed as its own card rather
+  than folded into this one, which the task limits to what a lock-free flag needs.
+- Fake tmux binary + fake unix sockets, `TMUX_TMPDIR` removed: `hscc main
+  start` and `_ensure_tmux_session` both land their `new-window`/`new-session`
+  on the discovered `-S <socket>`; with `TMUX_TMPDIR` declared the argv is
+  byte-identical; two live servers refuse and create nothing. No test reaches
+  a live tmux server.
+- `hscc-api/tests/test_repl_inject_socket.py` + `test_repl_inject.py`:
+  **65 passed**; `hscc-cluster/tests/test_orch_message.py` **51 passed**;
+  `hscc_daemon/tests/test_main_cli.py` **28 passed**;
+  `hscc-project/tests/test_tmux_chat.py` + `test_tmux_chat_matcher.py` +
+  `test_doctor_tmux_repl.py` **46 passed**.
+- `hscc-cluster/tests/test_orch_message.py`: **50 passed** (47 pre-existing + 3 new) in one pytest process. The new cases parse `__init__.py` (the dir is hyphenated, so it is not importable — same approach as `hscc_daemon/tests/test_plugin_manifest_drift.py`) and assert against the string `register()` actually advertises, not against a copy: the pre-#635 sentence asserted GONE in both the description and the comment, both doors present (`*-orch` and the configured main), both refusals present (`worker`, `default`), the four safety properties still named, and a 600-char cap so the description cannot be ballooned by a later card.
+- Description-pin contract checked on both sides of the gate, per the card: `hscc_daemon/tests/test_plugin_manifest_drift.py` and `test_verify_cluster_tools.py` compare tool NAMES (`plugin.yaml provides_tools` vs the `_*_TOOLS` tables the `register()` loop concatenates) and make no assertion on description text, so no manifest edit was needed — `orch_message` was already declared.
+- Counts are table counts at `origin/main` `82364196` (branch carries current
+  main), not estimates: 33 `TOP_LEVEL_COMMANDS` (`hscc_daemon/hscc.py:698`), 26
+  tools (`hscc-cluster/__init__.py:31-131`), 12 `register_command` sites
+  (`hscc-commands/__init__.py:852-913`), 96 unique `(method, path)` route pairs
+  with zero duplicate registrations + 1 WS (`ROUTES.append` sites across 22
+  `routes_*.py` plus the 12-entry `routes_cluster.load()` table), 13
+  `BUNDLED_SKILLS` names (`hscc-skills/hscc.py:59`).
+- Skill-coverage column measured by `grep -rl` over `install/hscc-skills/` for
+  49 verb strings: 7 hit, 42 hit nothing. Install-vs-skip measured by md5
+  pairing each installed `~/.hermes/skills/<name>/SKILL.md` against its template
+  (all 11 equal) and by `diff` against a profile-scoped copy (differs) — so the
+  installer updates where it writes, and the gap is the template plus the
+  default-home-only write target.
+- Read-only throughout: no fleet mutation, no confirm-gated call, no daemon
+  state write. `scripts/changelog_fragments.py check` and `scripts/readme_lint.py`
+  both clean on the branch.
+* `leg hscc_daemon` (canonical `scripts/run_tests.sh`, sealed env, at head
+  `d7822460`): `4816 passed, 1 skipped in 281.29s`, exit 0 — under twelve
+  self-expiring CPU burners, on purpose, because the last defect closed here only
+  ever showed up inside a loaded leg. Two further runs at the same sha on a quiet
+  host: `4816 passed, 1 skipped in 242.41s` and `in 230.18s`, both exit 0. The one
+  skip is `test_orch_waker_wake_claim.py`'s deployed-Hermes §3.1 wake-claim guard,
+  pre-existing. Reconciliation against the card's base on this host: 4805
+  pre-existing items + the 12 this file adds = 4817 collected. One further run
+  after merging `origin/main` (10 commits in, ~40 items added to this leg) at
+  `3ab48018`: `4857 passed, 1 skipped in 278.54s`, exit 0, same single skip. The
+  tip of this branch differs from that sha by this changelog line only.
+* The runs that shaped the fix, in order, because the shape came out of them:
+  at `15b1ea58` (handler still starting a helper thread) three consecutive
+  `leg hscc_daemon` runs came back `2 failed, 4814 passed, 1 skipped` — the
+  SIGINT arm of `test_the_serving_loop_returns_instead_of_being_cut_short` and
+  the SIGINT arm of `test_a_signal_landing_inside_a_log_write_still_stops`, both
+  with the child parked: its log ending at the startup lines, no
+  `Received signal` line (so the helper never reached its first statement), no
+  `@@SHUTDOWN@@` marker (so `_serve`'s `finally:` never ran) and the sidecar
+  alive at the 25 s bound. The same file alone at that same sha: `12 passed`.
+  Red only inside a full leg, never alone — that pair is what pointed at the
+  handler's remaining call rather than at the test.
+* Stated plainly, because it is the part a reviewer cannot re-derive: the
+  thread-start deadlock was never reproduced on command. Probes that take the
+  lock the interrupted state needs reproduce the *log* deadlock for both signals
+  (2/2, stack parked in `_get_logger`) and do NOT reproduce the thread-start one
+  — that second lock was never pinned down. What removed it is that the handler
+  no longer calls anything, so there is no lock left inside it to lose a stop
+  over; `...holds_nothing_the_serving_thread_holds` forbids adding one back and
+  the loaded leg run above is the check that the stop still lands.
+* New `hscc_daemon/tests/test_api_cli_stop_sidecar.py` (12 items): on a pristine
+  base worktree (`c934fb12`, production source untouched) `9 failed, 3 passed in
+  66.24s`. `hscc api stop` leaves the sidecar's pid alive, and its marker
+  records the sidecar starting and never its shutdown; both
+  `..._inside_a_log_write_still_stops` arms hang outright, which is the deadlock
+  itself. On the fixed tree `12 passed`, three consecutive runs: 7.55 s, 4.94 s,
+  5.21 s. The three base survivors
+  pin facts already true at base (`_handle_start` registers both signals, the
+  teardown sits in the `finally:`, the pid file is marked stopped on the path
+  that always runs), so surviving there is correct, not slack.
+* Posture of the new cases: sandboxed children with a redirected HOME, a
+  fixture token and an ephemeral loopback port; the gateway bridge is a fake
+  whose sidecar is a real subprocess, so "torn down" means a dead pid;
+  `launchctl` is fenced so no case can ask the operator's live gui domain. No
+  new skip or xfail, and the diff adds no address beyond 127.0.0.1.
+- `hscc-cluster/tests/test_proxy_log_archive_cluster_template_t_569fb349.py`:
+  10 cases, all fakes — `subprocess.run` stubbed, so no sparkrun argv is ever
+  exec'd and the suite's fence still reports 0 live-CLI resolutions. The
+  ordering claim is asserted on an event tape (`["archive", "start"]`), not on
+  timestamps. The value claim is the simulated-truncation case: the stub answers
+  the start the way sparkrun does (`open(log, "w")`), the live file really
+  empties, and the outage line is still readable in the archive afterwards.
+  Both WARN arms are pinned (`ok=False` result, and an archiver that raises
+  despite its contract), as is the fail-soft import (missing `hscc_daemon` →
+  one WARN naming `ImportError`, `loaded` still True), the once-per-apply guard
+  (2 families → 1 copy, 2 starts) and the negative control (a start that really
+  failed stays `loaded=False`; the seam launders nothing).
+- Red before green by mutation: commenting out the single call site makes
+  **8 of the 10 fail** (both ordering cases, the truncation proof, all three
+  WARN paths, the once-per-apply guard, and the default-posture case, whose
+  pass-through spy pins that the seam really fired). The 2 that stay green do so
+  by design — the failed-start negative control and the conftest-floor pin,
+  which are posture guards rather than behaviour.
+- `hscc-cluster/tests/conftest.py` gained `_pin_proxy_log_archive_to_tmp`, the
+  reason the ~15 pre-existing `install_proxy`/apply tests may keep calling it
+  with only `subprocess.run` patched: `PROXY_LOG_DIR` (write side) goes to the
+  per-test tmp dir and `SRC_OVERRIDE` (read side) to a path that does not exist,
+  so the default is a no-op by construction instead of reading the operator's
+  live log and creating `~/.hscc/proxy-logs` mid-suite. It also resets the
+  once-per-apply guard, so no test inherits another test's state.
+- `hscc-cluster` leg green over the whole directory: **1272 passed, 3 skipped,
+  0 failed** (60.9 s). CI on the PR selects `leg hscc-cluster` and `leg scripts`
+  and both pass, plus compile and guard.
+- Full 12-leg `scripts/run_tests.sh` at this head: **11915 passed, 10 skipped,
+  5 failed**, host at load 18-23 with a second card's full suite running
+  concurrently for the entire run. All 5 failures are in
+  `hscc_daemon/tests/test_api_cli_stop_sidecar.py` (2) and
+  `hscc-api/tests/test_api_server_stop_signal.py` (3) — the SIGINT /
+  child-teardown timing files #628 landed at current `main`, each failing by
+  exceeding its 180 s child-silence threshold, and none reachable from this diff
+  (no file here is imported by those two legs, and the daemon leg never loads
+  `hscc-cluster/tests/conftest.py`). Run alone on this head, under the same
+  contention, those two files are **25 passed in 29.75s**.
+- `hscc_daemon` was not touched: the change is one call site plus a wrapper in
+  `hscc-cluster`, and the archiver it calls is already pinned by
+  `hscc_daemon/tests/conftest.py`. Its leak guard and the seam's own tests were
+  re-run here anyway: 23 passed.
+- nolive respected: the live proxy's `state.yaml` was read and never written,
+  no `sparkrun` process was started or stopped, and nothing was written into
+  sparkrun's cache dir.
+* Measured before the change, on the leg interpreter, one `_ApiServer`,
+  `poll_interval=0.1`: a healthy listener's `shutdown()` returned in 0.09 s; with
+  `service_actions` blocked on an Event nobody sets it was STILL BLOCKED at
+  5.15 s.
+* `hscc-api/tests/test_api_server_stop_bound.py` (new): 8 cases — the wedged stop
+  returns (in-process, and end to end in the child that runs `serve_main`, which
+  at base printed `hscc-api: signal 15, shutting down` and then nothing: no
+  `stopped` line, no sidecar teardown, no exit), the healthy stop still reports
+  clean and exits 0 with no warning, the bound is a named constant inside the
+  supervisor's SIGKILL window and is the wait actually kept, only the wedged
+  listener of two is named, and two source pins — the flag branch may not call
+  `self.shutdown()`, and `_MultiServer.shutdown()` may not grow a bounded wait.
+  Hermetic: loopback and `::1` only, a throwaway HOME with a fixture token, and a
+  fake `gateway_bridge` that writes a marker instead of supervising a real
+  `hermes serve`.
+* The wedge is announced, not assumed. Signalling on the child's ready line alone
+  RACES the listener threads into their loops, and a stop that arrives first makes
+  a loop exit before `service_actions` is ever reached — `serve_forever` came back
+  in 0.15 s and the case would have passed on a build that still hangs. The wedge
+  now reports entry (an Event in-process, a marker file in the child) and the stop
+  waits for it.
+- `hscc-bootstrap/tests/test_skill_install_update.py`: 12 -> **17** cases, all
+  green. The five new cases drive the real CLI as a subprocess in a sandboxed
+  `HERMES_HOME` + `HSCC_SKILLS_SRC`: the orphan (with a post-July nested
+  edit) leaves `skills/` and comes back out of
+  `skills-backups/removed-<stamp>/hscc-master-knowledge/` by md5; a clean home
+  gets no empty backup dir and a second run moves nothing; the full `install`
+  verb retires it too; and two retirements under one stamp become
+  `hscc-master-knowledge` + `hscc-master-knowledge-2`. `install-skills` and
+  `install` were also run by hand against a throwaway `HERMES_HOME`, not just
+  through pytest.
+- `hscc_daemon/tests/test_proxy_repair_pid_identity_t_640be7a2.py`: 22 cases
+  — parent-tracked/child-owns-port VERIFIED (and the success line names both
+  PIDs), foreign and cousin PIDs on `:4000` still UNVERIFIED and still
+  ERROR, the bounded walk pinned by lookup count at the depth cap and at the
+  PID budget, the reap refused against the tracked proxy's own child, and the
+  healthy drift tick emitting no ERROR line and no failure record. Fake
+  `sparkrun` planted off PATH, fake port-owner and process tables (192.0.2.x);
+  no `lsof`, no real `ps`, no signal delivered.
+- `hscc_daemon/tests/conftest.py`: new autouse `_hermetic_process_table`
+  defaults `_proc_children` to an empty table, so no test can pass or fail on
+  what else is running on the host.
+- Every card id written into §9's ownership line was checked against the board rather
+  than copied from the briefing: the five low-priority findings exist TWICE (hscc-board
+  `t_3df8595c`/`t_4a149f2f`/`t_1a5a4a8c`/`t_3a0ade78`/`t_96ae8add` and general-board
+  `t_34804e61`/`t_01ce22cd`/`t_328bfa22`/`t_28cc4de5`/`t_b21a939e`), so the doc names both
+  and says which half is already landed (F8's line is on main at `f59c0bdd`). F4/F10 are
+  recorded as having no card of their own — verified from `t_852a32e6`'s body + amendment.
+- The 26→28 tool note is a registry read, not an assumption: `_READ_TOOLS` … `_ORCH_TOOLS`
+  in `hscc-cluster/__init__.py:32-148` enumerate 28 names, the two new ones being
+  `autodown_status` and `merge_queue_status`, each with its no-mutation refusal in the
+  adjacent comment. The verbatim ruling's "all 26 tools" is left as the operator wrote it.
+- `python3 scripts/changelog_fragments.py check` → OK (46 entries consistent, 44 before
+  this fragment's two entries);
+  `scripts/readme_lint.py --strict` (hermes venv interpreter) → `findings: 0`,
+  `docs-index: 225/225`, `files: 23`, `commands: 630` — identical to the pre-change
+  baseline, since no doc was added and no command token introduced. Hygiene: no address,
+  no absolute home path and no new attribution anywhere in the diff; the sole tilde-rooted
+  path in the doc's diff is the one inside the quoted ruling, which the card required
+  verbatim.
+- `scripts/tests/test_load_burners.py`: **7 passed in 2.98 s** with the hermes
+  venv interpreter, and a direct smoke run of the real harness
+  (`scripts/load_burners.sh 1 5 -- sh -c 'echo ok'`, exit 0) — the harness is a
+  script, so both were run rather than inferred from pytest. Burner counts stay
+  at 1–2 and each run is under a second, so CI never loads the box.
+* `hscc-api/tests/test_routes_node_pauses_t_787930b5.py` — 12 new cases over a
+  real loopback server: empty overlay, a record written by the real
+  `node_pauses.pause` writer, sorted rows with `until: null`, span/owner
+  semantics, server-root isolation from the module default, 405 on `POST` with
+  no write, 401 without a token, degraded answers for a raising/non-object
+  reader, corrupt-file fail-open, and the raw JSON row-key contract. Every host
+  is TEST-NET-1 (`192.0.2.0/24`).
+* Full `hscc-api` leg via `HSCC_TEST_LEGS=hscc-api scripts/run_tests.sh -q`:
+  **1393 passed, 1 skipped** (the pre-existing captured-corpus skip), green.
+* root cause reproduced before the fix, both paths: a child spawned with SIGINT blocked stalls in the stop case with `@@HANDLER-LATE@@ ... (_last_signal=None)` (the handler really was never dispatched, not merely ignored), and the same signature appears for SIGTERM. With the mask clear restored, the same children exit 0, print `harness: _serve returned` / `@@SERVE_MAIN_RETURNED rc=0@@`, record the real sidecar `shutdown`, and leave no live sidecar pid.
+* teeth: reverting only the mask clear (`pthread_sigmask` call made a no-op) reddens all four new cases (both signals, both entry paths); restoring it goes green with the existing assertions untouched — no skip, no xfail, no weakened bound.
+* `hscc_daemon/tests/test_api_cli_stop_sidecar.py` 14 passed; `hscc-api/tests/test_api_server_stop_signal.py` 15 passed. The neighbouring entry paths run green over the same seam: `hscc_daemon` stop/launchd/ANSI/unified-CLI files 162 passed, and the `hscc-api` stop-bound/entrypoint/multibind files 49 passed.
+* smoke: `hscc api start --help` (the verb whose child installs the handlers) prints its usage and exits 0 under a throwaway HOME.
+* `hscc-cluster/tests/test_doctor_tool.py`: 25 tests green (payload parity
+  against the real door's own spawn, per-call re-spawn — no cached verdict,
+  findings-addressable-by-check-name, a fatal verdict on a non-zero rc still
+  relaying its findings, missing/unparseable/hung door refusing rather than
+  reporting green, fixed-argv + structural ban on the repair side and any
+  transport, registry + manifest refusal of a `doctor_fix`, and a pin that the
+  door resolves to the plugin dir's own sibling rather than the deployed
+  `~/.hermes/plugins` copy). Hermetic (nolive): the door runs in a process the
+  test cannot patch, so the seal is the child's own environment — sandbox
+  `HOME`/`HERMES_HOME`, a fake `sparkrun`/`curl`/`ssh` first on `PATH` that
+  logs every call, TEST-NET-1 (192.0.2.x) hosts and closed loopback ports, and
+  the uv cache sealed outside the snapshot; the seal is guard-asserted to have
+  reached the child. The sparkrun fence reported no real exec.
+* `hscc_daemon/tests/test_plugin_manifest_drift.py`: manifest/registry receipt
+  bumped 28 -> 29 with a `doctor` presence assert and a loop rejecting
+  `doctor_fix`/`doctor_apply`/`doctor_repair`/`doctor_enable`/`doctor_write`.
+* `hscc-roles` leg green under `scripts/run_tests.sh`'s own posture (HOME seal,
+  `HSCC_TEST_LEGS=hscc-roles`): 464 passed, 0 failed, 0 skipped. The item that
+  was red — `test_every_registered_tool_is_named_or_deliberately_excluded[doctor]`
+  — passes as a mapped row, not as an exclusion; the same 464 items read
+  "1 failed, 453 passed, 10 skipped" before this card.
+* `hscc-cluster` leg green on the same tree: 1297 passed, 3 skipped (two
+  cached-diffusion-fixture skips and the opt-in `sparkrun show` VRAM estimator).
+* `hscc_daemon/tests/test_plugin_manifest_drift.py` +
+  `test_skill_tool_coverage_t_cb167686.py`: 27 passed — the registry/manifest
+  receipt and the skill-doc coverage still hold with `doctor` registered, and
+  neither needed a change here. `changelog_fragments.py check`: OK, 70 entries
+  consistent.
+* Mutation probe: deleting the `doctor` row reddens BOTH the parametrized case
+  and the static read-tool pin. It had to be re-run once — an earlier wording
+  carried a second backticked `doctor` in the CLI-only sentence, and because
+  both pins are substring checks the mutant survived on that passing mention.
+  The sentence now says "the read tool mapped above", so the row is the only
+  thing that can satisfy the gate.
+* five machine-path asserts in the sweep's other legs re-pinned as what the render actually does, after re-rendering each one under real pytest with the verbatim Rich console teed to a log (a pytest `E` line middle-elides a long repr, so an ellipsis there is pytest's own — that artifact is what made a fold look like a clip in t_f2382c78's report): `api install-service` folds the unit-file path from tmp root 161, `autodown status` folds the agent-source path at tmp roots 68..73 and 144..149, `roadmap add` folds at 185+, `roadmap adopt` at 161..163 and 176..190, `map-sessions` at 179+. The four whose phrase a fold really splits now assert through `_says` (hscc-project/tests/rich_layout.py, plus the daemon-leg copy added beside real_hermes.py), each keeping a RAW anchor from the same row (`UNEVALUABLE`, `NOT loaded yet`, `launchctl bootstrap`, `backed up`, `added a new item`, `resolved deterministic (repo-path): 3`) as the proof the row rendered; the fifth (`.bak`) was measured at eight tmp-root lengths never to break inside the phrase and keeps its raw assert. Nothing deleted, skipped, xfailed or broadened; no width, `COLUMNS` or `--basetemp` change.
+* the normalised asserts still refuse a view that stops printing the token: `map-sessions`'s proposal prefix renamed away from `map-sessions-` in `flightdeck/core/map_sessions.py` reddens the case (pytest rc=1) with the unmutated control green (rc=0), and on the four captured renders the raw phrase is absent (the fold), `_says` recovers it, and deleting the folded fragment makes `_says` refuse again.
+* the two cases the sweep reported as red at EVERY length are not layout: `hscc-cluster/tests/test_fleet.py::test_daemon_mod_does_not_pollute_sys_path_*` assert `assert <the sweep's own workspace> not in sys.path`, and the six `hscc_daemon/tests/test_node_pause_stop_intent_t_8ad06a53.py` cases were the leg's own sparkrun fence firing on the sweep's posture. Both are green in the leg posture.
+* `hscc-cluster/tests/test_merge_queue_status_tool.py`: 22 tests green (one-
+  door payload parity vs the CLI verb byte-for-byte, per-project fields,
+  read-only ledger snapshots + a write-verb control proving the snapshots bite,
+  structural ban on any mutating/builder/transport name in the handler, and the
+  schema/mutation-surface contract). Hermetic under a sealed `HSCC_HOME` +
+  `FLIGHTDECK_REGISTRY`; every planted repo path is non-existent so
+  `default_reason` short-circuits to "no repo" and no git/network is touched.
+  The sparkrun fence reported no real exec.
+* `hscc_daemon/tests/test_plugin_manifest_drift.py`: manifest/registry receipt
+  bumped 27 -> 28 with a D8 guard asserting none of the six merge-queue
+  mutation tools is declared.
+- `hscc-cluster/tests/test_orch_message.py`: **47 passed** (33 pre-existing + 14 new) in the sealed env — per-test `HSCC_DIR` and `HERMES_PROFILE`, `repl_inject` stubbed, no tmux and no live `~/.hscc` reached. The new cases cover the main orchestrator accepted as sender and as target, non-main `*-orch` profiles unchanged, worker/`default`/empty names still refused, `default` configured as main still refused, an unreachable and a raising resolver both degrading to the shipped rule, the self-message guard still holding for the main profile, and the no-hardcode proof: renaming the main inside a temp `main-orchestrator.json` makes the tool accept the new name and refuse the previous one again. Two structural guards forbid a quoted main-orchestrator name or state filename anywhere in `orch_message.py`.
+* `hscc-roles/tests`: **510 passed**. `test_main_only_role_templates.py` now
+  reads the *rendered* SOUL through `compose_soul()` — the QA finding was a
+  generated line, so the template block alone is not the contract — for both a
+  worker and a `*-orch` name, asserts its cluster-tool predicate is empty (with
+  no `orch_message` exemption left), and asserts the main's rendered SOUL still
+  names `orch_message`. The mutation probe still reddens on a reintroduced
+  `cluster_status` / `provision_model` / `hscc-cluster` claim.
+* `hscc_daemon/tests/test_skill_tool_coverage_t_cb167686.py`: **4 passed**. The
+  new count pin parses the registry with the shipped `_registered_tool_names`
+  parser (`len(_registered_tools())`) and checks each of the four prose claims
+  in `install/hscc-skills/{hscc-cluster,hscc}/SKILL.md`; the claim pattern must
+  still match exactly once, so a rewording cannot make the pin vacuous.
+* No CLI verb, argparse surface, live file or fleet surface was touched: the
+  change is the SOUL template constant, the audit/release-note counts, and the
+  tests. `python3 scripts/address_guard.py --tracked` clean.
+* red before green, re-executed at the rebased head with the CORRECTED
+  expectation. The uvx-descendant half of this finding shipped with t_640be7a2,
+  so it must NOT be red pre-fix; the pre-fix tree is therefore this head with
+  ONLY the reap's guard reverted to `_proxy_owner_is_tracked_proxy` (helper and
+  everything else untouched): `1 failed, 14 passed`. The single failure is
+  `test_reap_refuses_when_the_ancestry_cannot_be_read`, failing `assert True is
+  False` — the old guard returned True, i.e. it had already SIGTERM'd a listener
+  whose parent chain could not be read at all. Every other case passes on the old
+  code, including the wrapper/child refusal (the measured 85087/85090 shape) and
+  all controls, which is what pins this change as the unreadable-table delta and
+  not a re-landing of t_640be7a2. Over the fix: 15 passed.
+* Suites over the same seam, separate invocations: `test_health.py` 167 passed,
+  `test_proxy_repair_pid_identity_t_640be7a2.py` 22 passed, and the health /
+  guard / pause-drift / stay-down / re-attach / verdict-logging /
+  paused-router-stale / live-leak set together 258 passed.
+* Seam collision found and fixed INSIDE THE FAKE. `FakeProcessTable` in
+  `test_proxy_repair_pid_identity_t_640be7a2.py` faked only `_proc_children`; once
+  the guard walks parents, two of that file's own reap controls fell through to the
+  host's real `ps` and failed — `test_reap_still_reaps_a_foreign_litellm_orphan`
+  (asserts the reap still fires) and
+  `test_reap_never_signals_a_child_of_the_tracked_proxy` (asserts a healthy proxy
+  is never signalled), and keeping both true is precisely the guard's job. The fake
+  now also installs `_proc_ppid`, derived as the inverse of the parent→children
+  table it already holds. No assertion in that file was relaxed, changed or
+  removed. The same two-directional fix is applied to this file's own `Reaper` rig
+  so the pre-fix leg cannot go red for a reason unrelated to the guard: a
+  downward-only fake lets the old BFS read an empty table and call a healthy child
+  foreign, which would have looked like a regression of t_640be7a2 and was not one.
+* `hscc_daemon/tests/test_health.py::test_reap_kills_untracked_litellm_orphan`
+  was passing on the host's real PID table (the invented PID's actual parent was
+  never stubbed, which the old code never consulted). It now states the ancestry it
+  means to test — a chain that completes at the root without the tracked PID — so
+  "untracked" is asserted rather than inherited from the machine running the suite.
+* All fakes: injected `ppid_fn`, stubbed `_proxy_listener`, `_proc_children` and
+  `os.kill` — no real `lsof`, no real `ps`, no signal that could reach a process,
+  and the live proxy's `state.yaml` was read, never touched.
+* The finding was executed, not asserted. A probe (scratch, run by path) planted NO
+  serving.json, three TEST-NET-1 workers each running a sparkrun container, and a
+  recording `run_cmd`, then called `reap_orphans({"confirm": True})`. On unmodified
+  `heal.py`/`clusterlib.py` at HEAD: `executed=True refused=None guard=None stops=3
+  reaped=3` with `STOP sparkrun-11-vllm on 192.0.2.11`, `.12`, `.13` — the fleet-wide
+  teardown. Over the fix: `executed=False refused=True guard='not_evaluable' stops=0
+  reaped=0`. The structural half (14 failed on `module 'clusterlib' has no attribute
+  'serving_snapshot'`) is the one that proves nothing on its own, so the probe is the
+  evidence; restore was proven by `diff` against the saved copies, not trusted.
+* `hscc-cluster/tests/test_heal_reap_serving_guard_t_b21a939e.py` (new): 17 cases —
+  the four not_evaluable file states each refuse and reach NO `sparkrun stop`
+  (recorded argv asserted empty, and the refusal names which state it was), the
+  whole-fleet blast-radius refusal, the CONTROL half that a single leftover on one of
+  three workers still reaps exactly that container (a guard that disables the tool is
+  not a guard), a no-containers sweep answering `preview` rather than a refusal so the
+  guard does not cry wolf, the preview quoting path + `guard: trustworthy` + live
+  worker count, `force=true` overriding the verdict while `run_cmd`'s argv proves the
+  head container never entered the stop list, the action-time re-read dropping a stop
+  the moment a writer claims the node (and surviving `force`, and NOT aborting on an
+  unreadable re-read — one-directional by design), the guard leaving the planted file
+  byte-identical across all four branches with no sibling file added (it does not own
+  serving.json), and the snapshot seam's own contract (state per malformed shape,
+  never raises, path argument wins, non-dict unit tolerated). Hermetic: TEST-NET-1
+  fakes only, serving.json planted as a real fake file under tmp_path by the new
+  `fake_serving` fixture, `sparkrun stop` intercepted at the clusterlib seam — no
+  fleet, no ssh, no subprocess (the suite's fence reports "no sparkrun-shaped
+  subprocess call reached a real exec").
+* The six pre-existing reap tests moved from stubbing `read_serving_units` to planting
+  a fake serving.json, which is what the guard branches on; each keeps its original
+  assertions (spares-serving-units, head-exemption, per-stop failure tracking,
+  all-ok/all-fail) and the same `reaped` lists. `test_reap_never_touches_head` now
+  plants a HEALTHY file, so it says only what its name says — the corrupt-file half it
+  used to double as is pinned explicitly in the new file.
+* `hscc-cluster/tests/conftest.py`: `_pin_serving_json_to_tmp` also pins
+  `clusterlib.SERVING_JSON` (it pinned only `cluster_template`'s copy), so no test in
+  the suite can read the operator's live serving.json — the same live-state leak
+  doctrine as t_501fb7f1, in the read direction. New `fake_serving` fixture added
+  beside it.
+* CI on the PR (not just the local leg): `leg hscc-cluster` pass 1 m 7 s,
+  `leg scripts` pass, aggregate `legs` pass, `guard` + `select` pass — the cluster
+  leg in particular runs the conftest's widened serving.json pin against every test in
+  the suite, not only the reap tests.
+- Inventory checked bidirectionally against disk rather than by eye: every directory in `ls install/hscc-skills` appears in `install/README.md` (0 missing) and every skill name the page inventories is a directory on disk (0 phantom), with 13 == 13 on both sides. `hscc-lessons` confirmed to be a real skill before documenting it as shipped-as-source: `install/hscc-skills/hscc-lessons/SKILL.md`, 2.7 KB, valid `name:`/`description:` frontmatter.
+- `python3 scripts/readme_lint.py --strict`: **findings: 0** — measured against a **pristine** `origin/main` baseline that also reported 0, printed side by side. `docs-index: 225/225` and `files: 23` unchanged (no page added or removed); `commands: 625 -> 630`, accounted for as five added backticked `hscc*` tokens (`hscc-lessons` ×2, `hscc bootstrap` ×2 — one per page — and `hscc-skills/hscc.py`), all quotations of existing surface, no new CLI verb. `python3 scripts/changelog_fragments.py check` OK. `python3 scripts/address_guard.py --tracked` clean on the staged diff; docs-only, no cluster command run (nolive).
+* New `hscc-bootstrap/tests/test_skill_install_main_only.py` (8 cases) drives
+  the real CLI as a subprocess with throwaway `HERMES_HOME` / `HSCC_DIR`: the
+  three skills land under the resolved (non-default) main name, the root home
+  and two fake profiles keep zero copies, every moved tree is byte-recoverable
+  under `skills-backups/removed-<stamp>/`, a profile-authored skill and a
+  same-named non-skill reference dir survive, a category-depth copy is moved,
+  the sweep is idempotent, a non-main `HERMES_HOME` is cleaned, `status` reads
+  the main profile, a tampered name fails closed, the full `install` verb
+  follows the same route, and `uninstall` reverses both destinations.
+* Revised `hscc-bootstrap/tests/test_skill_install_update.py` (13 cases) to run
+  with `HERMES_HOME` as the main profile home plus sandboxed `HSCC_DIR`; the
+  backup-first update, collision-guard, retention and fail-closed pins are
+  unchanged and green.
+* The LEFT-3 safety gate ran BEFORE any code, read-only, in one process with a fake `sparkrun` on `PATH[0]`, a `subprocess.run` tripwire that raises on any argv not resolving to that fake, and `post_boot.clear_expected_up` replaced by a recorder: the operator's real `~/.hscc/expected-up.json` was stat'd byte-identical before and after (`size=1161 mtime_ns=1794210032780252155`), zero real stops, zero marker writes, across the engine's `--dry-run`, the slash plan, and four canned sparkrun modes (`clean` / `already` / `mixed` / `none`) run through BOTH surfaces. Verbatim before/after log and the hosts-scope-marker-models diff table: `NOTES-t_bf8577f9.md`; the same probe re-run against the fix shows both surfaces issuing `sparkrun stop --all --cluster hscc` and reaching the same verdict in all four modes. No `--apply`, no confirmed real run, ever from this card.
+* `hscc-commands/tests`: **87** cases green (was 84). `test_cluster_down_stay_down.py` was rewritten around the delegation — one engine call with `reason="/cluster-down"`, verdict rendered from the engine's dict, `○` never claimed as a stop, the real-failure case keeping its `ssh: Permission denied` tail instead of becoming `○ nothing running`, `dry-run` issuing nothing, refusal when the engine is absent — plus a fake `sparkrun` on PATH that proves no sparkrun process is reached from this surface, and a source-level gate that `cmd_cluster_down` and its helpers contain no `SPARKRUN`, no `cmdlib._run`, no `--hosts`, no `ThreadPoolExecutor`.
+* `hscc-cluster/tests`: **1202 passed, 3 skipped** (skips pre-existing: two diffusion fixtures, one opt-in live `sparkrun show`). New `TestStayDownMarkerReport` pins the CLI default reason unchanged, an explicit reason reaching the record, the marker key being additive-only (`_PREVIOUS_KEYS ⊆ set(res)`, `success` unmoved), a failed clear reported as well as warned, and `--dry-run` reporting no marker at all.
+* Two render bugs the new tests caught before they shipped: a `res.get("error")` guard that mistook sparkrun's stderr for the engine's pre-flight refusal (every honest failure would have rendered "the engine could not issue the stop"), and a renderer that passed through only what the engine *printed* — sparkrun's per-host text is captured in the result, so the first cut showed the operator an exit code and nothing else. Both pinned (`test_sparkruns_stderr_reaches_the_operator`).
+* `hscc-cluster/tests/test_autodown_status_tool.py` (new): 21 cases — payload byte
+  parity with `hscc autodown status --json` (payload, key set, and a rich planted
+  payload), armed/disabled/blocked/reconciled renderings from a planted config, the
+  read-only guarantee (state-dir snapshot unchanged across both doors — the tool's
+  and the CLI's — including the §8 reconcile path), the structural one-door pins,
+  the schema pins and the manifest/registry pins. Hermetic: fake hosts 192.0.2.x,
+  every `~/.hscc` and `~/.hermes` path in the status read redirected to a per-test
+  tmp dir, and the interlock/serving probes default-stubbed — no fleet, no network,
+  no subprocess (the suite's sparkrun fence reports anything that tried).
+- `hscc-roles/tests/test_main_only_role_templates.py`: new suite pinning the
+  non-main rule, the absence of every registered `hscc-cluster` tool/toolset
+  from both worker and project-orch blocks, the `orch_message` split, and a
+  committed mutation probe that reintroduces `cluster_status`,
+  `provision_model` and `hscc-cluster` into a block and reddens the same
+  predicate. `hscc-bootstrap/tests/test_install_soul.py` adds the root-audience
+  guard (exact rule present; no cluster tool catalog; slash verbs kept).
+- `hscc-roles` leg: **471 passed**; `hscc-bootstrap` legs touched:
+  `test_install_soul.py` + `test_doctor_role_soul.py` +
+  `test_bootstrap_main_orch*.py` **46 passed**. The script entry point was
+  smoke-tested against a temp `HERMES_HOME` (`SOUL.md: created | ops
+  personality: seeded`, rule present once, `sparkrun_exec` absent).
+* `hscc-cluster/tests/test_main_status_tool.py` (new, 23 tests green): payload
+  parity with `hscc main status --json` for the main fields, resolver-default and
+  stored/renamed identity (proving the name is not baked into the module), live
+  pane shapes (idle/busy/not-running/ambiguous/unreadable), the waker block from
+  a planted config + state ledger, read-only state snapshots across both doors,
+  structural bans on lifecycle/waker writers and transports, and the schema +
+  manifest pins. Hermetic: every `~/.hscc` / `~/.hermes` read redirected to a
+  per-test tmp dir, pane discovery injected, no fleet or subprocess reached.
+* `hscc_daemon/tests/test_plugin_manifest_drift.py`: manifest/registry receipt
+  bumped 29 -> 30 for this tool, then 30 -> 31 after rebasing onto main's
+  `heal_status` bump (t_14b86753), with a guard asserting no
+  `main_start`/`main_wakeups`/rename tool is declared.
+* `hscc_daemon/tests/test_skill_tool_coverage_t_cb167686.py` +
+  `install/hscc-skills/hscc-cluster/SKILL.md`: the bundled skill documents the
+  ninth read tool; `main start`/`wakeups` are recorded as the refused lifecycle
+  half, and the deferred D9 HTTP read routes are named as routes, not tools.
+* 38 new tests, all green: 30 in
+  `hscc-bootstrap/tests/test_doctor_main_only_surface.py`, 1 new in
+  `hscc-bootstrap/tests/test_doctor_row_registry.py` (18 → 19), 7 in
+  `hscc_daemon/tests/test_hook_registration_sites_t_caf98114.py`. The card's
+  required posture — a sandboxed `HERMES_HOME` with one main profile carrying
+  everything plus one worker seeded with a stray skill AND a per-profile plugins
+  block — fires both flags with the names exact; the clean posture (workers
+  enabled for `hscc-cluster` only, generic skills intact) is silent; a root home
+  holding all three plugins and the cluster skills stays unreported.
+* Seven mutation probes, each run in a throwaway worktree at the commit under
+  test so the card's own checkout was never rewritten mid-suite, each reddening a
+  named test: hook registration behind a profile gate; `register()` returning
+  before the hook block; the hook plugin counted as drift again (R2/D-C); the row
+  declaring no `hermes_home`/`hscc_dir`; the pytest fence removed from the feature
+  check; the `<main>` half of the sweep skipped; the dot-dir exclusion removed
+  from the profile sweep.
+* Sweep denominator, per the operator's mid-run correction to the audit's §5.1:
+  the home list is `skill_guard.discover_profiles`' (non-dot dirs only), so
+  `~/.hermes/profiles/.deleted` — the Oct 26 recycle dir with two `probe-*`
+  markers, the difference between the audit's 54 and the real 53 — is not treated
+  as a home. A sweep that counted it would report the same false finding on every
+  run; `test_dot_dirs_are_not_profiles` seeds that directory with every tool
+  plugin enabled and all three cluster skills present and asserts silence.
+* The folded LEFT-4 pin (R6) records each hook's firing process and the home that
+  must load the plugin, and rules that the only conditional a registration may
+  sit under is the `hasattr(ctx, "register_hook")` capability probe — an identity
+  gate, an early `return`, or a hook moved out of `register()` goes red. It does
+  not duplicate `test_plugin_manifest_drift.py`, which already pins manifest ==
+  registration names in both directions and cannot see a coordinated removal.
+* nolive: the row shells out to nothing — it opens `config.yaml` and skills dirs
+  under the home it is handed, refuses inside a pytest process unless the seam is
+  injected, and a spy-canary test asserts no read escaped the asked-about root and
+  no file under it changed. `hscc-bootstrap` (1010+), `hscc_daemon` and
+  `hscc-roles` (463 passed) legs run after the change; `hscc-roles` is the leg
+  whose grep guard keeps the main identity out of consumers, and it passes.
+* `hscc_daemon/tests/test_skill_tool_coverage_t_cb167686.py` (new, 3 tests
+  green): the skill's tool tables must be EXACTLY the registered set in both
+  directions — every registered tool documented (the F1 regression) and no
+  documented tool that `hscc-cluster/__init__.py` does not register (an agent
+  calling a phantom is worse than one missing a real tool) — plus the
+  decided-against verbs must still be declared absent with their decision id,
+  and `hscc-cluster` must still appear in `BUNDLED_SKILLS` or the refresh never
+  reaches an installed host. Parses only, reusing `hscc_daemon.verify`'s own
+  registered-name parser (one implementation, as the sibling
+  `test_plugin_manifest_drift.py` requires); the sparkrun and gh fences
+  reported nothing reaching a real exec.
+* Mutation probe (all 4 caught, skill restored byte-identical): drop a
+  documented tool -> fails naming it; document `kanban_paused` as a tool ->
+  fails "does not register it"; lose the decided-against heading -> fails; drop
+  a decision id -> fails. The gate bites on the two ways the audit says the
+  drift actually happened.
+* `hscc-roles/tests/test_main_orch_cluster_control.py` (new, 79 items) renders
+  the section through BOTH write paths (`compose_soul`, and bootstrap's
+  `ensure_orchestrator` -> `SOUL.md` in a tmp home), asserts it lands once inside
+  the role section a regeneration owns, that it follows a RENAMED main through
+  `main_orch`, and that a project orchestrator and a worker never get it.
+  `hscc-roles` leg, sealed env, one pytest process: **451 passed, 0 failed**
+  (372 pre-existing + 79 new) at this head.
+* No invented verbs — the audit's own F3/F5 class, pinned against this card.
+  Every backticked tool name must be in the set `hscc-cluster/__init__.py`
+  registers (its parser asserts >= 28 tools so the read cannot go vacuous) and
+  every backticked `hscc ...` verb must be dispatched: top level against
+  `TOP_LEVEL_COMMANDS`, group verbs against the subcommand table in the module
+  that routes that group. Coverage is pinned BOTH ways — a tool the section
+  skips must be in a two-name reasoned exclusion set, and >= 15 verbs must be
+  inspected, so a thin section fails the gate instead of passing it.
+* The toolset + skill guarantee is asserted on the GENERATED PROFILE, not on the
+  prose: `config.yaml` for the main profile (default name and a renamed one)
+  carries `hscc-cluster` + `sparkrun`, a generated worker profile still lacks
+  both, and every skill the section points at (`hscc`, `hscc-cluster`,
+  `hscc-model-onboard`) is in `hscc-skills`' `BUNDLED_SKILLS` — a reference
+  bootstrap cannot install is caught at the sentence that promises it, not at
+  spawn time.
+* The operator's main-only rule is pinned in both directions: nine named clauses
+  (the ONLY-profile sentence, the four surfaces, the ask-instead-of-take path),
+  no spelled main name (so a renamed main stays correct), and a phrasing guard
+  that refuses any line handing the surface to a worker or project orchestrator —
+  with a positive control proving the phrasing predicate can fire.
+* Genericity guards re-run against this section (public repo): no path-shaped
+  token, no home-relative path, no account or home name checked against the
+  RUNTIME user, no address literal, no assistant product name, no fixture project
+  name baked in — plus a positive control that proves each predicate is
+  satisfiable. `hscc notify` is the named escalation path; no raw transport is
+  offered (`docker`, `ssh`, `launchctl`, `sudo` are all asserted absent).
+* Eight mutation probes on a copy of the section, each reverted and re-verified
+  (file byte-identical after the run): invent a tool name, rename a read tool to
+  a mutating verb, invent a CLI verb, drop the D6 board-brake line, restate the
+  nudge guard list, drop the toolset claim, drop the ONLY-profile sentence, and
+  phrase access as available to workers. 8/8 bite.
+- `hscc-bootstrap/tests/test_enable_plugins_new_home_tier.py`: **13** new cases —
+  the config-less home, the two tiers from one resolver, the tier-only write touching
+  no other key, pruning a home `_migrate_to_21` had widened, idempotence, the missing
+  home, the escape hatch, and the `--plugins-tier-only` CLI (including that it refuses
+  to run without `--home` and never enters the full wire).
+- `hscc-project/tests/test_project_lifecycle_plugin_tier.py`: **14** new cases — the
+  seed command's shape and ordering behind `hermes profile create`, seeding on the
+  `skipped` path too, the four non-fatal degradations, the profile-scoped
+  `HERMES_HOME` resolution, and two end-to-end runs of the real writer against a tmp
+  home (the `hermes` CLI is stubbed by the `_run` seam in every case; nothing live and
+  no cluster host is touched).
+* 53 new tests across six files, every one sandboxed to a fake `~/.hermes` tree
+  in tmp plus an `HSCC_DIR` holding a NON-default stored main name — nothing
+  live is read or written: `hscc-roles/tests/test_main_orch_cluster_surface.py`
+  (20), `hscc-bootstrap/tests/test_enable_plugins_cluster_tier.py` (16),
+  `hscc-commands/tests/test_cluster_surface_gate.py` (6),
+  `hscc-cluster/tests/test_cluster_surface_gate.py` (5),
+  `sparkrun-hermes/tests/test_cluster_surface_gate.py` (5), and 1 in
+  `hscc-roles/tests/test_generator.py`.
+* The root home is pinned on both sides of the split: verbs register there, the
+  tool catalog and the fleet passthrough do not — and the split is asserted at
+  the wrapper each plugin actually calls, not just at the resolver.
+* D-A is pinned by tests that store a main name that is NOT the default and
+  assert the resolver still answers correctly, plus source gates that no plugin
+  or new bootstrap writer contains a profile literal or a `-orch` sniff.
+* The writer/gate asymmetry is pinned in both directions: a named worker home can
+  never get the full tier from the config writer, while a stub context with no
+  usable `profile_name` is allowed even under a profile home (existing suites must
+  not start depending on ambient `HERMES_HOME`).
+* A sweep of an already-tiered tree writes nothing: file contents, mtimes and the
+  backup set are all asserted unchanged.
+* measured on macOS against the shipped watchdog, 5 trials per arm, real SIGKILL
+  of a real parent (chain parent -> watchdog -> serve): detection 0.0008-0.0010 s
+  on the liveness-pipe arm, 0.2366-0.3387 s on the 0.25 s reparenting-poll arm,
+  0.8962-1.0397 s at a 1.0 s tick; the serve is truly gone 0.065-0.174 s after
+  the parent's death on the pipe arm and 0.290-0.504 s on the fallback arm.
+  Accepted blind spot: the fallback's 0.25 s tick, plus up to 2.0 s of SIGTERM
+  and 1.0 s of SIGKILL grace while a stubborn serve goes down — the bound the
+  new tests assert is 4.0 s. The watchdog's whole teardown budget stays below the
+  API's wait, and the test file pins that inequality in both directions.
+* ``hscc-api/tests/test_gateway_serve_watchdog.py`` (17 items) SIGKILLs a real
+  API-side parent whose sidecar is a real subprocess and asserts the pid is gone
+  and its loopback port released, not that a flag was set. Red on pristine
+  ``origin/main`` at ``8a36d579``, where the sidecar is still alive 4.0 s after
+  its parent was killed.
+* `hscc_daemon/tests/test_model_onboard_pause_aware_t_ed77d757.py` — 19 new
+  cases, plus the 18 pre-existing `test_model_onboard_hermes_root.py`: 37 passed
+  at `158f4a00` (merged `origin/main @ a123d773`). Hosts are TEST-NET-1,
+  `~/.hscc` is fabricated under `tmp_path` with a guard-assert on the seal, and
+  the `hscc` door is a recorded argv that is never executed.
+* Thirteen of the rules are mutation-proven, each against a COPY of the script
+  through the `HSCC_ONBOARD_SRC` seam (never the working tree): dropping the
+  parked `continue`, asking `paused()` instead of `paused_nodes`, treating an
+  expired record as free, letting the fallback park an unusable record, reading a
+  corrupt overlay as clean, printing `DOWN` for a parked node, reporting an
+  all-parked fleet as a pass, forgetting the `cluster down`, re-rolling a
+  hand-built `sparkrun run`, previewing by stopping the fleet, routing the
+  `serve_cmd` refresh through the resume path, deriving it before the fields were
+  written, and leaving a stale record in place. All 13 turned the intended case
+  red.
+* The overlay drift pin diffs the script's standalone fallback against
+  `hscc_daemon.node_pauses.paused_nodes` over eight fabricated overlays, the way
+  `test_hermes_home_ladder.py::test_ladder_drift` pins the Hermes-home ladder. It
+  caught a real divergence in the fallback as written: it parked the keyed host of
+  an unusable record where the shared reader drops the whole record.
+* the refusal window was measured before it was attributed: the live retest's drift verdict, the repair line and the returning listener sit 14.6 s apart in the daemon's own health log (20:02:21.254Z → 20:02:35.806Z), and the FAILED line's captured output begins with `Discovering inference endpoints…` — proof the fleet sweep ran AFTER the port was already dead, which is the half of the window hscc authored.
+* adding a backend without a restart was checked against the gateway, not assumed impossible, and is impossible as deployed: litellm's runtime `/model/new` needs a DB-backed model store (sparkrun `plugins/litellm/engine.py::apply_desired_state` records that it answers `500 No DB Connected` against a sparkrun-launched proxy), and `proxy sync`, the 30 s auto-discover sweep and `proxy start --restart` all end in the same SIGTERM → await → spawn restart. The ordering inside sparkrun's own `api/proxy/_ops.py::start()` (discover → preview → stop → write → launch) is what makes the sanctioned command the make-before-break one. The residual stop→bind window is a gateway-side gap: an fd/`SO_REUSEPORT` handoff, or a gateway that can add a model in place.
+* resume re-attach: 14 items in `hscc_daemon/tests/test_proxy_reattach_no_stop_t_f4ee3ce6.py` drive `check_proxy()` against a planted `sparkrun` (TEST-NET-1 hosts, off PATH, lsof/PID table/reap stubbed) and pin that no `proxy stop` and no reap is issued for a re-attach, that no sparkrun command is ever issued while :4000 has no owner, that the uvx wrapper/child pair VERIFIES instead of reading FAILED, and — the control half — that a foreign listener, a hollow PID record and a dead backend in the router each still take stop + reap + start, with a failed adopt falling through to it after the adopt was attempted. The merged pause-drift, proxy-stall and node-pause repair suites run green over the same seam.
+
+### Docs
+- **New audit: `docs/audits/2026-11-23-main-only-surface.md` — the main-only
+  cluster surface, measured against the real Hermes loader.** Answers the four
+  questions the operator's 07:24 rule needs before any of the five gated cards
+  can move: (1) the six `hscc-cluster` hooks are a 6th surface and **all six are
+  worker-lane** (`kanban_task_completed`/`_blocked` fire inside the worker's own
+  `complete_task`/`block_task`, `kanban_db.py:2743,3211`; `post_api_request` +
+  `transform_tool_result` are the worker `[budget]` note, worker-only by
+  construction, `budget_watch.py:8-16,126,292-301`), and hermes gates at
+  *plugin load* (`plugins_discovery.py:269-334`) with tools and hooks registered
+  in one `register()` (`hscc-cluster/__init__.py:151-196`) — so
+  `plugins.enabled` cannot move wholesale to the main profile.
+  (2) `orch_message` already refuses workers and `default` at both ends
+  (`orch_message.py:17-18,92`); the 12 `hscc-commands` verbs have **no**
+  profile gate (`__init__.py:965-1020`).
+  (3) What breaks when workers lose the toolset is *truthfulness*, not runtime:
+  the cluster-ops SOUL block exists in exactly **1** deployed SOUL — the **root**
+  `~/.hermes/SOUL.md:37-48`, **0 of the 51** profile `SOUL.md` files
+  (`install_soul.py:75-100`), and its "only the
+  orchestrator profile has this toolset" line sits in the one file whose reader
+  is not the main orchestrator.
+  (4) The config shape, per hermes' real resolution order.
+- **A `heal*` / `orch*` disambiguation table where agents meet the verbs.** Audit F7 (`docs/audits/2026-11-23-agent-surface.md:110`, `:171`, `:314`, finding at `:422`) recorded that one prefix hides several capabilities, and t_328bfa22 answered it by making each surface disambiguate *itself* — correct, but every surface then carried its own half-truth ("not to be confused with three neighbours"), and no surface listed the family. `install/hscc-skills/hscc/SKILL.md` gains one "Naming traps" section, one row per capability: where it lives, what it actually does, what it does **NOT** do, and the sibling names it is confused with. `heal` gets five rows — `hscc heal-status` and `hscc heal-clear <node>` (read / clear the daemon's per-node heal-breaker ledger, `~/.hscc/heal-breaker.json`; they touch no unit), `/heal confirm` (probe worker serving and restart the unhealthy units; reads and clears no strike), the four heal-category agent tools (`restart_model`, `remount_nas`, `repair_nas_export`, `reap_orphans`), and the daemon's own auto-heal loop with its lease and breaker (no verb of its own — the two CLI verbs are its only operator knobs). `orch` gets five plus the pane owner: `hscc orch inject`, `hscc orch waker status|enable|disable`, `orch_message`, `/orch-restart`, `POST /v1/orchestrator/chat` (+ its poll and stop routes), and `hscc main`, which owns the pane the others talk to. Every cell was read off the implementing code, not off the audit or a help text — which changed the count twice: the live router (`hscc-cluster/hscc.py::cmd_orch`) dispatches `inject` **and** `waker`, so `orch` carries **five** capabilities where F7 counted four, and the audit's `/orch-restart`-only view of that prefix missed the waker entirely. The prose that carried the old count now points at the table instead (the hscc skill says five capabilities answer to `orch`; the hscc-cluster skill's "three neighbours" list gained `orch waker`), the standalone-plugin `COMMANDS` fence gained the `orch waker` verb it omitted, and the section heading's hand-maintained "(33 verbs)" is gone — `TOP_LEVEL_COMMANDS` is 34 today and the sentence below it already names that tuple as the authority. Naming only: no rename, no dispatch change, no schema field, no threshold, no route.
+* the bundled `hscc` skill template (`install/hscc-skills/hscc/SKILL.md`, v4.0.0) was rewritten to the current CLI surface, every rule verified against source at `39c887cf` and aligned with the operator-signed agent-surface audit (D1-D11): the 33-verb map, node-pause rules (single-node-only with no override for multi-node, `--force` = orchestrator guard only, the y/N confirmation that REPLACED `--apply`, `--yes`/`--dry-run`, durable overlay + exact-launch-argv resume), `orch inject` vs the policed `orch_message`, the local merge queue, `hscc main` + the main-orchestrator identity resolver, autodown's operator OFF-policy, template-owned kanban caps (live 6/2), the templates → `serving.json` → `applied_template.json` record chain, and the sparkrun-only iron rule; the six dangling `references/` cites are gone — the References section now cites only files the shipped tree carries, proven by driving `copy_skill_dir()` into a temp dest with a `git archive` pre-fix control
+* `hscc-default-tools` (sub-skill of the same template) had its retired-command table (`hscc init|reset|version|cluster cluster-status`) replaced with the current verb map and the 28 registered `hscc-cluster` tools; `hscc-model-idle-monitor`'s stale header now names `hscc autodown` as the successor and the OFF policy
+* `hscc kanban monitor --help` now names its route parity: `GET
+  /v1/kanban/running` answers this same read from the same
+  `kanban_live.collect(registered_only=True)` pass, for a caller with no TTY
+  (agent-surface audit F8, `docs/audits/2026-11-23-agent-surface.md:158` — the
+  parity existed under a different name and no surface said so, so a reader at
+  the verb could not learn the route exists and a reader at the route could not
+  learn which verb it mirrors). The pointer is stated on BOTH ends: the verb's
+  help names the path, and `routes_kanban.handle_kanban_running`'s docstring
+  names the verb back, so neither side can go silent again. Nothing was added to
+  the surface — no agent tool and no mutation route (F8's disposition says do not
+  invent one): the kill panel stays the separate confirm-gated `POST
+  /v1/kanban/task/{id}/kill`, and `kanban pause/resume/paused/enforce` stay
+  CLI-only per decision D6.
+- **The four "orch" names and the two "heal" names now say which one they are.** Audit F7 (`docs/audits/2026-11-23-agent-surface.md:110`, `:171`, `:314`): one prefix covered four capabilities — `orch_message` (the agent tool that queues a signed nudge between orchestrators), `hscc orch inject` (which types into a live tmux REPL pane), `/orch-restart` (which stops and relaunches the orchestrator's vLLM unit) and `POST /v1/orchestrator/chat` (one chat turn, polled by job id) — and "heal" covered two: `hscc heal-status` / `heal-clear` (read and clear the daemon's per-node heal-breaker strike ledger) versus the `/heal` slash command (probe worker serving and restart the unhealthy units). Each surface now disambiguates itself at its own first mention, in the wording an operator actually reads: the `hscc --help` banner and `COMMAND_HELP` entries for `orch`, `heal-status` and `heal-clear`, the `hscc orch --help` verb block, the slash-command registrations `GET /v1/commands` serves (so the palette text and the `/heal` output header carry it too), the `orch_message` tool description, the `routes_orchestrator` module docstring, and the landing-page copy plus the READMEs. Wording only: no dispatch, no schema field, no flag, no threshold and no code path moved.
+- **`docs/audits/2026-11-23-agent-surface.md`** — the agent-surface coverage
+  matrix the 2.17.4 workstream is gated on: every `hscc` CLI verb (33 top-level,
+  48 group leaves) × the 26 `hscc-cluster` agent tools × the 12 `hscc-commands`
+  slash commands × the 96 API routes × the bundled skill that documents it, each
+  cell marked MISSING / STALE / INTENTIONALLY CLI-ONLY with a per-verb reason
+  rather than a blanket "destructive, therefore CLI-only". It also records where
+  each tool reads state (`serving.json`, `applied_template.json`,
+  `node_pauses.json`, `cluster.json`, the daemon's `state/*.json`) and who else
+  writes that file, so a tool working from a stale copy has a named owner to
+  check against. Findings F1–F13, open operator decisions D1–D11, and a LEFT
+  list; the doc ships no behaviour change.
+- **`docs/audits/2026-11-23-agent-surface.md` §12** — the operator's verdict is now
+  part of the gate doc. The audit was squash-merged (`3fdb1495`, PR #638) while the
+  ruling was still being written, so a reader of the doc alone could not tell a decided
+  answer from an open question: §10 still read "Decisions this card asks the operator to
+  make" with the recommendation in bold. Added §12 (ruling quoted verbatim from the
+  verdict comment on `t_4c12ff7f`, a per-item D1–D11 table, and the F1/F11 = FIX / F12 /
+  atomic-card / low-priority direction), a `SUPERSEDED BY §12` pointer at the top of §10,
+  and an ownership line under §9's findings table (finding → card id). §2–§11 are
+  unchanged on purpose: the trail stays recommendation → decision. No behaviour change.
+- **The bundled-skills docs now separate what is *vendored* from what is *installed*, and name `hscc-lessons` in both.** Audit F12 (`docs/audits/2026-11-23-agent-surface.md` §8): `install/README.md` described its one table row as "the bundled skills the installer ships" while listing 5 names plus an ellipsis — wrong on both counts, because it omitted `hscc-lessons` and implied the vendored tree is the installed set. It now enumerates all 13 vendored dirs (`brainstorming`, `caveman`, `devops`, `executing-plans`, `hscc`, `hscc-cluster`, `hscc-lessons`, `hscc-model-onboard`, `sdlc-review`, `systematic-debugging`, `test-driven-development`, `verification-before-completion`, `writing-plans`), notes `devops` carries 7 sub-skills, and states that `BUNDLED_SKILLS` names only 12 of the 13 — so `hscc-lessons` ships as source but `hscc bootstrap` never installs or updates it. `hscc-skills/README.md` carries the same boundary at the point where a reader learns the install rule, pointing at the canonical inventory rather than restating 13 names a second time. `docs/audits/2026-11-23-agent-surface.md` §8 had the two counts inverted ("13 names / 12 dirs" above a list of 12 names and 13 dirs on disk); corrected to agree with its own §1 row and findings table. No behaviour changed and `BUNDLED_SKILLS` is untouched: listing `hscc-lessons` there is a one-line code change in `hscc-skills/hscc.py` that this card deliberately did not make.
+* `install/hscc-skills/hscc-cluster/SKILL.md` rewritten to document the agent
+  toolset rather than a stale copy of it. The bundled template named 6
+  standalone-plugin commands and none of the 28 tools the registry registers
+  (agent-surface audit F1 — "the template is the ceiling": bootstrap copies
+  this file byte-for-byte, so a perfect installer was shipping a document that
+  could not tell a bootstrapped agent its own toolset exists). It now carries,
+  per tool, what it answers, where its state comes from and its confirm /
+  high-risk posture, grouped by the registry's own tables (8 read, 5 ops,
+  3 debug, 4 heal, 4 fleet, 3 template, 1 orch) and including the two this
+  wave added (`autodown_status`, `merge_queue_status`); the `~/.hscc` per-file
+  ownership table; and the one-door rule (a tool calls the CLI's own verb,
+  `confirm=true` maps to `--yes`, absent `confirm` maps to `--dry-run`). It
+  also states which verbs were decided AGAINST a tool and names the audit
+  decision (D2-D11), because the card body itself assumed `kanban_paused`,
+  `main_status` and `doctor` were being added when D6/D9/D11 refused them.
+  Corrected along the way: `hscc cluster cluster-status` is not a CLI verb (the
+  unified group takes `status`), and the file's prescriptive node-IP list —
+  which contradicted its own "never hardcode node IPs" rule — is replaced by
+  the live precedence (`sparkrun cluster list --json` -> `cluster.json` cache ->
+  `DiscoveryError`, no fake-IP fallback).
+* `install/hscc-skills/hscc-model-onboard/SKILL.md` gained a Pause-aware
+  onboarding section: the three overlay rules (ask `covering`/`paused_nodes` and
+  never `paused()`, because `span_nodes` peers are just as parked; expiry does
+  not release a node; an unreadable overlay fails open and says so), a
+  situation/behaviour table covering cache, launch, verify, proxy drift, an armed
+  `autodown` mid-cutover and a keepalive relaunch during `wire`, the
+  `hscc cluster up --dry-run` preview, and why the launch argv has exactly one
+  builder. The `launch` phase row no longer advertises `sparkrun run`, and the
+  gateway-restart note now points at `hscc-cluster/gateway_restart.py` (which
+  checks the label is loaded and uses the `gui/<uid>/` slash form) with the raw
+  `kickstart -k` kept as the fallback.
 ## [2.17.3] - 2026-11-22
 
 ### Added
