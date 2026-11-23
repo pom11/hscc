@@ -146,7 +146,12 @@ class TestColocationPermitted:
                  {"name": "reasoning",
                   "models": [{"recipe": "big.yaml", "tp": 1}],
                   "nodes": ["192.0.2.248"], "allow_colocation": True},
-                 {"name": "vision",
+                 # `proxy: false` because this fixture has TWO families and
+                 # sparkrun keeps one gateway per cache dir (see the
+                 # one-proxy-per-cluster rule) — this test is about colocation,
+                 # and `proxy` defaults to true, so the second family has to say
+                 # it explicitly to stay out of the way.
+                 {"name": "vision", "proxy": False,
                   "models": [{"recipe": "v.yaml", "tp": 1}],
                   "nodes": ["192.0.2.248"], "allow_colocation": True},
              ]}

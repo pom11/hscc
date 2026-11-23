@@ -72,7 +72,7 @@ families:
     models:
       - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
     workers: remaining
-    proxy: true
+    proxy: false  # one gateway per cluster: the first proxy family owns it
 
 routing:
   # Delegated subagents are the bulk of fleet traffic and belong on the worker

@@ -2173,6 +2173,36 @@ def _structural_validate(raw: dict, tpl: Any,
                             errors.append(
                                 f"{label} model {j}: unknown key '{k}'")
 
+    # ── at most ONE proxy family per cluster ─────────────────────────────
+    # sparkrun keeps ONE gateway per cache dir, not one per port: the gateway
+    # state dir is fixed (``sparkrun/proxy/_supervisor.py``
+    # ``GatewayState.__init__`` binds ``resolve_sparkrun_cache_dir()/"proxy"``),
+    # ``is_running()`` reads the PID out of that one shared ``state.yaml`` and
+    # is therefore port-agnostic, and ``api/proxy/_ops.py::_start`` raises
+    # ``ProxyAlreadyRunning`` (the CLI: ``sys.exit(1)``) for every start after
+    # the first — whatever ``--port`` it was handed. There is no
+    # ``--cache-dir``/``--instance`` on ``sparkrun proxy start``, so a second
+    # proxy family cannot be given its own gateway from here.
+    #
+    # What a second ``proxy: true`` DOES buy is a ``proxy_port`` (the resolver
+    # mints one per proxy family from ``base_proxy_port``) that
+    # ``_proxy_front_for_target`` then writes into consumer configs as
+    # ``http://localhost:<port>/v1`` — a route to a port nothing ever listens
+    # on, reported by apply as a per-family ``loaded=False`` under a
+    # ``proxies/`` step that still says ``"status": "ok"``. The single gateway
+    # already auto-discovers every family's endpoints, so say what is true
+    # instead of half-applying.
+    proxy_fams = [f.name for f in tpl.families if f.proxy]
+    if len(proxy_fams) > 1:
+        errors.append(
+            f"template '{tpl.name}': {len(proxy_fams)} families declare "
+            f"proxy: true ({', '.join(proxy_fams)}) — sparkrun keeps one "
+            "gateway per cache dir, so only the first can ever be loaded and "
+            "the others would get a config pointing at a port with nothing "
+            "listening. Declare proxy: true for exactly one family (that "
+            "gateway auto-discovers every family's endpoints) and proxy: "
+            "false for the rest")
+
     # ── uniform_pool means uniform: one recipe everywhere ─────────────────
     # The flag makes every unit advertise BOTH aliases, so a request for
     # `orchestrator-model` may land on any unit. If the units were different
