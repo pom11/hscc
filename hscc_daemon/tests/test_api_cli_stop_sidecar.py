@@ -57,9 +57,17 @@ orphaned by the SIGKILL escalation. The case below reproduces that environment
 by blocking the signal in the forking thread; the fix is product-side (clear
 the inherited mask where the handlers are installed, and again in `_serve`).
 
-Every child this file spawns is its own session (`start_new_session=True`) and
-is reaped by PROCESS GROUP, so a failed case cannot leave a harness child or a
-fake sidecar orphaned on the host (measured for 7 h before this card).
+Every child this file spawns is its own session leader (`start_new_session=True`)
+and is reaped by PROCESS GROUP, so a failed case cannot leave a harness child or
+a fake sidecar orphaned on the host (measured for 7 h before this card). That
+covers the double-forked `hscc api start` server only because the harness KEEPS
+it in that group by fencing `os.setsid`: production `_handle_start` detaches into
+a new session (api_cli.py:986), out of reach of the group-wide SIGKILL a queue
+gate's timeout performs, and a kill of this leg skips every fixture teardown
+anyway. `test_a_hard_kill_of_the_harness_group_takes_the_double_forked_server`
+reddens if that ownership ever lapses. Every child also binds port 0 and reports
+the port it actually bound, so no case reserves one and hands it back to the
+kernel while the child is still looking for it.
 """
 import ast
 import collections
@@ -132,15 +140,34 @@ HANDLER_RAN = "@@HANDLER-RAN@@"
 # So the budgets are sized for a runner that is two orders of magnitude slower
 # than an idle one, and a stall is judged against the child's own progress rather
 # than against its whole life.
+#
+# CAN THE VERDICT COME EARLIER OFF THE CHILD'S OWN WATCHDOG? It says
+# `@@HANDLER-LATE@@` eight seconds after the raise, so on paper the stall could
+# collapse to about nine. It does not, and not from caution: measured under ~100x
+# oversubscription this file's own rig writes that line for a handler that is
+# merely UNSCHEDULED and then finishes fine (see :data:`HANDLER_LATE`). The line
+# is the diagnosis; the silence after it is the verdict, and silence can only be
+# observed over an interval. What can be cut without weakening anything is the
+# interval itself — these were sized ~7x over the worst observation on record —
+# and that is what changed here.
 #: Silence from a live child between two announced stages (or, once the parent
 #: has asked it to stop, between the signal and its exit) before it is called
-#: stuck. ~1000x the idle gap, ~7x the worst CI observation.
-CHILD_STAGE_STALL = 180.0
+#: stuck. ~1000x the idle gap and ~5x the worst CI observation on record (run
+#: 45081900690: a child with NOTHING written — stdout or `api.log` — in 25 s).
+#: 120 s rather than 180 s because this is what a genuine wedge costs the queue
+#: gate: the gate's whole allowance is `DEFAULT_GATE_TIMEOUT_S = 1800`
+#: (hscc_daemon/merge_queue.py), so one wedge spent 10% of the gate reporting
+#: itself at 180 s and spends 7% here. Set equal to the sibling leg's copy
+#: (t_eed6b74d), which measured the same child on the same runner.
+CHILD_STAGE_STALL = 120.0
 #: One child's entire life, whatever it is doing — the backstop behind the stall.
-CHILD_LIFE_CAP = 420.0
+#: 360 s is 20% of the gate's allowance instead of 420 s' 23%, and still 1000x
+#: the idle whole-life measurement of this file's slowest arm.
+CHILD_LIFE_CAP = 360.0
 #: Spawn -> the child's own `HSCC API listening on ...` line. Same import phase
-#: as above, so the same order of budget.
-CHILD_READY_BUDGET = 180.0
+#: as the stall above, so the same order of budget and the same ~5x over the
+#: worst CI observation.
+CHILD_READY_BUDGET = 120.0
 #: How long the child's watchdog waits, AFTER the signal has been raised, for the
 #: handler to come back out of the log-write window before it says the handler is
 #: still in there. The handler's body is an attribute write and a return, so this
@@ -299,6 +326,29 @@ from hscc_daemon import api_cli
 print("@@MARK_STAGE@@ api_cli-imported", flush=True)
 
 verb, rest = sys.argv[1], sys.argv[2:]
+
+if verb == "start":
+    # `api_cli._handle_start` calls `os.setsid()` in its first forked child
+    # (api_cli.py:986), and that moves the serving grandchild — and the gateway
+    # sidecar the bridge spawns inside it — into a NEW session, out of the
+    # process group the harness was spawned with. Nothing the test owns can then
+    # reach them: the queue gate's timeout kills the gate's own group
+    # (`hscc_daemon/merge_queue.py:_kill_gate_group`), a SIGKILL of the leg skips
+    # every pytest fixture teardown, and both leave a server plus a sidecar
+    # holding the sandbox token running on the host. Keeping the grandchild in
+    # THIS group is what makes the `killpg` in :func:`_reap` sufficient instead
+    # of merely best-effort.
+    #
+    # What this fence does NOT weaken: both forks still happen, so does
+    # `_detach_stdio`, the pid-file handover from the CLI parent to the
+    # grandchild, and the whole `_serve` path down to the real sidecar subprocess
+    # this case has to kill. What it skips is the daemon's SESSION detach —
+    # deliberate production behaviour for an operator typing `hscc api start`,
+    # and not the subject of this file. The guard case
+    # `test_a_hard_kill_of_the_harness_group_takes_the_double_forked_server`
+    # asserts the grandchild's pgid equals this process's pid, so the fence
+    # cannot silently stop applying.
+    os.setsid = lambda: None
 
 if verb == "serve":
     # Install the stop handlers the way `hscc api start` does in its forked
@@ -557,6 +607,19 @@ def _alive(pid):
     return True
 
 
+def _await_gone(pid, timeout=10.0):
+    """True once `pid` is no longer live; False if it outlived `timeout`.
+
+    SIGKILL is not cooperative, so this is a reaping wait, not a load budget:
+    ten seconds on an idle host is a zombie waiting for its (reparented-to)
+    parent to notice, not a process still working.
+    """
+    deadline = time.time() + timeout
+    while _alive(pid) and time.time() < deadline:
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
 def _kill_pid(pid):
     """SIGKILL a pid, taking its process group when it owns one.
 
@@ -586,15 +649,31 @@ def _reap(proc):
     (t_7c2eb604). Every Popen here uses start_new_session, so proc.pid is the
     group id, and killpg reaches all of them; wait() then reaps the direct child
     so no zombie is left for pytest.
+
+    The killpg is UNCONDITIONAL, and that is the whole point of this function.
+    It used to sit behind `if proc.poll() is None`, which is false for the
+    normal `start` arm: `hscc api start` returns as soon as the server is up, so
+    by the time the fixture reaps it the CLI parent is gone while the serving
+    grandchild and the sidecar are still alive in that same group. Gating on the
+    direct child therefore skipped the one signal that reaches them and left the
+    pid-file poll as the only thing between a red test and an orphan — the exact
+    shape this card is about. A process GROUP's liveness has nothing to do with
+    whether our direct child is still ours to wait on.
+
+    `proc.kill()` stays as a belt, not as the mechanism: it reaches the direct
+    child only, so on its own it is what orphans a sidecar.
     """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        # ESRCH: the group is already empty (everybody exited on their own, the
+        # ordinary case for the non-forking verbs). Nothing to reach.
+        pass
     if proc.poll() is None:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            proc.kill()
         except OSError:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            pass
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
@@ -1015,6 +1094,130 @@ def test_api_stop_tears_the_sidecar_down(sandbox):
             f"of the server having finished: {_describe(sandbox)}")
     finally:
         _kill_pid(pid)
+
+
+# --------------------------------------------------------------------------- #
+# the leak guard: a hard kill of the harness's group must take the whole tree
+# --------------------------------------------------------------------------- #
+
+def test_a_hard_kill_of_the_harness_group_takes_the_double_forked_server(sandbox):
+    """A leg-level hard kill must not be able to orphan `hscc api start`.
+
+    This is the case that proves the leak is closed, and it is deliberately NOT
+    a teardown test. It performs the kill a queue-gate timeout performs
+    (`hscc_daemon/merge_queue.py:_kill_gate_group`: SIGKILL the group, with no
+    Python left afterwards to clean up) and then asks whether anything of the
+    child survived. No fixture teardown runs on this path, and that omission is
+    the scenario rather than an oversight — a SIGKILL of the leg skips every
+    `finally:` and every generator teardown, so the process group is the only
+    thing a test can own a descendant with.
+
+    Before this card's fix the case was red, and for a reason no fixture could
+    paper over: `api_cli._handle_start` calls `os.setsid()` (api_cli.py:986), so
+    the serving grandchild had already left the group and the group-wide kill
+    found nobody. The server and the fake `hermes serve` inside it stayed on the
+    host holding the sandbox token, and the only cleanup that had ever reached
+    them was the pid-file poll in the fixture — which is precisely the cleanup a
+    hard-killed leg does not run.
+
+    Non-vacuity, asserted BEFORE anything is killed and sampled before this case
+    cleans up after itself (a guard arm that samples after its own sweep passes
+    on the arm's hygiene rather than on the mechanism):
+
+      * the dummy sidecar is a LIVE pid — otherwise "it is gone" is free; and
+      * the serving grandchild's pgid IS the harness's pid — the one property a
+        group kill depends on and the one a removed `os.setsid` fence breaks. It
+        is named here rather than left to the death assertion below, which
+        cannot tell "the fence stopped working" apart from "the kill missed".
+    """
+    started = _start_api(sandbox)
+    assert started.returncode == 0, (
+        f"`hscc api start` failed: {started.stdout}\n{started.stderr}")
+    server_pid, _port = _wait_serving_child(sandbox, not_pid=started.pid)
+
+    assert _have(sandbox, SIDECAR_STARTED), (
+        "the sidecar never started, so 'it died with the group' below would be "
+        f"satisfied by a run that never had one: {_describe(sandbox)}")
+    sidecar_pid = _read_int(sandbox["sidecar_pid"])
+    assert sidecar_pid is not None and _alive(sidecar_pid), (
+        f"the dummy sidecar (pid {sidecar_pid}) is not a live process, so "
+        f"nothing below proves a leak was closed: {_describe(sandbox)}")
+
+    # Sampled now, while both are alive and before anything of ours sweeps.
+    pgid = os.getpgid(server_pid)
+    assert pgid == started.pid, (
+        f"the serving grandchild (pid {server_pid}) lives in process group "
+        f"{pgid}, not in the harness's group {started.pid}. Nothing the test "
+        f"owns can reach it from there: a group-wide SIGKILL — the queue gate's "
+        f"timeout, or a SIGKILL of the leg, both of which skip every fixture "
+        f"teardown — leaves the server and its sidecar running on the host "
+        f"holding the sandbox token. The harness fences `os.setsid` for the "
+        f"`start` verb precisely to keep this true (see HARNESS); that fence has "
+        f"stopped applying.")
+
+    # The kill a gate timeout performs, on the group the harness owns.
+    try:
+        os.killpg(started.pid, signal.SIGKILL)
+    except OSError as exc:
+        pytest.fail(
+            f"the group kill found nobody ({exc}) although a live member was "
+            f"just observed in it (server pid {server_pid}, pgid {pgid}): the "
+            f"grandchild has left the group the harness owns, which is the "
+            f"orphan path this case exists to close.")
+
+    assert _await_gone(server_pid), (
+        f"the serving grandchild (pid {server_pid}) survived a SIGKILL of its "
+        f"own process group — it is orphaned, still serving the sandbox token "
+        f"and still the parent of the sidecar below. {_describe(sandbox)}")
+    assert _await_gone(sidecar_pid), (
+        f"the sidecar (pid {sidecar_pid}) outlived a SIGKILL of the group "
+        f"`hscc api start` was spawned into. A hard kill of this leg therefore "
+        f"still orphans a real process holding the sandbox token, which is the "
+        f"leak this card was written to close. {_describe(sandbox)}")
+
+
+def test_the_reap_every_teardown_calls_takes_the_serving_childs_sidecar(sandbox):
+    """`_reap` must reach the bridge's subprocess, not just the pid it waited on.
+
+    `_reap` is the cleanup every case in this file ends up in — the `finally:` of
+    each behavioural case and the fixture teardown behind them — so it, and not
+    a test, decides whether a RED leaves an orphan. It used to skip its `killpg`
+    whenever the direct child had already exited, which for the `start` arm is
+    the normal case: the CLI parent returns as soon as the server is up, so the
+    gate was false exactly when the grandchild and the sidecar most needed
+    reaching.
+
+    Drives the real `_reap` rather than a hand-written kill, because the point is
+    that this function is what runs when a case fails. The sidecar pid is
+    sampled before `_reap` is called: an arm that reads it afterwards would see
+    a dead pid thanks to its own cleanup and pass on a mutated `_reap` that only
+    kills the direct child.
+    """
+    proc = _popen(sandbox, "serve", str(PORT_AUTO))
+    trail = _ChildTrail(proc)
+    try:
+        _await_listening(sandbox)
+        assert _have(sandbox, SIDECAR_STARTED), (
+            "the sidecar never started, so the assertions below prove nothing "
+            f"about a teardown: {_describe(sandbox)}")
+        sidecar_pid = _read_int(sandbox["sidecar_pid"])
+        assert sidecar_pid is not None and _alive(sidecar_pid), (
+            f"the dummy sidecar (pid {sidecar_pid}) is not a live process, so "
+            f"nothing below proves anything: {_describe(sandbox)}")
+
+        _reap(proc)                      # the real cleanup path, unmodified
+
+        assert proc.poll() is not None, (
+            "`_reap` returned with its direct child still un-reaped")
+        assert _await_gone(sidecar_pid), (
+            f"the sidecar (pid {sidecar_pid}) outlived `_reap`. A red case "
+            f"therefore still leaves a fake `hermes serve` on the host holding "
+            f"the sandbox token: `_reap` reached only the direct child "
+            f"(`proc.kill()` hits one pid), and the sidecar is a grandchild of "
+            f"the group. {_describe(sandbox)}")
+    finally:
+        trail.finish()
+        _reap(proc)
 
 
 # --------------------------------------------------------------------------- #
