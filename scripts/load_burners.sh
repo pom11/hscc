@@ -15,10 +15,15 @@
 #
 # The ownership shape, all three legs of it:
 #
-#   * GROUP. Burners (and the command under test) are started under `set -m`,
-#     so each background job is its own process-group leader. `$!` is then a
-#     PGID, and `kill -- -PGID` reaches the whole group even after the leader
-#     has exited. `kill $PID` is exactly the shape that failed on 2026-11-23.
+#   * GROUP. Burners (and the command under test) are each started through an
+#     exec wrapper that makes the child its own process-group leader BEFORE it
+#     runs: `setsid` where available, otherwise a python3 `os.setsid()` /
+#     `os.setpgid(0, 0)` shim. The wrapper execs, so `$!` is the leader's PID
+#     and also its PGID, and `kill -TERM -PGID` reaches the whole group even
+#     after the leader has exited. `kill $PID` is exactly the shape that failed
+#     on 2026-11-23. `set -m` is deliberately NOT used: in a non-interactive
+#     shell on Linux it can leave background jobs in the harness's own PGID,
+#     which is how this harness passed on macOS and failed on CI.
 #   * TRAP. EXIT, INT, TERM and HUP all route through cleanup(), which TERMs
 #     every group (watchdog, command, burners), waits a short bounded grace,
 #     then KILLs every group. It is idempotent, so a signal landing during
@@ -73,6 +78,16 @@ WATCHDOG_PID=""
 COMMAND_PID=""
 CLEANED=0
 
+# Signal a whole process group, falling back to the leader alone if the
+# platform's kill rejects the group form. The group is the contract; the
+# fallback exists only so cleanup still does something on an odd host.
+kill_group() {
+    sig=$1
+    pid=$2
+    [ -n "$pid" ] || return 0
+    kill "-$sig" "-$pid" 2>/dev/null || kill "-$sig" "$pid" 2>/dev/null || true
+}
+
 cleanup() {
     status=$?
     # A signal arriving during cleanup must not re-enter and kill half the
@@ -86,27 +101,19 @@ cleanup() {
     # deliberately ignored below (ESRCH means the group already went).
     exec 2>/dev/null
 
-    if [ -n "$WATCHDOG_PID" ]; then
-        kill -TERM -- "-$WATCHDOG_PID" 2>/dev/null ||
-            kill -TERM "$WATCHDOG_PID" 2>/dev/null || true
-    fi
-    if [ -n "$COMMAND_PID" ]; then
-        kill -TERM -- "-$COMMAND_PID" 2>/dev/null ||
-            kill -TERM "$COMMAND_PID" 2>/dev/null || true
-    fi
+    kill_group TERM "$WATCHDOG_PID"
+    kill_group TERM "$COMMAND_PID"
     for pid in $BURNER_PIDS; do
-        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        kill_group TERM "$pid"
     done
 
     # Bounded grace, then the guarantee. TERM is what lets a well-behaved
     # burner/test clean up; KILL is what makes "no survivor" true regardless.
     sleep 0.2
-    if [ -n "$COMMAND_PID" ]; then
-        kill -KILL -- "-$COMMAND_PID" 2>/dev/null ||
-            kill -KILL "$COMMAND_PID" 2>/dev/null || true
-    fi
+    kill_group KILL "$WATCHDOG_PID"
+    kill_group KILL "$COMMAND_PID"
     for pid in $BURNER_PIDS; do
-        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        kill_group KILL "$pid"
     done
 
     # Reap them here, with stderr quiet: otherwise bash announces every killed
@@ -127,24 +134,48 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 # ── own the groups ──────────────────────────────────────────────────────────
-# `set -m` in a non-interactive shell still gives each background job its own
-# PGID (measured on this host): $! is the PGID, not merely a PID.
-set -m
+# NOT `set -m`: job control is unreliable in a non-interactive shell on Linux
+# (the child can inherit the harness's PGID), which is why this passed on
+# macOS and failed on CI. Instead each child is launched through an exec
+# wrapper that makes it a process-group leader before exec'ing the real
+# program. The wrapper execs rather than forks, so `$!` is both the PID and
+# the PGID, and `kill -TERM -$!` owns the whole group. Background jobs run
+# without job control, so the child is not already a group leader and
+# setsid(1) therefore execs in place instead of forking.
+if command -v setsid >/dev/null 2>&1; then
+    new_group() { exec setsid "$@"; }
+elif command -v python3 >/dev/null 2>&1; then
+    new_group() {
+        exec python3 -c 'import os, sys
+try:
+    os.setsid()
+except OSError:
+    try:
+        os.setpgid(0, 0)
+    except OSError:
+        pass
+os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+    }
+else
+    echo "$0: need setsid or python3 to give each child its own process group" >&2
+    exit 70
+fi
+
 i=0
 while [ "$i" -lt "$BURNERS" ]; do
-    sh -c 'while :; do :; done' "$TAG" &
+    new_group sh -c 'while :; do :; done' "$TAG" &
     BURNER_PIDS="$BURNER_PIDS $!"
     i=$((i + 1))
 done
-( sleep "$LIMIT"; : > "$TIMEOUT_MARK"; kill -TERM "$$" ) &
+new_group sh -c 'sleep "$1"; : > "$2"; kill -TERM "$3"' \
+    sh "$LIMIT" "$TIMEOUT_MARK" "$$" &
 WATCHDOG_PID=$!
 
 # The command runs in the background so `wait` (not a blocking foreground
 # exec) is what the trap interrupts. Its group is owned and killed like the
 # burners': a timed-out command must not outlive the harness either.
-"$@" &
+new_group "$@" &
 COMMAND_PID=$!
-set +m
 
 wait "$COMMAND_PID"
 status=$?
