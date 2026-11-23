@@ -4435,6 +4435,30 @@ class TestSilentReadDefersTheWarnBudget:
         assert warns == ["Autodown kanban interlock unevaluable: loud outside"], (
             f"a deferred WARN never came back: {lines}")
 
+    def test_the_prci_warn_is_not_muted_by_a_read(self, monkeypatch):
+        """A read may silence the kanban leaf it borrowed; never the PR/CI alarm.
+
+        ``test_autodown_cli.py::TestStatus::test_status_json_survives_a_real_gh_blip``
+        pins that a PR/CI screen which could not be evaluated stays visible on
+        stderr and in the log file from the ``autodown status`` door — "Silence
+        here would mean the fail-safe went quiet". This is the unit-level twin of
+        that pin: the mute window is only allowed to cover the leaf the borrowed
+        seam owns. (An earlier revision of this fix muted the whole module
+        ``log`` name and broke that test in the leg — this pin keeps it from
+        coming back.)
+        """
+        fake, lines = self._fake_logger()
+        monkeypatch.setattr(ad, "log", fake)
+        monkeypatch.setitem(ad._PRCI_LOAD, "blocking", None)
+        monkeypatch.setitem(ad._PRCI_LOAD, "ok", True)
+        monkeypatch.setitem(ad._PRCI_LOAD, "reason", "")
+        monkeypatch.setitem(ad._PRCI_LOAD, "warned", False)
+        with ad.silent_read():
+            ad._note_prci_unavailable("gh blipped")
+        warns = [(lvl, m) for lvl, m in lines if lvl == "WARN"]
+        assert len(warns) == 1, f"the PR/CI WARN was muted: {lines}"
+        assert "PR/CI interlock unevaluable: gh blipped" in warns[0][1]
+
     def test_both_budgets_come_back_untouched(self, monkeypatch):
         fake, _lines = self._fake_logger()
         monkeypatch.setattr(ad, "log", fake)
