@@ -159,19 +159,16 @@ class Reaper:
             lambda msg, level="INFO": self.logs.append((str(msg), level)))
         chain = _Chain(parents or {})
         monkeypatch.setattr(health, "_proc_ppid", chain)
-        # The SAME tree, also seen DOWNWARD. The guard in this file answers
-        # "is this PID ours?" with `_proc_ppid` (an upward walk); the guard it
-        # replaced on main answers it with `_proc_children` (a downward BFS).
-        # Faking only the upward seam would make the pre-fix leg go red for a
-        # reason that has nothing to do with the guard — the BFS would read the
-        # conftest default (an empty table), fail to find the proxy's own child,
-        # and call a HEALTHY listener foreign. With both directions derived from
-        # one `parents` map, a red here is the guard's verdict and nothing else.
-        children = {}
-        for kid, parent in chain.parents.items():
-            children.setdefault(int(parent), []).append(int(kid))
-        monkeypatch.setattr(health, "_proc_children",
-                            lambda pid: list(children.get(int(pid), [])))
+        # ONE process-table seam (t_0df7fc35): the guard answers "is this PID
+        # ours?" with `_proc_ppid` — an upward walk — and nothing else consults
+        # a process table any more. While the downward BFS still existed this
+        # rig ALSO faked `_proc_children`, both directions derived from this
+        # same `parents` map, so a pre-fix leg answered from the BFS rather
+        # than from the conftest default (that red-before-green pair is on
+        # t_af7d5486); a committed test fakes only what shipped code reads.
+        # A PID absent from `parents` has an UNREADABLE parent — the
+        # tri-state's NOT-EVALUABLE answer, which must mean "refuse", never
+        # "not mine".
 
         def fake_kill(pid, sig):
             self.killed.append((pid, sig))
