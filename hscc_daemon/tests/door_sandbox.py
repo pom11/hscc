@@ -82,18 +82,21 @@ FAKE_BIN_FILES = {
         "sys.stderr.write('nolive: ssh refused\\n')\n"
         "sys.exit(255)\n"
     ),
-    # ``hscc autodown status`` screens PR/CI with ``gh``. The real gh answers
-    # from the sandbox and creates ``$HOME/.local/state/gh`` (measured in
-    # docs/audits/read-surface-logging_t_88abe739.md §2) — a write that is
-    # nobody's bug but would muddy a "the read wrote nothing" snapshot. The stub
-    # makes the screen fail closed instead.
+    # ``hscc autodown status`` screens PR/CI with ``gh``. Two reasons to stub it:
+    # the real gh answers from the sandbox and creates ``$HOME/.local/state/gh``
+    # (measured in docs/audits/read-surface-logging_t_88abe739.md §2) — a write
+    # that is nobody's bug but would muddy a "the read wrote nothing" snapshot;
+    # and it must answer POSITIVELY CLEAR ("0" for every count), not fail,
+    # because the PR/CI fail-safe WARN is deliberately NOT muted by
+    # ``autodown.silent_read`` (test_status_json_survives_a_real_gh_blip pins it
+    # audible). A failing stub would put a second, legitimately-written WARN in
+    # the sandbox and this guard would be guarding the wrong leaf.
     "gh": (
         "#!/usr/bin/env python3\n"
         "import os, sys\n"
         "with open(os.path.join(os.environ['FAKE_BIN_LOG']), 'a') as fh:\n"
         "    fh.write('gh ' + ' '.join(sys.argv[1:]) + '\\n')\n"
-        "sys.stderr.write('nolive: gh unavailable\\n')\n"
-        "sys.exit(1)\n"
+        "print('0\\n')\n"
     ),
     "hermes": (
         "#!/usr/bin/env python3\n"
