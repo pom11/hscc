@@ -45,6 +45,20 @@ task: t_01ce22cd
   injecting substitutes (`rc=1`), the POST's `_require_confirm` deleted (`rc=1`),
   the POST injects no-ops so it stops mutating (`rc=1`), the GET stops injecting
   (`rc=1`); the same copy untouched: `rc=0`.
+* the help text has a coupled mirror, and it bit: `hscc --help` is also stored in
+  `scripts/tests/fixtures/hscc_help_landing.txt`, and
+  `scripts/tests/test_site_landing.py::test_fixture_is_the_repos_own_help`
+  compares that fixture against the repo's OWN rendered help — this card's
+  wording change reddened it (`1 failed, 66 passed, 2 skipped`) until the fixture
+  was refreshed from the repo's own render the way the test renders it (sandboxed
+  HOME, `PYTHONPATH`=repo, COLUMNS=80, NO_COLOR, TERM=dumb, HSCC_THEME=dark, ANSI
+  stripped). The fixture delta is exactly the escalate entry (the old 56-col
+  description pushed the pair to 79 cols, so it rendered as usage-alone + hanging
+  description; the new 47-col one fits one line), and
+  `scripts/gen_site_commands.py --help-file … --write` then reported
+  `site/index.html is up to date (46 commands, hscc 2.17.3)` — the page lists
+  command names, not descriptions. After the refresh:
+  `test_site_landing.py` + `test_cli_help_surface.py` → `67 passed, 2 skipped`.
 * the surfaces the diff touches, re-run on the merged tree: `hscc_daemon/tests`
   `test_toplevel_cli_help_f5.py` (60 items — it carries the verbatim pin of the
   one-line entry) + `test_cli_h_shortflag.py` + `test_cli_rich_handlers.py` →
