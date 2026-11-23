@@ -1,7 +1,15 @@
 # install/ — Bundled Skill Sources
 
 This directory holds the **bundled skill sources** that the HSCC skills installer
-(`hscc-skills/hscc.py install-skills`) copies into `~/.hermes/skills/`.
+(`hscc-skills/hscc.py install-skills`) copies into a Hermes home's `skills/` tree.
+
+The cluster-control skills — `hscc`, `hscc-cluster`, `hscc-model-onboard` — are
+**main-profile only** (operator ruling R4, card `t_b52e70ba`). They install to
+`<root>/profiles/<main_orch.main_name()>/skills/`, never a hard-coded name.
+Any copy found in the root home or another profile is **moved** (never deleted)
+to that home's `skills-backups/removed-<stamp>/`. The shared/work skills
+(generic set, `sdlc-review`, `devops`) keep installing into the caller's
+`HERMES_HOME/skills/`.
 
 ## What's Inside
 
