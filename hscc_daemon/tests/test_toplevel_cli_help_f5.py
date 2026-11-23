@@ -157,7 +157,7 @@ DESCRIPTIONS = [
     "Commit-time address-guard posture for that checkout",
     "Fleet activity — completions & tool usage over N days (default 7)",
     "Show autoscale decision from current queue depth (read-only)",
-    "Show pending failure escalations (dry-run, no mutations)",
+    "Preview escalations — POST /v1/escalate mutates",
     "Project-portfolio commands: standup verify doctor ...",
     "HSCC HTTP API server: start stop status (external apps)",
     "Board hygiene: blocked (show/recover), stale (list/archive)",

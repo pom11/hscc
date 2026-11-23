@@ -373,8 +373,11 @@ def _get_help_text():
                 "Aggregate vLLM throughput + queue depth across the fleet"),
         *_entry("autoscale",
                 "Show autoscale decision from current queue depth (read-only)"),
+        # F6: the one-line entry must not imply the verb never mutates — the
+        # same word names POST /v1/escalate, which does. 47 cols, so the pair
+        # still renders on one line inside the 78 budget.
         *_entry("escalate",
-                "Show pending failure escalations (dry-run, no mutations)"),
+                "Preview escalations — POST /v1/escalate mutates"),
         # Heal verbs are live TOP_LEVEL_COMMANDS (the breaker's alert names
         # `hscc heal-clear`), so they are listed on the primary surface too.
         *_entry("heal-clear <node>",
@@ -671,7 +674,19 @@ COMMAND_HELP = {
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
     "throughput": "Aggregate vLLM throughput + queue depth across the fleet.\n  Usage: hscc throughput [--json]",
     "autoscale": "Show autoscale decision from current queue depth (read-only, never scales).\n  Usage: hscc autoscale [--json]",
-    "escalate": "Show pending failure escalations (dry-run, no mutations).\n  Usage: hscc escalate [--json]",
+    # F6 (audit docs/audits/2026-11-23-agent-surface.md §9): this verb's name is
+    # shared with POST /v1/escalate, which DOES mutate. The old wording —
+    # "(dry-run, no mutations)" — read as a property of the verb, so an agent
+    # that read only the CLI help had a false model of the route (and "dry-run"
+    # is a false friend besides: everywhere else in this CLI --dry-run is a flag
+    # on the mutating verb, not a property of a read). The honest split is now
+    # stated: this verb writes nothing, the route is the mutating half.
+    # Both halves are pinned together by
+    # hscc-api/tests/test_escalate_surface_contract.py.
+    "escalate": "Preview pending escalations — this verb writes nothing.\n"
+                "  POST /v1/escalate is the mutating half: confirm-gated,\n"
+                "  it reassigns a failing card or alerts a human.\n"
+                "  Usage: hscc escalate [--json]",
     "advanced": "Internal/service-manager commands.\n  See 'hscc help advanced' for details.",
     "start-daemon": "Run the daemon loop in the foreground (used by launchd)",
     # heal verbs (audit B5, card t_aeb982bc): the breaker's alert text names
