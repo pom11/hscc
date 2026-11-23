@@ -24,6 +24,8 @@ The template **format reference** is
 | `list_recipes` / `pick_node` | Browse sparkrun recipes / choose an idle worker. |
 | `provision_model` / `stop_model` / `model_health` | Model lifecycle (guarded: `confirm=true`). Correct sparkrun invocation (`--cluster/--port/--ensure`). |
 | `node_pause` / `node_resume` / `node_paused` | Park a node for maintenance (stop its units + record the pause the heal paths skip) / restart the recorded units and clear the pause + heal strikes / list what is parked. Guarded: `confirm=true`; the read is read-only. Both halves call `hscc node …`'s own verb functions — no second policy to drift (t_c28f4f14). |
+| `autodown_status` | Idle autodown state: armed?, idle window, state (reconciled against the live serving probe), last activity, and which interlock holds a teardown off. **Read-only** — same payload as `hscc autodown status --json` (it calls that verb), so CLI, route and tool cannot disagree. No tool for `enable`/`disable`/`wake`/`cancel`: fleet-power mutations are operator scope (t_c036808c, audit §2.4). |
+| `merge_queue_status` | Per-project merge-queue state: enabled (or why off — no repo / no GitHub remote / no gates), paused, queue depth + entries, waiting head, in-flight PR, last outcome. **Read-only** — same payload as `hscc merge-queue status --json` (it calls that verb), so CLI, route and tool cannot disagree. No tool for `add`/`remove`/`pause`/`resume`/`enable`/`disable`: the queue force-pushes and squash-merges, so an agent-writable merge door is a self-merge path (t_96134d32, audit D8). |
 | `vllm_logs` / `node_diagnostics` / `nas_diagnose` | Debug a node / NAS. |
 | `restart_model` / `remount_nas` / `repair_nas_export` / `reap_orphans` | Self-heal (guarded). |
 | `orch_message` | Orchestrator-to-orchestrator **nudge** (queue-only, signed, audited) — see [Orchestrator-to-orchestrator messaging](#orchestrator-to-orchestrator-messaging). |
@@ -108,8 +110,12 @@ Registered in `__init__.py` into the `hscc-cluster` toolset as
 1. **Both ends are orchestrators.** The sender is the *running* profile's
    identity (`HERMES_PROFILE`, falling back to the `profiles/<name>` leaf of
    `HERMES_HOME`, else `default`) — never an argument, so a sender cannot sign
-   as someone else. Sender and target must match `*-orch`; worker profiles and
-   `default` are refused, as is `to == sender`.
+   as someone else. Each end must be a `*-orch` profile **or** the configured
+   main orchestrator (the name `hscc-roles/main_orch.py` resolves — the same
+   source `hscc main status` reads, so a renamed main needs no edit here);
+   worker profiles and `default` are refused even if a config names `default`
+   as the main, as is `to == sender`. If the resolver is unreachable the tool
+   falls back to the `*-orch` rule alone rather than guessing a name.
 2. **Queue-only.** Delivery always asks `repl_inject` for `mode="auto"`, so a
    nudge queues behind a running turn; `steer` is never chosen by this tool.
 3. **Auto-signed.** `[from <sender-orch>] ` always, plus `re: t_xxxx ` when

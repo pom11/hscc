@@ -18,6 +18,8 @@ provides_tools:
   - discovery_status
   - nas_status
   - node_paused
+  - autodown_status
+  - merge_queue_status
   # _OPS_TOOLS
   - provision_model
   - stop_model

@@ -252,3 +252,95 @@ class TestStayDownConfirmation:
         mod, _calls = _wire_down(monkeypatch)
         assert "deliberately down" in mod.STAY_DOWN_CONFIRMATION
         assert "the daemon will not relaunch" in mod.STAY_DOWN_CONFIRMATION
+
+
+class TestStayDownMarkerReport:
+    """t_bf8577f9 (audit F5) — this verb is now the ONLY fleet-down.
+
+    `/cluster-down` (hscc-commands) used to run its own
+    `sparkrun stop --all --hosts <node>` loop with its own already-down markers;
+    measured on identical sparkrun output the two surfaces disagreed about
+    whether a stop had failed, and about which hosts were in scope at all. It
+    now delegates here, which obliges this verb to give the delegating surface
+    two things it never had to give before:
+
+      1. a `reason` argument, so the record can still name WHICH verb claimed
+         the stay-down — the CLI default keeps the CLI's stamped text
+         byte-identical, and `hscc_daemon/verify.py` documents that the text is
+         provenance, never a safety signal;
+      2. the marker OUTCOME in the result dict, additively, so a caller that
+         renders its own text does not have to re-read this function's `print`
+         output to know whether the record was claimed.
+
+    `success` still means "sparkrun exited 0" in every case — the `--json`
+    machine contract is untouched (`_PREVIOUS_KEYS`).
+    """
+
+    def _counting_clear(self, monkeypatch):
+        seen = []
+
+        def fake_clear(reason, path=None):
+            seen.append(reason)
+        monkeypatch.setattr(post_boot, "clear_expected_up", fake_clear)
+        return seen
+
+    def test_the_cli_default_reason_is_unchanged(self, monkeypatch):
+        mod, _calls = _wire_down(monkeypatch)
+        seen = self._counting_clear(monkeypatch)
+        res = mod.cmd_cluster_down(dry_run=False)
+
+        assert seen == ["hscc cluster down"]
+        assert mod.STAY_DOWN_REASON == "hscc cluster down"
+        assert res["stay_down_marker"]["reason"] == mod.STAY_DOWN_REASON
+
+    def test_an_explicit_reason_reaches_the_record(self, monkeypatch):
+        """What `/cluster-down` passes: provenance without a second record."""
+        mod, _calls = _wire_down(monkeypatch)
+        seen = self._counting_clear(monkeypatch)
+        res = mod.cmd_cluster_down(dry_run=False, reason="/cluster-down")
+
+        assert seen == ["/cluster-down"]
+        assert res["stay_down_marker"] == {"cleared": True,
+                                           "reason": "/cluster-down",
+                                           "error": None}
+
+    def test_the_marker_key_is_additive_only(self, monkeypatch):
+        mod, _calls = _wire_down(monkeypatch)
+        self._counting_clear(monkeypatch)
+        res = mod.cmd_cluster_down(dry_run=False)
+
+        assert _PREVIOUS_KEYS <= set(res)      # nothing lost from the --json shape
+        assert res["success"] is True          # and its meaning did not move
+
+    def test_a_failed_clear_is_reported_as_well_as_warned(self, monkeypatch,
+                                                          capsys):
+        mod, _calls = _wire_down(monkeypatch)
+
+        def boom(reason, path=None):
+            raise RuntimeError("disk on fire")
+        monkeypatch.setattr(post_boot, "clear_expected_up", boom)
+        res = mod.cmd_cluster_down(dry_run=False)
+
+        assert res["stay_down_marker"] == {"cleared": False,
+                                           "reason": "hscc cluster down",
+                                           "error": "disk on fire"}
+        assert "WARN: expected_up marker clear failed" in capsys.readouterr().out
+
+    def test_an_unimportable_post_boot_reports_why(self, monkeypatch):
+        """The tolerance path: nothing claimed and nothing printed, but a
+        delegating caller can now say WHY from the dict."""
+        mod, _calls = _wire_down(monkeypatch)
+        monkeypatch.setattr(mod, "_post_boot_module", lambda: None)
+        res = mod.cmd_cluster_down(dry_run=False)
+
+        assert res["stay_down_marker"]["cleared"] is False
+        assert "post_boot" in res["stay_down_marker"]["error"]
+
+    def test_dry_run_reports_no_marker_at_all(self, monkeypatch):
+        """A preview claims nothing, and must not look like it did."""
+        mod, calls = _wire_down(monkeypatch)
+        seen = self._counting_clear(monkeypatch)
+        res = mod.cmd_cluster_down(dry_run=True)
+
+        assert calls == [] and seen == []
+        assert "stay_down_marker" not in res

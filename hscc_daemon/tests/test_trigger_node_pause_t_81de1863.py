@@ -65,6 +65,8 @@ guard-assert that root is inside the tmp dir before writing to it.
 
 import json
 import os
+import re
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -126,6 +128,46 @@ def pause_line(rule_id, host, reason=""):
     label = f" ({reason})" if reason else ""
     return (f"Trigger {rule_id}: notify suppressed — node {host} "
             f"is paused{label}")
+
+
+def past_the_deadline():
+    """An ISO instant strictly past any pause deadline this file creates.
+
+    DERIVED, not pinned. ``pause(until="1h")`` resolves its deadline against
+    ``node_pauses``' OWN clock, so a hard-coded far-future witness (this file passed
+    ``2099-01-01T00:00:00+00:00`` twice) is only "past due" while the real clock sits
+    below it. t_0389093a measured ``test_expiry_then_the_daemons_clear_restores_the_page``
+    red at frozen 2200-01-01 and at ``HSCC_WALL_SHIFT_DAYS=+63225`` — at such a clock the
+    pause is genuinely NOT yet expired and the product is right to keep suppressing.
+    ±400 days (the shipped ``test_single_clock_rule.py`` travel) never reaches it, and
+    this file owns no ``datetime(20xx,`` literal, so the rule never ran it at any shift.
+    """
+    return (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+
+
+class TestThePastDueWitnessIsDerived:
+    """Why the expiry witness must be DERIVED here (t_0389093a).
+
+    The shipped clock rule travels ±400 days and cannot see a premise that only breaks
+    in 2099, so the bite is a source guard: a pinned instant may not be handed to the
+    product as its clock. Re-pinning either expiry call to
+    ``2099-01-01T00:00:00+00:00`` reddens this class on any host, immediately.
+    """
+
+    def test_no_pinned_instant_is_handed_to_the_product_as_now(self):
+        with open(__file__) as fh:
+            pinned = [ln.strip() for ln in fh
+                      if re.search(r'(now|as_of)\s*=\s*"2\d{3}-', ln)]
+        assert not pinned, (
+            "a hard-coded far-future instant is being used as the product's clock — "
+            "the case is then green only while the real clock sits below it "
+            f"(derive it, see past_the_deadline): {pinned}")
+
+    def test_the_witness_is_far_past_any_deadline_this_file_writes(self):
+        # `until="1h"` is resolved by the producer against its own clock, so the
+        # MARGIN is what makes a pause expired — never the calendar year.
+        assert node_pauses._utc(past_the_deadline()) > (
+            node_pauses._utc(None) + timedelta(hours=12))
 
 
 def pause(host, directory, **kw):
@@ -469,14 +511,14 @@ class TestResumeRestoresAlerting:
 
         # The deadline passes; the record still holds the node.
         expired = node_pauses.pending_resume(
-            now="2099-01-01T00:00:00+00:00", directory=overlay)
+            now=past_the_deadline(), directory=overlay)
         assert [h for h, _e in expired] == [PAUSED_NODE]
         trigger.fire_trigger_action(
             rule, {"event_type": "x"}, pauses_directory=overlay,
             primary_node_fn=lambda: PAUSED_NODE)
         assert sent == []
 
-        node_pauses.expiry_pass(now="2099-01-01T00:00:00+00:00",
+        node_pauses.expiry_pass(now=past_the_deadline(),
                                 directory=overlay)
         assert node_pauses.covering(PAUSED_NODE, directory=overlay) is None
         trigger.fire_trigger_action(

@@ -264,6 +264,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
             health,
             heal_breaker, heal_lease,
             hscc, lifecycle, node_pauses,
+            proxy_log_archive,
             serving, state, trigger, update_check, usage,
         )
         def p(sub):
@@ -379,6 +380,24 @@ def _isolate_hscc(tmp_path, monkeypatch):
              {"failures": 0, "warned": False, "last_success_at": None,
               "last_good_epoch": None, "last_good": None}),
             (health, "_fleet_last_seen_epoch", None),
+            # proxy_log_archive.py (t_9713c765) — the pre-restart copy of
+            # sparkrun's litellm.log. BOTH sides must be pinned. PROXY_LOG_DIR
+            # is where the archives are WRITTEN (~/.hscc/proxy-logs), so an
+            # unredirected path would litter the operator's real ~/.hscc from
+            # any test that reaches a proxy repair. SRC_OVERRIDE is the READ
+            # side: pinned to a path that does not exist, so no test can ever
+            # observe — or depend on — the live proxy's log; the archive then
+            # no-ops ("absent") unless a test points it at its own fake file.
+            (proxy_log_archive, "PROXY_LOG_DIR", p("proxy-logs")),
+            (proxy_log_archive, "SRC_OVERRIDE", p("absent-litellm.log")),
+            (proxy_log_archive, "PROXY_LOG_KEEP", 5),
+            (proxy_log_archive, "PROXY_LOG_CAP_BYTES", 64 * 1024 * 1024),
+            # health.py (t_892378c1) — the log-on-change latch behind the
+            # paused-host router WARN. In-process only (nothing on disk), but
+            # without a per-test reset a test that saw a stale entry leaves the
+            # NEXT test's identical WARN suppressed, so the suite would pass or
+            # fail on test ORDER. Rebound fresh, exactly like the latch above.
+            (health, "_paused_stale_router_state", {"signature": None}),
             # heal_lease.py (F2) — the durable single-flight repair lease. This
             # MUST be redirected: check_workers / check_proxy / recover now all
             # take and release it, so an unredirected path would write a LIVE
@@ -695,6 +714,24 @@ def _hermetic_sparkrun_resolution(tmp_path, monkeypatch):
     sparkrun_bin.reset_cache()
     yield str(fake_cli)
     sparkrun_bin.reset_cache()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_process_table(monkeypatch):
+    """Empty process table by default: no test walks the operator's real PIDs.
+
+    t_640be7a2 gave the proxy repair verifier a DESCENDANT walk, which reads
+    THIS machine's process table (``ps -o pid= -P``) — ambient state on exactly
+    the same footing as the real ``sparkrun`` CLI pinned directly above. Default
+    it to an empty table (fail closed: the tracked proxy has no children, which
+    is the pre-fix ``owner == tracked`` semantics), so no test can turn green or
+    red depending on what else happens to be running on the box. A test that
+    cares about process identity installs its own parent -> children table.
+    """
+    from hscc_daemon import health
+
+    monkeypatch.setattr(health, "_proc_children", lambda pid: [])
+    yield
 
 
 class _SubprocessResult:

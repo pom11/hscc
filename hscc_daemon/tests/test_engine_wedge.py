@@ -192,6 +192,18 @@ class TestEngineWedgeProbe:
         state = _read("engine_wedge")
         assert state["wedged"] == []
 
+    # ARTEFACT of an absolute freeze, not a date risk (t_0389093a). The two
+    # `is not None` assertions below ask for an ELAPSED time between tick 1 (the
+    # successful probe, which records `last_success`) and tick 2 (the wedge).
+    # `health.py` derives it as `now_wall - st["last_success"]`, so with the clock
+    # frozen to one instant the difference is exactly 0 and the `... if stalled_s
+    # else None` arm reports "no stall duration": measured `assert None is not None`
+    # red at frozen 2020-01-01 AND frozen 2200-01-01. Green at the real clock and at
+    # every relative arm (±400 days and the equivalent travel ±2518/+63225 days), which
+    # is what separates a clock that cannot advance from a two-clock window — the
+    # latter reddens in ONE direction only. Worth knowing: the same `if stalled_s` arm
+    # reports nothing for a stall under half a second, so this case also depends on the
+    # real gap between its two ticks staying >= 0.5 s.
     def test_stalled_detail_reports_last_success(self, monkeypatch):
         """A unit that streamed fine, then wedged, records when it last
         succeeded and how long it has been stalled — the detail an operator

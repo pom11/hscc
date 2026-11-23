@@ -1196,6 +1196,156 @@ def _proxy_models_healthy(probe, expected_aliases):
     return True, f"expected aliases {sorted(expected_aliases)} all served"
 
 
+# ── through-proxy COMPLETION probe (t_f0b8051b, incident 2026-11-22) ────────
+#
+# WHY this exists when the catalogue check above already exists: on 2026-11-22
+# every `POST /v1/chat/completions` through :4000 failed for ~57 minutes (157
+# failing calls, 31 of them exhausting all 3 client attempts) while
+# `/v1/models` answered 200 and `check_proxy` produced ZERO unhealthy verdicts
+# across ~80 sixty-second ticks. Both endpoints that check asks —
+# :func:`_proxy_models_probe` and :func:`_proxy_backend_probe` — are answered
+# LOCALLY by litellm and never dial an upstream, so a proxy whose every upstream
+# connection is dead is green there permanently. The one check in the daemon
+# that does send a completion through :4000 (`proxy_stall`) REQUIRES that probe
+# to SUCCEED before it may alarm (condition (c)), so the fast-500 shape fell
+# into the intersection of the two exclusions: in no check's domain by
+# construction (docs/audits/2026-11-22-proxy-connection-error.md §4.1-4.2).
+#
+# This closes that hole — it is the only thing in the daemon that asks :4000 for
+# a real completion and treats a FAILURE as news. DETECTION ONLY: a failing
+# completion flips this tick's verdict exactly as backend drift does, and the
+# remediation is the pre-existing cooldown / heal-lease / F5-breaker / streak
+# machinery below `check_proxy`. No restart path lives here.
+
+PROXY_COMPLETION_PROBE_TIMEOUT = float(
+    os.environ.get("HSCC_PROXY_COMPLETION_PROBE_TIMEOUT", "10"))
+# ONE token. The probe pays for the upstream round trip, not for generation —
+# the HTTP status IS the whole signal here (unlike the engine-wedge probe, which
+# asks for 40 tokens because it must SEE text). A smaller request is also a
+# cheaper tax on a GPU once per check tick.
+PROXY_COMPLETION_PROBE_MAX_TOKENS = 1
+# Same wording as the engine-wedge probe (:func:`_probe_unit_generation`), so
+# the prompt is known-good against vLLM rather than invented here.
+PROXY_COMPLETION_PROBE_PROMPT = "Reply with the single word: ok."
+
+
+def _proxy_completion_model(expected_aliases, models):
+    """The model id to ask :4000 for, or ``""`` meaning SKIP the probe.
+
+    Preference order is set by the incident, not by taste: an EXPECTED alias is
+    what the fleet is actually supposed to serve (so a failure is news about a
+    model somebody is calling), falling back to any id the catalogue probe just
+    reported. Never an invented name — a model the proxy does not know answers
+    4xx, which this probe deliberately reads as "the proxy answered" and which
+    would therefore mask the real fault. Empty return = nothing honest to ask
+    for, so the probe is skipped rather than guessed at.
+    """
+    for alias in sorted(expected_aliases or ()):
+        if alias:
+            return alias
+    for mid in (models or ()):
+        if mid:
+            return mid
+    return ""
+
+
+def _proxy_completion_probe(url=None, model=None,
+                            timeout=PROXY_COMPLETION_PROBE_TIMEOUT):
+    """POST a 1-token NON-streaming chat completion THROUGH the proxy.
+
+    The point is the ROUND TRIP: `/v1/models` and `/v1/model/info` are served
+    from litellm's own memory, so they stay green while every upstream dial
+    fails. A completion is the only request the proxy cannot answer without
+    reaching a backend, which makes it the only request that can see a poisoned
+    connection pool.
+
+    Returns ``{"ok": bool, "status": int|None, "skipped": bool, "error": str}``
+    with the same never-raises contract as :func:`_proxy_models_probe` — every
+    transport, HTTP and unexpected failure comes back as a dict, because a
+    raising probe would take the whole proxy check down and a proxy check that
+    dies cannot repair anything. `status` is the HTTP code the proxy answered
+    with (including the 500 that is the reason this probe exists) and is None
+    ONLY when nothing answered at all (timeout, refused, reset). `skipped` is
+    True when there was no model id to ask for; that is "no evidence", never
+    health and never a fault. The verdict itself lives in
+    :func:`_proxy_completion_healthy`, not here.
+
+    ``url``/``model``/``timeout`` are all injectable so the test suite drives
+    this through fakes; the defaults are the production shape.
+    """
+    if not model:
+        return {"ok": True, "status": None, "skipped": True, "error": "",
+                "detail": "no model id available — completion probe skipped"}
+    url = url or f"http://localhost:{PROXY_PORT}/v1/chat/completions"
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user",
+                      "content": PROXY_COMPLETION_PROBE_PROMPT}],
+        "max_tokens": PROXY_COMPLETION_PROBE_MAX_TOKENS,
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+            # urlopen only returns below 400; anything else arrives as an
+            # HTTPError below. A response object without a readable status
+            # (a test double) is therefore an ordinary 200.
+            status = getattr(resp, "status", None) or 200
+    except Exception as e:
+        # ONE handler, no urllib.error import: HTTPError carries `.code`, and
+        # distinguishing "the proxy answered with a bad code" from "nothing
+        # answered" is the whole verdict, so the code — not the exception type
+        # — is what gets surfaced.
+        code = getattr(e, "code", None)
+        if isinstance(code, int):
+            return {"ok": False, "status": code, "skipped": False,
+                    "error": f"HTTP {code}"}
+        return {"ok": False, "status": None, "skipped": False,
+                "error": f"{type(e).__name__}: {e}"}
+    return {"ok": status < 500, "status": status, "skipped": False, "error": ""}
+
+
+def _proxy_completion_healthy(probe):
+    """(healthy, reason) for a through-proxy completion probe.
+
+    UNHEALTHY on exactly two shapes: NO answer at all (transport error /
+    timeout — the proxy took the request and produced nothing), or an answer of
+    HTTP >= 500 — the proxy answered and its OWN upstream dial failed, which is
+    the 2026-11-22 signature (litellm's `InternalServerError: OpenAIException -
+    Connection error`). Both say "this proxy cannot serve a worker".
+
+    Any 4xx is HEALTHY for this probe, deliberately: the proxy answered and
+    refused to run the request, which is a catalogue/routing fault the
+    expected-alias check already owns. Flipping proxy health on a 4xx would have
+    this check relaunch a working load-balancer over a config gap a relaunch
+    cannot fix — once per cooldown tick, forever.
+
+    `skipped` is neither: it returns healthy with a reason that says the probe
+    never ran, so a reader of the state file can never mistake an un-run probe
+    for a passing one.
+    """
+    if probe.get("skipped"):
+        return True, (f"completion probe skipped "
+                      f"({probe.get('detail') or 'no model id'})")
+    status = probe.get("status")
+    if status is None:
+        return False, (f"no completion from :{PROXY_PORT} — "
+                       f"{probe.get('error') or 'transport error'}")
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        return False, (f"completion probe returned no usable status "
+                       f"({status!r})")
+    if status >= 500:
+        return False, (f"completion through :{PROXY_PORT} returned HTTP {status} "
+                       f"(proxy answered, upstream dial failed)")
+    return True, f"completion through :{PROXY_PORT} answered HTTP {status}"
+
+
 # ── per-unit alias coverage (t_be4b94ca operator addendum, 2026-10-22) ──────
 #
 # WHY this lives at UNIT granularity when the proxy check above exists: the
@@ -1514,6 +1664,158 @@ def _proxy_relaunch_window():
     return window if window > 0 else PROXY_RELAUNCH_COOLDOWN_S
 
 
+# ── proxy-check VERDICT logging (t_e26aaa56) ────────────────────────────────
+# WHY THIS EXISTS. `check_proxy` logged `Running proxy check` every 60 s and
+# NOTHING ELSE for ~80 ticks during the 2026-11-22 :4000 outage
+# (docs/audits/2026-11-22-proxy-connection-error.md §4.1). A tick line proves
+# the LOOP ran; it does not prove what the loop CONCLUDED. Proving "the check
+# stayed green through the outage" therefore meant filtering ~11k proxy lines
+# and arguing from ABSENCE — slow, fragile, and an inference an incident report
+# should not have to lean on (it nearly produced the wrong conclusion there).
+#
+# WHAT IT IS NOT. No new verdict, no new probe, no new remediation, no change
+# to what `check_proxy` returns: this logs the verdict the check ALREADY
+# computed (`healthy`, `reason` from `_proxy_models_healthy` /
+# `_proxy_backend_drift`) at the two moments it is worth reading — when it
+# CHANGES, and once in a while when it does not. The `Running proxy check` tick
+# line stays exactly as it was; the per-tick `Worker proxy unhealthy ...` line
+# stays too (removing it would cost the per-tick repair narrative the cooldown
+# and streak logic is written around).
+#
+# ONE GREPPABLE PREFIX. Every line this emits starts `proxy verdict: `, so
+# `grep "proxy verdict:" daemon.log` is the whole timeline — transitions and
+# anchors — with no need to reason about what is missing from it.
+PROXY_VERDICT_HEARTBEAT_TICKS = int(
+    os.environ.get("HSCC_PROXY_VERDICT_HEARTBEAT_TICKS", "30"))
+#: Key holding the last logged verdict inside the proxy stream state file —
+#: the same file and the same durability rule as `last_relaunch`,
+#: `relaunch_streak` and `stall_alerted_at` above. `write_state` REPLACES the
+#: whole file, so every proxy-state write must carry this block (see
+#: :func:`_proxy_verdict_carry`).
+PROXY_VERDICT_STATE_KEY = "check_verdict"
+#: Longest verdict text kept in the state file. `reason` is human prose from the
+# probes (it can carry a whole sorted model list); the state file is not where
+# that gets read, and the 400-char rule above is the house limit for stored
+# probe text.
+PROXY_VERDICT_REASON_MAX = 300
+
+#: Has THIS PROCESS logged a proxy verdict yet? Process-local by necessity:
+#: "the first tick after daemon start" is a statement about the process, not
+#: about the state file (which outlives it). A restart must not invent a
+#: transition it did not observe, so the first verdict tick after a start is
+#: labelled a baseline instead. Same lifetime argument as `_DGX_VERDICT` and
+#: the same test-isolation rule (:func:`reset_proxy_verdict_memory`).
+_proxy_verdict_logged_this_run = False
+
+
+def _proxy_verdict_state():
+    """The last verdict block the proxy check logged, read DURABLY (or None).
+
+    ``None`` when no verdict has ever been recorded (fresh state file) or the
+    block is malformed — a reader must not treat garbage as a green streak.
+    """
+    from .state import read_state
+    prev = read_state("proxy")
+    if not isinstance(prev, dict):
+        return None
+    block = prev.get(PROXY_VERDICT_STATE_KEY)
+    return block if isinstance(block, dict) and block.get("verdict") else None
+
+
+def _proxy_verdict_carry(data):
+    """Re-attach the durable verdict block to a proxy state write; returns data.
+
+    For the branches that make NO verdict — the operator-down stay-down gate and
+    the no-workers no-op. They have nothing to report, so they must not invent a
+    verdict; but `write_state` replaces the file wholesale, and a write that
+    drops the block would erase the memory the next tick needs to tell a
+    transition from a repeat. The same carry-forward rule already governs
+    `last_relaunch` and `stall_alerted_at` for exactly this reason.
+    """
+    block = _proxy_verdict_state()
+    if block:
+        data[PROXY_VERDICT_STATE_KEY] = block
+    return data
+
+
+def reset_proxy_verdict_memory():
+    """Forget that this process has logged a proxy verdict (test isolation only).
+
+    Without it, a test that ran `check_proxy` leaks its first-tick state into the
+    next test, and that test's cold-start baseline silently never fires — the
+    same leak `reset_dgx_verdict()` exists to prevent for `_DGX_VERDICT`. Nothing
+    in the daemon path calls this; a daemon start is a fresh process.
+    """
+    global _proxy_verdict_logged_this_run
+    _proxy_verdict_logged_this_run = False
+
+
+def _proxy_verdict_tick(healthy, reason, heartbeat_every=None):
+    """Emit the proxy check's verdict line when it is worth reading.
+
+    Returns the block :func:`check_proxy` stores under
+    :data:`PROXY_VERDICT_STATE_KEY`, so the next tick — and the next daemon
+    restart — can tell a transition from a repeat.
+
+    Three shapes, never more than one line per tick:
+
+      **transition**  ``GREEN -> UNHEALTHY`` / ``UNHEALTHY -> GREEN``, once per
+          change, naming the reason. WARN going down, INFO coming back.
+      **baseline**    the first verdict tick THIS process makes. A restart must
+          not report a transition it did not observe — the change may have
+          happened while the daemon was down — so the observed verdict is logged
+          once and labelled, and the last RECORDED verdict is named when it
+          differs (that is the restart-mid-outage and restart-mid-green cases,
+          and they read differently).
+      **heartbeat**   every ``heartbeat_every``-th verdict tick while nothing
+          changed (default 30 → ~30 min at the 60 s cadence). This is the whole
+          point for the incident report: a green streak gets positive anchors
+          instead of an argument from absence, without turning a 60 s loop into
+          a 60 s log line. ``<= 0`` disables them.
+
+    Repeated identical ticks emit nothing, which is what keeps a 60 s loop from
+    becoming a 60 s verdict line.
+    """
+    global _proxy_verdict_logged_this_run
+    prior = _proxy_verdict_state()
+    verdict = "GREEN" if healthy else "UNHEALTHY"
+    try:
+        tick = int((prior or {}).get("tick") or 0) + 1
+    except (TypeError, ValueError):
+        tick = 1
+    prev_verdict = (prior or {}).get("verdict")
+    every = (PROXY_VERDICT_HEARTBEAT_TICKS if heartbeat_every is None
+             else heartbeat_every)
+    # One line per tick is the whole contract — a reader greps it and a parser
+    # may split on it — so the reason is flattened even though every reason
+    # builder reachable today (`_proxy_models_healthy`, `_proxy_backend_drift`)
+    # is already single-line. Cheap insurance against the day one of them
+    # interpolates a multi-line probe error into the line that has to stay flat.
+    reason = " ".join(str(reason or "").split())[:PROXY_VERDICT_REASON_MAX]
+
+    if not _proxy_verdict_logged_this_run:
+        # Cold start: an OBSERVATION, never a transition — see the docstring.
+        if prior is None:
+            note = "baseline (first proxy verdict recorded)"
+        elif prev_verdict == verdict:
+            note = "baseline (first check since daemon start)"
+        else:
+            note = ("baseline (first check since daemon start; last recorded "
+                    f"verdict {prev_verdict})")
+        log(f"proxy verdict: {verdict} | {note} | reason: {reason}",
+            "INFO" if healthy else "WARN")
+    elif prev_verdict and prev_verdict != verdict:
+        log(f"proxy verdict: {prev_verdict} -> {verdict} | reason: {reason}",
+            "INFO" if healthy else "WARN")
+    elif every > 0 and tick % every == 0:
+        log(f"proxy verdict: {verdict} | heartbeat (tick {tick}) "
+            f"| reason: {reason}")
+
+    _proxy_verdict_logged_this_run = True
+    return {"verdict": verdict, "tick": tick, "at": now_iso(),
+            "reason": reason}
+
+
 def _ensure_cmdlib_on_path():
     """Put the sibling hscc-commands plugin dir on sys.path for the cmdlib import.
 
@@ -1773,6 +2075,99 @@ def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports,
                   f"backend(s){note}")
 
 
+# The log-on-change latch for `_note_paused_router_stale` below (t_892378c1).
+# Module state, reset per test by tests/conftest.py's `_module_attrs()`.
+# `signature` is the sorted tuple of stale backends last printed, or None when
+# nothing has been printed yet (so a never-dirty check never prints a clear).
+_PAUSED_STALE_ROUTER_LOCK = threading.Lock()
+_paused_stale_router_state: dict = {"signature": None}
+
+
+def _paused_router_stale_backends(expected_absent, live_backends):
+    """The backends the LIVE router still holds for a host the operator parked.
+
+    ``expected_absent`` is :func:`_proxy_backend_drift_sets`' third set — every
+    hscc-owned backend whose HOST is paused — and ``live_backends`` is what
+    ``/v1/model/info`` answered for the running proxy. Their intersection is the
+    one fact the exclusion hides: the endpoint a pause deliberately left behind
+    is still in the live router, so traffic can still be aimed at a machine that
+    was stopped on purpose.
+
+    Intersecting with the RAW live set is the same as intersecting with the
+    drift math's ``live_in_fleet``: ``expected_absent`` is built only from
+    fleet / healthy / live-in-fleet hostports, so anything in it is already
+    hscc-owned. No probe, no I/O — both arguments are already in hand.
+    """
+    live = set(live_backends or ())
+    return {b for b in (expected_absent or ()) if b in live}
+
+
+def _note_paused_router_stale(expected_absent, live_backends):
+    """Print — once per change — the paused-host backends the router still holds.
+
+    WHY. :func:`_proxy_backend_drift` subtracts every parked host's backends
+    (``expected_absent``) from BOTH drift directions, deliberately: reading a
+    pause as DEAD is the bug that stopped the fleet's only entrypoint
+    (t_90958eb8). The cost of subtracting from both is that the DEAD direction
+    became structurally invisible — zero stale/extra-backend verdicts exist in
+    the entire daemon log — so during the 2026-11-22 :4000 outage the daemon
+    could not answer "does the live router still point at the node that was
+    paused five minutes ago?", which is the one alternative explanation the
+    audit could not exclude (``docs/audits/2026-11-22-proxy-connection-error.md``
+    §3.2/§4.3, PR #634 — the record of that outage).
+
+    VISIBILITY, NOT A FAULT. This must not change what the verdict does: it
+    never touches the ``(healthy, reason)`` tuple, never takes a heal lease,
+    never strikes the heal breaker, never emits an event, never notifies and
+    never restarts anything. t_90958eb8's guarantee — a paused node never stops
+    the fleet's entrypoint — stays literally true with this line present, and
+    ``tests/test_proxy_paused_router_stale_t_892378c1.py`` pins that against
+    byte-identical verdict goldens.
+
+    RATE LIMIT: log on CHANGE, not per tick. The signature is the sorted tuple
+    of stale backends, so a node parked for a day costs ONE WARN and the
+    recovery costs one INFO ("no longer points at") — the same once-per-outage
+    posture as the FLEET VISIBILITY latch. The latch is in-process, so a daemon
+    restart re-prints the current state once; that is intentional, since the
+    line is also the evidence that the condition held across a restart.
+
+    Returns the message it printed, or None when it stayed quiet (the caller
+    ignores it; the tests pin the wording). A visibility line must never be able
+    to break the check that prints it, so emission failures are swallowed.
+    """
+    stale = _paused_router_stale_backends(expected_absent, live_backends)
+    signature = tuple(sorted(stale))
+    with _PAUSED_STALE_ROUTER_LOCK:
+        previous = _paused_stale_router_state.get("signature")
+        if signature == previous:
+            return None
+        _paused_stale_router_state["signature"] = signature
+    try:
+        if not stale:
+            if previous is None:
+                # Never dirty, so nothing to clear: a clean check stays silent.
+                return None
+            message = (f"live router no longer points at any paused-host "
+                       f"backend (was {len(previous)}: {list(previous)}) — "
+                       f"the drift verdict was unchanged throughout")
+            log(message, "INFO")
+            return message
+        hosts = sorted({_host_of(b) for b in stale})
+        message = (f"live router still points at {len(stale)} backend(s) on "
+                   f"paused host(s) {sorted(stale)} — not counted as drift "
+                   f"(paused hosts: {', '.join(hosts)})")
+        log(message, "WARN")
+        return message
+    except Exception:  # pragma: no cover - visibility must never break a check
+        return None
+
+
+def _reset_paused_stale_router_state():
+    """Drop the in-process log-on-change latch. Test seam; nothing on disk."""
+    with _PAUSED_STALE_ROUTER_LOCK:
+        _paused_stale_router_state["signature"] = None
+
+
 def _proc_cmdline(pid):
     """The command line of `pid` (stripped), or None if unreadable.
 
@@ -1786,6 +2181,84 @@ def _proc_cmdline(pid):
         return out.strip() or None
     except Exception:
         return None
+
+
+# How far the repair verifier may walk DOWNWARD from sparkrun's tracked PID
+# before it stops calling a port owner "our proxy" (t_640be7a2). The live shape
+# is one level (`uvx litellm` wrapper -> litellm child that binds :4000); the
+# cap exists so a mis-stated identity costs a couple of `ps` calls, never a
+# process-table scan.
+PROXY_TRACKED_TREE_MAX_DEPTH = int(
+    os.environ.get("HSCC_PROXY_TRACKED_TREE_MAX_DEPTH", "3"))
+# Hard ceiling on how many PIDs one walk may visit, so a chatty parent (a shell
+# with dozens of children) cannot turn the bounded-depth rule into a wide one.
+PROXY_TRACKED_TREE_MAX_PIDS = int(
+    os.environ.get("HSCC_PROXY_TRACKED_TREE_MAX_PIDS", "64"))
+
+
+def _proc_children(pid):
+    """Direct children of `pid` from the process table, or [] if unreadable.
+
+    Seam for the proxy identity check, same discipline as :func:`_proc_cmdline`:
+    the answer comes from `ps`, never from a guess, and an unreadable answer is
+    an empty list (fail closed — no children means no descendant may be
+    credited with owning the port).
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid=", "-P", str(pid)],
+            capture_output=True, text=True, timeout=5).stdout
+        return [int(p) for p in out.split() if p.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def _proxy_owner_is_tracked_proxy(owner, tracked_pid, max_depth=None):
+    """(matched, depth) — is the port owner the tracked proxy, or ITS OWN child?
+
+    THE PIDS ARE NOT THE SAME PROCESS (t_640be7a2). For ``uvx litellm``
+    sparkrun's state file tracks the WRAPPER, while the socket on :4000 is held
+    by a litellm CHILD of that wrapper — the hollow-PID shape already documented
+    in :func:`_proxy_kill_hollow_tracked`. Comparing the two with ``==`` (the
+    old rule) called a working proxy "repair UNVERIFIED" and then "FAILED" at
+    ERROR level on 2026-11-22 while :4000 answered every request.
+
+    So identity is the tracked PID's PROCESS TREE, walked breadth-first from the
+    tracked PID to at most ``PROXY_TRACKED_TREE_MAX_DEPTH`` levels /
+    ``PROXY_TRACKED_TREE_MAX_PIDS`` processes, and no wider: a port owner that
+    is NOT in that tree stays unmatched. This widens identity to the proxy's own
+    descendants, never to "any pid that happens to own the port".
+
+    Depth is 0 for the tracked PID itself and 1..N for descendants, so callers
+    can say in the log WHICH process served the port.
+    """
+    if not owner or not tracked_pid or int(owner) <= 0 or int(tracked_pid) <= 0:
+        return False, None
+    owner, root = int(owner), int(tracked_pid)
+    if owner == root:
+        return True, 0
+    depth_cap = (PROXY_TRACKED_TREE_MAX_DEPTH if max_depth is None
+                 else int(max_depth))
+    seen = {root}
+    frontier = [root]
+    for depth in range(1, max(0, depth_cap) + 1):
+        nxt = []
+        for pid in frontier:
+            for child in _proc_children(pid):
+                if child == owner:
+                    return True, depth
+                if child in seen:
+                    continue
+                seen.add(child)
+                nxt.append(child)
+                if len(seen) > PROXY_TRACKED_TREE_MAX_PIDS:
+                    # Ceiling reached: stop widening. An owner we never reached
+                    # stays unverified, which is the honest answer.
+                    return False, None
+        frontier = nxt
+        if not frontier:
+            break
+    return False, None
 
 
 def _proxy_listener():
@@ -1830,15 +2303,15 @@ def _reap_orphan_proxy_listener(tracked_pid):
       1. no listener -> nothing to do (returns True, port is free).
       2. the listener IS the tracked PID **or a descendant of it** -> not an
          orphan, do NOT touch it (that is sparkrun's own process, or the
-         litellm CHILD of the launcher sparkrun recorded, which is what
-         actually holds the socket — killing it takes a WORKING :4000 down).
-         THE PIDs ARE USUALLY DIFFERENT (t_af7d5486): the old ``pid ==
-         tracked_pid`` test never held under ``uv tool uvx``, so the healthy
-         proxy fell straight through to the SIGTERM below and was logged as an
-         orphan it had been killed for. An ancestry walk that cannot be
-         COMPLETED is also a refusal — see :func:`_pid_is_tracked_or_descendant`
-         for why unknown is not "not mine", and why nothing irreversible may
-         hang on that.
+         litellm CHILD of sparkrun's launcher — the t_640be7a2 shape, and the
+         one that actually holds the socket: killing it takes a WORKING
+         :4000 down, which is worse than the bookkeeping mismatch the verifier
+         used to complain about. THE PIDs ARE USUALLY DIFFERENT, so identity
+         may never be ``pid == tracked_pid``.
+         UNKNOWN IS NOT "NOT MINE" (t_af7d5486): this guard uses the tri-state
+         :func:`_pid_is_tracked_or_descendant`, and a walk that could not be
+         COMPLETED refuses as well — a SIGKILL cannot be unsent, so an
+         unreadable process table must not be read as a foreign tree.
          When ``tracked_pid`` is None there is no "mine" to compare against
          (hollow or absent state file), so this guard stands aside and the
          cmdline vetting decides — the shape t_90958eb8's repair relies on.
@@ -1916,6 +2389,42 @@ def _start_refused_already_running(res):
     return any(marker in text for marker in PROXY_ALREADY_RUNNING_MARKERS)
 
 
+def _archive_proxy_log_before_restart(reason):
+    """Seam: copy the outgoing litellm log aside, THEN ask for a restart.
+
+    sparkrun opens ``litellm.log`` in mode ``"w"`` on every gateway launch
+    (``sparkrun/proxy/_supervisor.py::_launch_background``), so the restart we
+    are about to request truncates the one file that could explain the outage
+    we are repairing — which is precisely what happened on 2026-11-22 (audit
+    §3.4: 57 minutes of the only litellm-side record, destroyed by the fix).
+    Copy first. The right fix is a rotate inside sparkrun; this is the fallback
+    and lives in :mod:`hscc_daemon.proxy_log_archive`, whose contract this
+    wraps.
+
+    Thin wrapper so health tests can stub it, same discipline as
+    :func:`_router_drift_probe`. It must NEVER fail a repair: a lost log is
+    bad, an entrypoint left down because a file copy failed is worse, so every
+    outcome — raise, permission error, full disk — logs a WARN and returns.
+    """
+    try:
+        from . import proxy_log_archive
+        res = proxy_log_archive.archive_before_restart()
+    except Exception as exc:  # pragma: no cover - defensive; repair never blocks
+        log(f"proxy log archive FAILED before {reason} ({type(exc).__name__}: "
+            f"{exc}) — restarting anyway; sparkrun will truncate litellm.log",
+            "WARN")
+        return None
+    if res.get("action") == "archived":
+        pruned = res.get("pruned") or []
+        log(f"proxy log archived before {reason}: {res['archived']}"
+            + (f" (pruned {len(pruned)} older archive{'s' if len(pruned) != 1 else ''})"
+               if pruned else ""))
+    elif res.get("error"):
+        log(f"proxy log archive FAILED before {reason} ({res['error']}) — "
+            "restarting anyway; sparkrun will truncate litellm.log", "WARN")
+    return res
+
+
 def _proxy_repair_orphan(relaunch_hosts):
     """Full orphan repair: stop, reap any untracked litellm listener, start.
 
@@ -1928,7 +2437,9 @@ def _proxy_repair_orphan(relaunch_hosts):
       3. `sparkrun proxy start --hosts <fleet>` — plain start, no --restart:
          after 1+2 the port is genuinely free, and --restart's own state-file
          assumptions are what failed us.
-      4. verify the port is now owned by the tracked PID.
+      4. verify the port is now owned by the tracked PID **or a descendant of
+         it** (see :func:`_proxy_owner_is_tracked_proxy` — sparkrun tracks the
+         launcher, the child holds the socket).
 
     STALE-PID REFUSAL (t_90958eb8, step 3b): step 1+2 do NOT guarantee a free
     port — sparkrun's state file can still carry a PID that ``is_running()``
@@ -1944,6 +2455,10 @@ def _proxy_repair_orphan(relaunch_hosts):
     sleeping on a dead entrypoint.
     """
     tracked_before = _proxy_tracked_pid()
+    # Copy the outgoing log FIRST (t_9713c765): `proxy stop` + `proxy start`
+    # end in a launch, and a launch truncates litellm.log. Read-only here — the
+    # proxy may still be serving while we copy.
+    _archive_proxy_log_before_restart("orphan repair")
     run_cmd(sparkrun_bin.argv("proxy", "stop"), timeout=60)
     reaped = _reap_orphan_proxy_listener(tracked_before)
     if not reaped:
@@ -1976,14 +2491,31 @@ def _proxy_repair_orphan(relaunch_hosts):
         time.sleep(1.0)
         owner, owner_cmd = _proxy_listener()
     tracked_after = _proxy_tracked_pid()
-    verified = (owner is not None and tracked_after is not None
-                and owner == tracked_after)
+    # IDENTITY IS THE PROCESS TREE, NOT ONE PID (t_640be7a2). sparkrun tracks the
+    # `uvx litellm` WRAPPER; the process holding :4000 is usually its litellm
+    # child. The old `owner == tracked` equality called that healthy proxy
+    # UNVERIFIED -> FAILED, which is the false alarm the operator measured on
+    # 2026-11-22 ("port owner 15706, sparkrun tracks 15701" over a proxy that
+    # answered every request).
+    verified, depth = _proxy_owner_is_tracked_proxy(owner, tracked_after)
     if not verified:
         log(f"proxy repair UNVERIFIED on :{PROXY_PORT} — port owner {owner}, "
             f"sparkrun tracks {tracked_after} ({owner_cmd!r})", "WARN")
+    elif depth:
+        log(f"proxy repaired on :{PROXY_PORT}, owned by PID {owner} — a "
+            f"depth-{depth} descendant of tracked PID {tracked_after} "
+            f"(sparkrun tracks the launcher, not the socket owner)")
     else:
         log(f"proxy repaired on :{PROXY_PORT}, owned by tracked PID {owner}")
     return {"ok": bool(res.get("ok")) and verified,
+            # `healthy` is the END-STATE verdict and it is deliberately not the
+            # same thing as `ok`: `ok` also carries the start command's exit
+            # code, which feeds the streak/escalation machinery. A repair whose
+            # proxy IS serving :4000 (verified, whatever the CLI said) must
+            # never be reported to the operator as a FAILED repair at ERROR
+            # level — see the verdict gate in check_proxy (t_640be7a2).
+            "healthy": bool(verified),
+            "owner_depth": depth,
             "port_owner": owner, "tracked_pid": tracked_after,
             "verified": verified, "output": res.get("output", ""),
             # NOTHING listening on the port = :4000 refuses every connection.
@@ -2073,13 +2605,16 @@ def _pid_is_tracked_or_descendant(pid, tracked_pid,
              on the chain was unreadable or the hop budget ran out before a
              root was reached. Unknown is not the same statement as "not mine".
 
-    WHY THREE VALUES AND NOT A BOOLEAN (t_af7d5486). The consumers differ on
-    purpose and both need ``None`` kept apart from ``False``:
+    WHY THREE VALUES AND NOT A BOOLEAN (t_af7d5486). Both consumers need
+    ``None`` kept apart from ``False``, and they read it differently ON PURPOSE:
       - the kill path (:func:`_reap_orphan_proxy_listener`) reads ``None`` as
         REFUSE TO KILL — a signal cannot be unsent, so an unfinished walk fails
         closed;
-      - the repair verifier reads ``None`` as UNVERIFIED — not-evaluable is not
-        green, and it is not evidence that someone else owns the port either.
+      - the repair verifier must read ``None`` as UNVERIFIED — not-evaluable is
+        not green, and it is not evidence that someone else owns the port
+        either. It does NOT call this helper yet: on main it still answers with
+        :func:`_proxy_owner_is_tracked_proxy`, and adopting the tri-state is
+        what t_0df7fc35 exists to do.
     Collapsing ``None`` into ``False`` is what turns a ``ps`` hiccup into a
     fleet outage: the caller concludes "not our proxy" and SIGKILLs the gateway.
 
@@ -2221,6 +2756,9 @@ def _proxy_adopt_backends(relaunch_hosts):
     ``port_owner``, ``tracked_pid``, ``verified``, ``output``, ``proxy_down``,
     plus ``identity``) so the caller's verdict logic never forks.
     """
+    # `--restart` is a launch, and a launch truncates litellm.log (t_9713c765):
+    # copy the outgoing log while the old gateway is still serving.
+    _archive_proxy_log_before_restart("backend re-attach")
     args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
             "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT),
             "--restart"]
@@ -2239,6 +2777,24 @@ def _proxy_adopt_backends(relaunch_hosts):
             "output": res.get("output", ""),
             # NOTHING listening on the port = :4000 refuses every connection.
             "proxy_down": owner is None}
+
+def _proxy_repair_verdict(res, ok_text, incomplete_prefix):
+    """The sentence a repair tick reports — the END STATE decides the wording.
+
+    ``ok`` mixes two things: the start command's exit code (which the streak and
+    escalation machinery need, so it must stay conservative) and the verified
+    verdict. ``healthy`` is the end state a repair exists to produce — the
+    tracked proxy's own process tree serving :4000. Reporting THAT to the
+    operator as ``proxy repair FAILED`` at ERROR level is the t_640be7a2 false
+    alarm, so the healthy-but-not-ok shape gets its own honest sentence instead
+    of a failure verdict derived from pid/exit-code bookkeeping.
+    """
+    if res.get("ok"):
+        return ok_text
+    if res.get("healthy"):
+        return (f"{incomplete_prefix} incomplete (:{PROXY_PORT} IS served by "
+                f"the tracked proxy; the sparkrun command reported a failure)")
+    return f"{incomplete_prefix} incomplete (unverified)"
 
 
 def _router_drift_probe():
@@ -2402,6 +2958,16 @@ def check_proxy(pause_directory=None):
     Relaunch hosts follow :func:`_proxy_relaunch_hosts` — under a uniform_pool
     they MUST include the orchestrator node, or the relaunched LB can never
     recover the orchestrator's endpoint.
+    Health is ALSO not the catalogue (t_f0b8051b, the 2026-11-22 outage): both
+    endpoints above are answered from litellm's own memory and never dial an
+    upstream, so a proxy whose every upstream connection is dead served `200`
+    with a full catalogue for ~57 minutes while 157 completions through `:4000`
+    failed. Once the catalogue verdict is green this check therefore asks
+    :func:`_proxy_completion_probe` for ONE 1-token completion THROUGH the proxy
+    and reads the answer as a health verdict: no answer at all (timeout /
+    transport) or HTTP >= 500 is unhealthy; any 4xx is healthy, because a
+    refusing proxy is a catalogue/routing fault the alias check owns. Detection
+    only — the remediation stays the existing cooldown/lease/breaker path below.
     STAY-DOWN (t_ba1424b7, the first thing the body does): when
     :func:`_operator_down` reports post_boot's durable record — stamped by
     `hscc cluster down` (and by autodown's idle teardown), lifted by
@@ -2439,6 +3005,16 @@ def check_proxy(pause_directory=None):
     TRADE-OFF (intended, stated so it is not discovered the hard way): a proxy
     that is genuinely down while the keyed host is parked is not repaired until
     the pause is lifted.
+    VERDICT LOGGING (t_e26aaa56): the tick line ``Running proxy check`` proves
+    the LOOP ran; it never proved what the loop CONCLUDED, so on 2026-11-22 a
+    ~80-tick green streak was provable only from the ABSENCE of complaint lines
+    (audit §4.1). :func:`_proxy_verdict_tick` therefore logs the verdict this
+    check already computes — once on a transition in either direction, once at
+    daemon start labelled as an observation (a restart must not report a change
+    it did not observe), and every ``HSCC_PROXY_VERDICT_HEARTBEAT_TICKS`` ticks
+    (30 ≈ 30 min) while nothing changes. Memory lives in this stream's own state
+    file; the branches that make no verdict carry it forward rather than erase
+    it. Logging only: no verdict, probe, repair or return value changes.
     """
     from .state import write_state
 
@@ -2455,19 +3031,19 @@ def check_proxy(pause_directory=None):
         _reason = _down.get("reason") or "unspecified"
         log(f"fleet deliberately down — not relaunching (proxy; "
             f"reason: {_reason})")
-        write_state("proxy", {
+        write_state("proxy", _proxy_verdict_carry({
             "ok": True, "port": PROXY_PORT, "last_check": now_iso(),
             "intentional": "operator_down",
             "message": f"fleet deliberately down — not relaunching "
-                       f"(proxy; reason: {_reason})",
-        })
+                       f"(proxy; reason: {_reason})"}))
         return True
 
     log("Running proxy check")
     nodes = sorted(serving.KEEPALIVE_NODES)
     if not nodes:
-        write_state("proxy", {"ok": True, "message": "no workers — proxy not needed",
-                              "last_check": now_iso()})
+        write_state("proxy", _proxy_verdict_carry(
+            {"ok": True, "message": "no workers — proxy not needed",
+             "last_check": now_iso()}))
         return True
 
     serving_data = serving.load_serving()
@@ -2543,8 +3119,17 @@ def check_proxy(pause_directory=None):
             # is what stops `hscc node pause` from stopping the fleet's proxy.
             paused_hp = _paused_nodes(pause_directory)
             live_hp = live.get("backends") or set()
-            missing_hp, dead_hp, _absent = _proxy_backend_drift_sets(
+            missing_hp, dead_hp, absent_hp = _proxy_backend_drift_sets(
                 live_hp, healthy_units, fleet_hp, paused_nodes=paused_hp)
+            # PAUSED-HOST VISIBILITY (t_892378c1). `absent_hp` is subtracted
+            # from BOTH drift directions above, so "the live router still holds
+            # this parked host's endpoint" has never been printed anywhere — the
+            # DEAD direction is structurally blind while a node is paused, which
+            # is exactly what the 2026-11-22 audit could not exclude. Say it, on
+            # change, and move on: this line is not drift, takes no lease,
+            # strikes nothing, alerts nothing, and must not touch `drift_ok` or
+            # `drift_reason` below.
+            _note_paused_router_stale(absent_hp, live_hp)
             drift_ok, drift_reason = _proxy_backend_drift(
                 live_hp, healthy_units, fleet_hp,
                 paused_nodes=paused_hp)
@@ -2557,12 +3142,56 @@ def check_proxy(pause_directory=None):
                 # the repair block, and why `_proxy_backend_drift_sets` exists).
                 drift_missing_only = bool(missing_hp) and not dead_hp
                 healthy, reason = False, drift_reason
+
+    # THROUGH-PROXY COMPLETION (t_f0b8051b). The two verdicts above are
+    # answered locally by litellm and never dial an upstream, so a proxy whose
+    # every upstream connection is dead passes them forever — measured on
+    # 2026-11-22, ~57 minutes and ~80 ticks of it. Ask :4000 for ONE real
+    # completion: it is the only request here the proxy cannot answer without
+    # reaching a backend. Runs only while the verdict is still green (a proxy
+    # that failed the catalogue has no completion to give and the repair path
+    # below is the same either way) and only under the operator gate at the top
+    # of this function, so an intentional autodown / `cluster down` never sees a
+    # probe — the stay-down path returns before this line, and a parked node is
+    # inert for the same reason the repair path is (its strike is skipped by the
+    # pause seam below, so a pause never buys a relaunch).
+    #
+    # DETECTION ONLY. A failing completion flips the verdict exactly as drift
+    # does and lands in the same state keys; the remediation is the pre-existing
+    # cooldown / heal-lease / F5-breaker / relaunch-streak machinery, which
+    # clears the streak the moment a probe goes green again. TRADE-OFF (stated
+    # so it is not discovered the hard way): the timeout is an UNDEBOUNCED
+    # single tick — a proxy that is alive but too busy to answer a 1-token
+    # request inside PROXY_COMPLETION_PROBE_TIMEOUT reads as unhealthy here,
+    # exactly as an unreachable one does. What bounds the false positive is the
+    # machinery below (cooldown, lease, breaker, and the plain start a running
+    # proxy refuses), not this probe.
+    completion_ok, completion_detail = True, (
+        "completion probe not run (verdict already failed before the probe)")
+    if healthy:
+        completion = _proxy_completion_probe(
+            model=_proxy_completion_model(expected, probe.get("models")),
+            timeout=PROXY_COMPLETION_PROBE_TIMEOUT)
+        completion_ok, completion_detail = _proxy_completion_healthy(completion)
+        if not completion_ok:
+            healthy, reason = False, completion_detail
+
+    # VERDICT LINE (t_e26aaa56) — the moment the check's own verdict is FINAL
+    # (after the backend-drift flip above and after the through-proxy completion
+    # flip, which is what turned the 2026-11-22 fast-500 outage invisible), and
+    # before either write. Emits at most one line: a transition, a cold-start
+    # baseline, or a heartbeat. Logs only — never re-decides; `healthy`/`reason`
+    # are the check's own values and the return value below is untouched by it.
+    verdict_block = _proxy_verdict_tick(healthy, reason)
     if healthy:
         write_state("proxy", {"ok": True, "port": PROXY_PORT,
                               "last_check": now_iso(), "message": reason,
                               "router_drift": drift["detail"],
                               "router_drift_warn": bool(drift["warn"]),
                               "unit_alias_warn": unit_alias_warn,
+                              PROXY_VERDICT_STATE_KEY: verdict_block,
+                              "completion_ok": completion_ok,
+                              "completion": completion_detail,
                               "models": sorted(probe.get("models") or [])})
         if drift["warn"]:
             log(f"proxy router drift ({drift['detail']})", "WARN")
@@ -2721,8 +3350,9 @@ def check_proxy(pause_directory=None):
                                 r = _proxy_repair_orphan(start_hosts)
                         else:
                             r = _proxy_repair_orphan(start_hosts)
-                        message = ("repaired" if r.get("ok")
-                                   else "repair incomplete (unverified)")
+                        # t_640be7a2: the END STATE decides the wording — a proxy
+                        # served by the tracked tree is not reported as FAILED.
+                        message = _proxy_repair_verdict(r, "repaired", "repair")
                     elif escalated:
                         # Carry the PREVIOUS attempt's surfaced error into the
                         # escalation banner — the streak that triggered this
@@ -2733,13 +3363,18 @@ def check_proxy(pause_directory=None):
                             start_hosts, prev_streak,
                             _prev.get("relaunch_error") if isinstance(_prev, dict) else "",
                             reason)
-                        message = ("escalated repair" if r.get("ok")
-                                   else "escalated repair incomplete (unverified)")
+                        message = _proxy_repair_verdict(
+                            r, "escalated repair", "escalated repair")
                     else:
                         log(f"relaunching with {start_hosts}"
                             f"{' (--restart: running proxy serves nothing)' if restart else ''}"
                             f" (attempt {prev_streak + 1} of "
                             f"{PROXY_RELAUNCH_MAX_CONSECUTIVE} before stall alarm)", "WARN")
+                        # A start is a launch, and a launch truncates
+                        # litellm.log — also when the proxy is already DOWN,
+                        # where the outgoing log is the only record of why
+                        # (t_9713c765, audit §3.4).
+                        _archive_proxy_log_before_restart("relaunch")
                         args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
                                 "--hosts", ",".join(start_hosts), "--port", str(PROXY_PORT)]
                         if restart:
@@ -2757,9 +3392,21 @@ def check_proxy(pause_directory=None):
     # NOTHING, so it is not a failed repair and must not read as one (the same
     # argument as `suppressed` / `deferred`, three lines below).
     if not ok and not suppressed and not deferred and not paused_skip:
-        log(f"proxy repair on :{PROXY_PORT} FAILED ({message}): "
-            f"{(r.get('output') or r.get('stderr') or 'no command output')[:400]}",
-            "ERROR")
+        detail = (r.get('output') or r.get('stderr') or 'no command output')[:400]
+        if r.get("healthy"):
+            # t_640be7a2: the port IS served by the tracked proxy's own process
+            # tree, so :4000 answers requests and this tick's verdict is a
+            # bookkeeping mismatch, not an outage. ERROR level here is what made
+            # a HEALTHY proxy look like a failed repair in the 2026-11-22 log
+            # (`proxy repair UNVERIFIED ... port owner 15706, sparkrun tracks
+            # 15701` + `[ERROR] proxy repair FAILED`, while every request was
+            # being served). Still surfaced, as a WARN, because the streak and
+            # the escalation path legitimately stay armed.
+            log(f"proxy repair on :{PROXY_PORT} INCOMPLETE ({message}): "
+                f"{detail}", "WARN")
+        else:
+            log(f"proxy repair on :{PROXY_PORT} FAILED ({message}): "
+                f"{detail}", "ERROR")
     new_streak = _proxy_relaunch_streak() + (1 if attempted else 0)
     # REPAIR NEVER LEAVES :4000 DOWN (t_90958eb8, fix 2). `proxy_down` is the
     # repair's own verdict that NOTHING is listening on the port — i.e. :4000
@@ -2793,6 +3440,11 @@ def check_proxy(pause_directory=None):
                   "reason": reason,
                   "restart": restart,
                   "backend_drift": backend_drift,
+                  # The verdict block this tick logged (t_e26aaa56). Every
+                  # unhealthy tick rewrites it with the SAME verdict text, which
+                  # is what makes the next tick's comparison — and a restart's
+                  # baseline label — correct.
+                  PROXY_VERDICT_STATE_KEY: verdict_block,
                   "relaunch_hosts": relaunch_hosts,
                   # A deferral is not a FAILED relaunch — nothing was attempted.
                   # Same treatment as `suppressed`, so a deferred tick cannot
@@ -2812,6 +3464,13 @@ def check_proxy(pause_directory=None):
                   "router_drift": drift["detail"],
                   "router_drift_warn": bool(drift["warn"]),
                   "unit_alias_warn": unit_alias_warn,
+                  # The completion verdict is the ONE piece of evidence that can
+                  # name this tick's fault when the catalogue is green, so it
+                  # must survive on the unhealthy path too (t_f0b8051b): on
+                  # 2026-11-22 every proxy state row said "healthy-looking"
+                  # because nothing here ever asked for a completion.
+                  "completion_ok": completion_ok,
+                  "completion": completion_detail,
                   "message": message}
     if not ok and not suppressed and not deferred and not paused_skip:
         proxy_data["relaunch_error"] = (r.get("output") or r.get("stderr") or "")[:400]

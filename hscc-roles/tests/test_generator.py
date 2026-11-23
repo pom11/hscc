@@ -7,6 +7,7 @@ import pytest
 import rolelib
 import generator
 import hermes_gap
+import main_orch
 
 
 def test_compose_soul_has_all_three_layers():
@@ -51,6 +52,68 @@ def test_project_orch_work_rules_carry_the_orch_message_nudge_rule():
     worker = generator.compose_soul(
         {"name": "coder", "identity": "You build.\n", "preload_skills": []},
         base_identity="BASE")
+    assert "orch_message" not in worker
+
+
+# --- t_1992ab13: the MAIN orchestrator's SOUL must name the nudge TOOL -------
+#
+# t_9e3d868f made `orch_message` accept the CONFIGURED main orchestrator as
+# sender and as target, so the policed channel is now available to exactly the
+# profile whose SOUL still said "only through `hscc orch inject`". The fix was
+# real and undiscoverable: the main kept shelling out to the CLI verb and
+# forfeited the rate limit, the reply-loop guard, the exactly-one-pane rule and
+# the signed audit line. Same discipline as the rule-11 pin above — assert the
+# text AFTER the heading, so a stray mention elsewhere cannot pass.
+
+TALKING_HEADING = "## Talking to orchestrators"
+
+
+@pytest.mark.parametrize("main_name", [main_orch.DEFAULT_NAME, "ops"])
+def test_main_orch_talking_section_names_the_orch_message_channel(
+        tmp_path, monkeypatch, main_name):
+    """The main's own channel section names `orch_message` as the agent path."""
+    monkeypatch.setenv("HSCC_DIR", str(tmp_path / "hscc"))   # sealed: nothing stored
+    if main_name != main_orch.DEFAULT_NAME:
+        main_orch.store_name(
+            main_name, profiles_dir=str(tmp_path / "profiles"),
+            registry_path=str(tmp_path / "absent-registry.yaml"))
+    soul = generator.compose_soul(
+        {"name": main_name, "identity": "You orchestrate.\n",
+         "preload_skills": []},
+        base_identity="BASE")
+    assert soul.count(TALKING_HEADING) == 1, (
+        "the main's channel section must appear exactly once")
+    section = soul.split(TALKING_HEADING, 1)[1].split("\n## ", 1)[0]
+
+    # The tool is named, with the properties that make it the preferred path.
+    assert "`orch_message`" in section
+    for property_ in ("queue-only", "rate-limited", "audited"):
+        assert property_ in section, f"section drops the {property_!r} property"
+    # A nudge reaches an orchestrator at either end — the main included, which
+    # is the whole point of t_9e3d868f — and refuses the reserved profiles.
+    assert "main orchestrator (you)" in section
+    assert "`default`" in section
+
+    # `hscc orch inject` is demoted, not deleted: dry-run probe + fallback.
+    assert "`hscc orch inject`" in section
+    assert "--dry-run" in section
+    assert "fallback" in section
+    # The sentence that made this card exists must not come back.
+    assert "only through `hscc orch inject`" not in section
+
+    # The safety sentences the section has always carried stay put.
+    assert "no `~/bin` scripts and no side channels" in section
+    assert "A nudge is not a work order" in section
+    assert "steer when the orchestrator is busy; plain when it is idle" in \
+        section.lower()
+
+
+def test_a_worker_soul_still_never_names_the_nudge_channel():
+    """The section is orchestrator-only; a worker still cannot send."""
+    worker = generator.compose_soul(
+        {"name": "sweeper", "identity": "You sweep.\n", "preload_skills": []},
+        base_identity="BASE")
+    assert TALKING_HEADING not in worker
     assert "orch_message" not in worker
 
 
