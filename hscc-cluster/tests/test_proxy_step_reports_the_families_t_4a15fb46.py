@@ -341,25 +341,42 @@ class TestApplyReportsWhatTheProxiesDid:
                                                        "start"]]
         assert len(starts) == 1 and "--restart" not in starts[0], starts
 
-    def test_a_proxy_port_that_nothing_serves_fails_the_apply(
+    def test_a_proxy_that_does_not_load_fails_the_apply(
             self, tmp_path, monkeypatch):
-        """The two-proxy-family shape: the second family's port is never served,
-        and apply can no longer print success over it."""
-        rig = self._setup(tmp_path, monkeypatch, "two-proxy", TWO_PROXY_YAML)
+        """A proxy start that genuinely fails still flips the apply to failure.
 
-        res = ct.apply_template("two-proxy", confirm=True)
+        Before the one-gateway fix this used the two-proxy shape: the second
+        family's port was refused and therefore never served. That shape no
+        longer exists — every proxy family resolves to the ONE gateway and
+        apply starts it once (t_6283c79f) — so the derived status is pinned on
+        the failure that remains: the gateway itself does not come up. The
+        family report says so and the apply must not print success over it.
+        """
+        rig = self._setup(tmp_path, monkeypatch, "one-proxy", ONE_PROXY_YAML)
+
+        def _failing_run(argv, **kw):
+            argv = [str(a) for a in argv]
+            rig["calls"].append(argv)
+            if argv[:3] == ["sparkrun", "proxy", "start"]:
+                return MagicMock(returncode=1, stdout="",
+                                 stderr="Error: gateway failed to bind")
+            return _started()
+
+        monkeypatch.setattr(subprocess, "run", _failing_run)
+
+        res = ct.apply_template("one-proxy", confirm=True)
         step = self._proxy_step(res)
 
         assert step["status"] == "warn", step
-        assert [d["loaded"] for d in step["details"]] == [True, False], step
-        assert step["failed"] and step["failed"][0]["family"] == "fast", step
-        assert step["failed"][0]["port"] == 4001, step
-        assert "fast(:4001)" in step["note"], step
+        assert [d["loaded"] for d in step["details"]] == [False], step
+        assert step["failed"] and step["failed"][0]["family"] == "coding", step
+        assert step["failed"][0]["port"] == 4000, step
+        assert "coding(:4000)" in step["note"], step
         assert res["success"] is False, res
         # ...and the failure is loud enough to stop the applied-state write.
         assert not (rig["hscc"] / "applied_template.json").exists()
-        # The gateway that exists is still only the first family's.
-        assert rig["state"].read_text() == "4000"
+        # No gateway was ever recorded.
+        assert not rig["state"].exists()
 
     def test_a_clean_apply_is_unchanged(self, tmp_path, monkeypatch):
         """Control: a fresh apply with nothing running still says ok, with no
