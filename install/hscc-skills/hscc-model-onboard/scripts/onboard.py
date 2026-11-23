@@ -17,6 +17,19 @@ Phases (each is a subcommand; `all` runs them in order):
     all     <model> <recipe> --yes    # plan -> cache -> wire -> launch -> verify
 
 Safety:
+    - NODE PAUSE IS AUTHORITATIVE. A node held by ~/.hscc/node_pauses.json is
+      never picked: it is skipped by cache (no rsync onto a machine the operator
+      parked), reported as parked by plan, and reported expected-absent (NOT
+      DOWN) by verify. `launch` has no pause awareness of its own because it
+      delegates to `hscc cluster up`, which partitions the plan against the
+      overlay. There is no --include-paused here either — see
+      docs/ops/node-pause.md.
+    - launch is a CALL to `hscc cluster up`, not a hand-built `sparkrun run`.
+      sparkrun finds and re-issues a workload by an INTENT HASH of recipe plus
+      --port / --served-model-name / --tp, so an argv built by hand that drops
+      one of those starts a workload no later stop can match (t_8ad06a53) and
+      that `--ensure` answers with a PARALLEL DUPLICATE (t_e1ff0e8e). The door
+      builds the argv from serving.json; this script does not.
     - Mutating phases (wire/launch/all) require --yes.
     - wire backs up ~/.hscc + hermes root config + EVERY profile config first.
     - The hermes root is resolved at call time (never an import-time
@@ -42,8 +55,12 @@ import urllib.request
 from datetime import datetime, timezone
 
 HSCC_HOME = os.path.expanduser(os.environ.get("HSCC_HOME", "~/.hscc"))
-SPARKRUN_DIR = os.path.expanduser("~/sparkrun")
-SPARKRUN_BIN = os.path.join(SPARKRUN_DIR, ".venv", "bin", "sparkrun")
+# Deliberately NO sparkrun constant here. This script must not be able to build
+# a sparkrun argv: the launch/stop argv is sparkrun's INTENT HASH (recipe plus
+# --port / --served-model-name / --tp), and only ``hscc_daemon/serving.py`` may
+# derive it (``_unit_run_cmd`` / ``unit_stop_cmd``). A constant pointing at the
+# binary is what made the old ``phase_launch`` look like it was allowed to call
+# it directly — and it was not (see :func:`phase_launch`). ``hscc`` is the door.
 SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 
 R = "\033[0;31m"; G = "\033[0;32m"; Y = "\033[0;33m"; B = "\033[0;34m"; NC = "\033[0m"
@@ -242,15 +259,181 @@ def die(msg):
     sys.exit(1)
 
 
+# ── Node-pause overlay (the skip seam) ───────────────────────────────────────
+#
+# ``hscc node pause`` parks one node and edits NOTHING the cluster is built
+# from (``hscc_daemon/node_pauses.py``). That is exactly what makes an
+# overlay-blind onboarding wrong: ``serving.json`` still lists the parked node's
+# units, so a script that reads only config.json + serving.json sees a node that
+# should be running and "fixes" it — rsyncing gigabytes onto a machine the
+# operator parked for a training run, then launching vLLM back onto it.
+#
+# THREE RULES, all taken from node_pauses' own docstring ("WHAT A SKIP SEAM
+# MUST ASK"):
+#
+#   1. Ask ``covering`` / ``paused_nodes``, NEVER ``paused``. A pause record is
+#      keyed by the host it was issued against and a tensor-parallel unit's
+#      other hosts ride in its ``span_nodes``; they are just as parked. A seam
+#      that asked ``paused(host)`` per node would relaunch the peer of a span
+#      the operator parked.
+#   2. Expiry does not release a node. A record whose ``until`` has passed is
+#      still a pause until the daemon's own auto-resume (or ``hscc node
+#      resume``) ends it; treating "deadline passed" as free relaunches the unit
+#      a few seconds before the daemon was about to.
+#   3. Unreadable overlay -> FAIL OPEN to "nothing parked", and SAY so. A
+#      missing file genuinely means nothing is paused (``load()`` cannot raise);
+#      a corrupt one must not strand a cutover, but silently ignoring a
+#      readable record would.
+#
+# Read through ``hscc_daemon.node_pauses`` when it is importable (the shared
+# implementation, so this script cannot drift from how the daemon and the CLI
+# read the same file), with a standalone fallback pinned against it by
+# ``test_overlay_drift`` in test_model_onboard_hermes_root.py — same
+# ladder-plus-drift-pin discipline as ``_fallback_homes``.
+
+OVERLAY_NAME = "node_pauses.json"
+
+
+def _load_node_pauses():
+    """Import ``hscc_daemon.node_pauses``, or None when hscc_daemon is absent.
+
+    Deferred + guarded (see :func:`_load_hermes_python` for the walk-up
+    rationale): the overlay's parse rules live with the overlay, and a
+    skills-only install has to fall back rather than die.
+    """
+    try:
+        from hscc_daemon import node_pauses
+        return node_pauses
+    except Exception:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    d = here
+    for _ in range(8):
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+        if os.path.isfile(os.path.join(d, "hscc_daemon", "node_pauses.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            try:
+                from hscc_daemon import node_pauses
+                return node_pauses
+            except Exception:
+                return None
+    return None
+
+
+def _fallback_parked_nodes(directory=None):
+    """Standalone read of the overlay: keyed hosts ∪ their ``span_nodes``.
+
+    The SAME set ``node_pauses.paused_nodes`` returns, reached without the
+    package, mirroring its normalisation rule for rule: no clock (rule 2); a
+    non-string host key or a NON-OBJECT record drops the whole record — so the
+    keyed host is NOT parked either, which is the shared reader's fail-open and
+    not a licence to park; a non-list ``span_nodes`` degrades to empty instead
+    of crashing; a blank span entry is dropped. A fallback that quietly
+    disagrees with the daemon is the bug, so
+    :mod:`test_model_onboard_pause_aware_t_ed77d757` diffs the two on fabricated
+    overlays every run, the way ``test_hermes_home_ladder.py::test_ladder_drift``
+    pins the Hermes-home ladder.
+    """
+    path = os.path.join(directory or HSCC_HOME, OVERLAY_NAME)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    pauses = data.get("pauses") if isinstance(data, dict) else None
+    if not isinstance(pauses, dict):
+        return set()
+    out = set()
+    for host, entry in pauses.items():
+        if not isinstance(host, str) or not host.strip():
+            continue
+        if not isinstance(entry, dict):
+            continue                    # unusable record: fails open, like the reader
+        out.add(host.strip())
+        span = entry.get("span_nodes")
+        if isinstance(span, (list, tuple)):
+            out.update(n.strip() for n in span if isinstance(n, str) and n.strip())
+    return out
+
+
+def _overlay_readable(directory=None):
+    """Whether ``node_pauses.json`` can be read, independent of what it says.
+
+    The shared reader normalises a corrupt overlay to "no pauses" and WARNs on
+    its OWN log, so its return value alone cannot distinguish "nothing is
+    parked" from "your pause record is unreadable and every seam just failed
+    open" — and the second one is the situation the operator must hear about,
+    because it means a node they parked is about to be healed under them. So the
+    SET comes from the shared reader (parity) and this check comes from the file
+    (honesty). An absent file IS readable: no overlay genuinely means nothing is
+    parked.
+    """
+    path = os.path.join(directory or HSCC_HOME, OVERLAY_NAME)
+    if not os.path.exists(path):
+        return True
+    try:
+        with open(path) as f:
+            json.load(f)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def parked_nodes(directory=None):
+    """Every node the overlay holds (keyed hosts ∪ span nodes).
+
+    ``(nodes, readable)``. ``readable`` is False only when the shared reader
+    AND the file both gave nothing usable, so a caller can tell "nothing is
+    parked" from "I could not tell" and say which — the difference an operator
+    needs before concluding their parked node is broken.
+
+    The directory is ALWAYS passed explicitly, never left to the module default:
+    ``node_pauses.HSCC_DIR`` is a module-level ``~/.hscc`` captured at import,
+    so calling ``paused_nodes()`` bare reads the OPERATOR'S overlay even when
+    this process set ``HSCC_HOME`` (a sandboxed run, a test, a second cluster).
+    Passing it is what keeps this read inside the same root every other ``~/.hscc``
+    read in this script is inside.
+    """
+    directory = directory or HSCC_HOME
+    np = _load_node_pauses()
+    if np is not None:
+        try:
+            # The set from the shared reader (parity with every other seam); the
+            # readable flag from the file, because the reader normalises
+            # corruption away and its return value cannot report it.
+            return set(np.paused_nodes(directory)), _overlay_readable(directory)
+        except Exception:
+            # A raising shared reader is an unreadable overlay, not "no pauses":
+            # fall through so the caller still learns it could not tell.
+            return _fallback_parked_nodes(directory), False
+    path = os.path.join(directory, OVERLAY_NAME)
+    if os.path.exists(path):
+        return _fallback_parked_nodes(directory), _overlay_readable(directory)
+    return set(), True
+
+
 # ── Topology ────────────────────────────────────────────────────────────────
 
 def load_topology():
-    """Read cluster topology from ~/.hscc/config.json (single source of truth)."""
+    """Read cluster topology from ~/.hscc/config.json (single source of truth).
+
+    ``serving_nodes`` is the WHOLE declared fleet and ``parked`` is the subset
+    the node-pause overlay holds; a caller that must not disturb a parked node
+    filters on the second set (see the overlay block above), never by dropping
+    nodes from the first — plan and verify still have to REPORT a parked node,
+    and a node that simply vanished from the topology reads as a broken cluster.
+    """
     path = os.path.join(HSCC_HOME, "config.json")
     if not os.path.exists(path):
         die(f"missing {path} — is HSCC initialized?")
     cfg = json.load(open(path))
     gw = cfg["gateway_ip"]
+    parked, readable = parked_nodes()
+    all_nodes = [gw] + list(cfg.get("workers", []))
     return {
         "gateway": gw,
         "workers": list(cfg.get("workers", [])),
@@ -260,8 +443,27 @@ def load_topology():
         # The NAS is mounted at /mnt/nas on the gateway; rsync source host = gateway.
         "nas_mount_host": gw,
         # serving nodes = gateway (orchestrator) + workers
-        "serving_nodes": [gw] + list(cfg.get("workers", [])),
+        "serving_nodes": all_nodes,
+        # The declared fleet MINUS the parked set: what cache/verify may touch.
+        "active_nodes": [h for h in all_nodes if h not in parked],
+        "parked": parked,
+        "overlay_readable": readable,
     }
+
+
+def note_parked(topo, label="node_pauses"):
+    """Print the parked set once per phase (plan/cache/verify), if any.
+
+    A skip that is not printed is indistinguishable from a node nobody
+    remembered, and this script runs a cutover an operator is watching.
+    """
+    if not topo.get("overlay_readable", True):
+        print(c(Y, f"  {label}: overlay unreadable — treating NO node as parked; "
+                   f"check {os.path.join(HSCC_HOME, OVERLAY_NAME)} before trusting "
+                   f"the skips below"))
+    for h in sorted(topo.get("parked") or ()):
+        print(c(Y, f"  {label}: {h} is PARKED — not picked. Put it back with "
+                   f"'hscc node resume {h}' (hscc node paused lists why)"))
 
 
 def ssh(user, host, cmd, timeout=30):
@@ -421,13 +623,121 @@ def _save(name, data):
     os.replace(tmp, path)
 
 
+def _load_serving_module():
+    """``hscc_daemon.serving``, or None when the daemon package is unreachable.
+
+    Same deferred + guarded walk-up as :func:`_load_hermes_python` /
+    :func:`_load_node_pauses`: the fleet's launch argv has ONE builder
+    (``serving.fleet_up_plan`` -> ``_unit_run_cmd``) and the only way for this
+    script to record a ``serve_cmd`` that agrees with it is to ask it. A
+    skills-only install gets None and the caller degrades honestly (see
+    :func:`wire_serving`), never by inventing an argv.
+    """
+    try:
+        from hscc_daemon import serving
+        return serving
+    except Exception:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    d = here
+    for _ in range(8):
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+        if os.path.isfile(os.path.join(d, "hscc_daemon", "serving.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            try:
+                from hscc_daemon import serving
+                return serving
+            except Exception:
+                return None
+    return None
+
+
+def _refreshed_serve_cmds(d):
+    """``{unit_id: sanctioned serve argv}`` from the daemon's OWN plan builder.
+
+    Returns ``{}`` when ``hscc_daemon.serving`` is unreachable or the plan is
+    empty. Empty is NOT "no drift": the caller must then clear the stale records
+    rather than keep them, because a recorded ``serve_cmd`` is a promise about
+    the exact argv a resume will replay — and after :func:`wire_serving` moved
+    every unit to a new ``model``/``recipe``, the old promise is false.
+
+    ``fleet_up_plan`` is used because it is the public entry to the one builder
+    (``_unit_run_cmd``) and because it derives every argv from the unit's FIELDS
+    — ``prefer_serve_cmd`` is the node-resume path only, so the stale record
+    already in ``d`` cannot leak into what comes back. That is the property this
+    function depends on, and
+    :func:`test_wire_serving_refresh_derives_from_fields_not_the_record` is what
+    fails if anyone ever routes it through the record.
+    """
+    serving = _load_serving_module()
+    if serving is None:
+        return {}
+    try:
+        plan = serving.fleet_up_plan(d)
+    except Exception:
+        return {}
+    out = {}
+    for entry in plan or []:
+        if isinstance(entry, dict) and entry.get("unit_id") and entry.get("cmd"):
+            out[str(entry["unit_id"])] = list(entry["cmd"])
+    return out
+
+
 def wire_serving(model_id, recipe):
+    """Point every declared unit at the new model + recipe, keeping the record true.
+
+    ``model`` and ``recipe`` are the fields; ``serve_cmd`` is the RECORDED argv
+    the apply path wrote and the node-resume path replays. Leaving it describing
+    the old launch costs three things, all of them silent at wire time:
+    ``_unit_run_cmd(prefer_serve_cmd=True)`` replays a placement-matching record
+    with its non-placement flags intact (so ``--tp`` keeps the old value while
+    the field says otherwise), ``serving._serve_cmd_mismatch`` fires the serve_cmd
+    drift canary on every daemon tick afterwards, and the moment the recipe
+    differs the planner logs ``serve_cmd refused ... using derived command`` on
+    every plan. The record is therefore refreshed from the sanctioned plan
+    builder in the same write, or CLEARED with a printed reason. Never left
+    describing a launch that no longer exists.
+
+    Placement (``nodes``, ``port``, ``tp``, ``role``, ``keepalive``,
+    ``max_num_seqs``) is untouched: this verb changes WHAT is served, never
+    WHERE, and rewriting placement here would fight the template apply that owns
+    it.
+    """
     d = _load("serving.json")
-    for u in d.get("units", []):
+    units = d.get("units", []) or []
+    # Fields FIRST, plan SECOND. ``fleet_up_plan`` derives --served-model-name
+    # from ``model`` and the recipe position from ``recipe``; deriving before
+    # the rewrite re-rendered the record from the values we had just replaced
+    # and printed a confident "re-rendered" over a stale intent.
+    for u in units:
         u["model"] = model_id
         u["recipe"] = recipe
+    fresh = _refreshed_serve_cmds(d)
+    stale = 0
+    for u in units:
+        key = str(u.get("id") or ",".join(u.get("nodes") or []))
+        if fresh.get(key):
+            u["serve_cmd"] = fresh[key]
+        elif "serve_cmd" in u:
+            u.pop("serve_cmd")
+            stale += 1
     _save("serving.json", d)
-    print(c(G, f"  serving.json: {len(d.get('units', []))} units -> {model_id}"))
+    print(c(G, f"  serving.json: {len(units)} units -> {model_id}"))
+    if fresh:
+        print(c(G, f"  serving.json: {len(fresh)} recorded serve_cmd(s) "
+                   f"re-rendered from the fleet plan builder"))
+    elif stale:
+        print(c(Y, f"  serving.json: {stale} stale serve_cmd(s) CLEARED — "
+                   f"hscc_daemon.serving unreachable, so the sanctioned argv "
+                   f"could not be re-rendered. 'hscc cluster template apply' "
+                   f"(or one 'hscc cluster up') re-records them; resume uses the "
+                   f"derived command until then"))
+    return units
+
 
 
 def wire_models(model_id):
@@ -556,6 +866,7 @@ def phase_plan(topo, model_id, recipe):
     print(c(B, "── PLAN ──"))
     print(f"  gateway:  {topo['gateway']}  workers: {topo['workers']}  nas: {topo['nas_ip']}")
     print(f"  serving:  {topo['serving_nodes']}  port: {topo['port']}")
+    note_parked(topo)
     rm = recipe_model(recipe)
     if rm is None:
         print(c(Y, f"  recipe:   {recipe} (MISSING — will scaffold on cache/all)"))
@@ -570,6 +881,11 @@ def phase_plan(topo, model_id, recipe):
     else:
         print(c(R, "  NAS:      MISSING (cache phase will need a download)"))
     for h in topo["serving_nodes"]:
+        if h in topo["parked"]:
+            # Not "needs sync": the node is parked, and the cache verdict is
+            # deliberately not collected for it (no ssh onto a parked machine).
+            print(c(Y, f"    {h}: PARKED — cache not probed, node not picked"))
+            continue
         if nref and node_cache_ready(topo, h, model_id, nref, nfiles):
             print(c(G, f"    {h}: cache READY"))
         else:
@@ -578,6 +894,8 @@ def phase_plan(topo, model_id, recipe):
     print("    serving.json units, models.json primary_model, provision.json mappings,")
     print("    agents.json (model part only), hermes ROOT config.yaml + every "
           "profile config.yaml model.default")
+    print(c(B, "  launch is delegated to `hscc cluster up` (it owns the sparkrun "
+              "argv; see phase_launch)"))
     return nref, nfiles
 
 
@@ -586,6 +904,7 @@ def phase_cache(topo, model_id, recipe):
     if recipe and recipe_model(recipe) is None:
         scaffold_recipe(recipe, model_id)
         die("recipe was missing; scaffolded a starter. Review it, then re-run.")
+    note_parked(topo)
     nref = nas_ref(topo, model_id)
     if not nref:
         die(f"model not on NAS. Download first, e.g.:\n"
@@ -594,6 +913,15 @@ def phase_cache(topo, model_id, recipe):
     nfiles = nas_snapshot_files(topo, model_id, nref)
     print(c(G, f"  NAS ref={nref[:12]} ({nfiles} snapshot files)"))
     for h in topo["serving_nodes"]:
+        if h in topo["parked"]:
+            # Skipped, and said out loud. A parked machine is parked for a
+            # reason the operator did not write into serving.json; pushing a
+            # multi-gigabyte rsync at it is disturbing a node on purpose. The
+            # cache is not lost either: `hscc node resume` restarts the recorded
+            # units with --ensure, and re-running `cache` after the resume
+            # fills it — resume does NOT depend on this pass having run.
+            print(c(Y, f"  {h}: PARKED — rsync skipped (resume, then re-run cache)"))
+            continue
         if node_cache_ready(topo, h, model_id, nref, nfiles):
             print(c(G, f"  {h}: already complete — skip"))
             continue
@@ -623,23 +951,120 @@ def phase_wire(topo, model_id, recipe, yes):
     print(c(G, "  wired. NOTE: gateway/daemon still hold old config until restarted."))
 
 
+def _hscc_argv_prefix():
+    """The argv prefix that reaches the unified ``hscc`` CLI, or None.
+
+    ``HSCC_BIN`` names it explicitly (a test plants a fake there, an operator
+    may have it off PATH); otherwise ``hscc`` on PATH. Returns a LIST so callers
+    never build a command line through a shell. None = no door, and the caller
+    must stop rather than improvise a sparkrun call: hand-rolling the launch is
+    exactly what this phase used to do and what it can no longer do (see
+    :func:`phase_launch`).
+    """
+    explicit = (os.environ.get("HSCC_BIN") or "").strip()
+    if explicit:
+        return [explicit]
+    found = shutil.which("hscc")
+    return [found] if found else None
+
+
 def phase_launch(topo, recipe, yes):
+    """Bring the serving layer up by calling ``hscc cluster down|up``.
+
+    This phase used to build its own ``sparkrun run <recipe> --hosts <node>``
+    per node. Two independent reasons that had to go:
+
+    * **Intent parity (t_8ad06a53, t_e1ff0e8e).** ``sparkrun`` identifies a
+      workload by an INTENT HASH of the recipe plus ``--port`` /
+      ``--served-model-name`` / ``--tp`` — every flag the launch carried has to
+      ride on any later ``sparkrun stop`` or it matches nothing and stops
+      nothing while the caller logs a stop; and a launch that carries DIFFERENT
+      flags from the fleet's declared unit makes ``--ensure`` a parallel
+      duplicate instead of a re-issue. The only safe place to build that argv is
+      ``hscc_daemon/serving.py`` (``_unit_run_cmd`` / ``_unit_intent`` /
+      ``unit_stop_cmd``), reached through ``hscc cluster up``, which takes the
+      unit's recipe, node span, port, model, role and tp from ``serving.json``.
+      A skill script cannot reimplement that and keep agreeing with the daemon.
+    * **Node pause.** ``cmd_cluster_up`` partitions its plan against
+      ``node_pauses`` and skips a unit whose span has even one parked node
+      (reported under the additive ``paused`` key; ``result: "all-paused"`` when
+      everything is parked). A hand-rolled per-node loop has no such seam, so
+      the old launch relaunched precisely the machine the operator parked.
+
+    Down THEN up: ``wire`` has just rewritten every unit's ``recipe``/``model``,
+    so the intent hash of a still-running OLD container no longer matches the
+    declared unit — an ``--ensure`` up over it is the duplicate case above.
+    ``hscc cluster down`` issues the one sanctioned ``sparkrun stop --all``
+    (scoped to the cluster), which needs no intent flags at all and so cannot be
+    defeated by the rewrite; a fleet that is already down is a SUCCESS for it,
+    so this stays correct for a first bring-up.
+
+    No ``--yes``, no mutation: the door's own ``--dry-run`` prints the exact
+    plan (including which units it will skip as parked) and nothing is launched.
+    """
     print(c(B, "── LAUNCH ──"))
-    if not os.path.exists(SPARKRUN_BIN):
-        die(f"sparkrun bin not found at {SPARKRUN_BIN}")
+    declared = {os.path.realpath(os.path.expanduser(u.get("recipe") or ""))
+                for u in _serving_units()}
+    if declared and os.path.realpath(os.path.expanduser(recipe)) not in declared:
+        die(f"serving.json declares no unit with recipe {recipe}; wire "
+            f"<model> <recipe> --yes first (launch uppers the DECLARED units, "
+            f"not a recipe named on the side)")
     if not yes:
-        die("launch starts vLLM containers on the cluster. Re-run with --yes.")
-    for h in topo["serving_nodes"]:
-        print(c(Y, f"  {h}: sparkrun run…"))
-        try:
-            r = subprocess.run(
-                [SPARKRUN_BIN, "run", recipe, "--hosts", h],
-                cwd=SPARKRUN_DIR, capture_output=True, text=True, timeout=180)
-            tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
-            status = G + "launched" if r.returncode == 0 else R + "FAILED"
-            print(f"    {status}{NC}: " + " | ".join(tail))
-        except subprocess.TimeoutExpired:
-            print(c(R, "    launch timed out (container may still be starting)"))
+        print(c(Y, "  no --yes: previewing via `hscc cluster up --dry-run`, "
+                   "nothing is stopped or started"))
+        return _call_cluster(["cluster", "up", "--dry-run"], required=False)
+    note_parked(topo)
+    if not _call_cluster(["cluster", "down"]):
+        return False
+    return _call_cluster(["cluster", "up"])
+
+
+def _serving_units():
+    """The units ``serving.json`` declares, or [] when it cannot be read."""
+    path = os.path.join(HSCC_HOME, "serving.json")
+    try:
+        with open(os.path.realpath(path)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    units = data.get("units") if isinstance(data, dict) else None
+    return [u for u in units if isinstance(u, dict)] if isinstance(units, list) else []
+
+
+def _call_cluster(args, required=True):
+    """Call the sanctioned ``hscc cluster ...`` door and stream its own report.
+
+    The door's stdout IS the report (unit ids, the parked skips, the per-unit
+    launch results) — re-rendering it here would be a second renderer allowed to
+    disagree with the first, so this only adds a phase-prefixed status line and
+    returns the success verdict. ``required`` True means a missing door is a
+    hard stop (a real up) and False means a warning (a dry-run preview is
+    worthless, not dangerous).
+    """
+    prefix = _hscc_argv_prefix()
+    if prefix is None:
+        msg = ("the `hscc` CLI is not on PATH and HSCC_BIN is unset — launch "
+               "refuses rather than hand-building a sparkrun argv (only "
+               "hscc_daemon.serving may build one)")
+        if required:
+            die(msg)
+        print(c(Y, f"  {msg}"))
+        return False
+    argv = prefix + args
+    print(c(B, f"  $ {' '.join(argv)}"))
+    try:
+        r = subprocess.run(argv, timeout=1800)
+    except subprocess.TimeoutExpired:
+        print(c(R, f"  {' '.join(argv)} timed out (30m) — the fleet may be "
+                   f"mid-transition; re-run 'hscc cluster status'"))
+        return False
+    except OSError as e:
+        print(c(R, f"  could not run {' '.join(argv)}: {e}"))
+        return False
+    if r.returncode != 0:
+        print(c(R, f"  {' '.join(argv)} exited {r.returncode}"))
+        return False
+    return True
 
 
 def _health(host, port, timeout=5):
@@ -668,10 +1093,32 @@ def _completion(host, port, model_id, timeout=40):
 
 
 def phase_verify(topo, model_id, wait_secs=0):
+    """Health + a completion per serving node, with PARKED read as absent.
+
+    A parked node is deliberately running nothing, so its port not answering is
+    the CORRECT state, not an outage. The proxy seam already reads it that way
+    (``health._proxy_backend_drift_sets`` returns ``expected_absent`` and drops
+    those hosts from both drift directions before any repair is decided, so a
+    pause never triggers a ``sparkrun proxy stop``). verify has to agree with
+    that or the two surfaces disagree on the same tick: the operator sees a red
+    DOWN for a node they parked themselves, and learns to distrust the report.
+
+    So a parked host gets one PAUSED line, no probe, no wait, and no failure
+    credit either way — and the count of them is stated so an all-paused fleet
+    cannot read as a clean pass.
+    """
     print(c(B, "── VERIFY ──"))
     port = topo["port"]
     deadline = time.time() + wait_secs
+    parked = topo.get("parked") or set()
+    checked = 0
     for h in topo["serving_nodes"]:
+        if h in parked:
+            print(c(Y, f"  {h}: PAUSED — expected-absent, not probed "
+                       f"(this is the pause working; 'hscc node resume {h}' to "
+                       f"bring it back)"))
+            continue
+        checked += 1
         ok = _health(h, port)
         while not ok and time.time() < deadline:
             time.sleep(15)
@@ -682,6 +1129,11 @@ def phase_verify(topo, model_id, wait_secs=0):
         comp = _completion(h, port, model_id)
         bad = comp.startswith("ERR")
         print(f"  {h}: {c(G,'health 200')} | completion: {c(R if bad else G, comp)}")
+    if parked and not checked:
+        print(c(Y, "  every declared serving node is parked — nothing was "
+                   "verified, which is not a pass"))
+    elif parked:
+        print(c(Y, f"  {len(parked)} node(s) parked and excluded from this verdict"))
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
