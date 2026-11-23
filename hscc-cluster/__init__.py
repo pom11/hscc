@@ -106,7 +106,10 @@ _HEAL_TOOLS = [
     ("repair_nas_export", S.REPAIR_NAS_EXPORT_SCHEMA, heal.repair_nas_export, "🛠️",
      "Re-publish QNAP NFS exports (backup first). HIGH-RISK. GUARDED: confirm=true."),
     ("reap_orphans", S.REAP_ORPHANS_SCHEMA, heal.reap_orphans, "🧹",
-     "Stop sparkrun containers not in serving.json. GUARDED: confirm=true."),
+     "Stop sparkrun containers not in serving.json. GUARDED: confirm=true, and "
+     "REFUSED outright when serving.json is absent/unparseable/unit-less or does "
+     "not name the orphan's node (stale copy = live workload; force=true to "
+     "override the guard only)."),
 ]
 
 
