@@ -157,7 +157,21 @@ class Reaper:
         monkeypatch.setattr(
             health, "log",
             lambda msg, level="INFO": self.logs.append((str(msg), level)))
-        monkeypatch.setattr(health, "_proc_ppid", _Chain(parents or {}))
+        chain = _Chain(parents or {})
+        monkeypatch.setattr(health, "_proc_ppid", chain)
+        # The SAME tree, also seen DOWNWARD. The guard in this file answers
+        # "is this PID ours?" with `_proc_ppid` (an upward walk); the guard it
+        # replaced on main answers it with `_proc_children` (a downward BFS).
+        # Faking only the upward seam would make the pre-fix leg go red for a
+        # reason that has nothing to do with the guard — the BFS would read the
+        # conftest default (an empty table), fail to find the proxy's own child,
+        # and call a HEALTHY listener foreign. With both directions derived from
+        # one `parents` map, a red here is the guard's verdict and nothing else.
+        children = {}
+        for kid, parent in chain.parents.items():
+            children.setdefault(int(parent), []).append(int(kid))
+        monkeypatch.setattr(health, "_proc_children",
+                            lambda pid: list(children.get(int(pid), [])))
 
         def fake_kill(pid, sig):
             self.killed.append((pid, sig))
