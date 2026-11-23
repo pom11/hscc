@@ -178,6 +178,144 @@ def store_name(name, *, hscc_dir=None, overwrite=False,
 
 
 # --------------------------------------------------------------------------- #
+# The main-only cluster surface (t_e98c6ad4)
+# --------------------------------------------------------------------------- #
+#
+# Why the plugin-name policy lives here, next to the identity resolver: the
+# operator's ruling (docs/audits/2026-11-23-main-only-surface.md §6 D-A/D-B/D-C,
+# verdict ~/fleet-check/verdict-main-only.txt) makes the cluster surface a
+# function of ONE fact — "is this Hermes home the main orchestrator's home?" —
+# and this module is the single owner of that fact. A second copy of the tier
+# rule (in bootstrap, in a plugin, in a test) is a second resolver, which is
+# exactly what D-A forbids: the name must never be hard-coded anywhere except
+# the ``DEFAULT_NAME`` above.
+#
+# The tier is deliberately a *config* answer (what ``plugins.enabled`` may
+# carry) and a *registration* answer (whether tools register) in one place, so
+# the bootstrap writer and the plugins' ``register()`` cannot disagree about
+# which home is which.
+
+#: The cluster plugin surface HSCC owns. Only ``<main>`` (and the operator/
+#: gateway root home, D-B) may load all three.
+CLUSTER_PLUGINS = ("hscc-cluster", "hscc-commands", "sparkrun-hermes")
+
+#: The hooks-only tier (D-C): every OTHER home still loads ``hscc-cluster``,
+#: because 6 of 6 of its hooks are worker/dispatcher-lane
+#: (audit §3.2) — ``post_api_request``/``transform_tool_result`` are the
+#: ``[budget]`` note the worker SOUL promises, ``pre_tool_call`` stamps the
+#: per-profile tool ledger, and ``kanban_task_completed``/``_blocked`` fire
+#: inside the worker's own ``complete_task``/``block_task``. Disabling the
+#: plugin per-profile silently kills those lanes. ``hscc-commands`` and
+#: ``sparkrun-hermes`` register NO hooks, so they do not belong here.
+HOOKS_ONLY_PLUGINS = ("hscc-cluster",)
+
+
+#: Hermes' own sentinel for "this home is the root home, not a profile"
+#: (``hermes_cli/plugins.py:400-407`` — ``profile_name`` is ``"default"`` for
+#: ``~/.hermes``, the ``<name>`` id for ``~/.hermes/profiles/<name>``). Not the
+#: main-orchestrator name, so naming it here does not breach D-A.
+ROOT_PROFILE_NAME = "default"
+
+
+def hermes_home(env=None) -> str:
+    """``$HERMES_HOME`` (or ``~/.hermes``), expanded. Read per call."""
+    env = os.environ if env is None else env
+    return os.path.expanduser((env.get("HERMES_HOME") or "").strip()
+                              or os.path.join(os.path.expanduser("~"), ".hermes"))
+
+
+def hermes_root(home=None, env=None) -> str:
+    """The ROOT home for a possibly profile-scoped ``home``.
+
+    ``<root>/profiles/<name>`` is Hermes' normal run mode (the kanban
+    dispatcher injects it into every worker, audit §2), so the root is the
+    profiles-grandparent. Same rule as ``backup_util._hermes_root`` /
+    ``hscc_daemon.hermes_python.hermes_root``; written here in stdlib so the
+    resolver stays importable from a plugin ``register()`` with nothing else on
+    the path.
+    """
+    home = os.path.abspath(os.path.expanduser(str(home if home is not None
+                                                   else hermes_home(env))))
+    if os.path.basename(os.path.dirname(home)) == "profiles":
+        return os.path.dirname(os.path.dirname(home))
+    return home
+
+
+def is_root_home(home=None, env=None) -> bool:
+    """True when ``home`` IS the root home (operator CLI + gateway + dispatcher).
+
+    That home is the one Hermes home that is not a profile, and the audit's
+    D-B allows the cluster surface there alongside ``<main>``.
+    """
+    target = os.path.abspath(os.path.expanduser(
+        str(home if home is not None else hermes_home(env))))
+    return hermes_root(target) == target
+
+
+def plugins_for_home(*, profile=None, home=None, hscc_dir=None,
+                     env=None) -> tuple:
+    """The ``plugins.enabled`` tier the home of ``profile`` should carry.
+
+    ``<main>`` and the root home get all of :data:`CLUSTER_PLUGINS`; every
+    other home gets :data:`HOOKS_ONLY_PLUGINS` (hooks only — no
+    ``hscc-commands``, no ``sparkrun-hermes``).
+
+    ``profile`` is Hermes' active profile name (``ctx.profile_name``; Hermes'
+    :data:`ROOT_PROFILE_NAME` sentinel for the root home) and ``home`` is that
+    home's directory. Only a name equal to :func:`main_profile` opens the full
+    tier — the default name itself is never compared here (D-A).
+
+    A caller that names a ``home`` gets the answer for THAT home: this is the
+    config writer, and failing open here would write the wide tier into a
+    worker profile — the widening the ruling forbids. Only a caller with
+    nothing resolvable at all (no name, no home, no ``HERMES_HOME``) falls back
+    to the full tier.
+    """
+    name = (profile or "").strip()
+    if name and name == main_profile(hscc_dir):
+        return CLUSTER_PLUGINS
+    if name == ROOT_PROFILE_NAME:
+        return CLUSTER_PLUGINS
+    if home is not None or (os.environ if env is None else env).get("HERMES_HOME"):
+        return CLUSTER_PLUGINS if is_root_home(home, env=env) else HOOKS_ONLY_PLUGINS
+    if not name:
+        return CLUSTER_PLUGINS          # nothing resolvable — see docstring
+    return HOOKS_ONLY_PLUGINS           # a named non-main profile
+
+
+def cluster_surface_allowed(*, profile=None, home=None, hscc_dir=None,
+                            env=None) -> bool:
+    """May this home register the cluster TOOLS/COMMANDS (vs. hooks only)?
+
+    D-B's gate: tools register only in ``<main>`` or in the root home that hosts
+    the operator's interactive CLI, the gateway and the kanban dispatcher;
+    hooks register everywhere (see :data:`HOOKS_ONLY_PLUGINS`).
+
+    Fail-open on an unresolvable caller: with no profile name and no home
+    directory (a stub ctx in a test, a catalog pass that never sets
+    ``HERMES_HOME``) the answer is "allowed". Stripping the surface is the
+    dangerous direction — it silences the operator's wedge path and, because
+    the gateway multiplexes per-profile sessions from the root home, it can
+    strip the orchestrator itself — whereas widening can only ever follow an
+    explicitly resolvable non-main profile, which is what the ruling closes.
+    """
+    name = (profile or "").strip()
+    if name == main_profile(hscc_dir):
+        return True
+    if name == ROOT_PROFILE_NAME:
+        return True
+    if not name:
+        # No name: judge by directory, and fail open when there is none.
+        if home is None and not (os.environ if env is None else env).get("HERMES_HOME"):
+            return True
+        return is_root_home(home, env=env)
+    if home is None:
+        # A named non-main profile with no directory to contradict it.
+        return False
+    return is_root_home(home, env=env)
+
+
+# --------------------------------------------------------------------------- #
 # Validation
 # --------------------------------------------------------------------------- #
 
