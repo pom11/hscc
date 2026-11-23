@@ -90,7 +90,7 @@ is answered here in §3.
 
 | what | path | why this path is authoritative |
 |---|---|---|
-| hermes source | `/Users/desac/.hermes/hermes-agent` @ `v0.23.0-7-g045881137d` | It is the **editable** install the runtime uses: `venv/lib/python3.14/site-packages/__editable__.hermes_agent-0.0.0.pth` + `__editable___hermes_agent_0_0_0_finder.py` point at this checkout, so there is no separate site-packages copy to diverge from. Every hermes file:line below is from here. |
+| hermes source | `~/.hermes/hermes-agent` @ `v0.23.0-7-g045881137d` | It is the **editable** install the runtime uses: `venv/lib/python3.14/site-packages/__editable__.hermes_agent-0.0.0.pth` + `__editable___hermes_agent_0_0_0_finder.py` point at this checkout, so there is no separate site-packages copy to diverge from. Every hermes file:line below is from here. |
 | hscc source | this worktree at `origin/main` = `e88c1bb7` | plugin/SOUL/CLI text under audit |
 | deployed plugins | `~/.hermes/plugins/` (root) and `~/.hermes/profiles/*/plugins/` | discovery's *user* dir is `get_hermes_home()/plugins` (`hermes_cli/plugins_discovery.py:210-212`) |
 | configs | `~/.hermes/config.yaml`, `~/.hermes/profiles/*/config.yaml` | read via `yaml.safe_load` in three probe scripts (below); no writes |
