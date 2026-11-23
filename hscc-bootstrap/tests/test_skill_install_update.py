@@ -32,6 +32,7 @@ same breath. No live home is touched.
 """
 import hashlib
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -66,10 +67,17 @@ def write_skill(home, *rel, text):
     return path
 
 
+def hscc_state_dir(home):
+    """The HSCC_DIR sandbox beside the Hermes root that owns *home*."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(home)))
+    return os.path.join(os.path.dirname(root), "hscc")
+
+
 def run_installer(home, cmd="install-skills"):
     """The exact invocation bootstrap.sh:417 uses, in a sandboxed home."""
     env = dict(os.environ)
     env["HERMES_HOME"] = home
+    env["HSCC_DIR"] = hscc_state_dir(home)
     env["HSCC_SKILLS_SRC"] = _TEMPLATE
     r = subprocess.run([sys.executable, _INSTALLER, cmd], env=env,
                        capture_output=True, text=True, timeout=180)
@@ -79,9 +87,20 @@ def run_installer(home, cmd="install-skills"):
 
 @pytest.fixture
 def home(tmp_path):
-    h = str(tmp_path / "home")
-    os.makedirs(h, exist_ok=True)
-    return h
+    """A sandbox whose HERMES_HOME is the MAIN profile home (t_b52e70ba).
+
+    The installer writes main-only skills to ``<root>/profiles/<main_name>``,
+    so these update/backup pins run with that profile as the caller's home.
+    HSCC state is a sibling dir carrying the same resolved name.
+    """
+    root = tmp_path / "hermes"
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    (hscc / "main-orchestrator.json").write_text(
+        json.dumps({"name": "general"}), encoding="utf-8")
+    h = root / "profiles" / "general"
+    h.mkdir(parents=True)
+    return str(h)
 
 
 def backups_of(home, skill):
@@ -260,6 +279,7 @@ def test_status_reports_nested_drift_the_writer_can_see(home):
 def _load_installer_module(monkeypatch, home):
     """The installer as a module (its paths are read from env at import)."""
     monkeypatch.setenv("HERMES_HOME", home)
+    monkeypatch.setenv("HSCC_DIR", hscc_state_dir(home))
     monkeypatch.setenv("HSCC_SKILLS_SRC", _TEMPLATE)
     spec = importlib.util.spec_from_file_location("hscc_skills_installer", _INSTALLER)
     mod = importlib.util.module_from_spec(spec)
