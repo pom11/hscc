@@ -177,18 +177,24 @@ class TestKanbanHelpHonesty:
     def test_help_entry_advertises_no_verb_the_group_rejects(self, dispatched,
                                                              monkeypatch,
                                                              capsys):
-        """The F5 rule for this surface: help never advertises a command that
-        does not exist. Scans the entry's per-verb lines (2-space indent)."""
-        out = _rendered_help_kanban(monkeypatch, capsys)
+        """The F5 rule, applied to BOTH surfaces: help never advertises a
+        command the group does not dispatch.
+
+        Each surface has its own shape, so each gets its own extractor:
+        ``hscc help kanban`` lists verbs at a 2-space indent, ``hscc kanban
+        --help`` writes them as ``hscc kanban <verb> …`` example lines. Place-
+        holders (``<subcommand>``) and help flags never match."""
         named = set()
-        for ln in out.splitlines():
+        for ln in _rendered_help_kanban(monkeypatch, capsys).splitlines():
             m = re.match(r"  ([a-z][a-z-]+)(\s|$|[:\[])", ln)
-            if m and m.group(1) != "usage":
+            if m:
                 named.add(m.group(1))
+        named |= set(re.findall(r"hscc kanban ([a-z][a-z-]+)",
+                                _rendered_group_help(capsys)))
         phantom = named - dispatched
         assert not phantom, (
-            f"`hscc help kanban` advertises {sorted(phantom)} but the group "
-            f"dispatches {sorted(dispatched)}")
+            f"help advertises {sorted(phantom)} but the group dispatches "
+            f"{sorted(dispatched)}")
 
     def test_every_entry_line_within_the_78_gate(self, monkeypatch, capsys):
         """COMMAND_HELP is plain-printed, so authored width IS rendered width
