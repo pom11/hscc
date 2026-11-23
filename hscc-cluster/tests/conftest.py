@@ -124,8 +124,8 @@ def pytest_terminal_summary(terminalreporter):
 
 @pytest.fixture(autouse=True)
 def _pin_serving_json_to_tmp(monkeypatch, tmp_path):
-    """Defense-in-depth: redirect cluster_template.SERVING_JSON to a per-test
-    tmp file so NO cluster-template test can write fixture data into the
+    """Defense-in-depth: redirect EVERY module-level ``SERVING_JSON`` to a
+    per-test tmp file so NO test can read or write fixture data through the
     operator's LIVE ~/.hscc/serving.json (t_501fb7f1 — the fourth live-state
     leak in this project).
 
@@ -136,9 +136,17 @@ def _pin_serving_json_to_tmp(monkeypatch, tmp_path):
     hosts 10.0.0.x, port 9000) into the real serving.json. Tests that need a
     SPECIFIC serving.json still override it themselves (monkeypatch.setattr);
     this fixture only guarantees the default is never the live path.
+
+    ``clusterlib.SERVING_JSON`` joined the pin with F13 (t_b21a939e): the
+    reaper's staleness guard reads that constant, and a guard that silently reads
+    the operator's real serving.json makes every reap test order-dependent on the
+    host's fleet — the same "test read production" shape as the leak above, in the
+    read direction. Unpinned it answers whatever the live fleet happens to declare.
     """
     import cluster_template as ct
+    import clusterlib as cl
     monkeypatch.setattr(ct, "SERVING_JSON", tmp_path / "serving.json")
+    monkeypatch.setattr(cl, "SERVING_JSON", str(tmp_path / "serving.json"))
 
 
 @pytest.fixture(autouse=True)
@@ -238,6 +246,36 @@ def _pin_discovery_io(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "SERVING_JSON", str(tmp_path / "serving.json"))
     monkeypatch.setattr(d, "_run", _inert_run)
     monkeypatch.setattr(d, "_write_cache", lambda topo: calls.append(["_write_cache"]))
+
+
+@pytest.fixture
+def fake_serving(monkeypatch, tmp_path):
+    """Plant a FAKE serving.json (TEST-NET-1 nodes only) and hand back the planter.
+
+    The reaper's whole notion of "orphan" comes from this file, so the reap tests
+    state it as content rather than monkeypatching a reader: the guard branches are
+    file-state branches (absent / unparseable / unit-less), and a stubbed reader
+    cannot express them. ``_pin_serving_json_to_tmp`` has already moved the default
+    path into ``tmp_path``, which is where this writes.
+
+        fake_serving([{"name": "orch", "nodes": ["192.0.2.11"]}])  # a fleet that serves .11
+        fake_serving(raw="not json{{{")                              # corrupt on purpose
+        fake_serving(path=some_dir)                                  # an unreadable path
+
+    Returns the path written. Calling it with no arguments writes
+    ``{"units": []}`` — the "parsed but declared nothing" shape.
+    """
+    import clusterlib as cl
+
+    def _plant(units=(), *, raw=None, path=None):
+        target = str(path or tmp_path / "serving.json")
+        body = raw if raw is not None else json.dumps({"units": list(units)})
+        with open(target, "w") as fh:
+            fh.write(body)
+        monkeypatch.setattr(cl, "SERVING_JSON", target)
+        return target
+
+    return _plant
 
 
 @pytest.fixture(autouse=True)
