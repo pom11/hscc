@@ -14,6 +14,7 @@ import pytest  # noqa: E402
 
 import api_launchd  # noqa: E402
 import hermes_python  # noqa: E402
+from hscc_daemon.tests.rich_layout import _says  # noqa: E402
 
 
 PLIST = "com.hscc.api.plist"
@@ -472,7 +473,15 @@ def test_cli_install_service_writes_unit_in_private_home(home, tmp_path, capsys,
     rc = _cli(tmp_path, monkeypatch, ["install-service"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert str(tmp_path / "Library" / "LaunchAgents" / PLIST) in out
+    # The unit-file path is longer than the daemon's plain Console is wide (80 on a
+    # non-tty), so the view FOLDS it mid-token — the characters are all printed, just
+    # not contiguously. Measured (t_89804ce6, verbatim tee of the render, tmp root
+    # 190): `…/test_cli_install_service_write0/Library/L` ⏎ `aunchAgents/com.hscc.api
+    # .plist`; red from tmp root 161. `_says` asks what the row spells with layout
+    # whitespace removed, which is the only normaliser that recovers a fold. The two
+    # raw anchors below it are the proof the view rendered at all, and they are short
+    # enough that nothing can fold them.
+    assert _says(out, str(tmp_path / "Library" / "LaunchAgents" / PLIST))
     assert "NOT loaded yet" in out                      # the opt-in promise, on screen
     assert "launchctl bootstrap" in out                 # the manual step is spelled out
     assert os.path.exists(api_launchd.API_PLIST_PATH)

@@ -1743,13 +1743,19 @@ class TestCheckProxy:
     probe defaults to "could not ask the proxy", which is the documented
     fail-open (drift check skipped) and preserves every pre-F4 expectation
     exactly. Tests that exercise drift pass `backend=` explicitly.
+
+    t_f0b8051b added a THIRD one (_proxy_completion_probe -> POST
+    /v1/chat/completions). _setup stubs it too, defaulting to "skipped" — the
+    probe's own no-evidence shape, which again preserves every pre-existing
+    expectation exactly. Tests that exercise the completion verdict pass
+    `completion=` explicitly.
     """
 
     _SERVING_NO_UNITS = {"version": 2, "units": []}
 
     def _setup(self, tmp_hfcc_dir, monkeypatch, nodes, probe=None,
                serving_data=_SERVING_NO_UNITS, backend=None,
-               healthy_units=None, fleet_hp=None):
+               healthy_units=None, fleet_hp=None, completion=None):
         from hscc_daemon import health, serving
         from hscc_daemon import state as state_mod
         monkeypatch.setattr(health, "log", lambda *a, **kw: None)
@@ -1773,6 +1779,21 @@ class TestCheckProxy:
                        "error": "stubbed — drift check skipped"}
         monkeypatch.setattr(health, "_proxy_backend_probe",
                             lambda url=None, timeout=5: dict(backend))
+        # t_f0b8051b: the through-proxy completion probe is a THIRD live
+        # surface. Default to its own no-evidence shape ("skipped") so every
+        # pre-existing expectation in this class is unchanged; completion
+        # tests pass `completion=` explicitly.
+        if completion is None:
+            completion = {"ok": True, "status": None, "skipped": True,
+                          "error": "",
+                          "detail": "stubbed — completion probe skipped"}
+        monkeypatch.setattr(health, "_proxy_completion_probe",
+                            lambda url=None, model=None, timeout=None:
+                            dict(completion),
+                            # raising=False: the red-before run must fail on
+                            # behaviour, not on a module attribute the pre-fix
+                            # code never had (t_f0b8051b).
+                            raising=False)
         if healthy_units is not None:
             monkeypatch.setattr(
                 health, "_fleet_unit_backends",
@@ -2573,6 +2594,303 @@ class TestCheckProxy:
         assert out["ok"] is False and "refused" in out["error"]
 
 
+class TestProxyCompletionProbe:
+    """t_f0b8051b — check_proxy must probe a real completion THROUGH :4000.
+
+    Incident (docs/audits/2026-11-22-proxy-connection-error.md §4.1): 157
+    `POST /v1/chat/completions` calls through :4000 failed across ~57 minutes
+    (31 exhausting all 3 attempts) while `/v1/models` answered 200 and
+    `check_proxy` produced ZERO unhealthy verdicts over ~80 sixty-second ticks.
+    Both endpoints that check asked are answered locally by litellm and never
+    dial an upstream, so a proxy whose every upstream connection is dead was
+    green there by construction — and `proxy_stall` requires ITS through-proxy
+    probe to succeed before it may alarm, so the fast-500 shape belonged to no
+    check at all.
+
+    The pair that defines the fix, both driven through fakes only (no socket is
+    opened by anything in this class):
+
+      models-200 + completions-500  -> UNHEALTHY  (the outage, detected)
+      models-200 + completions-200  -> HEALTHY    (no false alarm)
+    """
+
+    _SERVING = {"version": 2, "units": [
+        {"id": "w1", "role": "worker", "keepalive": True,
+         "nodes": ["192.0.2.2"], "port": 8001, "recipe": "r"},
+    ]}
+    _CATALOGUE_OK = {"ok": True, "models": ["worker-model"], "error": ""}
+
+    class _HttpError(Exception):
+        """Stand-in for urllib.error.HTTPError — it carries `.code`."""
+        def __init__(self, code):
+            super().__init__(f"HTTP {code}")
+            self.code = code
+
+    def _fake_urlopen(self, box, status=None, exc=None, payload=b'{"choices":[]}'):
+        """Capture the Request urlopen was handed; answer, or raise `exc`."""
+        class _Resp:
+            def __init__(self, code):
+                self.status = code
+
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def _open(req, timeout=None):
+            box["url"] = req.full_url
+            box["method"] = req.get_method()
+            box["headers"] = dict(req.header_items())
+            box["body"] = json.loads(req.data.decode("utf-8"))
+            box["timeout"] = timeout
+            if exc is not None:
+                raise exc
+            return _Resp(status)
+        return _open
+
+    # ── the probe: shape, contract, no invented model ───────────────────
+
+    def test_probe_posts_one_token_nonstreaming_completion(self, monkeypatch):
+        from hscc_daemon import health
+        box = {}
+        monkeypatch.setattr(health.urllib.request, "urlopen",
+                            self._fake_urlopen(box, status=200))
+        out = health._proxy_completion_probe(model="worker-model")
+        assert box["url"] == (f"http://localhost:{health.PROXY_PORT}"
+                             f"/v1/chat/completions")
+        assert box["method"] == "POST"
+        assert box["body"]["stream"] is False          # non-streaming, per spec
+        assert box["body"]["max_tokens"] == 1          # the round trip is the signal
+        assert box["body"]["model"] == "worker-model"
+        # Same wording the engine-wedge probe uses — known-good against vLLM.
+        assert box["body"]["messages"] == [
+            {"role": "user", "content": "Reply with the single word: ok."}]
+        assert box["timeout"] == health.PROXY_COMPLETION_PROBE_TIMEOUT
+        assert out == {"ok": True, "status": 200, "skipped": False, "error": ""}
+
+    def test_probe_default_timeout_is_the_settled_10s(self):
+        """The probe window is settled at 10 s and is overridable by env —
+        pinned so a refactor cannot silently widen it (the check loop is 60 s
+        and this runs inside it, once per tick)."""
+        from hscc_daemon import health
+        assert health.PROXY_COMPLETION_PROBE_TIMEOUT == 10.0
+
+    def test_probe_never_raises_on_transport_failure(self, monkeypatch):
+        """The _proxy_models_probe contract: a dead port is a RESULT, not an
+        exception — a raising probe would take the whole proxy check down."""
+        from hscc_daemon import health
+        box = {}
+        monkeypatch.setattr(health.urllib.request, "urlopen",
+                            self._fake_urlopen(box, exc=OSError("Connection refused")))
+        out = health._proxy_completion_probe(model="worker-model")
+        assert out["ok"] is False and out["skipped"] is False
+        assert out["status"] is None                   # NOTHING answered
+        assert "Connection refused" in out["error"]
+
+    def test_probe_surfaces_the_error_status_the_proxy_answered_with(
+            self, monkeypatch):
+        from hscc_daemon import health
+        box = {}
+        monkeypatch.setattr(health.urllib.request, "urlopen",
+                            self._fake_urlopen(box, exc=self._HttpError(500)))
+        out = health._proxy_completion_probe(model="worker-model")
+        assert out["status"] == 500 and out["ok"] is False
+        assert out["error"] == "HTTP 500"
+
+    def test_probe_skips_without_a_model_and_never_opens_a_socket(
+            self, monkeypatch):
+        from hscc_daemon import health
+
+        def no_socket(*a, **k):
+            raise AssertionError("must not dial :4000 with no model id to ask for")
+        monkeypatch.setattr(health.urllib.request, "urlopen", no_socket)
+        for model in (None, ""):
+            out = health._proxy_completion_probe(model=model)
+            assert out["skipped"] is True and out["status"] is None
+
+    # ── the verdict: what counts as news ────────────────────────────────
+
+    def test_verdict_500_and_silence_are_unhealthy(self):
+        from hscc_daemon import health
+        ok, reason = health._proxy_completion_healthy(
+            {"ok": False, "status": 500, "skipped": False, "error": "HTTP 500"})
+        assert ok is False and "HTTP 500" in reason
+        ok, reason = health._proxy_completion_healthy(
+            {"ok": False, "status": None, "skipped": False,
+             "error": "timeout"})
+        assert ok is False and "timeout" in reason
+
+    def test_verdict_any_4xx_is_healthy_and_says_so(self):
+        """A refusing proxy ANSWERED — that is the alias check's fault, not a
+        down proxy. Flipping health here would relaunch a working LB over a
+        config gap a relaunch cannot fix, every cooldown tick."""
+        from hscc_daemon import health
+        for code in (400, 401, 404, 429):
+            ok, reason = health._proxy_completion_healthy(
+                {"ok": False, "status": code, "skipped": False,
+                 "error": f"HTTP {code}"})
+            assert ok is True, f"HTTP {code} must not make the proxy unhealthy"
+            assert f"HTTP {code}" in reason
+
+    def test_verdict_skipped_is_labelled_not_counted_as_a_pass(self):
+        from hscc_daemon import health
+        ok, reason = health._proxy_completion_healthy(
+            {"ok": True, "status": None, "skipped": True, "error": "",
+             "detail": "no model id available — completion probe skipped"})
+        assert ok is True and "skipped" in reason
+
+    def test_verdict_garbage_status_is_unhealthy_not_a_crash(self):
+        from hscc_daemon import health
+        ok, reason = health._proxy_completion_healthy(
+            {"ok": True, "status": "?", "skipped": False, "error": ""})
+        assert ok is False and "no usable status" in reason
+
+    # ── the model it asks for ───────────────────────────────────────────
+
+    def test_model_prefers_expected_alias_then_catalogue_then_skip(self):
+        from hscc_daemon import health
+        assert health._proxy_completion_model(
+            {"orchestrator-model", "worker-model"}, ["other"]) == "orchestrator-model"
+        assert health._proxy_completion_model(set(), ["a", "b"]) == "a"
+        assert health._proxy_completion_model(set(), []) == ""
+        assert health._proxy_completion_model(None, None) == ""
+
+    # ── check_proxy: the pair that pins the outage ──────────────────────
+
+    def _rig(self, tmp_hfcc_dir, monkeypatch, asked, completion, probe=None):
+        """check_proxy with EVERY live surface stubbed (TestCheckProxy._setup —
+        one ambient-state stub for this file) plus a completion probe that
+        records the model it was asked for and replays `completion`."""
+        from hscc_daemon import health
+        health = TestCheckProxy()._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
+            probe=probe if probe is not None else dict(self._CATALOGUE_OK),
+            serving_data=self._SERVING)
+
+        def fake_probe(url=None, model=None, timeout=None):
+            asked["called"] = asked.get("called", 0) + 1
+            asked["model"] = model
+            asked["timeout"] = timeout
+            return dict(completion)
+        monkeypatch.setattr(health, "_proxy_completion_probe", fake_probe,
+                            # raising=False so the RED-BEFORE run fails on the
+                            # BEHAVIOUR (a green tick for the outage shape) and
+                            # not on an attribute the pre-fix module never had.
+                            # A renamed seam still fails loudly here: the fake
+                            # would never be consulted and the 500 half would
+                            # come back healthy.
+                            raising=False)
+        return health
+
+    def test_models_200_completion_500_is_UNHEALTHY(self, tmp_hfcc_dir,
+                                                    monkeypatch):
+        """RED-BEFORE HALF. The 2026-11-22 steady state: catalogue fine, every
+        completion 500s. Before this probe existed the tick returned healthy and
+        the outage stood ~80 ticks with every check green; now it is an
+        unhealthy verdict naming the 500."""
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+        asked = {}
+        health = self._rig(tmp_hfcc_dir, monkeypatch, asked,
+                           completion={"ok": False, "status": 500,
+                                       "skipped": False, "error": "HTTP 500"})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda a, **k: ran.append(list(a)) or {"ok": False})
+        assert health.check_proxy() is False
+        st = state_mod.read_state("proxy") or {}
+        assert st["ok"] is False
+        assert "HTTP 500" in st["reason"]
+        assert st["completion_ok"] is False
+        # The catalogue really was green — this tick's ONLY evidence is the
+        # completion, which is why the old check could not see it at all.
+        assert st["backend_drift"] is not True
+        assert asked["called"] == 1
+        # Detection only: the fault goes to the PRE-EXISTING repair machinery.
+        assert any(c[1:3] == ["proxy", "start"] for c in ran), f"got {ran}"
+
+    def test_models_200_completion_200_is_HEALTHY(self, tmp_hfcc_dir,
+                                                  monkeypatch):
+        """GREEN HALF. A proxy that answers a completion is healthy even though
+        the probe is a brand-new failure surface — and the healthy branch must
+        not stamp a relaunch cooldown."""
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+        asked = {}
+        health = self._rig(tmp_hfcc_dir, monkeypatch, asked,
+                           completion={"ok": True, "status": 200,
+                                       "skipped": False, "error": ""})
+        assert health.check_proxy() is True
+        st = state_mod.read_state("proxy") or {}
+        assert st["ok"] is True and st["completion_ok"] is True
+        assert "HTTP 200" in st["completion"]
+        assert "last_relaunch" not in st                # nothing was attempted
+        # It asked for an EXPECTED alias, not an invented name (a 4xx answer to
+        # a made-up model would be read as health and mask a real fault).
+        assert asked["model"] == "worker-model"
+        assert asked["timeout"] == health.PROXY_COMPLETION_PROBE_TIMEOUT
+
+    def test_completion_probe_never_runs_when_the_catalogue_already_failed(
+            self, tmp_hfcc_dir, monkeypatch):
+        """A proxy that failed /v1/models has no completion to give, and the
+        repair below is the same either way — so the probe must not spend 10 s
+        on a dead port, and must not overwrite the catalogue's reason."""
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+        asked = {}
+        health = self._rig(tmp_hfcc_dir, monkeypatch, asked,
+                           probe={"ok": False, "models": [],
+                                  "error": "Connection refused"},
+                           completion={"ok": True, "status": 200,
+                                       "skipped": False, "error": ""})
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda a, **k: {"ok": True})
+        health.check_proxy()
+        assert asked.get("called", 0) == 0
+        st = state_mod.read_state("proxy") or {}
+        assert "Connection refused" in st["reason"]
+        assert st["completion_ok"] is True and "not run" in st["completion"]
+
+    def test_completion_4xx_does_not_flip_proxy_health(self, tmp_hfcc_dir,
+                                                       monkeypatch):
+        """The other half of the verdict rule, at the check level: a 404 from
+        the proxy keeps the tick healthy (the alias check owns that fault)."""
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+        asked = {}
+        health = self._rig(tmp_hfcc_dir, monkeypatch, asked,
+                           completion={"ok": False, "status": 404,
+                                       "skipped": False, "error": "HTTP 404"})
+        assert health.check_proxy() is True
+        st = state_mod.read_state("proxy") or {}
+        assert st["ok"] is True and st["completion_ok"] is True
+
+    def test_model_falls_back_to_a_served_id_when_no_alias_is_expected(
+            self, tmp_hfcc_dir, monkeypatch):
+        """No serving.json units => nothing to REQUIRE, but the catalogue still
+        answered with an id, so the probe asks for THAT rather than skipping a
+        proxy it could have asked (and rather than inventing a name)."""
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+        asked = {}
+        health = TestCheckProxy()._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
+            probe={"ok": True, "models": ["some-id"], "error": ""},
+            serving_data={"version": 2, "units": []})
+        monkeypatch.setattr(
+            health, "_proxy_completion_probe",
+            lambda url=None, model=None, timeout=None: asked.update(
+                model=model) or {"ok": True, "status": 200, "skipped": False,
+                                 "error": ""}, raising=False)
+        assert health.check_proxy() is True
+        assert asked["model"] == "some-id"
+        assert (state_mod.read_state("proxy") or {})["completion_ok"] is True
+
+
 class TestProxyRelaunchStall:
     """t_43b6e245 — the relaunch loop must never no-op silently for hours.
 
@@ -2617,6 +2935,14 @@ class TestProxyRelaunchStall:
         monkeypatch.setattr(health, "_proxy_backend_probe",
                             lambda url=None, timeout=5: {"ok": False, "backends": set(),
                                                           "error": "refused"})
+        # t_f0b8051b: check_proxy's healthy path now asks for a completion
+        # THROUGH :4000. Tests here flip the catalogue probe to healthy (the
+        # recovery ticks), so stub the completion surface too — its no-evidence
+        # shape — or this rig dials the operator's live proxy.
+        monkeypatch.setattr(health, "_proxy_completion_probe",
+                            lambda url=None, model=None, timeout=None:
+                            {"ok": True, "status": None, "skipped": True,
+                             "error": ""})
         # Dep-bump guard (#40) added a THIRD read surface to check_proxy: the
         # router-drift probe. Stub it here too — this class builds its own
         # setup rather than reusing TestCheckProxy._setup, so without this line

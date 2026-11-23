@@ -1196,6 +1196,156 @@ def _proxy_models_healthy(probe, expected_aliases):
     return True, f"expected aliases {sorted(expected_aliases)} all served"
 
 
+# ── through-proxy COMPLETION probe (t_f0b8051b, incident 2026-11-22) ────────
+#
+# WHY this exists when the catalogue check above already exists: on 2026-11-22
+# every `POST /v1/chat/completions` through :4000 failed for ~57 minutes (157
+# failing calls, 31 of them exhausting all 3 client attempts) while
+# `/v1/models` answered 200 and `check_proxy` produced ZERO unhealthy verdicts
+# across ~80 sixty-second ticks. Both endpoints that check asks —
+# :func:`_proxy_models_probe` and :func:`_proxy_backend_probe` — are answered
+# LOCALLY by litellm and never dial an upstream, so a proxy whose every upstream
+# connection is dead is green there permanently. The one check in the daemon
+# that does send a completion through :4000 (`proxy_stall`) REQUIRES that probe
+# to SUCCEED before it may alarm (condition (c)), so the fast-500 shape fell
+# into the intersection of the two exclusions: in no check's domain by
+# construction (docs/audits/2026-11-22-proxy-connection-error.md §4.1-4.2).
+#
+# This closes that hole — it is the only thing in the daemon that asks :4000 for
+# a real completion and treats a FAILURE as news. DETECTION ONLY: a failing
+# completion flips this tick's verdict exactly as backend drift does, and the
+# remediation is the pre-existing cooldown / heal-lease / F5-breaker / streak
+# machinery below `check_proxy`. No restart path lives here.
+
+PROXY_COMPLETION_PROBE_TIMEOUT = float(
+    os.environ.get("HSCC_PROXY_COMPLETION_PROBE_TIMEOUT", "10"))
+# ONE token. The probe pays for the upstream round trip, not for generation —
+# the HTTP status IS the whole signal here (unlike the engine-wedge probe, which
+# asks for 40 tokens because it must SEE text). A smaller request is also a
+# cheaper tax on a GPU once per check tick.
+PROXY_COMPLETION_PROBE_MAX_TOKENS = 1
+# Same wording as the engine-wedge probe (:func:`_probe_unit_generation`), so
+# the prompt is known-good against vLLM rather than invented here.
+PROXY_COMPLETION_PROBE_PROMPT = "Reply with the single word: ok."
+
+
+def _proxy_completion_model(expected_aliases, models):
+    """The model id to ask :4000 for, or ``""`` meaning SKIP the probe.
+
+    Preference order is set by the incident, not by taste: an EXPECTED alias is
+    what the fleet is actually supposed to serve (so a failure is news about a
+    model somebody is calling), falling back to any id the catalogue probe just
+    reported. Never an invented name — a model the proxy does not know answers
+    4xx, which this probe deliberately reads as "the proxy answered" and which
+    would therefore mask the real fault. Empty return = nothing honest to ask
+    for, so the probe is skipped rather than guessed at.
+    """
+    for alias in sorted(expected_aliases or ()):
+        if alias:
+            return alias
+    for mid in (models or ()):
+        if mid:
+            return mid
+    return ""
+
+
+def _proxy_completion_probe(url=None, model=None,
+                            timeout=PROXY_COMPLETION_PROBE_TIMEOUT):
+    """POST a 1-token NON-streaming chat completion THROUGH the proxy.
+
+    The point is the ROUND TRIP: `/v1/models` and `/v1/model/info` are served
+    from litellm's own memory, so they stay green while every upstream dial
+    fails. A completion is the only request the proxy cannot answer without
+    reaching a backend, which makes it the only request that can see a poisoned
+    connection pool.
+
+    Returns ``{"ok": bool, "status": int|None, "skipped": bool, "error": str}``
+    with the same never-raises contract as :func:`_proxy_models_probe` — every
+    transport, HTTP and unexpected failure comes back as a dict, because a
+    raising probe would take the whole proxy check down and a proxy check that
+    dies cannot repair anything. `status` is the HTTP code the proxy answered
+    with (including the 500 that is the reason this probe exists) and is None
+    ONLY when nothing answered at all (timeout, refused, reset). `skipped` is
+    True when there was no model id to ask for; that is "no evidence", never
+    health and never a fault. The verdict itself lives in
+    :func:`_proxy_completion_healthy`, not here.
+
+    ``url``/``model``/``timeout`` are all injectable so the test suite drives
+    this through fakes; the defaults are the production shape.
+    """
+    if not model:
+        return {"ok": True, "status": None, "skipped": True, "error": "",
+                "detail": "no model id available — completion probe skipped"}
+    url = url or f"http://localhost:{PROXY_PORT}/v1/chat/completions"
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user",
+                      "content": PROXY_COMPLETION_PROBE_PROMPT}],
+        "max_tokens": PROXY_COMPLETION_PROBE_MAX_TOKENS,
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+            # urlopen only returns below 400; anything else arrives as an
+            # HTTPError below. A response object without a readable status
+            # (a test double) is therefore an ordinary 200.
+            status = getattr(resp, "status", None) or 200
+    except Exception as e:
+        # ONE handler, no urllib.error import: HTTPError carries `.code`, and
+        # distinguishing "the proxy answered with a bad code" from "nothing
+        # answered" is the whole verdict, so the code — not the exception type
+        # — is what gets surfaced.
+        code = getattr(e, "code", None)
+        if isinstance(code, int):
+            return {"ok": False, "status": code, "skipped": False,
+                    "error": f"HTTP {code}"}
+        return {"ok": False, "status": None, "skipped": False,
+                "error": f"{type(e).__name__}: {e}"}
+    return {"ok": status < 500, "status": status, "skipped": False, "error": ""}
+
+
+def _proxy_completion_healthy(probe):
+    """(healthy, reason) for a through-proxy completion probe.
+
+    UNHEALTHY on exactly two shapes: NO answer at all (transport error /
+    timeout — the proxy took the request and produced nothing), or an answer of
+    HTTP >= 500 — the proxy answered and its OWN upstream dial failed, which is
+    the 2026-11-22 signature (litellm's `InternalServerError: OpenAIException -
+    Connection error`). Both say "this proxy cannot serve a worker".
+
+    Any 4xx is HEALTHY for this probe, deliberately: the proxy answered and
+    refused to run the request, which is a catalogue/routing fault the
+    expected-alias check already owns. Flipping proxy health on a 4xx would have
+    this check relaunch a working load-balancer over a config gap a relaunch
+    cannot fix — once per cooldown tick, forever.
+
+    `skipped` is neither: it returns healthy with a reason that says the probe
+    never ran, so a reader of the state file can never mistake an un-run probe
+    for a passing one.
+    """
+    if probe.get("skipped"):
+        return True, (f"completion probe skipped "
+                      f"({probe.get('detail') or 'no model id'})")
+    status = probe.get("status")
+    if status is None:
+        return False, (f"no completion from :{PROXY_PORT} — "
+                       f"{probe.get('error') or 'transport error'}")
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        return False, (f"completion probe returned no usable status "
+                       f"({status!r})")
+    if status >= 500:
+        return False, (f"completion through :{PROXY_PORT} returned HTTP {status} "
+                       f"(proxy answered, upstream dial failed)")
+    return True, f"completion through :{PROXY_PORT} answered HTTP {status}"
+
+
 # ── per-unit alias coverage (t_be4b94ca operator addendum, 2026-10-22) ──────
 #
 # WHY this lives at UNIT granularity when the proxy check above exists: the
@@ -2633,6 +2783,16 @@ def check_proxy(pause_directory=None):
     Relaunch hosts follow :func:`_proxy_relaunch_hosts` — under a uniform_pool
     they MUST include the orchestrator node, or the relaunched LB can never
     recover the orchestrator's endpoint.
+    Health is ALSO not the catalogue (t_f0b8051b, the 2026-11-22 outage): both
+    endpoints above are answered from litellm's own memory and never dial an
+    upstream, so a proxy whose every upstream connection is dead served `200`
+    with a full catalogue for ~57 minutes while 157 completions through `:4000`
+    failed. Once the catalogue verdict is green this check therefore asks
+    :func:`_proxy_completion_probe` for ONE 1-token completion THROUGH the proxy
+    and reads the answer as a health verdict: no answer at all (timeout /
+    transport) or HTTP >= 500 is unhealthy; any 4xx is healthy, because a
+    refusing proxy is a catalogue/routing fault the alias check owns. Detection
+    only — the remediation stays the existing cooldown/lease/breaker path below.
     STAY-DOWN (t_ba1424b7, the first thing the body does): when
     :func:`_operator_down` reports post_boot's durable record — stamped by
     `hscc cluster down` (and by autodown's idle teardown), lifted by
@@ -2798,12 +2958,46 @@ def check_proxy(pause_directory=None):
                 # the repair block, and why `_proxy_backend_drift_sets` exists).
                 drift_missing_only = bool(missing_hp) and not dead_hp
                 healthy, reason = False, drift_reason
+
+    # THROUGH-PROXY COMPLETION (t_f0b8051b). The two verdicts above are
+    # answered locally by litellm and never dial an upstream, so a proxy whose
+    # every upstream connection is dead passes them forever — measured on
+    # 2026-11-22, ~57 minutes and ~80 ticks of it. Ask :4000 for ONE real
+    # completion: it is the only request here the proxy cannot answer without
+    # reaching a backend. Runs only while the verdict is still green (a proxy
+    # that failed the catalogue has no completion to give and the repair path
+    # below is the same either way) and only under the operator gate at the top
+    # of this function, so an intentional autodown / `cluster down` never sees a
+    # probe — the stay-down path returns before this line, and a parked node is
+    # inert for the same reason the repair path is (its strike is skipped by the
+    # pause seam below, so a pause never buys a relaunch).
+    #
+    # DETECTION ONLY. A failing completion flips the verdict exactly as drift
+    # does and lands in the same state keys; the remediation is the pre-existing
+    # cooldown / heal-lease / F5-breaker / relaunch-streak machinery, which
+    # clears the streak the moment a probe goes green again. TRADE-OFF (stated
+    # so it is not discovered the hard way): the timeout is an UNDEBOUNCED
+    # single tick — a proxy that is alive but too busy to answer a 1-token
+    # request inside PROXY_COMPLETION_PROBE_TIMEOUT reads as unhealthy here,
+    # exactly as an unreachable one does. What bounds the false positive is the
+    # machinery below (cooldown, lease, breaker, and the plain start a running
+    # proxy refuses), not this probe.
+    completion_ok, completion_detail = True, (
+        "completion probe not run (verdict already failed before the probe)")
+    if healthy:
+        completion = _proxy_completion_probe(
+            model=_proxy_completion_model(expected, probe.get("models")),
+            timeout=PROXY_COMPLETION_PROBE_TIMEOUT)
+        completion_ok, completion_detail = _proxy_completion_healthy(completion)
+        if not completion_ok:
+            healthy, reason = False, completion_detail
+
     # VERDICT LINE (t_e26aaa56) — the moment the check's own verdict is FINAL
-    # (after the backend-drift flip above, which is what turned the 2026-10-14
-    # incident green on /v1/models alone), and before either write. Emits at
-    # most one line: a transition, a cold-start baseline, or a heartbeat. Logs
-    # only — never re-decides; `healthy`/`reason` are the check's own values and
-    # the return value below is untouched by it.
+    # (after the backend-drift flip above and after the through-proxy completion
+    # flip, which is what turned the 2026-11-22 fast-500 outage invisible), and
+    # before either write. Emits at most one line: a transition, a cold-start
+    # baseline, or a heartbeat. Logs only — never re-decides; `healthy`/`reason`
+    # are the check's own values and the return value below is untouched by it.
     verdict_block = _proxy_verdict_tick(healthy, reason)
     if healthy:
         write_state("proxy", {"ok": True, "port": PROXY_PORT,
@@ -2812,6 +3006,8 @@ def check_proxy(pause_directory=None):
                               "router_drift_warn": bool(drift["warn"]),
                               "unit_alias_warn": unit_alias_warn,
                               PROXY_VERDICT_STATE_KEY: verdict_block,
+                              "completion_ok": completion_ok,
+                              "completion": completion_detail,
                               "models": sorted(probe.get("models") or [])})
         if drift["warn"]:
             log(f"proxy router drift ({drift['detail']})", "WARN")
@@ -3084,6 +3280,13 @@ def check_proxy(pause_directory=None):
                   "router_drift": drift["detail"],
                   "router_drift_warn": bool(drift["warn"]),
                   "unit_alias_warn": unit_alias_warn,
+                  # The completion verdict is the ONE piece of evidence that can
+                  # name this tick's fault when the catalogue is green, so it
+                  # must survive on the unhealthy path too (t_f0b8051b): on
+                  # 2026-11-22 every proxy state row said "healthy-looking"
+                  # because nothing here ever asked for a completion.
+                  "completion_ok": completion_ok,
+                  "completion": completion_detail,
                   "message": message}
     if not ok and not suppressed and not deferred and not paused_skip:
         proxy_data["relaunch_error"] = (r.get("output") or r.get("stderr") or "")[:400]
