@@ -219,6 +219,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/backup-retain-atomicity_t_9462260b.md` — backup pile growth + non-atomic backup writes.
 - `docs/audits/drift-guard-test-dir-census-t_69a1c9f2.md` — widening the DIRS drift guard to every `tests/` dir.
 - `docs/audits/run-tests-scripts-leg-t_95d864fc.md` — `run_tests.sh` never ran `scripts/tests`: the fix + evidence.
+- `docs/testing/loadstress-leg.md` — the `loadstress` leg: the stop/sidecar teardown class under bounded CPU pressure, with the measured load and the anti-rot arms.
 - `docs/audits/memory-path-resolution-t_7a16aed0.md` — memory endpoint profile-resolution fix.
 - `docs/audits/t_c95a2137_analyze_access.py` — read-only analysis companion to `docs/audits/2026-10-31-proxy-stalls.md`: reconstructs per-connection structure of the uvicorn access capture from the client ephemeral source port.
 - `docs/audits/t_c95a2137_shape_split.py` — read-only analysis companion: shape split (long-lived vs fresh connections, loopback-holder correlation, response-backlog trace) over the operator capture.

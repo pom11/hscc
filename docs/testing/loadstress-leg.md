@@ -38,25 +38,30 @@ or a `run_tests.sh` with no selector can never pay for the repeats).
 
 ## Measured, not claimed
 
-Run on this host (14 cores, 1-min load ~3 at rest) at the head that introduced
-the marker, interpreter `/Users/desac/.hermes/hermes-agent/venv/bin/python`:
+Run on this host (14 cores, 1-min load ~3 at rest) with the interpreter the
+runner selects (`/Users/desac/.hermes/hermes-agent/venv/bin/python`). Two runs,
+both quoted rather than averaged, because a single run of a stress leg proves
+nothing:
 
 ```
-loadstress: 20 items x 3 repeats at load 8.40 -> 60 passed, 0 failures
+loadstress: 20 items x 3 repeats at load 8.40 -> 60 passed, 0 failures   # 3ab28e4d
+loadstress: 20 items x 3 repeats at load 7.83 -> 60 passed, 0 failures   # fe272c1c
 ```
 
 | fact | value |
 |---|---|
 | items selected (`-m loadstress`) | **20** (11 of 20 in the api file, 9 of 16 in the daemon file) |
 | repeats per file | **3** → 6 file-passes, one pytest process per file per pass |
-| passes / failures | **60 passed, 0 failed** |
+| passes / failures | **60 passed, 0 failed** in both runs |
 | burners | **7** (`min(8, ceil(cores/2))`), owned by `scripts/load_burners.sh` |
-| load average created | **8.40** peak 1-min, sampled every 2 s inside the window (52 samples) |
-| survivors afterwards | **0** |
-| wall | 107 s for the stressed run |
+| load average created | peak 1-min **8.40** / **7.83**, sampled every 2 s inside the window (52 / 51 samples over 107 / 105 s) |
+| survivors afterwards | **0** in both runs |
+| ordinary legs, same posture | `hscc_daemon`: **5064 passed, 1 skipped, 9 deselected** · `hscc-api`: **1392 passed, 1 skipped, 11 deselected, 1 xfailed** |
 
 The peak is sampled *during* the run because a 1-minute average read afterwards
-has already forgotten the run that produced it.
+has already forgotten the run that produced it. The two legs' `N deselected`
+counts are the proof that the ordinary gates do not pay for the marked cases:
+11 and 9, exactly the marked sets.
 
 ## How the pressure is made, and how it dies
 

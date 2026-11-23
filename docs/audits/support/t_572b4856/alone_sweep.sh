@@ -50,7 +50,7 @@ for f in "${FILES[@]}"; do
       -u HERMES_KANBAN_BOARD -u HERMES_KANBAN_WORKSPACES_ROOT \
       -u HERMES_KANBAN_ATTACHMENTS_ROOT -u HSCC_REGISTRY \
     "$PY" -m pytest -q -rs "$f" -p no:cacheprovider \
-      --junitxml="$OUT/xml/$b.xml" > "$OUT/logs/$b.log" 2>&1
+      -m "not loadstress" --junitxml="$OUT/xml/$b.xml" > "$OUT/logs/$b.log" 2>&1
   echo $? > "$OUT/rc/$b.rc"
 done
 

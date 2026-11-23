@@ -24,12 +24,18 @@ task: t_b0bcc49c
 kind: Verified
 order: 1
 
-- Stress leg, measured on a 14-core host (1-min load ~3 at rest), interpreter
-  `/Users/desac/.hermes/hermes-agent/venv/bin/python`:
-  **`20 items x 3 repeats at load 8.40 -> 60 passed, 0 failures`** — 6
-  file-passes, 7 burners (`min(8, ceil(cores/2))`), peak 1-min load **8.40**
-  sampled every 2 s inside the window (52 samples over 107 s), **0 burner
-  survivors** afterwards.
+- Stress leg, measured twice on a 14-core host (1-min load ~3 at rest),
+  interpreter `/Users/desac/.hermes/hermes-agent/venv/bin/python`:
+  **`20 items x 3 repeats at load 8.40 -> 60 passed, 0 failures`** (3ab28e4d) and
+  **`... at load 7.83 -> 60 passed, 0 failures`** (fe272c1c) — 6 file-passes each,
+  7 burners (`min(8, ceil(cores/2))`), peak 1-min load sampled every 2 s inside
+  the window (52 / 51 samples over 107 / 105 s), **0 burner survivors** in both.
+- Ordinary legs still deselect the marker, by count and not by claim:
+  `HSCC_TEST_LEGS="hscc-api hscc_daemon scripts"` collected **1405** items for
+  the api leg and ran **1394 (11 deselected)**, and collected **5074** for the
+  daemon leg and ran **5065 (9 deselected)** — 11 and 9 being exactly the marked
+  sets. Leg results: `5064 passed, 1 skipped, 9 deselected` and `1392 passed,
+  1 skipped, 11 deselected, 1 xfailed`.
 - `scripts/tests/test_loadstress_leg.py`: **16 arms**, run inside the ordinary
   `scripts` leg so rot reddens a gate rather than a stress run nobody
   invokes. Four proven by mutation probes — empty-selection guard disabled ->
