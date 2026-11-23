@@ -39,7 +39,8 @@ or a `run_tests.sh` with no selector can never pay for the repeats).
 ## Measured, not claimed
 
 Run on this host (14 cores, 1-min load ~3 at rest) with the interpreter the
-runner selects (`/Users/desac/.hermes/hermes-agent/venv/bin/python`). Two runs,
+runner selects (the Hermes venv python, `~/.hermes/hermes-agent/venv/bin/python`).
+Two runs,
 both quoted rather than averaged, because a single run of a stress leg proves
 nothing:
 

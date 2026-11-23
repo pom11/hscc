@@ -24,8 +24,8 @@ task: t_b0bcc49c
 kind: Verified
 order: 1
 
-- Stress leg, measured twice on a 14-core host (1-min load ~3 at rest),
-  interpreter `/Users/desac/.hermes/hermes-agent/venv/bin/python`:
+- Stress leg, measured twice on a 14-core host (1-min load ~3 at rest), with
+  the interpreter the runner selects (its Hermes venv python):
   **`20 items x 3 repeats at load 8.40 -> 60 passed, 0 failures`** (3ab28e4d) and
   **`... at load 7.83 -> 60 passed, 0 failures`** (fe272c1c) — 6 file-passes each,
   7 burners (`min(8, ceil(cores/2))`), peak 1-min load sampled every 2 s inside
