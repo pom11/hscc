@@ -932,13 +932,32 @@ def run_daemon_loop():
         guard passes — restarts the gateway. The restart action is injectable
         and defaults to the real ``launchctl kickstart``. A raising tick must
         never kill the thread: swallow it loudly and continue.
+
+        t_57d8ca28: the same tick also runs ``merged_pr_resolve.tick()``, the
+        pass that resolves a card the dispatcher's ``active_pr`` respawn guard
+        is holding on a PR that has already MERGED (286 ticks of that in the
+        t_edc71fcb / #625 incident). It shares this thread because the interval
+        is the dispatcher's own, and it is deliberately NOT gated on a declared
+        stall: t_160d306f correctly explains a benign ``active_pr`` hold, which
+        keeps the wedge stream GREEN, so a resolution that waited for red would
+        never have fired. Two independent guards stay in front of the restart
+        path untouched — the wedge's hold classification and its gates — and
+        the resolution pass itself never restarts anything.
         """
         from . import dispatcher_wedge as _dwe
+        from . import merged_pr_resolve as _mpr
         while not stop_event.is_set():
             try:
                 _dwe.recover_dispatcher_wedge()
             except Exception as e:
                 log(f"Dispatcher-wedge recovery error: {e}", "ERROR")
+            try:
+                _mpr.tick()
+            except Exception as e:
+                # ``tick`` swallows its own failures; this is the same
+                # belt-and-braces the recovery call above gets, because a
+                # thread that dies here silently loses both self-heal paths.
+                log(f"merged-PR resolution error: {e}", "ERROR")
             stop_event.wait(_dwe.DISPATCHER_RECOVER_CHECK_INTERVAL)
 
     threads = []
@@ -969,7 +988,7 @@ def run_daemon_loop():
     dwr.start()
     threads.append(dwr)
     log("Started dispatcher-wedge recovery thread "
-        "(interval=%ss)" % _DWE_INTERVAL)
+        "(interval=%ss, + merged-PR resolution pass)" % _DWE_INTERVAL)
 
     wd = threading.Thread(target=run_watchdog_loop, daemon=True)
     wd.start()
