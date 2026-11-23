@@ -198,6 +198,42 @@ def _stub_sparkrun_proxy_write(monkeypatch):
     monkeypatch.setattr(ct, "_SPARKRUN_WRITE_CALLS", calls)
 
 
+@pytest.fixture(autouse=True)
+def _pin_proxy_log_archive_to_tmp(monkeypatch, tmp_path):
+    """Defense-in-depth (same doctrine as ``_pin_serving_json_to_tmp``): NO test
+    may read the operator's LIVE sparkrun ``litellm.log`` or create/write
+    ``~/.hscc/proxy-logs``.
+
+    t_569fb349: ``install_proxy`` now takes a pre-start copy of sparkrun's
+    gateway log — the same preservation seam t_9713c765 wired into the daemon's
+    repair path. The apply tests exercise ``install_proxy`` with only
+    ``subprocess.run`` patched out, so unpinned that copy would run for real on
+    every one of them: reading the operator's live log and creating
+    ``~/.hscc/proxy-logs`` on a host where the proxy is up. Pin both sides the
+    way ``hscc_daemon/tests/conftest.py`` pins them for its own leg —
+    ``PROXY_LOG_DIR`` is the WRITE side, ``SRC_OVERRIDE`` the READ side, pointed
+    at a path that does not exist so the default is a no-op by construction.
+    A test that wants a real archive points ``SRC_OVERRIDE`` at its own tmp file
+    (its monkeypatch runs after this fixture and wins).
+
+    Also resets the once-per-process archive guard, so no test inherits another
+    test's "already copied" state.
+    """
+    try:
+        import cluster_template as ct
+        ct._reset_proxy_log_archive_once()
+    except Exception:
+        pass
+    try:
+        from hscc_daemon import proxy_log_archive as pla
+    except Exception:
+        return  # hscc_daemon not importable in this leg; the seam is fail-soft
+    monkeypatch.setattr(pla, "PROXY_LOG_DIR", str(tmp_path / "proxy-logs"))
+    monkeypatch.setattr(pla, "SRC_OVERRIDE", str(tmp_path / "absent-litellm.log"))
+    monkeypatch.setattr(pla, "PROXY_LOG_KEEP", 5)
+    monkeypatch.setattr(pla, "PROXY_LOG_CAP_BYTES", 64 * 1024 * 1024)
+
+
 #: clusterlib's topology names are LAZY (module ``__getattr__`` -> discovery).
 _TOPOLOGY_NAMES = ("HEAD", "NODES", "NAS_HOST")
 
