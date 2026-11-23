@@ -87,9 +87,13 @@ STAGE_PREFIX = "stage:"
 RACE_ENTERED = "@@INSIDE-LOG-WRITE@@"
 #: ...and the handler came back out of it. This is the line the case asserts on.
 INTERRUPTED_INSIDE_LOG = "@@INTERRUPTED-INSIDE-LOG@@"
-#: The child's own watchdog thread says the handler never came back. This is the
-#: child's diagnosis of the wedge this file exists for, not the parent's guess.
-HANDLER_WEDGED = "@@HANDLER-WEDGED@@"
+#: The child's watchdog thread observed that the handler had still not returned
+#: `HANDLER_GRACE` seconds after the raise. An OBSERVATION, not a verdict: a
+#: throttled task can also simply not have been running (measured: under ~100x
+#: oversubscription this line appears while the handler is merely unscheduled),
+#: so nothing reddens on it. It is what lets a child that then goes silent be
+#: named — see :func:`_await_child`.
+HANDLER_LATE = "@@HANDLER-LATE@@"
 
 # ━━━ load budgets, not behaviour budgets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # None of these can turn a wrong answer into a right one: they only decide how
@@ -116,11 +120,11 @@ CHILD_LIFE_CAP = 420.0
 #: Spawn -> the child's own `HSCC API listening on ...` line. Same import phase
 #: as above, so the same order of budget.
 CHILD_READY_BUDGET = 180.0
-#: How long the child's watchdog waits for the signal handler to come back out of
-#: the log-write window before it says the handler is wedged. Generous next to
-#: the handler itself (an attribute write and a return; microseconds when the CPU
-#: is free) and short next to the stall above, so a real regression still reads
-#: red in seconds rather than in minutes.
+#: How long the child's watchdog waits, AFTER the signal has been raised, for the
+#: handler to come back out of the log-write window before it says the handler is
+#: still in there. The handler's body is an attribute write and a return, so this
+#: is generous about the work; it is only ever an observation, because a
+#: throttled task can also be unscheduled (see :data:`HANDLER_LATE`).
 HANDLER_GRACE = 8.0
 #: How long a marker the child writes BEFORE it exits may take to land on disk.
 CHILD_MARKER_BUDGET = 60.0
@@ -312,20 +316,28 @@ if verb == "serve-lograce":
     _signum = getattr(_signal, rest[1])
     _real_log = daemon_ops.log
     _fired = []
+    _raised = _threading.Event()
     _came_back = _threading.Event()
 
     def _watchdog():
         # The trap this arm exists for is a handler that never comes back, and the
         # only witness that can see it is a thread the blocked thread is not
         # holding: `threading.Lock.acquire()` gives up the GIL while it waits, so
-        # this thread still runs while the main thread is wedged inside the
-        # handler. Having the CHILD say so on stdout is what lets the parent fail
-        # on a verdict instead of on a stopwatch it would otherwise have to size
-        # for the slowest runner in the fleet — the wedge reads red in ~GRACE
-        # seconds while a merely SLOW child is never called stuck at all.
+        # this thread still runs while the main thread is stuck inside the
+        # handler. It measures from the RAISE, not from its own birth — measured
+        # the hard way under ~100x oversubscription, a grace clocked from here
+        # accused the handler of a deadlock while the child was still crossing
+        # `_load_api_server()` and had not raised anything yet.
+        #
+        # And it only OBSERVES. A task the kernel has simply not scheduled looks
+        # identical to a task deadlocked on a lock from the outside, so this line
+        # can be a slow runner as easily as a bug; what turns it into a verdict is
+        # the child then going silent for the whole stall budget, which is what
+        # :func:`_await_child` decides.
+        _raised.wait()
         if not _came_back.wait(@@HANDLER_GRACE@@):
-            print("@@MARK_WEDGED@@ %s did not return from the log-write window"
-                  % rest[1], flush=True)
+            print("@@MARK_LATE@@ %s had still not returned %.0fs after the raise"
+                  % (rest[1], @@HANDLER_GRACE@@), flush=True)
 
     _threading.Thread(target=_watchdog, daemon=True).start()
 
@@ -334,6 +346,7 @@ if verb == "serve-lograce":
             _fired.append(str(msg))
             with daemon_ops._handlers_lock:   # exactly where the real write stands
                 print("@@MARK_RACE@@", flush=True)   # the window is entered
+                _raised.set()                # the grace clock starts HERE
                 _signal.raise_signal(_signum)  # the stop lands here, on this thread
                 _came_back.set()              # the handler came back; stand down
                 _time.sleep(0.4)              # a handler that waits, waits here
@@ -374,7 +387,7 @@ HARNESS = (HARNESS
            .replace("@@MARK_STAGE@@", STAGE_PREFIX)
            .replace("@@MARK_RACE@@", RACE_ENTERED)
            .replace("@@MARK_INTERRUPTED@@", INTERRUPTED_INSIDE_LOG)
-           .replace("@@MARK_WEDGED@@", HANDLER_WEDGED)
+           .replace("@@MARK_LATE@@", HANDLER_LATE)
            .replace("@@HANDLER_GRACE@@", repr(HANDLER_GRACE)))
 
 
@@ -659,8 +672,8 @@ class _ChildTrail:
 
 
 #: What :func:`_await_child` settled for. `clean` is the only verdict the child
-#: earned by itself; the other three mean the parent had to kill it, and each
-#: says which clock ran out.
+#: earned by itself; `stalled` and `wedged` both mean the parent had to kill it,
+#: and `detail` says which clock ran out.
 ChildRun = collections.namedtuple(
     "ChildRun", ("returncode", "output", "verdict", "detail"))
 
@@ -674,6 +687,19 @@ def _kill_child(proc):
             pass
 
 
+def _stuck_verdict(trail):
+    """`wedged` when the child itself said the handler was still in the window.
+
+    The `@@HANDLER-LATE@@` line ALONE is not a verdict — a task the scheduler
+    simply passed over looks identical from here, and under ~100x oversubscription
+    this file's own rig measured it firing on a child that then finished fine.
+    But a child that said it and then produced NOTHING for the whole stall budget
+    is describing a lock it cannot leave, which is the defect this file exists for.
+    The line supplies the diagnosis; the silence supplies the verdict.
+    """
+    return "wedged" if trail.saw(HANDLER_LATE) else "stalled"
+
+
 def _await_child(proc, trail, *, stall=CHILD_STAGE_STALL, cap=CHILD_LIFE_CAP):
     """Wait for a backgrounded child to exit, judging SILENCE not elapsed time.
 
@@ -681,22 +707,27 @@ def _await_child(proc, trail, *, stall=CHILD_STAGE_STALL, cap=CHILD_LIFE_CAP):
 
       ``clean``    the child exited on its own; `returncode` is its and the
                    caller asserts on what it did.
-      ``wedged``   the child REPORTED the wedge this file exists for — its own
-                   watchdog thread (see the `serve-lograce` harness) said the
-                   signal handler did not return while the thread that raised it
-                   held `daemon_ops._handlers_lock`. The diagnosis is the child's.
-      ``stalled``  a live child announced nothing for `stall` seconds.
-      ``capped``   still alive after `cap` seconds of visible progress.
+      ``stalled``  the parent had to kill it: a live child announced nothing for
+                   `stall` seconds, or outlived `cap` while still talking, with no
+                   such observation on record. `detail` says which clock ran out.
+      ``wedged``   the child went silent, and its own watchdog thread (see the
+                   `serve-lograce` harness) had said the handler was still inside
+                   the log-write window when the raise happened. The diagnosis is
+                   the child's; the silence is what makes it a verdict.
 
-    In the last three the child has already been killed when this returns.
+    There is deliberately no separate ``capped`` verdict: a child that will not
+    finish and a child that will not speak are the same finding for a caller, and
+    which clock ran out belongs in `detail` rather than in a branch nobody reads.
+
+    In either of the other two the child has already been killed when this
+    returns. The price of the design is that a genuine wedge now costs the stall
+    budget to
+    report instead of a few seconds; a case that accuses a healthy child on a
+    busy runner costs the fleet a re-run triage every time it fires, and this one
+    has already done exactly that on CI.
     """
     deadline = time.monotonic() + cap
     while True:
-        if trail.saw(HANDLER_WEDGED):
-            _kill_child(proc)
-            trail.finish()
-            return ChildRun(None, trail.text(), "wedged",
-                            f"watchdog said so after {trail.idle():.1f}s")
         returncode = proc.poll()
         if returncode is not None:
             trail.finish()
@@ -705,12 +736,12 @@ def _await_child(proc, trail, *, stall=CHILD_STAGE_STALL, cap=CHILD_LIFE_CAP):
         if idle > stall:
             _kill_child(proc)
             trail.finish()
-            return ChildRun(None, trail.text(), "stalled",
+            return ChildRun(None, trail.text(), _stuck_verdict(trail),
                             f"went silent for {idle:.0f}s after {trail.last()!r}")
         if time.monotonic() > deadline:
             _kill_child(proc)
             trail.finish()
-            return ChildRun(None, trail.text(), "capped",
+            return ChildRun(None, trail.text(), _stuck_verdict(trail),
                             f"still alive after {cap:.0f}s, last line "
                             f"{trail.last()!r}")
         time.sleep(0.05)
@@ -917,6 +948,15 @@ def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
     What stays production-shaped afterwards: the binds happen, the fake sidecar
     really starts, the stop flag the handler set is what keeps the accept loops
     from starting, and the `finally:` still has a real child to kill.
+
+    How it waits, and why not on a clock: the signal is raised by the CHILD, so
+    there is no parent-side moment to aim at — all the parent can observe is what
+    the child says. The child therefore announces the window it is standing in
+    (`@@INSIDE-LOG-WRITE@@`, lock held and all) and the parent waits on SILENCE
+    rather than on elapsed life (:func:`_await_child`). A runner slow enough to
+    spend this case's whole old 25 s budget inside `import` reddened it on CI
+    (run 45081900690, both arms, empty stdout and no `api.log`) with the child not
+    yet entered into the handler at all — and the child had no way to say so.
     """
     port = _free_port()
     proc = _popen(sandbox, "serve-lograce", str(port), sig.name)
@@ -926,14 +966,15 @@ def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
         out = run.output
         if run.verdict == "wedged":
             # The child's own watchdog thread — the only witness that can still
-            # run while the main thread is blocked in `Lock.acquire()` — says the
-            # handler never came back. This is the defect, named by the process
-            # that has it.
+            # run while the main thread is blocked in `Lock.acquire()` — had said
+            # the handler was still inside the window, and the child then said
+            # nothing at all for the whole stall budget. Defect named by the
+            # process that has it, and confirmed by the silence after it.
             pytest.fail(
                 f"{sig.name} arriving inside a log write never stopped the "
                 f"process — the handler is blocked on a lock its own thread holds "
                 f"(`daemon_ops._handlers_lock`), so the stop flag was never set "
-                f"and the sidecar teardown was never reached."
+                f"and the sidecar teardown was never reached ({run.detail})."
                 f"\nchild output: {out}\n{_describe(sandbox)}")
         if run.verdict != "clean":
             # No verdict from the child, so no claim about its mechanism. The old
