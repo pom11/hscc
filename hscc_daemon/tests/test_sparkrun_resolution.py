@@ -13,9 +13,11 @@ to sparkrun, the venv python, or the fleet. No assertion depends on live state.
 """
 import json
 import os
+import re
 import sys
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -840,13 +842,50 @@ class TestFleetVisibilityLastKnownGood:
         assert health._read_fleet_last_seen() == (None, None)
         assert health._sparkrun_workloads()[2] == "degraded"
 
+    def test_the_future_witness_is_derived_not_pinned(self):
+        """Why the snapshot below stamps `as_of` from the clock (t_0389093a).
+
+        The case asserts "a snapshot dated AHEAD of the product's own clock proves
+        nothing". A hard-coded date (this file used ``2099-01-01T00:00:00+00:00``)
+        stops being ahead once the real clock passes it: t_0389093a measured the case
+        red at frozen 2200-01-01 and at ``HSCC_WALL_SHIFT_DAYS=+63225``, where the file
+        was simply 101 years OLD and the product correctly read it as aged rather than
+        impossible. ±400 days (the shipped ``test_single_clock_rule.py`` travel) never
+        reaches 2099, and this file owns no ``datetime(20xx,`` literal, so the shipped
+        rule never ran it at any shift.
+        """
+        with open(__file__) as fh:
+            pinned = [ln.strip() for ln in fh
+                      if re.search(r'"?(now|as_of)"?\s*[:=]\s*"2\d{3}-', ln)]
+        assert not pinned, (
+            "a hard-coded far-future instant is being judged against the product's "
+            "clock — the case is green only while the real clock sits below it; "
+            f"derive it from the clock instead: {pinned}")
+
+    def test_the_future_witness_is_ahead_of_the_product_clock(self):
+        """The premise the case rests on, checked against the product's own seam.
+
+        `health._read_fleet_last_seen()` rejects a stamp later than
+        ``time.time() + _FLEET_STALE_CLOCK_TOLERANCE_S`` (fail closed). So the witness
+        has to beat THAT number — a one-day margin does, at any clock; the pinned 2099
+        this file used beat it only until the real clock caught up (t_0389093a).
+        """
+        from hscc_daemon import health as _health
+        ahead = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        epoch = _health._epoch_from_iso(ahead)
+        assert epoch is not None, "the derived witness must parse through the product"
+        assert epoch > time.time() + _health._FLEET_STALE_CLOCK_TOLERANCE_S
+
     def test_future_stamped_snapshot_is_not_evidence(self, tmp_path, monkeypatch):
         """Clock jump / hand-edited file: a snapshot from the future proves
         nothing, and an age computed from it would be negative forever."""
         health, _state, _logs = self._setup(tmp_path, monkeypatch)
         self._dead_sweep(monkeypatch, health)
+        # DERIVED: "one day ahead of whatever the product's clock reads" — a pinned
+        # 2099 is only "the future" until the clock says otherwise (see the guard above).
+        future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
         self._write_raw(health, json.dumps(
-            {"as_of": "2099-01-01T00:00:00+00:00", "hosts": [], "workloads": []}))
+            {"as_of": future, "hosts": [], "workloads": []}))
 
         assert health._read_fleet_last_seen() == (None, None)
         assert health._sparkrun_workloads()[2] == "degraded"
