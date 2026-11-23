@@ -128,6 +128,15 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   `hscc orch waker status|enable|disable` verbs, state + audit schemas, the doctor
   row, and the retirement procedure for the `~/bin/orch-waker` stopgap — including
   the resolved state-file / stream-state collision that once made the built-in inert. **live**
+- `docs/ops/disk-hygiene.md` — `hscc clean`: the kanban workspace hygiene (archive a
+  finished card's workspace, then remove it). The five flags, why the dry run is the
+  default and read-only by construction, the `would` prefix, the engine's closed
+  skip vocabulary (`dirty / unpushed / stashed / unreadable / claim / archive-failed`),
+  what the verb never touches (`~/dev`, `~/.hscc`, hermes config/sessions/memory, the
+  board DBs, comments, attachments, unfinished cards), the archive location under the
+  hermes home and how to restore one with `tar -xzf`, and the standing note that the
+  gateway's weekly `~/bin/clean-mac.sh --apply` crontab line stays until the operator
+  moves it. **live**
 
 ## audit/
 
