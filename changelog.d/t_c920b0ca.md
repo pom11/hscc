@@ -25,8 +25,9 @@ task: t_c920b0ca
   manifest pins. Hermetic: every `~/.hscc` / `~/.hermes` read redirected to a
   per-test tmp dir, pane discovery injected, no fleet or subprocess reached.
 * `hscc_daemon/tests/test_plugin_manifest_drift.py`: manifest/registry receipt
-  bumped 28 -> 29 with a guard asserting no `main_start`/`main_wakeups`/rename
-  tool is declared.
+  bumped 29 -> 30 for this tool, then 30 -> 31 after rebasing onto main's
+  `heal_status` bump (t_14b86753), with a guard asserting no
+  `main_start`/`main_wakeups`/rename tool is declared.
 * `hscc_daemon/tests/test_skill_tool_coverage_t_cb167686.py` +
   `install/hscc-skills/hscc-cluster/SKILL.md`: the bundled skill documents the
   ninth read tool; `main start`/`wakeups` are recorded as the refused lifecycle
