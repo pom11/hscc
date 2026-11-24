@@ -25,8 +25,12 @@ So this module owns one rule and its two classic escape hatches:
     and registration order decides the winner), and the row must name the handler the
     dispatcher would actually run.
   * **A reason, not a rename.** Each register entry carries ``see <file>`` -- asserted to
-    exist AND to name the route -- plus ``deferred: <card>``. A register of bare paths is
-    the gap with a longer name, so an entry with no pointer or no owner reddens here.
+    exist AND to contain the route's display path VERBATIM, as its own string -- plus
+    ``deferred: <card>``. A register of bare paths is the gap with a longer name, so an
+    entry with no pointer or no owner reddens here. The check used to compare only the
+    text before the first placeholder, which verified ``GET /v1/projects/{name}/incidents``
+    with the five characters ``/v1/projects``.
+    ``test_a_pointer_verified_by_its_prefix_is_rejected`` reddens that mutation.
   * **The rows that promise a payload keep the promise.** For every read row this card
     documented, the first ``{...}`` group in its Description is compared with the key set
     the handler actually returns, measured by calling the handler in a sandboxed child
@@ -222,6 +226,56 @@ def _uncovered(documented, register) -> list[str]:
     return sorted(missing)
 
 
+#: Characters that would CONTINUE a path: a match followed by one of these named a
+#: longer route, not this one (``/v1/alerts`` inside ``/v1/alerts/{id}/ack``).
+_PATH_CONTINUES = re.compile(r"[A-Za-z0-9_/{-]")
+
+
+def _names_route(text: str, path: str) -> bool:
+    """Whether ``text`` names this route's display path -- verbatim, and as itself.
+
+    Two things, because the register's promise is that the pointer file says this
+    route exists:
+
+      * **verbatim**: the whole display path, placeholders and all. The text before
+        the first placeholder is a different route's door -- ``/v1/projects`` is what
+        ``HSCCClient.swift`` spells for ``GET /v1/projects``, and for 21 of the 38
+        entries open at ``9f083f91`` that five-character string was all the gate
+        checked.
+      * **not merely a prefix of a longer one**: the same equality rule the reference
+        rows are held to, applied to the pointer.
+    """
+    return any(not _PATH_CONTINUES.match(text, m.end())
+               for m in re.finditer(re.escape(path), text))
+
+
+def _pointer_problems(register: dict) -> list[str]:
+    """Each register entry's reason must carry an owner and a pointer that names it.
+
+    Extracted from the entry test so the mutation probes can run the SAME check over a
+    mutated copy of the register instead of re-implementing it.
+    """
+    bad = []
+    for (method, path), reason in register.items():
+        text = str(reason)
+        if len(text) < 40 or "deferred: t_" not in text:
+            bad.append(f"{method} {path}: no owning card in {text!r}")
+            continue
+        match = re.search(r"see (\S+?);", text)
+        if not match:
+            bad.append(f"{method} {path}: reason names no file -- {text!r}")
+            continue
+        rel = match.group(1)
+        target = _REPO_ROOT / rel
+        if not target.is_file():
+            bad.append(f"{method} {path}: pointer {rel!r} is not a file")
+            continue
+        if not _names_route(target.read_text(encoding="utf-8", errors="replace"), path):
+            bad.append(f"{method} {path}: pointer {rel!r} does not name the route "
+                       f"-- it never says {path!r} as its own path")
+    return bad
+
+
 # --------------------------------------------------------------------------- #
 # 1. Coverage: registered == documented + registered-missing
 # --------------------------------------------------------------------------- #
@@ -303,26 +357,82 @@ def test_each_documented_row_names_the_handler_the_dispatcher_would_run():
 
 def test_an_undocumented_route_with_no_reason_is_a_failure_not_a_warning():
     """Every register entry carries a pointer that exists and names the route."""
-    bad = []
-    for (method, path), reason in UNDOCUMENTED_ROUTES.items():
-        text = str(reason)
-        if len(text) < 40 or "deferred: t_" not in text:
-            bad.append(f"{method} {path}: no owning card in {text!r}")
-            continue
-        match = re.search(r"see (\S+?);", text)
-        if not match:
-            bad.append(f"{method} {path}: reason names no file -- {text!r}")
-            continue
-        rel = match.group(1)
-        target = _REPO_ROOT / rel
-        if not target.is_file():
-            bad.append(f"{method} {path}: pointer {rel!r} is not a file")
-            continue
-        literal = path.split("{")[0].rstrip("/")
-        if literal not in target.read_text(encoding="utf-8", errors="replace"):
-            bad.append(f"{method} {path}: pointer {rel!r} does not name the route")
+    bad = _pointer_problems(UNDOCUMENTED_ROUTES)
     assert not bad, "an allowlist entry without a verified reason is the gap " \
                     "renamed: " + "; ".join(bad)
+
+
+def test_a_pointer_verified_by_its_route_prefix_is_rejected():
+    """The pointer prefix trap, proved on the real pair rather than asserted in prose.
+
+    Until ``e9d2b8a2`` this entry pointed ``GET /v1/projects/{name}/incidents`` at
+    ``HSCCClient.swift``, and the gate accepted it because it only ever looked for the
+    text before the first placeholder: ``/v1/projects``, which that file spells for
+    ``GET /v1/projects`` and which says nothing about incidents. Re-point THIS route at
+    THAT file on a copy of the register and the entry check must name the route -- if
+    the check still compared the prefix, the same mutation would stay green.
+
+    The register itself is asserted clean first, so the mutation is the only difference
+    between the green and the red.
+    """
+    route = ("GET", "/v1/projects/{name}/incidents")
+    pointer = "ios-app/Sources/HSCC/HSCCClient.swift"
+    assert route in UNDOCUMENTED_ROUTES, (
+        "the pair this probe needs is the incidents entry; if it moved to a "
+        "reference row, re-pick a route with a placeholder mid-path")
+    body = (_REPO_ROOT / pointer).read_text(encoding="utf-8", errors="replace")
+    assert "/v1/projects" in body and not _names_route(body, route[1]), (
+        f"{pointer} no longer demonstrates the trap: it has to carry the "
+        f"{route[1]!r} prefix without naming the route")
+    assert route[1].split("{")[0].rstrip("/") in body, (
+        "the mutant has to be a pointer the OLD check accepted -- the display path up "
+        "to its first placeholder must be in the file, or this probe reddens for a "
+        "reason that has nothing to do with the hardening")
+    assert not _pointer_problems(UNDOCUMENTED_ROUTES), (
+        "the register is red before the mutation; this probe proves nothing then")
+
+    stale = (f"surface: named outside the Endpoint reference only — see {pointer}; "
+             f"deferred: t_790a985a")
+    mutated = dict(UNDOCUMENTED_ROUTES)
+    mutated[route] = stale
+    bad = _pointer_problems(mutated)
+    assert any(route[1] in line for line in bad), (
+        f"pointing {route[0]} {route[1]} at {pointer} stayed green -- the pointer is "
+        "being verified by the route's prefix again, which is the check that let 21 "
+        "of 38 entries name a file that never mentioned them")
+
+
+def test_a_pointer_naming_only_a_longer_sibling_route_is_rejected():
+    """The other direction of the same trap: a short path inside a longer route.
+
+    ``POST /v1/profile/export`` is a verbatim substring of
+    ``GET /v1/profile/export/{file}``, so a file that spells only the longer route
+    would satisfy a plain ``path in text`` check while naming a different door -- the
+    sibling the reference rows are already refused for. ``api_server.py`` is that file:
+    one comment, line 940, naming the download route and nothing else.
+    """
+    route = ("POST", "/v1/profile/export")
+    pointer = "hscc-api/api_server.py"
+    assert route in UNDOCUMENTED_ROUTES, (
+        "the pair this probe needs is the export entry; if it moved to a reference "
+        "row, re-pick a route that is the prefix of another registered route")
+    body = (_REPO_ROOT / pointer).read_text(encoding="utf-8", errors="replace")
+    assert route[1] in body, (
+        f"{pointer} no longer carries {route[1]!r} inside a longer path, so a plain "
+        "substring check is not what is being tested here")
+    assert _names_route(body, "/v1/profile/export/{file}"), (
+        f"{pointer} has stopped naming the sibling route this probe leans on")
+    assert not _names_route(body, route[1]), (
+        f"{pointer} now names {route[1]!r} as its own path; pick a real pair again")
+
+    stale = (f"surface: named outside the Endpoint reference only — see {pointer}; "
+             f"deferred: t_790a985a")
+    mutated = dict(UNDOCUMENTED_ROUTES)
+    mutated[route] = stale
+    bad = _pointer_problems(mutated)
+    assert any(route[1] in line for line in bad), (
+        f"pointing {route[0]} {route[1]} at {pointer} stayed green -- the pointer was "
+        "satisfied by a longer route that happens to start with it")
 
 
 # --------------------------------------------------------------------------- #
