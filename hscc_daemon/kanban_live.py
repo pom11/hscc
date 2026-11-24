@@ -1291,7 +1291,12 @@ def merge_queue_projects(data) -> list[tuple]:
         rows = [r for r in (proj.get("rows") or []) if isinstance(r, dict)]
         flight = next((r for r in rows
                        if r.get("state") in MQ_FLIGHT_STAGES), None)
-        if flight is None and not (proj.get("queue_len") or proj.get("waiting_len")):
+        if (flight is None
+                and not (proj.get("queue_len") or proj.get("waiting_len")
+                         # A hold IS something in it: a parked PR with a reason
+                         # is state an operator has to see even when nothing
+                         # else is queued (t_662753d6).
+                         or proj.get("held_len"))):
             continue
         out.append((name, proj, flight))
     return out
@@ -1335,6 +1340,18 @@ def merge_queue_line(data, width=None, now=None, muted="dim") -> Text | None:
                         style="warn")
         main.append(f" · {int(proj.get('queue_len') or 0)}q"
                     f" · {int(proj.get('waiting_len') or 0)}w", style=muted)
+        held = [h for h in (proj.get("held") or []) if isinstance(h, dict)]
+        if held:
+            # A hold is state, not history, so it lives in the always-on part of
+            # the cell — with its reason, which is the difference between a hold
+            # and a PR that simply vanished from the queue (t_662753d6).
+            cell = f" · held {_pr(held[0].get('pr'))}"
+            reason = " ".join(str(held[0].get("reason") or "").split())
+            if reason:
+                cell += f" {reason[:32]}" + ("…" if len(reason) > 32 else "")
+            main.append(cell, style=muted)
+            if len(held) > 1:
+                main.append(f" +{len(held) - 1}", style=muted)
         last = proj.get("last")
         tail = None
         if isinstance(last, dict) and last.get("pr") is not None:

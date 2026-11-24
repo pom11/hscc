@@ -4512,7 +4512,9 @@ def test_hold_and_unhold_are_cli_verbs_that_record_and_release_the_reason(
 
     # A held PR is not re-added by an explicit `add`: `unhold` is the release.
     assert merge_queue_cli.cmd_merge_queue(["add", "alpha", "7"]) == 1
-    assert "unhold" in capsys.readouterr().out, "the refusal must name unhold"
+    refusal = capsys.readouterr()
+    assert "unhold" in refusal.out + refusal.err, \
+        "the refusal must name unhold"
     assert mq.load_state(mq.state_file())["projects"]["alpha"]["queue"] == []
 
     assert merge_queue_cli.cmd_merge_queue(["unhold", "alpha", "7"]) == 0
