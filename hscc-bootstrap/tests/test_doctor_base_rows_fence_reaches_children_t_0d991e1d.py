@@ -78,9 +78,21 @@ FENCED_ROWS = (
     "reviewer readiness (sdlc-review)",
 )
 
-#: Rows whose ruling is "a suite-spawned door may read this": no seam above may be
+#: The phrase the repo's refusal convention always carries (``_refused_transport``,
+#: ``_refused_role_soul_scan``, every feature-row refusal): it names the fence AND the
+#: seam. Matched exactly because a probe error's own text can contain the bare word
+#: ``refused`` — ``<urlopen error [Errno 61] Connection refused>`` does.
+REFUSAL = "refused inside a pytest process"
+
+#: Rows whose ruling is "a suite-spawned door may read all of it": no seam above may be
 #: reached BY THEM, and they must keep reporting a real value in both halves.
-ACCEPTED_ROWS = ("python", "pyyaml", "disk space", "hermes", "sparkrun")
+ACCEPTED_ROWS = ("python", "pyyaml", "disk space", "hermes")
+
+#: The `sparkrun` row is HALF fenced (t_0d991e1d): its PATH lookup is the row's own
+#: subject and stays, its uv probe execs an operator binary and refuses. So it is
+#: checked on its own — it must keep the verdict it earned AND say which half it could
+#: not check, because an `ok` with no note is the silent pass this fence prevents.
+SPARKRUN_ROW = "sparkrun"
 
 #: Fake binaries: they never do their job, they only record that they were asked to.
 #: ``launchctl``/``systemctl``/``uv`` are here so the CONTROL half proves the exec
@@ -99,20 +111,34 @@ _FAKE_BIN = {
     "uv": "#!/usr/bin/env python3\nprint('3.12.0')\n",
 }
 
+#: Why the child loads the door with ``importlib`` instead of ``runpy`` (which is what
+#: ``doctor_tools.doctor_findings`` does): the seams under test are NAMES ON THE DOCTOR
+#: MODULE ITSELF, and ``runpy.run_path`` executes the file in a throwaway namespace — a
+#: spy installed on ``sys.modules['doctor']`` then counts nothing, which is exactly how
+#: a guard of this shape passes while measuring nothing (measured here: it reported 0
+#: for every doctor-internal seam in the CONTROL half, where the reads certainly
+#: happened). Loading it as a module keeps the properties that matter — a fresh
+#: non-pytest interpreter, the flat-sibling import shape, the real ``main()`` payload —
+#: and makes the counts real.
 _CHILD = (
-    "import json, os, runpy, sys\n"
+    "import importlib.util, io, json, os, sys\n"
     "boot, repo, door, log = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]\n"
     "seams = json.loads(sys.argv[5])\n"
     "sys.path.insert(0, repo)   # so `hscc_daemon` resolves\n"
     "sys.path.insert(0, boot)   # the deployed flat-sibling layout\n"
-    "def record(kind, argv):\n"
-    "    with open(log, 'a', encoding='utf-8') as fh:\n"
-    "        fh.write(json.dumps([kind, list(map(str, argv))]) + '\\n')\n"
+    "out = {'home': os.environ.get('HOME'),\n"
+    "       'hermes_home': os.environ.get('HERMES_HOME'),\n"
+    "       'pytest_imported': 'pytest' in sys.modules}\n"
+    "spec = importlib.util.spec_from_file_location('doctor', door)\n"
+    "mod = importlib.util.module_from_spec(spec)\n"
+    "sys.modules['doctor'] = mod\n"
+    "spec.loader.exec_module(mod)   # module body only; main() runs below, on demand\n"
     "counts, roots, unwrapped = {}, [], []\n"
     "for mod_name, attr in seams:\n"
     "    try:\n"
-    "        mod = __import__(mod_name, fromlist=[attr])\n"
-    "        real = getattr(mod, attr)\n"
+    "        target = mod if mod_name == 'doctor' else __import__(mod_name,\n"
+    "                                                             fromlist=[attr])\n"
+    "        real = getattr(target, attr)\n"
     "    except Exception as exc:      # a seam this interpreter lacks is loud\n"
     "        unwrapped.append(f'{mod_name}.{attr}: {type(exc).__name__}: {exc}')\n"
     "        continue\n"
@@ -121,24 +147,28 @@ _CHILD = (
     "        if _k.endswith('_skill_findings') and a:\n"
     "            roots.append(str(a[0]))\n"
     "        return _r(*a, **k)\n"
-    "    setattr(mod, attr, spy)\n"
+    "    setattr(target, attr, spy)\n"
     "    counts[mod_name + '.' + attr] = 0\n"
-    "out = {'seams': counts, 'roots': roots, 'unwrapped': unwrapped,\n"
-    "       'pytest_imported': 'pytest' in sys.modules,\n"
-    "       'home': os.environ.get('HOME'), 'hermes_home': os.environ.get('HERMES_HOME')}\n"
-    "sys.argv = [door, '--json']\n"
-    "buf = __import__('io').StringIO()\n"
+    "out['seams'], out['roots'], out['unwrapped'] = counts, roots, unwrapped\n"
+    "buf = io.StringIO()\n"
     "_real_stdout, sys.stdout = sys.stdout, buf\n"
     "try:\n"
-    "    runpy.run_path(door, run_name='__main__')\n"
+    "    out['rc'] = mod.main(['--json'])\n"
     "except SystemExit as exc:\n"
     "    out['rc'] = exc.code\n"
     "finally:\n"
     "    sys.stdout = _real_stdout\n"
+    # AFTER the run: the walk root the scan used (`_skill_findings` walks a
+    # profile-scoped home UP inside itself, so the argument alone cannot show that
+    # the shared tree was reached).
+    "try:\n"
+    "    out['skills_root'] = mod._skills_home(roots[-1]) if roots else None\n"
+    "except Exception as exc:\n"
+    "    out['skills_root'] = f'unreadable: {exc}'\n"
     "text = buf.getvalue()\n"
     "try:\n"
     "    out['checks'] = [(c.get('name'), bool(c.get('ok')), bool(c.get('fatal')),\n"
-    "                      (c.get('detail') or '')[:200])\n"
+    "                      (c.get('detail') or '')[:400])\n"
     "                     for c in json.loads(text).get('checks', [])]\n"
     "except Exception as exc:\n"
     "    out['error'] = f'{type(exc).__name__}: {exc}: {text[-400:]}'\n"
@@ -157,15 +187,15 @@ def _spawn(tmp_path, *, under_test: bool, profile_home: bool = False) -> dict:
     root = tmp_path / "hermes"
     home = tmp_path / "home"
     hermes_home = root
-    (home / ".hscc").mkdir(parents=True)
+    (home / ".hscc").mkdir(parents=True, exist_ok=True)
     if profile_home:
         hermes_home = root / "profiles" / "sandbox-worker"
-        (hermes_home / "skills").mkdir(parents=True)
+        (hermes_home / "skills").mkdir(parents=True, exist_ok=True)
         sibling = root / "profiles" / "sibling-orch"
-        (sibling / "skills").mkdir(parents=True)
+        (sibling / "skills").mkdir(parents=True, exist_ok=True)
         root.mkdir(parents=True, exist_ok=True)
     else:
-        hermes_home.mkdir(parents=True)
+        hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "config.yaml").write_text(
         "model:\n  default: sandbox-model\n"
         "  base_url: http://127.0.0.1:1/v1\n", encoding="utf-8")
@@ -174,9 +204,9 @@ def _spawn(tmp_path, *, under_test: bool, profile_home: bool = False) -> dict:
         encoding="utf-8")
 
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     log = tmp_path / "exec.log"
-    log.touch()
+    log.touch(exist_ok=True)
     for name, body in _FAKE_BIN.items():
         header = (
             "#!/usr/bin/env python3\n"
@@ -249,7 +279,7 @@ def test_a_spawned_door_refuses_every_base_row_that_crosses_a_live_seam(tmp_path
     r = _spawn(tmp_path, under_test=True)
     for name in FENCED_ROWS:
         _ok, _fatal, detail = _row(r, name)[1], _row(r, name)[2], _row(r, name)[3]
-        assert "refused" in detail, (
+        assert REFUSAL in detail, (
             f"the base row {name!r} took the ambient read path in a child of the "
             f"suite: {detail[:150]}")
         assert "inject" in detail, (
@@ -279,8 +309,15 @@ def test_a_spawned_door_still_reads_what_is_a_property_of_the_machine(tmp_path):
     r = _spawn(tmp_path, under_test=True)
     for name in ACCEPTED_ROWS:
         row = _row(r, name)
-        assert "refused" not in row[3], f"{name!r} refused though its ruling is accept"
+        assert REFUSAL not in row[3], f"{name!r} refused though its ruling is accept"
         assert row[3].strip(), f"{name!r} rendered an empty detail"
+    # The half-fenced `sparkrun` row keeps the PATH verdict it earned and says out loud
+    # which half it could not check — and uv was never exec'd.
+    sp = _row(r, SPARKRUN_ROW)
+    assert sp[1] is True, f"`sparkrun` lost its earned PATH verdict: {sp[3][:120]}"
+    assert REFUSAL in sp[3] and "_uv_runner" in sp[3], (
+        "`sparkrun` skipped its uv probe without saying so — an ok with no note is the "
+        f"silent pass: {sp[3][:170]}")
     assert _execs(r, "uv") == [], "the `sparkrun` row exec'd uv from a suite child"
 
 
@@ -295,7 +332,7 @@ def test_without_the_marker_the_same_child_takes_the_ambient_path(tmp_path):
     r = _spawn(tmp_path, under_test=False)
     for name in FENCED_ROWS:
         detail = _row(r, name)[3]
-        assert "refused" not in detail, (
+        assert REFUSAL not in detail, (
             f"{name!r} refused with no pytest in sight — the fence now denies a human "
             f"CLI run: {detail[:150]}")
     for key, count in r["seams"].items():
@@ -317,12 +354,14 @@ def test_the_skill_rows_walk_out_of_a_profile_home_only_outside_the_marker(tmp_p
     The planted tree here carries a sibling profile, so the two halves differ on ONE
     fact — which root the walk started from — and nothing else.
     """
+    shared = os.path.realpath(str(tmp_path / "hermes"))
     r = _spawn(tmp_path, under_test=True, profile_home=True)
     assert r["roots"] == [], (
         f"a suite-spawned door walked the profile trees: {r['roots']}")
+    assert r["skills_root"] is None, r["skills_root"]
     c = _spawn(tmp_path, under_test=False, profile_home=True)
-    walked = {os.path.realpath(x) for x in c["roots"]}
-    shared = os.path.realpath(str(tmp_path / "hermes"))
-    assert walked == {shared}, (
-        "the control did not take the walk this ruling is about, so the empty roots "
-        f"above prove nothing: walked={sorted(walked)} shared={shared}")
+    assert c["roots"], "the control never scanned, so the empty roots above are noise"
+    assert os.path.realpath(str(c["skills_root"])) == shared, (
+        "the control's scan did not reach the shared tree, so it did not take the walk "
+        f"this ruling is about: scanned={c['roots']} root={c['skills_root']} "
+        f"shared={shared}")
