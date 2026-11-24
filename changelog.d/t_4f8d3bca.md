@@ -13,3 +13,15 @@ task: t_4f8d3bca
   so this happens at most once per base commit per PR and cannot loop; a
   conflicted update is never retried and is flagged `update_conflict` for the
   hand-back that follows. PRs outside the wait list are untouched.
+---
+kind: Verified
+order: 1
+
+- `hscc_daemon/tests/test_merge_queue.py`: 134 -> **142** cases. The new ones
+  pin the bound rather than the happy path — one `gh pr update-branch` per
+  main commit (not per tick, not zero when main moves), no retry after a
+  conflict even onto a newer base, no retry after a `gh` error, and zero
+  `gh` calls at all when the wait list is empty. One case injects no git
+  runner, so the new base probe runs through `_default_runner`, the seam
+  that once raised on every production call while the injected runners
+  passed.
