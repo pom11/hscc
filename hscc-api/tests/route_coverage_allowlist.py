@@ -4,8 +4,11 @@ Generated ONCE from the live dispatch table at the sha named in the changelog fr
 then hand-curated: this file is DATA, not output, and the gate reads it as the promise.
 Every entry says two things a bare path list cannot:
 
-* ``see <path>`` — the file where this route IS written down (the gate asserts that file
-  exists and actually names the route, so the pointer cannot rot into a guess);
+* ``see <path>`` — the file where this route IS written down. The gate asserts that file
+  exists AND contains this entry's display path verbatim and as its own path — not the
+  text before the first placeholder (``/v1/projects`` verified
+  ``/v1/projects/{name}/incidents`` until ``e9d2b8a2``), and not only inside a longer
+  route that starts with it — so the pointer cannot rot into a guess;
 * ``deferred: <card id>`` — the card that owes the Endpoint-reference row.
 
 ``surface`` means the route has no shipped-client caller that the reference is failing;
