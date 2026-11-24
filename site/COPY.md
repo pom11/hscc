@@ -232,6 +232,11 @@ The background watcher that does the checking and the healing.
   or a Homebrew install; it creates the main orchestrator and its board.
 - `hscc update --check` — ask GitHub whether a newer release exists. Reads only;
   it never installs anything.
+- `hscc clean` — archive then remove finished cards' workspaces, and prune
+  rebuildable caches. Dry run until `--apply`; the safe set (package caches,
+  stale pytest dirs) runs there, and the deep set — the whole uv cache, Xcode
+  DerivedData, simulator caches, the Trash — only with `--apply --deep
+  --confirm`, because deep never runs without an operator asking for it.
 
 <!-- COMMANDS:END -->
 
