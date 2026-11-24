@@ -87,6 +87,15 @@ SHAPE_CHECKED: dict[str, dict] = {
     # seeds a real profile directory and the real _backing_read answers.
     "GET /v1/profile/editor/{profile}": {"profile": "demo"},
     "GET /v1/sessions": {"profile": "demo"},
+    # --- t_635ccba5: the bootstrap wizard's plan read ------------------------------ #
+    # Measurable only AFTER the handler stopped indexing a scalar as a list: a stub
+    # shaped like ``parse_qs`` OUTPUT (``{"name": ["demo"]}``) would have measured a
+    # request the server never sends, which is how the defect stayed green. These are
+    # the scalars ``_parse_path`` hands over. No seam stub: this route's key set IS
+    # ``_backing_plan``'s own return literal, and its four collision helpers each
+    # answer False from their own ``except`` in a sandbox, so the keys measured are
+    # the handler's, not a stub's.
+    "GET /v1/projects/new/plan": {"name": "demo", "repo": "/tmp/demo"},
 }
 
 #: ``(METHOD, display path) -> [(module, attribute, replacement)]``, applied to the
