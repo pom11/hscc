@@ -17,14 +17,18 @@ Coverage required by the card, per endpoint:
 
 import http.client
 import json
+import subprocess
+import sys
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
 import api_server
 import routes_autodown
+from hscc_daemon.tests import door_sandbox
 
 
 # --------------------------------------------------------------------------- #
@@ -348,3 +352,103 @@ def test_autodown_mutations_not_reachable_via_get(running, token, fakes):
         assert payload["error"]["code"] == "method_not_allowed"
     assert fakes["saves"] == []
     assert fakes["autoup_calls"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# The route is a documented READ: it creates no $HSCC_HOME/daemon.log (t_85875291)
+# --------------------------------------------------------------------------- #
+
+def _child_verdict(proc, mode: str) -> dict:
+    """The one JSON document the read harness prints — or a failure that quotes it.
+
+    Unparseable output is the harness's failure, not the route's: quoting stdout
+    and stderr is the only way a red run says which of the two broke.
+    """
+    lines = proc.stdout.strip().splitlines()
+    try:
+        data = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise AssertionError(
+            f"child ({mode}) printed no verdict JSON (rc={proc.returncode})\n"
+            f"stdout: {proc.stdout[-2000:]}\nstderr: {proc.stderr[-2000:]}")
+    return data
+
+
+class TestTheRouteWritesNoDaemonLog:
+    """``GET /v1/autodown/status`` writes no daemon log — measured, not asserted from docs.
+
+    The route shares the CLI door's payload builder, and that builder reports an
+    unreachable Hermes library through a WARN that ``daemon_ops.log`` appends to
+    ``$HSCC_HOME/daemon.log`` — the DAEMON'S rotating log, written by the API
+    process. Verdict + evidence:
+    ``docs/audits/verdict-api-autodown-status-read_t_85875291.md``; the fix is the
+    one-borrowed-call mute in ``routes_autodown._backing_status_snapshot``
+    (``autodown.silent_read()``). It is guarded HERE, in the surface's own suite,
+    because the CLI door's guards in ``hscc_daemon`` cannot see this route — it
+    reaches the builder directly (the #704 lesson).
+
+    Deliberately NOT hermetic like the rest of this file: monkeypatching
+    ``_backing_status_snapshot`` would stub away the very call that writes, so the
+    guard runs a real ``api_server`` + a real GET in a child process inside
+    ``door_sandbox``'s sealed HOME (that module builds the env and holds no
+    assert, by design). Three things stop it passing vacuously:
+
+      * the response must be ``200`` AND name the **sandbox** path in
+        ``kanban_reason`` — the leaf really ran, and resolved ``~`` to the sandbox;
+      * ``activity.json`` must appear — the request really was authenticated and
+        routed, so the handler really ran (a 401 would skip the handler and
+        "pass"). That stamp is the route's DESIGNED write
+        (``api_server._do_stamp_http_activity``): what this guard forbids is
+        ``daemon.log``, not every byte the surface is meant to produce;
+      * the control below runs the same builder **un-muted** in the same sealed
+        environment and must SEE the WARN — so silence means "muted", not
+        "nothing there to write".
+    """
+
+    _CHILD = Path(__file__).resolve().parent / "_autodown_status_child.py"
+
+    def _run(self, tmp_path, monkeypatch, mode):
+        """One child run in a fresh sealed HOME; returns (seal, its verdict dict)."""
+        seal = door_sandbox.seal(tmp_path, monkeypatch)
+        door_sandbox.the_seal_actually_took()  # only meaningful AFTER the seal
+        proc = subprocess.run(
+            [sys.executable, str(self._CHILD), mode, str(seal.hscc)],
+            env=seal.env, cwd=str(seal.cwd), capture_output=True, text=True,
+            timeout=240)
+        data = _child_verdict(proc, mode)
+        assert "error" not in data, (
+            f"child ({mode}) errored: {data['error']}\n{data.get('traceback', '')}")
+        door_sandbox.the_seal_actually_took()
+        return seal, data
+
+    def test_the_route_writes_no_daemon_log(self, tmp_path, monkeypatch):
+        seal, data = self._run(tmp_path, monkeypatch, "route")
+        assert data["status"] == 200, f"the route did not serve: {data['payload']}"
+        payload = data["payload"]
+        assert payload["kanban_ok"] is False, (
+            "the leaf must have been reached — the sandbox has no Hermes library: "
+            f"{payload}")
+        assert str(seal.home) in payload["kanban_reason"], (
+            "the payload does not name the SANDBOX path, so ~ resolved somewhere "
+            f"else and the silence would prove nothing: {payload['kanban_reason']}")
+        assert not data["daemon_log_exists"], (
+            "GET /v1/autodown/status created the daemon's log — a read route "
+            f"appended to another process's rotating log:\n{data['daemon_log']}")
+        assert "daemon.log" not in data["new_paths"], data["new_paths"]
+        assert "daemon.log" not in data["changed_paths"], data["changed_paths"]
+        assert "activity.json" in data["new_paths"], (
+            "the request was never authenticated+routed, so the handler never ran "
+            f"and had nothing to write: {data['new_paths']}")
+
+    def test_the_leaf_still_writes_when_the_read_is_not_muted(
+            self, tmp_path, monkeypatch):
+        """The control: same sealed sandbox, same builder, no mute -> the WARN lands."""
+        seal, data = self._run(tmp_path, monkeypatch, "unmuted")
+        assert str(seal.home) in data["kanban_reason"], data
+        assert "daemon.log" in data["new_paths"], (
+            "CONTROL IS VACUOUS: the un-muted builder wrote nothing in this "
+            "sandbox either, so the route's silence above proves nothing about "
+            f"the mute. new_paths={data['new_paths']}")
+        assert "interlock unevaluable" in data["daemon_log"], data["daemon_log"]

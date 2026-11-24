@@ -231,7 +231,19 @@ def _cmd_status(rest, json_mode, theme_name=None):
     # ONE builder shared with GET /v1/autodown/status (t_8743f98c). It owns
     # the read-only interlock evaluation and reconciles a recorded "down"
     # against the serving layer, so the CLI and the widget can never disagree.
-    status = autodown.status_snapshot()
+    #
+    # t_4564c680: this builder re-evaluates the kanban + PR/CI interlocks
+    # (``_status_interlock_context`` -> ``_has_active_work`` /
+    # ``list_stale_tasks`` -> ``_load_kanban_db_or_default``), and on an
+    # unreachable Hermes library each leaf appends one WARN to
+    # ``$HSCC_HOME/daemon.log`` — which this door's own docstring forbids
+    # ("Never writes, never creates, never acts"). The logger is borrowed for
+    # this ONE call only (``autodown.silent_read``); the ``_KANBAN_LOAD`` /
+    # ``_PRCI_LOAD`` ok+reason stay recorded, so the payload below still names
+    # why the interlock is unevaluable, and the WARN budget is deferred rather
+    # than spent, so the daemon keeps its one line per process.
+    with autodown.silent_read():
+        status = autodown.status_snapshot()
     kc = {"ok": status["kanban_ok"], "reason": status["kanban_reason"]}
     prci = status.get("prci_signal")
     if json_mode:

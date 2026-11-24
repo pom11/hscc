@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from typing import Optional
 
 from . import board_pin
@@ -839,7 +840,7 @@ def _note_kanban_unavailable(reason):
     if not _KANBAN_LOAD["warned"]:
         _KANBAN_LOAD["warned"] = True
         try:
-            log(f"Autodown kanban interlock unevaluable: {reason}", "WARN")
+            _kanban_warn(f"Autodown kanban interlock unevaluable: {reason}")
         except Exception:
             pass  # logging must never break the fail-safe
 
@@ -904,6 +905,104 @@ def _load_kanban_db_or_default():
     _KANBAN_LOAD["ok"] = True
     _KANBAN_LOAD["reason"] = ""
     return kanban_db
+
+
+# ── keeping a BORROWED read silent ─────────────────────────────────────────
+# :func:`_load_kanban_db_or_default` is the repo's ONE "import Hermes' kanban
+# lib" seam, and when the library is unreachable it reports itself through
+# :func:`_note_kanban_unavailable` / :func:`_note_prci_unavailable` — both of
+# which write one WARN through ``daemon_ops.log``, i.e. a file under
+# ``$HSCC_HOME`` (``daemon_ops.py:597`` -> ``append_rotating`` :575, ``LOG_FILE``
+# :19; the write is unconditional, only the stderr echo is conditional). For the
+# daemon that is right: the interlock is its own business, and it budgets one
+# line per process. A *documented read* that borrows the seam inherits the write
+# anyway, and that is not right — ``hscc autodown status``'s own docstring says
+# "Never writes, never creates, never acts" (``autodown_cli.py:223-229``) and
+# ``hscc kanban --help`` sells ``blocked`` / ``stale`` / ``monitor`` as list
+# verbs. All five of those doors create ``$HSCC_HOME/daemon.log`` today, each
+# emitting the SAME WARN line — the signature of one borrowed leaf
+# (docs/audits/read-surface-logging_t_88abe739.md §2).
+#
+# So the fix sits at the BORROWER, never at the leaf: a read that has to stay
+# silent borrows this module's logger for the duration of ONE call and hands it
+# back. The daemon's own write-side callers are not wrapped and are not
+# silenced. Shape proven by PR #716 for the ``orch_wake_subs`` doctor row
+# (``hscc-bootstrap/doctor_orch_subs.py::_silent_read``); this is that shape
+# living next to the seam so every borrower can use it.
+
+
+def _silent(*_args, **_kwargs) -> None:
+    """A logger that writes nothing. Stands in for the kanban leaf's logger."""
+
+
+def _kanban_warn(msg):
+    """The kanban interlock's one WARN route — the ONLY call :func:`silent_read` mutes.
+
+    Deliberately an indirection rather than a bare ``log(...)`` at the call site:
+    the leaf a borrowed read must not speak through is THIS one, and only this
+    one. The sibling ``_note_prci_unavailable`` keeps calling ``log`` directly,
+    on purpose — ``test_autodown_cli.py::TestStatus::test_status_json_survives_a_real_gh_blip``
+    pins that a PR/CI screen which could not be evaluated stays visible on stderr
+    and in the log file from this very door ("Silence here would mean the
+    fail-safe went quiet", t_18318fd9). Muting the whole module ``log`` name
+    would have quietly overridden that decision; the audit's five doors all emit
+    the KANBAN line, so muting the kanban leaf closes the measured class and
+    leaves the other verdict intact.
+    """
+    log(msg, "WARN")
+
+
+@contextmanager
+def silent_read():
+    """Borrow the kanban leaf's logger for the duration of one read, then give it back.
+
+    Inside the ``with`` block, :func:`_kanban_warn` is a no-op, so the WARN that
+    ``_note_kanban_unavailable`` would have appended to
+    ``$HSCC_HOME/daemon.log`` is not written. Used by the documented-read doors
+    (``autodown_cli._cmd_status``, ``kanban_blocked.list_blocked_tasks`` /
+    ``recover_blocked_task``, ``kanban_cli._cmd_stale``,
+    ``kanban_live.collect``); never by the daemon's loops, which keep their
+    logging untouched. The PR/CI WARN is NOT muted — see :func:`_kanban_warn`.
+
+    Restoring the WARN budget is the half that keeps this honest.
+    ``_note_kanban_unavailable`` sets ``warned = True`` *before* it logs, so a
+    caller that muted only the logger would also silently spend the process's
+    single WARN: a long-lived process that imports a read door once would then
+    never tell its operator about a genuine interlock failure — a fail-open
+    dressed up as a fix. So the budget is captured and restored in ``finally``
+    alongside the logger (and ``_PRCI_LOAD``'s too, defensively, so widening
+    this window later can never spend an alarm it does not own). The read is
+    allowed to be quiet; it is not allowed to spend somebody else's alarm.
+
+    Nothing becomes invisible. Only the FILE write is muted:
+    ``_note_kanban_unavailable`` records ``ok``/``reason`` in ``_KANBAN_LOAD``
+    BEFORE it logs, so ``hscc autodown status`` still names why the interlock is
+    unevaluable (its ``kanban_ok``/``kanban_reason`` payload fields and the human
+    panel's ``kanban interlock: UNEVALUABLE — …`` row), the doctor row still
+    reports UNCHECKED, and ``hscc kanban stale`` / ``monitor`` still print the
+    reason in their own ``errors`` payload (``autodown.py:658``,
+    ``kanban_live.py:384``).
+
+    Scoped to the ONE call: the swap is undone in ``finally``, so every other
+    consumer's logging is untouched the moment the read returns. It mutates a
+    module global, so a process with concurrent logging threads would see the
+    window (the CLI doors this guards are one-shot processes; a server that
+    wants the same quiet should scope the same way, per call).
+    """
+    global _kanban_warn
+    real_warn = _kanban_warn
+    budgets = (
+        (_KANBAN_LOAD, _KANBAN_LOAD.get("warned")),
+        (_PRCI_LOAD, _PRCI_LOAD.get("warned")),
+    )
+    _kanban_warn = _silent
+    try:
+        yield
+    finally:
+        _kanban_warn = real_warn
+        for load, budget in budgets:
+            if budget is not None:
+                load["warned"] = budget
 
 
 def kanban_check_state():

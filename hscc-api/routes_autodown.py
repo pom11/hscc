@@ -85,9 +85,22 @@ def _backing_status_snapshot():
     CLI and this route, including the read-only reconcile of a stale
     ``state: down`` against the live serving layer (t_8743f98c). No copied
     classifier logic lives here.
+
+    The call runs inside ``autodown.silent_read()`` (t_85875291): this is a
+    documented read, and the builder's unreachable-Hermes-library path would
+    otherwise append its kanban WARN to ``$HSCC_HOME/daemon.log`` — the
+    DAEMON'S log, written by the API process (the route answers the same
+    question in its own body, ``kanban_ok``/``kanban_reason``). Verdict and
+    evidence: ``docs/audits/verdict-api-autodown-status-read_t_85875291.md``;
+    the guard is ``TestTheRouteWritesNoDaemonLog`` in this surface's own suite
+    (the #704 lesson — the CLI door's guards in ``hscc_daemon`` prove nothing
+    here, because this route reaches the builder directly).
+    NOT a wider mute: only the kanban leaf is borrowed, never the module
+    ``log`` name — the PR/CI WARN stays audible (t_18318fd9).
     """
     from hscc_daemon import autodown
-    return autodown.status_snapshot()
+    with autodown.silent_read():
+        return autodown.status_snapshot()
 
 
 def _backing_list_active_cron_jobs():
