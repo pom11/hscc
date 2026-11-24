@@ -3137,6 +3137,7 @@ def test_tick_names_the_pr_waiting_behind_a_ci_pending_claim(tmp_path,
                         lambda command, worktree, timeout_s: ("pass", ""))
 
     lines, log = _logger()
+    mq.add_to_queue("alpha", 19, path=_state(tmp_path))
     first = mq.tick(state_path=_state(tmp_path),
                     root=str(tmp_path / "queue"), registry_path=registry,
                     gh_runner=gh, git_runner=subprocess.run,
