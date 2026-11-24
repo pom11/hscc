@@ -23,8 +23,13 @@ mid-flight is recovered to the head of its project's queue on the next tick.
 
 A PR that is not green yet sits in ``waiting``; EVERY tick re-checks that list
 (one cheap ``gh pr view`` per entry) and returns the green ones to the FIFO,
-whether or not the active queue is empty. After a push the new head's CI is
-usually pending, so the entry keeps its in-flight claim at ``ci-pending`` and
+whether or not the active queue is empty.  A wait-listed PR whose checks are
+``red`` (or ``cancelled``) gets its branch updated onto the current base with
+``gh pr update-branch``, which re-runs CI on a base that may since have been
+fixed; the entry records the base sha it was refreshed onto, so this happens
+at most once per base commit per PR and cannot loop.  After a push the new
+head's CI is usually pending, so the entry keeps its in-flight claim at
+``ci-pending`` and
 is re-read each tick until green (merge that exact SHA), red (hand back) or the
 CI budget expires (release to the rechecked wait list) — never re-gated on the
 same pushed head. GitHub answers ``mergeable: UNKNOWN`` for a few seconds after
@@ -2163,6 +2168,143 @@ def _release_to_head(state_path, project, entry):
         save_state(doc, state_path)
 
 
+# ── stale-base auto-refresh ───────────────────────────────────────────────
+#
+# A red PR in the wait list was red AT THE MOMENT ITS CI RAN, and nothing ever
+# looked again: PRs sat 9-18 h red because main itself was broken, or because
+# one flaky leg happened to fail on their run. Neither is the PR's fault, and
+# the wait list was strictly passive about it. ``gh pr update-branch`` moves the
+# PR's branch onto the current base, which re-triggers CI on a base that may
+# since have been fixed.
+#
+# The bound IS the design: at most ONE update per (PR, base sha). The sha is
+# recorded on the entry the moment the attempt is made — updated, already
+# current, conflicted, or a gh error — so the next tick reads the same sha and
+# does nothing. Without that record a red PR would re-update every tick and keep
+# CI busy forever.
+
+def _remote_base_sha(repo, base, git_runner=None):
+    """The CURRENT sha of ``refs/heads/<base>`` on origin, or None.
+
+    ``ls-remote`` rather than ``git rev-parse origin/<base>`` on purpose: this
+    drain does not fetch, and the case it exists for is a queue that is IDLE —
+    nothing fetches then, so the local remote-tracking ref never moves and a
+    stale base would never be noticed. One bounded network read, taken only
+    when a red waiting entry actually needs the answer.
+    """
+    runner = git_runner or _default_runner
+    try:
+        proc = _git(["ls-remote", "--", "origin", f"refs/heads/{base}"],
+                    repo, runner)
+    except Exception:
+        return None
+    if proc is None or proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        fields = line.split()
+        if fields and fields[0].strip():
+            return fields[0].strip().lower()
+    return None
+
+
+def _red_on_stale_base(entry, info):
+    """True when a waiting entry's checks are red/cancelled AND a refresh is
+    still allowed for it.
+
+    A ``CANCELLED`` check lands here too: GitHub cancels a run when a newer
+    commit pushes it aside, ``_truthy_check`` reads that as not-green, and the
+    PR is then waiting on a verdict that can never arrive.  No ``required``
+    answer is needed: an empty rollup reads as green or pending, never red, so
+    this cannot be flipped by branch protection.  A PR that is not open, a
+    draft, or a refresh that already conflicted (card 2 hands that one back) is
+    left strictly alone.
+    """
+    if bool(entry.get("update_conflict")):
+        return False
+    if str(info.get("state", "")).upper() != "OPEN" or info.get("isDraft"):
+        return False
+    return _checks_verdict(info) == "red"
+
+
+def _update_branch(repo, pr, gh_runner):
+    """ONE ``gh pr update-branch <pr>``. Returns ``(ok, conflict, output)``.
+
+    Never retries — the caller decides what a conflict means.
+    """
+    try:
+        proc = _gh(["pr", "update-branch", str(pr)], repo, gh_runner)
+    except Exception as exc:
+        return False, False, f"gh pr update-branch raised {exc!r}"
+    if proc is None:
+        return False, False, "gh pr update-branch: gh not runnable"
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        return False, "conflict" in output.lower(), output
+    return True, False, output
+
+
+def _refresh_stale_red(project, cfg, base, entries, *, state_path,
+                       git_runner=None, gh_runner=None, log=None):
+    """Update red wait-listed PRs onto the current base, once per base sha.
+
+    Returns the PR numbers an update was attempted for. Only entries that are
+    still in this project's wait list are written back — a CLI ``add`` during
+    the ``gh`` call moves the entry out, and a moved entry's bookkeeping
+    belongs to wherever it landed.
+    """
+    log = log or (lambda *a, **k: None)
+    candidates = [entry for entry in entries
+                  if isinstance(entry, dict) and entry.get("pr") is not None]
+    if not candidates:
+        return []
+    sha = _remote_base_sha(cfg["repo"], base, git_runner)
+    if not sha:
+        # Base unknown: doing nothing is the read-only answer, and the next
+        # tick asks again — no attempt was made, so nothing is recorded.
+        return []
+    patches = {}
+    for entry in candidates:
+        if str(entry.get("refreshed_main_sha") or "") == sha:
+            # Already refreshed onto exactly this base: the bound.
+            continue
+        pr = int(str(entry["pr"]))
+        ok, conflict, output = _update_branch(cfg["repo"], pr, gh_runner)
+        patch = {"refreshed_main_sha": sha, "refreshed_at": _now_iso()}
+        head = sha[:12]
+        if ok:
+            verb = ("branch already onto main"
+                    if "already up to date" in output.lower()
+                    else "updated branch onto main")
+            log(f"merge-queue {project}: PR #{pr} red on stale base; "
+                f"{verb} {head}", "INFO")
+        elif conflict:
+            patch["update_conflict"] = True
+            log(f"merge-queue {project}: PR #{pr} update-branch conflicted "
+                f"onto main {head}; left in the wait list for handback: "
+                f"{_tail(output, 3)}", "WARNING")
+        else:
+            patch["last_update_error"] = _tail(output, 3) or "gh failed"
+            log(f"merge-queue {project}: PR #{pr} update-branch failed on "
+                f"main {head}: {patch['last_update_error']}", "WARNING")
+        patches[pr] = patch
+    if not patches:
+        return []
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        for entry in ps.get("waiting") or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                pr = int(entry.get("pr"))
+            except (TypeError, ValueError):
+                continue
+            if pr in patches:
+                entry.update(patches[pr])
+        save_state(doc, state_path)
+    return sorted(patches)
+
+
 def _drain_waiting(project, cfg, *, state_path, git_runner=None,
                    gh_runner=None, log=None):
     """Return every wait-listed PR whose checks are green to the FIFO.
@@ -2183,6 +2325,7 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
         return []
     base = expected_base(cfg, git_runner) or "main"
     ready = []
+    stale_red = []
     for entry in waiting:
         info = pr_view(cfg["repo"], entry.get("pr"), runner=gh_runner)
         if not isinstance(info, dict):
@@ -2190,6 +2333,14 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
         required = _required_for_info(cfg, base, info, git_runner, gh_runner)
         if _pr_ready(info, required_checks=required):
             ready.append(entry)
+        elif _red_on_stale_base(entry, info):
+            stale_red.append(entry)
+    # Not green because its own checks are red/cancelled: the wait list used to
+    # be passive about that forever. Bounded to one update per (PR, base sha).
+    if stale_red:
+        _refresh_stale_red(project, cfg, base, stale_red,
+                           state_path=state_path, git_runner=git_runner,
+                           gh_runner=gh_runner, log=log)
     if not ready:
         return []
     ready_prs = {int(entry["pr"]) for entry in ready
