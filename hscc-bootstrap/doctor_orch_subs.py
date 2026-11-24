@@ -67,8 +67,8 @@ Silent, too — and that is the second half of read-only, not a nicety. A log li
 is a file write next to the DBs, so opening everything ``mode=ro`` proves nothing
 if the code path then creates ``$HSCC_HOME/daemon.log``. The one borrowed call
 that can log (``autodown.board_db_paths`` on its unreachable-library path) runs
-inside :func:`_silent_read`, which hands the logger back afterwards — including
-the process's once-per-WARN budget. Pinned by
+inside :func:`hscc_daemon.autodown.silent_read`, which hands the warn route back
+afterwards — including the process's once-per-WARN budget. Pinned by
 ``hscc-cluster/tests/test_doctor_tool.py::TestReadOnly::test_the_read_writes_nothing_anywhere``,
 which lives in a DIFFERENT top-level directory from this module: the row's own
 suite is not its whole seam test (t_2c218de8 shipped red on exactly that gap).
@@ -89,7 +89,6 @@ import json
 import os
 import sqlite3
 import sys
-from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 #: The row's printed name. Kept here (not only in doctor.py) so the verdict and
@@ -140,58 +139,18 @@ _ROLES_DIR = os.path.join(_REPO_ROOT, "hscc-roles")
 
 
 # ── keeping a read silent ───────────────────────────────────────────────────
-
-def _silent(*_args, **_kwargs) -> None:
-    """A logger that writes nothing. Stands in for a borrowed module's logger."""
-
-
-@contextmanager
-def _silent_read(module):
-    """Borrow ``module``'s logger for the duration of one read, then give it back.
-
-    Why this exists: :func:`enumerate_boards` delegates board enumeration to
-    ``hscc_daemon.autodown.board_db_paths``, and when the Hermes library is
-    unreachable that call reports it through ``_note_kanban_unavailable``, which
-    writes ONE WARN through ``daemon_ops.log`` — a file under ``$HSCC_HOME``.
-    For the daemon that is right: the interlock is its own business and it
-    budgets one line per process. For this row it is wrong: ``doctor`` is a
-    read, and
-    ``hscc-cluster/tests/test_doctor_tool.py::TestReadOnly::test_the_read_writes_nothing_anywhere``
-    snapshots a sandbox tree around exactly this door call and asserts that
-    nothing in it changed. The row therefore borrows the logger rather than
-    silencing the module — ``module.log`` is swapped for :func:`_silent`, the one
-    call runs, and the ``finally`` gives the module back what it had.
-
-    Restoring the WARN budget is the half that keeps this honest.
-    ``_note_kanban_unavailable`` sets ``_KANBAN_LOAD["warned"] = True`` *before*
-    it logs, so a caller that muted only the log would also silently spend the
-    process's single WARN: a daemon that imports this row would then never tell
-    its operator about a genuine interlock failure — a fail-open dressed up as a
-    fix. The row's read is allowed to be quiet; it is not allowed to spend
-    somebody else's alarm. So the budget is captured and restored too.
-
-    Nothing becomes invisible. Only the FILE write is muted:
-    ``_note_kanban_unavailable`` records ``ok``/``reason`` in
-    ``_KANBAN_LOAD`` BEFORE it logs, so ``hscc autodown status`` still names why
-    the interlock is unevaluable — the surface that already owns that answer —
-    and this row still reports its own board set as UNCHECKED rather than clean.
-
-    Scoped to the ONE call: the swap is undone in ``finally``, so the daemon's
-    and every other consumer's logging is untouched the moment the read returns.
-    """
-    real_log = getattr(module, "log", None)
-    load = getattr(module, "_KANBAN_LOAD", None)
-    budget = load.get("warned") if isinstance(load, dict) else None
-    if callable(real_log):
-        module.log = _silent
-    try:
-        yield
-    finally:
-        if real_log is not None:
-            module.log = real_log
-        if isinstance(load, dict) and budget is not None:
-            load["warned"] = budget
-
+#
+# The mute is deliberately NOT here. It is ``hscc_daemon.autodown.silent_read``:
+# one window, living next to the seam that writes the WARN, borrowed by this row
+# AND by the five CLI read doors (``autodown_cli._cmd_status``,
+# ``kanban_blocked.list_blocked_tasks`` / ``recover_blocked_task``,
+# ``kanban_cli._cmd_stale``, ``kanban_live.collect``). A copy of it here drifted
+# the moment the daemon narrowed its own mute to the kanban leaf (PR #723), so
+# t_85875291 deleted it: the "quiet for one call, and the once-per-process WARN
+# budget comes back afterwards" semantics live once, where the write lives.
+# :func:`enumerate_boards` below borrows the shared window, and
+# ``hscc-bootstrap/tests/test_doctor_orch_wake_subs_t_639b2834.py`` pins that it
+# really does (the row's read staying silent is still its own test's job).
 
 # ── the two declarations this check refuses to duplicate ────────────────────
 
@@ -250,18 +209,22 @@ def enumerate_boards() -> Dict[str, str]:
     not enumerate" (the seam fails closed when Hermes' kanban library is
     unreachable), which :func:`doctor_check` reports instead of calling clean.
 
-    The delegated call runs inside :func:`_silent_read`: its failure path writes
-    a WARN into ``$HSCC_HOME/daemon.log``, and a doctor read writes nothing
-    anywhere — the guard
+    The delegated call runs inside :func:`hscc_daemon.autodown.silent_read`: its
+    failure path writes a WARN into ``$HSCC_HOME/daemon.log``, and a doctor read
+    writes nothing anywhere — the guard
     ``hscc-cluster/tests/test_doctor_tool.py::TestReadOnly::test_the_read_writes_nothing_anywhere``
-    snapshots a sandbox tree around the door child and fails on that file.
+    snapshots a sandbox tree around the door child and fails on that file. The
+    mute is the daemon's own helper, not a copy: this row and the five CLI read
+    doors borrow the same window, so the "quiet, but the WARN budget comes back"
+    semantics live once, next to the seam (t_85875291 deleted the duplicate that
+    #716 briefly carried).
     """
     try:
         from hscc_daemon import autodown  # noqa: PLC0415
     except Exception:  # noqa: BLE001 - bootstrap-only layout has no daemon sibling
         return {}
     try:
-        with _silent_read(autodown):
+        with autodown.silent_read():
             paths = autodown.board_db_paths()
     except Exception:  # noqa: BLE001 - enumeration is Hermes' and may be dark
         return {}
