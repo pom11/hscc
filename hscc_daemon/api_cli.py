@@ -1354,7 +1354,7 @@ def _handle_status(argv, theme_name=None):
         # class doctor_supervision hunts, and an operator who runs `hscc api stop`
         # next should know the file is there. Stated as a fact, never as the
         # headline, which is the Supervisor row's job.
-        rows.append("PID file:      stale (the launchd unit above is running)")
+        rows.append("PID file:      stale (recorded process is gone)")
     if sup.get("refused"):
         # Suite-only (see _refused_launchd_status): a test that forgot to inject
         # the seam must SEE that, not silently read the PID-file fallback.

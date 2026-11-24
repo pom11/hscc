@@ -251,6 +251,10 @@ def test_loaded_unit_without_a_pid_outranks_the_stale_pid_file_too(
     assert _headline(panels).startswith("launchd unit loaded, no process")
     assert "stale PID file (not running)" not in message
     assert "stale" in message                   # the file is still reported
+    # ...and reported without contradiction: a row that called the unit "running"
+    # here would undo the honest headline two lines above it.
+    assert not any(line.lstrip().startswith("PID file") and "running" in line
+                   for line in message.splitlines()), message
 
 
 # --------------------------------------------------------------------------- #
