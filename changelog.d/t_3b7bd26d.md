@@ -65,8 +65,8 @@ task: t_3b7bd26d
   9 deselected in 310.74 s**, `RUNNER_EXIT=0`, `✓ hscc_daemon`, **ALL GREEN** — host
   load avg 4.56 falling to 2.69 across the run (the card's own induced storm had just
   drained, so the wall is not a storm wall; the load is recorded with the number, per the
-  lane rule). The tip `7d5e09f5` differs from `83687678` only in this fragment's prose,
-  which no test reads. The one skip is the pre-existing
+  lane rule). Later commits on this branch (`7d5e09f5`, `3ae11126`) change only this
+  fragment's prose, which no test reads. The one skip is the pre-existing
   `test_orch_waker_wake_claim.py:1495` (deployed Hermes has no wake-claim helpers yet).
 * Hermeticity: test-only diff, no product change, no new probe surface. Everything stays
   inside the file's own `cache_sandbox` (HOME/TMPDIR under `tmp_path`, every one of the
