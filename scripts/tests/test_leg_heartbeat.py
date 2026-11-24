@@ -158,4 +158,19 @@ def test_runner_wires_the_heartbeat():
     assert 'kill "$HB_PID"' in src, "heartbeat must be reaped after each leg"
     # pytest must stay FOREGROUND: a backgrounded job in a non-interactive shell
     # gets SIG_IGN on SIGINT, so Ctrl-C would stop reaching the suite.
-    assert '-p no:cacheprovider "$@"\n  code=$?' in src
+    # Re-pinned as a property of the invocation rather than one exact line:
+    # t_b0bcc49c put the stress leg's command in an `if` beside this one and the
+    # marker deselect wrapped onto a continuation line, so the old literal
+    # `'-p no:cacheprovider "$@"\n  code=$?'` stopped matching while every
+    # property it stood for still held. What it actually guarded is pinned
+    # directly now — the status captured here, the caller's argv still last, and
+    # nothing in the invocation backgrounded.
+    assert "-p no:cacheprovider" in src
+    invocation = src.split('"$PY" -m pytest', 1)[1].split("code=$?", 1)[0]
+    assert '"$@"' in invocation, (
+        "the runner's extra argv no longer reaches pytest — and `code=$?` on the "
+        "other side of this block means a leg that ignores it could not report "
+        "what it actually ran")
+    assert "&\n" not in invocation and not invocation.rstrip().endswith("&"), (
+        "something in the pytest invocation is backgrounded: Ctrl-C stops "
+        "reaching the suite, which is what this pin exists for")

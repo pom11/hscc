@@ -183,7 +183,7 @@ other door. That is a coherent design — it just is not written down anywhere.
 |---|---|---|---|---|---|
 | `api start\|stop\|status` | ✖ | ✖ | ➖ (it *is* the server) | ✖ MISSING | 🔒 self-hosting: cannot stop itself over the transport it serves |
 | `api install-service\|uninstall-service` | ✖ | ✖ | ✖ | ✖ MISSING | 🔒 launchd unit writes (`api_launchd.py`) |
-| `hscc profiles` (running card counts per profile) | ✖ | ✖ | ⚠ **two** routes answer it: `GET /v1/profiles` (`routes_ops`) and `GET /v1/profiles/list` (`routes_profiles`) | ✖ MISSING | **F2 second source of truth** — pick one canonical, alias the other |
+| `hscc profiles` (running card counts per profile) | ✖ | ✖ | ⚠ **two** routes answer it: `GET /v1/profiles` (`routes_ops`) and `GET /v1/profiles/list` (`routes_profiles`) | ✖ MISSING | **F2 — RESOLVED, not a duplicate.** Measured payloads answer two different questions; `GET /v1/profiles` is canonical for the counts, `GET /v1/profiles/list` is the roster. Named, pinned, documented — see the F2 row in §9 |
 | `hscc project <verb>` (~25 flightdeck commands) | ✖ (kanban tools are native Hermes) | ✖ | partial: 16 read + 8 mutating routes in `routes_project.py` / `routes_actions.py` | ✖ MISSING | family-level only. LEFT-1: per-verb map of flightdeck → route |
 
 ---
@@ -285,6 +285,13 @@ classification (`hscc-cluster/hscc.py:621-650`). Consequence: an operator who us
 **S3 — `hscc profiles` has two routes.** `GET /v1/profiles` (routes_ops) and
 `GET /v1/profiles/list` (routes_profiles). Two answers to one question is how drift
 becomes invisible. → F2.
+> *Disposition (measured after the §12 verdict):* the premise is false — the two
+> routes share a key name (`profiles`) and a name prefix, not a question. The
+> counts route returns `{counts, total_running, profiles:[names]}` from the single
+> `cmd_profile_status()` implementation the CLI verb also calls; the roster returns
+> `{count, profiles:[objects]}` and never reaches it. Nothing to collapse; the
+> disposition was to name the canonical, pin the boundary and document the pair
+> (see the F2 row in §9 for the two cards that did it).
 
 **S4 — slash commands shell out to `sparkrun` directly.** `hscc-commands/cmdlib.py:19
 SPARKRUN = "sparkrun"` and every handler builds its own argv. That is *deliberate* —
@@ -414,7 +421,7 @@ stale source, and leaves orphans behind.
 | id | finding | evidence | severity |
 |---|---|---|---|
 | **F1** | Bundled skill content is ~85% silent on the CLI surface (42/49 verbs undocumented), while the *same* knowledge exists only in one profile's curated skill tree | §7 table; `diff` of profile vs bundled `hscc/SKILL.md` | **High** — a fresh install yields an agent that cannot discover most of its own surface |
-| **F2** | `hscc profiles` has two GET routes (`/v1/profiles` and `/v1/profiles/list`) — second source of truth for the same answer | `routes_ops.py` route table; `routes_profiles.py` route table | Medium |
+| **F2** | `hscc profiles` has two GET routes (`/v1/profiles` and `/v1/profiles/list`) — second source of truth for the same answer. **RESOLVED — the premise is false: not a duplicate.** The payloads answer two different questions (`{counts, total_running, profiles:[names]}` from the one `cmd_profile_status()` implementation the CLI verb calls, vs `{count, profiles:[objects]}` + the config whitelist), both have shipped iOS decoders (`ProfilesResponse`, `ProfileListResponse`), so neither is removable and neither is deprecable. Disposition = name the canonical + pin the boundary + document the pair: `t_34804e61` (PR #664, `15d3cad6`) landed the pointers and the 19 payload-boundary tests; `t_3df8595c` closed the docs half the first card missed — `docs/API.md` had named **neither** route | `routes_ops.py` route table; `routes_profiles.py` route table; `hscc-cluster/profile_status.py:53-68`; `ios-app/Sources/HSCC/HSCCClient.swift:559,571`; `hscc-api/tests/test_profiles_route_canonical.py` | Medium (closed as not-a-duplicate; boundary pinned) |
 | **F3** | `hscc help kanban` lists 3 of the 7 dispatched subcommands (`pause`, `resume`, `paused`, `enforce` missing); `hscc kanban --help` lists all 7 — two help sources for one group | `hscc_daemon/hscc.py:585-592` vs `hscc_daemon/kanban_blocked.py:42-72` | Medium (help-honesty; the F5 rule in this repo's own comments) |
 | **F4** | `/template` slash `args_hint` advertises only `list\|preview\|apply` — `status` and `validate` unreachable through the slash surface, and `/v1/commands` republishes the same stale hint | `hscc-commands/__init__.py:902-905` | Medium |
 | **F5** | `/cluster-down` is a second fleet-down implementation (own parallel `sparkrun stop`) that misses the post-boot marker clear + benign-stop classification the engine has | `hscc-commands/__init__.py:467-510` vs `hscc-cluster/hscc.py:621-650` | **High** — operator-visible divergence in a destructive path |
@@ -431,7 +438,7 @@ stale source, and leaves orphans behind.
 
 - **F1 / F11** → bundled content: `t_268609d6` · `t_cb167686` · `t_ed77d757` (skill
   refresh); installer update path + profile trees: `t_45fa38e2`.
-- **F2** `t_3df8595c` · **F3** `t_46d03105` · **F5** `t_bf8577f9` (LEFT-3's dry-run
+- **F2** `t_3df8595c` (CLOSED — not a duplicate; see the F2 row) · **F3** `t_46d03105` · **F5** `t_bf8577f9` (LEFT-3's dry-run
   side-by-side is its first, blocking leg) · **F6** `t_4a149f2f` · **F7** `t_1a5a4a8c` ·
   **F8** `t_3a0ade78` · **F9** `t_787930b5` (same card as D10) · **F12** `t_b38df592`
   (docs) + `t_45fa38e2` (the `BUNDLED_SKILLS` code seam, kept off the docs card to avoid
@@ -450,6 +457,9 @@ stale source, and leaves orphans behind.
   `t_28cc4de5` · F13 `t_b21a939e`. F8's doc line from the general-board card is verifiably
   on main (`f59c0bdd`); the general-board F7/F13 cards report done, so at least two of
   these five pairs are already answered — check both ids before spending a card.
+  **F2's pair is now settled** (`t_34804e61` = PR #664 pointers + boundary tests,
+  `t_3df8595c` = the `docs/API.md` rows + their pin): one question, one canonical
+  route, both routes load-bearing. Do not re-cut it.
 
 ## 10. Decisions this card asks the operator to make
 

@@ -195,8 +195,10 @@ The background watcher that does the checking and the healing.
   read from; prints the pairing QR code (`stop` / `status` too).
 - `hscc autodown` — the idle sleep/wake for the GPU layer, off until you enable
   it: `status`, `enable`, `disable`, `wake`, `cancel`.
-- `hscc kanban` — board hygiene: blocked cards (list and recover), stale cards
-  (list and archive), and a live board monitor.
+- `hscc kanban` — board hygiene: `blocked` cards (list and recover), `stale`
+  cards (list and archive), a live `monitor` of every board, and `pause`,
+  `resume`, `paused`, `enforce` to hold a whole board, let it go again, see
+  what is held, and block cards that became ready or running while it was.
 - `hscc merge-queue` — the local queue of green PRs, on by default for GitHub
   projects with gates: `status`, `list`, `add`, `remove`, `pause`, `resume`,
   `enable`, `disable`.
@@ -232,6 +234,11 @@ The background watcher that does the checking and the healing.
   or a Homebrew install; it creates the main orchestrator and its board.
 - `hscc update --check` — ask GitHub whether a newer release exists. Reads only;
   it never installs anything.
+- `hscc clean` — archive then remove finished cards' workspaces, and prune
+  rebuildable caches. Dry run until `--apply`; the safe set (package caches,
+  stale pytest dirs) runs there, and the deep set — the whole uv cache, Xcode
+  DerivedData, simulator caches, the Trash — only with `--apply --deep
+  --confirm`, because deep never runs without an operator asking for it.
 
 <!-- COMMANDS:END -->
 
