@@ -5,7 +5,9 @@
 `origin/main` = `e88c1bb7`. **Every `file:line` citation was then re-pointed to the repo
 tree at `origin/main` = `3cb11669`** by `t_66c77e6c`: the first cut quoted the *deployed*
 copies under `~/.hermes/plugins/`, whose line numbers differ (§1, §0.4). Fleet
-denominators re-swept 2026-11-23 10:06 +02:00 (§5.1). Unqualified citations are
+denominators re-swept 2026-11-23 10:06 +02:00 and **corrected to 53 profile dirs by the
+11:45 +02:00 re-measure** (`t_bf5b1d50`) — the sweep's glob also counted
+`profiles/.deleted`, a Hermes tombstone dir and not a profile (§5.1). Unqualified citations are
 **repo-tree**; deployed-tree readings are labelled *deployed*.
 **Operator rule this doc implements (verbatim, 2026-11-23 07:24):** *"all this control and
 monitor cluster plugins should be hooked only to general profile or whatever the users in
@@ -55,7 +57,8 @@ is answered here in §3.
 3. **The 51 clean profile configs are one migration away from all having the surface.**
    `_migrate_to_21` writes `plugins.enabled` = **every directory under
    `$HERMES_HOME/plugins/` that has a manifest** (`hermes_cli/config_migrations.py:300-325`,
-   `:328-347`) for any config lacking the key. Every profile home that has a `plugins/` dir — **53 of the 54** profile dirs —
+   `:328-347`) for any config lacking the key. Every profile home that has a `plugins/` dir — **all 53** profile
+   dirs (the 10:06 sweep read "53 of the 54"; the 54th was `profiles/.deleted`, not a profile — §5.1) —
    *currently carries* `plugins/hscc-cluster`, `hscc-commands`, `sparkrun-hermes`,
    `hscc_daemon`, `hscc-api`, … (§5.1: 21 entries per profile `plugins/` dir). The next
    time `migrate_config()` reaches a profile config (`hermes_cli/profiles_config.py:26`,
@@ -241,14 +244,34 @@ already correct; the SOUL rule text is what misleads (card `t_c3a29c37`).
 | measurement | value | source |
 |---|---|---|
 | root `plugins.enabled` | `[hscc-cluster, hscc-commands, sparkrun-hermes]` | *deployed* `~/.hermes/config.yaml:529-535` (a root-config reading, not a repo line) |
-| profile dirs | **54** | re-swept 2026-11-23 10:06 +02:00 |
-| profile `config.yaml` files | **51** (of the 54 dirs) | same |
+| profile dirs | **53** | re-swept 2026-11-23 10:06 +02:00 as **54**; corrected by the **2026-11-23 11:45 +02:00 re-measure** (`t_bf5b1d50`) — the glob counted `profiles/.deleted`, not a profile (note below this table) |
+| profile `config.yaml` files | **51** (of the 53 dirs) | same |
 | profile configs with any `plugins` key | **0 / 51** configs | same |
 | profile configs naming `hscc-cluster` + `sparkrun` in top-level `toolsets:` | **25 / 51** configs — incl. `general`, `general-orch`, `orchestrator`, every `*-orch`, **and the worker roles `backend-engineer`, `ecofire-flows-executor`** | re-swept 2026-11-23 10:06 +02:00; the 07:2x `toolsets-sweep.tsv` had **26 / 52** |
 | root `toolsets:` | `[hermes-cli, hscc-cluster, kanban, sparkrun, delegation]` | same |
-| profile homes carrying hscc plugin dirs | **53 / 54** profile homes (`plugins/` present in 53, **21 entries in every one**, incl. `hscc-cluster`, `hscc-commands`, `sparkrun-hermes`, `hscc_daemon`, `hscc-api`, `hscc-roles`, `hscc-bootstrap`, `hscc-skills`) | re-swept 2026-11-23 10:06 +02:00; `profile-homes.tsv` is the 07:2x sweep |
-| profile `SOUL.md` files | **51** (of the 54 dirs); **0** carry the cluster-ops block of §5.3 | re-swept 2026-11-23 10:06 +02:00 |
+| profile homes carrying hscc plugin dirs | **53 / 53** profile homes (`plugins/` present in **all 53**, **21 entries in every one**, incl. `hscc-cluster`, `hscc-commands`, `sparkrun-hermes`, `hscc_daemon`, `hscc-api`, `hscc-roles`, `hscc-bootstrap`, `hscc-skills`) | re-swept 2026-11-23 10:06 +02:00 (read there as **53 / 54**); re-measured 2026-11-23 11:45 +02:00; `profile-homes.tsv` is the 07:2x sweep |
+| profile `SOUL.md` files | **51** (of the 53 dirs); **0** carry the cluster-ops block of §5.3 | re-swept 2026-11-23 10:06 +02:00; denominator corrected 2026-11-23 11:45 +02:00 |
 | hscc-owned skill dirs per profile | 0–20 (e.g. `backend-engineer` 20, `ios-engineer` 19, `devops-engineer` 11) — the `t_45fa38e2` fan-out | `profile-homes.tsv` (07:2x sweep) |
+
+**Why `profiles/.deleted` is not a profile, so the next sweep does not re-count it.** The 10:06
+denominator came from a `find ~/.hermes/profiles -maxdepth 1 -type d`-style glob, and such a glob
+returns dot dirs too. Re-measured 2026-11-23 11:45 +02:00 (re-checked 2026-11-24 01:45 +02:00,
+same answer): **53** non-dot profile dirs plus `.deleted`. `.deleted` is Hermes' tombstone
+location for a renamed/deleted profile home — *deployed* `hermes_cli/profiles.py:2320` names it
+(`profiles/.deleted/<old_name>`) — and Hermes' own listing would never return it:
+`_iter_named_profile_dirs()` keeps only names matching `PROFILE_ID_RE`
+(`^[a-z0-9][a-z0-9_-]{0,63}$`, *deployed* `hermes_constants.py:401`, used at
+`hermes_cli/profiles.py:480-497`) that carry a profile identity marker. `.deleted` satisfies
+neither and holds no `config.yaml`, no `SOUL.md` and no `plugins/` — only two `probe-20261026-*`
+marker files, mtime Oct 26 22:02. Hermes skips it on the name alone wherever it lists profiles
+(`PROFILE_ID_RE` applied at *deployed* `hermes_cli/web_server_profiles.py:179`,
+`hermes_cli/backup.py:1780`), so nothing was deleted between the 10:06 sweep and the 11:45
+re-measure: the count was simply wrong and the sweep itself is not retracted. hscc's own
+per-home sweep does not carry the bug —
+`skill_guard.discover_profiles()` skips dot dirs (`hscc-bootstrap/skill_guard.py:500-513`) and the
+`doctor` row added by `t_caf98114` inherits that by delegating rather than globbing again, pinned
+by `hscc-bootstrap/tests/test_doctor_main_only_surface.py::test_dot_dirs_are_not_profiles`. A
+future re-sweep must filter `-name '.*'`, not just `-type d`.
 
 ### 5.2 The gate, run (not reasoned)
 
@@ -374,7 +397,7 @@ Three rules the cards must hold so this stays true:
 | **G-1** | **No hooks-vs-tools split.** `gate_manifest` (`plugins_discovery.py:269-334`) is load/no-load; `register(ctx)` is all-or-nothing. The operator rule needs "this home loads the plugin for its hooks, and gets no tools". | hscc can emulate it in `register()` (D-B) — a workaround that lives in the plugin and depends on `profile_name()` staying accurate for routed/managed homes (`plugins.py:401-407`). If hermes ever gains a first-class notion it should replace the workaround. | `plugins.enabled` entries that can carry `{hooks_only: true}` (or a `plugins.tools_disabled: [names]` per-home list) honoured by `PluginContext.register_tool()`. |
 | **G-2** | **Plugin toolsets are default-ON unless `known_plugin_toolsets.<platform>` bookkeeping says otherwise** (`tools_config.py:520-527`), and `agent.disabled_toolsets` (`:637-643` → `model_tools.py:300-328`) has to pass `validate_toolset()` for a *registry-only* name (`toolsets.py:278,367-380`). Nothing I measured proves a worker profile can name `hscc-cluster` there and have its 31 tools (repo-tree count at 2.17.4; 28 at `3cb11669`; the deployed tree registers 26) pruned. | It is a hermes resolution question, answerable only by running hermes. **Must be measured, not assumed** — this is exactly the class of "assumption underneath correct code" that shipped the v1.15.0 grace bug. | One assertion in the QA sandbox (`t_035b1b0b`): with `plugins.enabled=[hscc-cluster]` + `agent.disabled_toolsets=[hscc-cluster]`, `hermes tools --summary` and a live session show **zero** `cluster_*` tools, and `has_hook("post_api_request")` is still `True`. If it passes, config becomes a usable second lock; if not, G-1 becomes mandatory. |
 | **G-3** | **`_migrate_to_21` grandfathers every manifest-bearing dir under `$HERMES_HOME/plugins/`** (`config_migrations.py:300-347`) — so "install the plugin into all profiles" and "keep profiles opt-in clean" are mutually unsatisfiable until bootstrap writes an explicit `plugins.enabled` everywhere. | hscc's installer is the thing putting plugin trees into profile homes; but the *behaviour* (a migration silently enabling third-party code) is hermes'. | Either (a) grandfather only plugins that were enabled-or-installed **in that home before the plugin dir existed**, or (b) log a WARNING naming the plugins it just enabled. Cheap; hscc can also neutralise it (card `t_e98c6ad4` writes the key). |
-| **G-4** | **No per-profile view of "what is loaded here".** `hermes plugins list` is home-scoped and requires running as that profile; the fleet's truth is spread across 54 profile homes plus the root home. | Would be a hermes read-surface. | `hermes plugins list --all-profiles` (or `--profile X`) reporting each home's `plugins.enabled` + the gate verdict, i.e. exactly what `probe_gate.py` had to reconstruct. Until then hscc should ship the same check in `doctor` (card `t_caf98114`). |
+| **G-4** | **No per-profile view of "what is loaded here".** `hermes plugins list` is home-scoped and requires running as that profile; the fleet's truth is spread across 53 profile homes plus the root home. | Would be a hermes read-surface. | `hermes plugins list --all-profiles` (or `--profile X`) reporting each home's `plugins.enabled` + the gate verdict, i.e. exactly what `probe_gate.py` had to reconstruct. Until then hscc should ship the same check in `doctor` (card `t_caf98114`). |
 
 G-3/G-4 are worth filing upstream; **G-2 must be measured by the QA card before anyone
 relies on the YAML in §6 as enforcement.**

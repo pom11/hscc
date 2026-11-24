@@ -17,8 +17,15 @@ Commands:
                            Build/refresh all role profiles from roles/*.yaml
                            (the legacy cluster-wide role is generated retired
                            in favour of the stored main orchestrator)
-  create <name> <desc...>  Author a new role spec from a description
-  list                     List role specs and whether their profile exists
+  create <name> <desc...>  Author a new role spec from a description AND report
+                           what git must do to keep it: an untracked spec is
+                           deleted by the next re-sync of the deployed plugin dir
+                           while the profile it minted survives (t_f2630ca3)
+  list                     List role specs and whether their profile exists, then
+                           census spec coverage — a worker-signature profile with
+                           no spec fails the command (exit 1, the same condition
+                           the hscc-roles leg asserts); a spec missing from
+                           `git ls-files` is a warning
   validate                 Validate every role spec (load + required fields)
   autonomy [on|off]        Show or set the fleet autonomy flag
   orch <project|general> [--registry P] [--hermes-home DIR]
@@ -66,6 +73,7 @@ import autonomy
 import orchestrators
 import orch_sync
 import reasoning_sync
+import role_soul_check
 import migrate_main
 import _theme
 from _theme import escape, make_console, panel, status_panel, table
@@ -195,13 +203,47 @@ def cmd_create(argv):
     name = argv[0]
     desc = " ".join(argv[1:])
     path = author.create_role(name, desc)
-    make_console().print(panel(
-        "hscc-roles create",
-        f"[ok]created[/ok] role [accent]{escape(name)}[/accent]\n"
-        f"[label]spec:[/label] {escape(path)}\n"
-        f"[dim]next: run `hscc-roles generate` to build the profile[/dim]",
-    ))
+    # The spec is only half the artefact: until git has it, the profile it mints
+    # is one plugin re-sync away from being orphaned (t_00d9581d — the ops block in
+    # generator.py routes operators to mint from the DEPLOYED plugin copy, which is
+    # not a repo, and then to file a card to commit the spec). So say what keeps it.
+    prov = rolelib.spec_provenance(path)
+    lines = [f"[ok]created[/ok] role [accent]{escape(name)}[/accent]",
+             f"[label]spec:[/label] {escape(path)}",
+             _create_provenance_line(prov)]
+    if prov["commands"]:
+        lines.extend(f"  {escape(c)}" for c in prov["commands"])
+    lines.append("[dim]next: run `hscc-roles generate` to build the profile[/dim]")
+    make_console().print(panel("hscc-roles create", "\n".join(lines)))
     return 0
+
+
+def _create_provenance_line(prov):
+    """One honest line on whether the minted spec survives the next re-sync.
+
+    Never an all-clear on a tree git could not be asked about: ``unknown`` and
+    ``outside-repo`` both name the loss they lead to, because the failure this
+    guards was silent (``marketing``'s spec existed, untracked, for ~6 hours).
+    """
+    state = prov["state"]
+    if state == "tracked":
+        return (f"[ok]tracked by git[/ok] ({escape(prov['detail'])}) — this spec "
+                "survives a plugin re-sync.")
+    if state == "untracked":
+        return (f"[warn]NOT tracked by git[/warn] — {escape(prov['detail'])}. Until "
+                "it is committed, no other host gets this role and the next "
+                "checkout/re-sync can drop it while the profile survives (the "
+                "`marketing` loss). Commit it:")
+    if state == "unknown":
+        return (f"[warn]git could not confirm this spec is tracked[/warn] — "
+                f"{escape(prov['detail'])}. Treat it as untracked and commit it:")
+    return (f"[error]minted OUTSIDE the tracked hscc repo[/error] — "
+            f"{escape(prov['detail'])}. The next re-sync of this deployed plugin dir "
+            "from the repo restores the tracked specs and deletes this file, while "
+            "the profile built from it survives (exactly how `marketing` lost its "
+            "spec, t_f2630ca3). Copy it into `hscc-roles/roles/` in the tracked hscc "
+            "checkout and commit it there — that is the follow-up card the fleet ops "
+            "block asks for; without it this role is temporary.")
 
 
 def cmd_list():
@@ -217,7 +259,59 @@ def cmd_list():
     for r in rows:
         tb.add_row(escape(r["role"]), "yes" if r["profile_exists"] else "no")
     make_console().print(tb)
-    return 0
+    return _report_spec_coverage()
+
+
+def _report_spec_coverage():
+    """Print the spec-coverage census; 1 when a live worker profile has no spec.
+
+    The table above is spec-driven, so the fault this reports is invisible in it:
+    a profile under ``PROFILES_DIR`` whose spec is gone. The pytest guard
+    ``test_every_hscc_owned_worker_profile_has_role_spec`` catches that inside the
+    repo; on a deployed host nothing did, and the guard also cannot see a spec that
+    is present but untracked. Both come from
+    :func:`role_soul_check.spec_coverage` (orphan) and ``git ls-files``
+    (provenance) — one census, ``ls roles/``, no second spec location.
+
+    Exit codes are deliberately split: an orphan is the guard's own condition, so
+    it fails the command; an untracked spec is a WARNING, because the fleet's ops
+    block mints specs on purpose ahead of the commit card — failing there would
+    make the documented workflow look broken and get routed around.
+    """
+    census = role_soul_check.spec_coverage()
+    if census["vacuous"]:
+        # Vacuous, not healthy: the reason and the zero are both printed.
+        make_console().print(panel(
+            "spec coverage",
+            f"[dim]VACUOUS — {escape(census['detail'])} — nothing audited, so this "
+            "is NOT an all-clear.[/dim]"))
+        return 0
+    lines = []
+    for name in census["orphans"]:
+        lines.append(f"[error]orphan[/error] {escape(name)}: worker-signature "
+                     f"profile with no roles/{escape(name)}.yaml — `generate` skips "
+                     "it, so nothing can repair its SOUL. Author the spec "
+                     f"(`hscc.py create {escape(name)} \"…\"`), or remove the "
+                     "profile if the role was retired.")
+    if not census["git_known"]:
+        lines.append(
+            f"[warn]provenance unknown[/warn] {escape(rolelib.ROLES_DIR)} is not the "
+            "tracked hscc repo's own `hscc-roles/roles`, so NO spec here is "
+            "protected by git — minted specs are dropped by the next plugin "
+            "re-sync. Run `list` from the repo checkout to check provenance.")
+    for name in census["untracked"]:
+        lines.append(f"[warn]untracked[/warn] roles/{escape(name)}.yaml is on disk "
+                     "but absent from `git ls-files` — the next re-sync deletes it "
+                     "and orphans the profile built from it (the `marketing` loss). "
+                     "Commit it.")
+    if not lines:
+        top, _rel = rolelib.roles_repo()
+        lines.append(f"[ok]coverage ok[/ok] {census['worker_scanned']} "
+                     f"worker-signature profile(s) all have a spec, and every spec "
+                     f"in roles/ is tracked by git"
+                     + (f" ({escape(top)})" if top else ""))
+    make_console().print(panel("spec coverage", "\n".join(lines)))
+    return 1 if census["orphans"] else 0
 
 
 def cmd_validate():

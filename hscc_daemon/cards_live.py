@@ -5,7 +5,13 @@ is each of them doing right now". Every running card on every board gets a
 bordered panel that follows its worker's transcript. The grid re-flows on every
 refresh: a card that starts gets a panel, a card that stops keeps its panel for
 ``LINGER_S`` with its outcome (done / blocked / ...) and then drops out. Cards
-waiting for a slot are listed along the bottom.
+waiting for a slot are listed along the bottom, and below them the local merge
+queue: one compact line per project with a queue that has something in it —
+what is in-flight and in what stage, how many are queued/waiting, the last
+outcome — plus the wait-listed PRs, whose stored error is what an operator has
+to act on (``--short`` keeps the one line per project). Read-only there too:
+the ledger is parsed through the same read ``GET /v1/merge-queue`` serves,
+never ticked, and ``gh`` is never called.
 
 Transcript source (``SessionTail`` is the primary, ``LogTail`` the fallback):
 under Hermes v0.23 the dispatcher spawns ``hermes_cli.kanban_worker_client``, a
@@ -46,6 +52,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import datetime
 import json
 import math
 import os
@@ -71,6 +78,24 @@ LINGER_S = 10                # a finished card's panel stays this long
 INITIAL_TAIL_BYTES = 64 * 1024
 MAX_LINES = 600              # kept per card; the panel shows the tail that fits
 READY_ROWS = 3               # waiting-card lines at the bottom (+N more)
+#: Waiting-PR rows the merge-queue block lists per project before the
+#: ``+N more`` marker. These are the rows that carry an error, so three is
+#: enough to see what is stuck without eating the card grid.
+MQ_WAITING_ROWS = 3
+#: The stages the daemon stamps on its in-flight claim (the live subset of
+#: ``merge_queue.MERGE_QUEUE_STATES``). Anything else a row carries is a queued
+#: entry or a terminal outcome, never "what the queue is doing right now".
+#: ``claimed`` is listed because the daemon's own stage vocabulary may reach the
+#: ledger before a real one does; an unknown stage is simply not in-flight.
+MQ_FLIGHT_STAGES = ("claimed", "rebasing", "gating", "merging", "ci-pending")
+#: Cap on the one-line error a waiting row prints. The ledger already caps the
+#: stored text (merge_queue's own retry-error cap); this only keeps the foot
+#: line short enough that the crop never hides the PR number.
+MQ_ERROR_CHARS = 60
+#: Hard cap on the block's lines. ``render`` sizes the card grid as
+#: ``height - 1 - len(foot)``, so an unbounded queue block could push the grid
+#: to its floor; past this many lines the rest collapses into one ``+N more``.
+MQ_MAX_LINES = 8
 TOOL_PREFIX = "┊"            # the marker this view prints every tool call with
 REASON_PREFIX = "░"          # the marker this view prints a row's thinking with
 #: Per-row cap on the SHORT-mode reasoning preview; all mode shows the thought
@@ -686,6 +711,19 @@ class Monitor:
         for t in self.tails.values():
             t.poll()
 
+    def refresh_merge_queue(self, now: float | None = None):
+        """Attach the merge-queue block's data (:func:`merge_queue_view`, read-only).
+
+        Called by the loops (:func:`run_live`, :func:`snapshot`) on the card-list
+        cadence rather than from :meth:`refresh`: ``refresh`` is the collector
+        seam every layout test stubs, and folding a second ambient read into it
+        would make ~50 offline tests read the operator's queue ledger and
+        evaluate the project registry. Here it is one explicit, stubbable call —
+        the same shape ``kanban_live.run_live`` uses for its own queue attach.
+        """
+        self.data["merge_queue"] = merge_queue_view(
+            self.board, self.clock() if now is None else now)
+
     def panels(self) -> list[tuple]:
         return [k for k in self.order if k in self.cards]
 
@@ -805,10 +843,15 @@ def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: f
     cap = d.get("caps", (None, None))[0]
     running = len(d.get("running", []))
     slots = f"{running}/{cap}" if cap else str(running)
+    mq = mq_token(mon)
     t = Text()
     t.append("hscc cards", style="title")
-    t.append(f"  slots {slots} · waiting {len(d.get('ready', []))} · "
-             f"{time.strftime('%H:%M:%S', time.localtime(now))}", style="text")
+    # `mq` names the PR the local merge queue is working right now: a card's
+    # work is not done until its PR lands, and the queue is otherwise only
+    # visible through `hscc merge-queue status` (absent when there is no queue).
+    t.append(f"  slots {slots} · waiting {len(d.get('ready', []))}"
+             + (f" · mq {mq}" if mq else "")
+             + f" · {time.strftime('%H:%M:%S', time.localtime(now))}", style="text")
     flags = ["tools" if tools_only else "full"] \
         + (["short"] if short else []) \
         + (["PAUSED"] if paused else []) \
@@ -831,6 +874,165 @@ def ready_lines(mon: Monitor, width: int) -> list[Text]:
     return out
 
 
+# ── merge queue ────────────────────────────────────────────────────────────
+#
+# A card's work is not finished when its worker completes: it is finished when
+# the PR lands. `hscc kanban monitor` already carries the queue as a table
+# (kanban_live.render); this is the compact form for the card view — one line
+# per project that has a queue, plus the wait-listed PRs that are sitting on an
+# error. Read-only by construction: the one shared read model, no tick, no gh.
+
+def merge_queue_view(board=None, now=None) -> dict:
+    """The local merge queue's rows, read-only, or ``{}`` when unreadable.
+
+    THE sanctioned read: :func:`hscc_daemon.kanban_live.attach_merge_queue` →
+    :func:`hscc_daemon.merge_queue.view` (which is itself a single
+    ``merge_queue.load_state()`` plus the registry), the same call
+    ``hscc kanban monitor`` and ``GET /v1/merge-queue`` make — so this view can
+    never disagree with those about a PR's position or state. Nothing here
+    ticks the queue, writes the ledger or shells out to ``gh``; a missing,
+    unreadable or corrupt state file is an empty queue, not a crash, and this
+    returns ``{}`` on ANY failure because a monitor must never die over the
+    thing it is reporting on.
+    """
+    try:
+        return kanban_live.attach_merge_queue({}, board=board, now=now)["merge_queue"]
+    except Exception:  # noqa: BLE001 — see above: report nothing, never fail
+        return {}
+
+
+def _iso_age_s(value, now) -> int | None:
+    """Seconds since an ISO stamp (naive stamps are UTC, as the ledger writes
+    them), or None when there is nothing to age.
+
+    Only the queue's ``last`` record needs this: the rows arrive with their
+    ``age_s`` already computed by the read model.
+    """
+    if not value:
+        return None
+    try:
+        stamp = datetime.datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return max(0, int(now - stamp.timestamp()))
+
+
+def _queue_projects(data) -> list[tuple]:
+    """``[(name, project, in_flight_row)]`` for the projects worth a line.
+
+    A project shows when the queue is ENABLED for it and there is SOMETHING IN
+    IT — a queued entry, a wait-listed entry or a live claim. A stale ``last``
+    alone is not "in it": a PR that merged yesterday must not hold a block open
+    forever. ``enabled`` comes from the read model, so an unregistered or
+    registry-invisible project is treated as off — the same posture
+    ``hscc merge-queue status`` prints (``disabled``), rather than this view
+    inventing its own eligibility rule.
+    """
+    mq = data.get("merge_queue") or {}
+    out = []
+    for name, proj in (mq.get("projects") or {}).items():
+        if not isinstance(proj, dict) or not proj.get("enabled"):
+            continue
+        rows = [r for r in (proj.get("rows") or []) if isinstance(r, dict)]
+        flight = next((r for r in rows
+                       if r.get("state") in MQ_FLIGHT_STAGES), None)
+        if flight is None and not (proj.get("queue_len") or proj.get("waiting_len")):
+            continue
+        out.append((name, proj, flight))
+    return out
+
+
+def _pr(value) -> str:
+    """A PR number as this view prints it: ``#747``, or ``-`` when unknown."""
+    return "-" if value is None else f"#{value}"
+
+
+def merge_queue_lines(mon: Monitor, short: bool = False,
+                      now: float | None = None) -> list[Text]:
+    """The compact merge-queue block, laid out under the waiting-card rows.
+
+    One line 1 per project::
+
+        queue hscc: in-flight #747 gating 8m · queued 2 · waiting 1 · last #741 merged 12m
+
+    plus up to ``MQ_WAITING_ROWS`` wait-listed rows — the ones an operator has
+    to act on — carrying the first line of the entry's ``last_error`` in the
+    warning colour. ``short`` (``--short``/``a``) keeps line 1 only.
+
+    Two cells are as precise as the shared read model allows, both noted rather
+    than worked around: the in-flight age is the row's ``age_s`` (since
+    ``enqueued_at`` — the model does not expose the claim's ``ci_since``, so a
+    CI-parked claim reads as time-in-queue, not time-since-push), and a
+    wait-listed row prints its row state because the model does not carry an
+    entry's own ``stage``. Exposing both would be an additive field on
+    ``merge_queue._row``; this view does not reach into the ledger for them.
+    """
+    now = mon.clock() if now is None else now
+    lines: list[Text] = []
+    for name, proj, flight in _queue_projects(mon.data):
+        t = Text(no_wrap=True, overflow="crop")
+        t.append(f"queue {name}", style=MUTED)
+        if proj.get("paused"):
+            t.append(" (paused)", style="warn")
+        t.append(": in-flight ", style=MUTED)
+        if flight is None:
+            t.append("-", style=MUTED)
+        else:
+            t.append(_pr(flight.get("pr")) + " ", style=MUTED)
+            # The stage is the one live thing on the line: the same warn the
+            # kanban monitor's queue table gives a rebasing/gating/merging row.
+            t.append(f"{flight.get('state')} "
+                     f"{kanban_live.fmt_age(flight.get('age_s'))}", style="warn")
+        t.append(f" · queued {int(proj.get('queue_len') or 0)}"
+                 f" · waiting {int(proj.get('waiting_len') or 0)}", style=MUTED)
+        last = proj.get("last")
+        if isinstance(last, dict):
+            t.append(f" · last {_pr(last.get('pr'))} {last.get('result') or '-'}"
+                     f" {kanban_live.fmt_age(_iso_age_s(last.get('at'), now))}",
+                     style=MUTED)
+        lines.append(t)
+        if short:
+            continue
+        waiting = [r for r in (proj.get("rows") or [])
+                   if isinstance(r, dict) and r.get("state") == "waiting"
+                   and not r.get("is_last")]
+        for r in waiting[:MQ_WAITING_ROWS]:
+            err = str(r.get("detail") or "").strip().splitlines()
+            err = err[0][:MQ_ERROR_CHARS].rstrip() if err else ""
+            row = Text(no_wrap=True, overflow="crop")
+            # A wait-listed PR sitting on an error is the thing the operator
+            # must see: warn, the same style the paused flag and a lingering
+            # "reclaimed" panel use. Without an error it is just waiting.
+            style = "warn" if err else MUTED
+            row.append(f"   {_pr(r.get('pr'))}"
+                       f" {r.get('stage') or r.get('state')}"
+                       + (f" {err}" if err else ""), style=style)
+            lines.append(row)
+        if len(waiting) > MQ_WAITING_ROWS:
+            lines.append(Text(f"   +{len(waiting) - MQ_WAITING_ROWS} more waiting",
+                              style=MUTED))
+    if len(lines) > MQ_MAX_LINES:
+        hidden = len(lines) - MQ_MAX_LINES
+        lines = lines[:MQ_MAX_LINES] + [Text(f"   +{hidden} more queue lines",
+                                             style=MUTED)]
+    return lines
+
+
+def mq_token(mon: Monitor) -> str | None:
+    """The status line's ``mq`` cell: the PR the queue is working, ``-`` when
+    the queue has projects but nothing in flight, None when there is no queue
+    to report (empty, disabled, or no ledger) — nothing printed."""
+    projects = _queue_projects(mon.data)
+    if not projects:
+        return None
+    for _name, _proj, flight in projects:
+        if flight is not None and flight.get("pr") is not None:
+            return f"#{flight['pr']}"
+    return "-"
+
+
 def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = False,
            tools_only: bool = False, paused: bool = False, now: float | None = None,
            cols: int | None = None, short: bool = False) -> Layout:
@@ -842,7 +1044,7 @@ def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = F
     top = status_line(mon, tools_only, paused, zoom, now, cols, short)
     errors = mon.data.get("errors", [])
     blind = not mon.data.get("boards") and bool(errors)
-    foot = ready_lines(mon, width)
+    foot = ready_lines(mon, width) + merge_queue_lines(mon, short, now)
     if errors and not blind:
         foot += [Text(e, style="error") for e in errors][:2]
     grid_h = max(height - 1 - len(foot), 3)
@@ -964,6 +1166,7 @@ def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None
                 now = time.time()
                 if now >= next_refresh:
                     mon.refresh()
+                    mon.refresh_merge_queue(now)
                     next_refresh = now + interval
                 if not view.paused:
                     mon.poll_logs()
@@ -986,6 +1189,7 @@ def snapshot(console, board: str | None = None, tools_only: bool = False,
              kanban_db=None, short: bool = False) -> int:
     mon = Monitor(board=board, kanban_db=kanban_db)
     mon.refresh()
+    mon.refresh_merge_queue()
     mon.poll_logs()
     height = max(console.height, 12 * max(len(mon.panels()), 1))
     height = min(height, 200)
@@ -1004,8 +1208,11 @@ One panel per running kanban card, streaming its worker's transcript — each
 row's thinking (dim italic, one logical line, whole text by default) above its
 reply text, and one ┊ line per tool call; the grid re-flows as cards start and
 finish (a finished card lingers ~10 s with its outcome). Waiting cards are
-listed at the bottom. Each panel header shows board · card · worker │ run ·
-heartbeat · tokens (as space allows).
+listed at the bottom, and under them the local merge queue — per project with
+a queue: `queue <project>: in-flight #<pr> <stage> <age> · queued N · waiting M
+· last #<pr> <result> <age>`, then up to 3 wait-listed PRs with the first line
+of the error they are sitting on (warn). Each panel header shows board · card ·
+worker │ run · heartbeat · tokens (as space allows).
 
   --live          full-screen, refreshing until q / Ctrl-C
   --interval <s>  card-list refresh period for --live (default 3; logs stream

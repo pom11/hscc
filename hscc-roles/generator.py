@@ -726,6 +726,18 @@ _PROJECT_ORCH_OPS = (
     "orchestrator holds that channel, so ask it to pass the nudge on. Never "
     "comment on DONE cards. Work itself always goes on a CARD on the right "
     "board (`--board` explicit); a nudge is not the work order.\n"
+    "12. **Verify a PR before you card against it — a card about a PR is stale "
+    "in minutes.** Before creating a card whose verb is `close`, `merge`, "
+    "`rebase` or `port` against a PR number, run `gh pr view <N> --repo "
+    "<owner>/<repo> --json state,closedAt,mergedAt,mergeable,headRefOid` and "
+    "`git ls-remote origin refs/heads/<head-branch>` (an empty result means the "
+    "branch is already gone), and paste that raw verdict into the card body "
+    "with the time you read it. If the read shows the work already happened, "
+    "**do not create the card** — say so instead. Cards naming a PR's next "
+    "step are historical by claim time on a repo where the operator merges "
+    "continuously, and the worker burns its whole run rediscovering that. "
+    "State verdicts and the check that proves them, never a SHA of `main`: "
+    "SHAs go stale, a method does not.\n"
     "\n"
 ) + _ANTI_CHURN_RULES
 

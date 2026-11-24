@@ -19,8 +19,13 @@ default `general`) can change the cluster.
 
 ```
 hscc.py generate            # build all profiles from specs → ~/.hermes/profiles/
-hscc.py create <name> "…"   # author a new role on demand
-hscc.py list                # roles + whether a profile exists
+hscc.py create <name> "…"   # author a new role on demand — and print the git
+                            # add/commit that keeps it: a spec minted from the
+                            # installed copy below is untracked until committed,
+                            # and an untracked spec is dropped by the next re-sync
+                            # while the profile it minted survives
+hscc.py list                # roles + whether a profile exists, then spec
+                            # coverage (exit 1 if a live worker profile has none)
 ```
 
 (`hscc.py` is `hscc-roles/hscc.py`, installed as

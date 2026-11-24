@@ -248,7 +248,14 @@ with open(MARKS, "a") as fh:
     fh.flush()
     os.fsync(fh.fileno())
 
-if os.environ.get("HSCC_TEST_MODE") == "stop":
+MODE = os.environ.get("HSCC_TEST_MODE")
+if MODE in ("stop", "stop_on_file"):
+    if MODE == "stop_on_file":
+        # t_b952885e: the harness gates the stop, so a case can SIGKILL the
+        # watchdog FIRST and only then run the ordinary cooperative stop path.
+        sentinel = os.path.join(SANDBOX, "stop.requested")
+        while not os.path.exists(sentinel):
+            time.sleep(0.02)
     gateway_bridge.shutdown()
     with open(MARKS, "a") as fh:
         fh.write("@@SHUTDOWN_DONE@@\\n")
@@ -551,7 +558,11 @@ def sidecar(request, tmp_path):
       ``no_watchdog``      the parent disables the seam — the ``origin/main``
                            shape, used to show the orphan reproduces;
       ``stop``             the parent calls the real ``shutdown()`` itself, so
-                           the test asserts the cooperative door from outside.
+                           the test asserts the cooperative door from outside;
+      ``stop_on_file``     like ``stop``, but the stop is gated on a
+                           ``stop.requested`` sentinel, so the harness can break
+                           the watchdog first and then run the ordinary stop
+                           path (t_b952885e).
     """
     mode = getattr(request, "param", "serve")
     sandbox = tmp_path / "sandbox"
@@ -581,7 +592,7 @@ def sidecar(request, tmp_path):
         "FAKE_SERVE_PATH": str(serve_py),
         "FAKE_SERVE_REPORT": str(sandbox / "serve_report.json"),
         "FIXTURE_TOKEN": FIXTURE_TOKEN,
-        "HSCC_TEST_MODE": "stop" if mode == "stop" else "serve",
+        "HSCC_TEST_MODE": mode if mode in ("stop", "stop_on_file") else "serve",
         "PYTHONDONTWRITEBYTECODE": "1",
     })
     if mode == "no_watchdog":
@@ -754,6 +765,117 @@ def test_sidecar_dying_on_its_own_leaves_no_watchdog_behind(sidecar):
     assert elapsed <= _SIDECAR_GONE_BOUND_S, (
         f"watchdog {supervised_pid} is still watching a serve that died "
         f"{elapsed:.2f}s ago")
+
+
+# --------------------------------------------------------------------------- #
+# the supervisor nobody supervises (t_b952885e) — measured, pinned, residual
+# --------------------------------------------------------------------------- #
+
+def _kill_watchdog(sidecar) -> None:
+    """SIGKILL the watchdog (identity-checked), then prove it is actually gone.
+
+    Measured here and in the t_b952885e measurement runs: a real SIGKILLed
+    watchdog is gone in 0.0024 - 0.0032 s. The bound is the file's, not a new
+    number — nothing in the residual argument depends on how fast the watcher
+    dies, only that it does.
+    """
+    wd_pid = sidecar.supervised_pid
+    assert _signal(wd_pid, signal.SIGKILL, sidecar.watchdog_marker), (
+        f"watchdog {wd_pid} was not ours to signal — it is gone or someone "
+        f"else holds the number")
+    elapsed = _wait_until_gone(wd_pid, _SIDECAR_GONE_BOUND_S,
+                               sidecar.watchdog_marker)
+    assert elapsed <= _SIDECAR_GONE_BOUND_S, (
+        f"watchdog {wd_pid} did not die within {_SIDECAR_GONE_BOUND_S}s of "
+        f"its SIGKILL")
+
+
+RESIDUAL = (
+    "documented residual, decided on measurement (t_b952885e, see "
+    "changelog.d/t_b952885e.md): nothing supervises the watchdog, and on "
+    "macOS the LAST watcher is uncloseable — no PR_SET_PDEATHSIG, so every "
+    "sidecar-side chain just moves the hole one level down, and an API-side "
+    "re-attach must signal the serve's pid without a child handle, i.e. "
+    "identity-blind pid signalling, the trap that already reddened this "
+    "harness twice. The orphan behaves exactly like the sidecar the API "
+    "wants while the API lives (same token, same port, keeps serving), and "
+    "start_serve's port-occupancy heal kills it before the next supervised "
+    "serve starts.")
+
+
+@pytest.mark.xfail(strict=True, reason=RESIDUAL)
+def test_sigkill_of_the_watchdog_does_not_orphan_the_sidecar(sidecar):
+    """THE acceptance case of t_b952885e: SIGKILL the WATCHDOG -> serve gone
+    within the bound. It does not hold today, so the case lands as a strict
+    xfail: red at base un-marked, green-as-failure in the leg, and XPASS-red —
+    not silently green — the day a fix ships and this doc must move with it.
+
+    Measured 10/10 trials (5 x 2 runs, real chain, real SIGKILL of the real
+    watchdog): serve alive at the 4.0 s bound, alive at 6.0 s, port still
+    held. The hole is real; the decision is that closing it is more moving
+    parts than the risk, with the risk spelled out below and in the changelog.
+    """
+    _kill_watchdog(sidecar)
+    elapsed = sidecar.wait_sidecar_gone(_SIDECAR_GONE_BOUND_S)
+    assert elapsed <= _SIDECAR_GONE_BOUND_S, (
+        f"serve pid {sidecar.serve_pid} was still alive {elapsed:.2f}s after "
+        f"its watchdog was SIGKILLed — the orphan/403 shape, one level up")
+    assert _port_free(sidecar.port), f"port {sidecar.port} still answering"
+
+
+def test_watchdog_sigkill_orphan_is_the_documented_residual(sidecar):
+    """The mirror of the acceptance case above: the shape as it stands TODAY.
+
+    A change detector, and it should be read as one: these three cases (this
+    pin, the stop pin below, the strict xfail above) assert the same sentence
+    from three sides, and a real fix reddens all of them at once. That is the
+    mechanism that forces the risk statement to be re-decided with the code,
+    rather than quietly inherited by it.
+
+    Nothing here depends on the orphan being fast; it depends on it being
+    INDEFINITE — measured: alive at the bound in 10/10 trials and holding the
+    port (``hscc api stop`` with a dead watchdog: 3/3, below).
+    """
+    _kill_watchdog(sidecar)
+    elapsed = sidecar.wait_sidecar_gone(_SIDECAR_GONE_BOUND_S)
+    assert elapsed >= _SIDECAR_GONE_BOUND_S, (
+        f"the orphan died after {elapsed:.2f}s — the residual stated on the "
+        f"xfail above and in changelog.d/t_b952885e.md is no longer true")
+    assert _alive(sidecar.serve_pid, sidecar.serve_marker)
+    assert not _port_free(sidecar.port), (
+        "the orphan should still hold the port and keep serving — it is "
+        "exactly the sidecar the live API wants, which is why this residual "
+        "is invisible while the API is up")
+
+
+@pytest.mark.parametrize("sidecar", ["stop_on_file"], indirect=True)
+def test_clean_stop_with_a_dead_watchdog_still_leaves_the_orphan(sidecar):
+    """The residual's sharpest edge: ``hscc api stop`` after the watchdog has
+    already died does NOT sweep the orphan.
+
+    ``shutdown()`` talks to the watchdog (``_stop_supervised``); a watchdog
+    that is already dead is polled and reaped without anything being signalled
+    (CPython's pid-reuse guard in ``Popen.terminate``, and it is wanted here),
+    so the cooperative stop returns in 0.07 - 0.16 s (measured 3/3) and the
+    serve is alive right after it and 2 s later, holding the port.
+
+    The boundary that DOES sweep it is the next start: ``start_serve``'s
+    port-occupancy heal (the iOS-chat-e2e 2026-10-13 machinery) reads the
+    stale token, vets the listener's cmdline and kills it before spawning a
+    supervised fresh one. The residual is therefore "an orphan that survives a
+    stop but never survives a start cycle" — and this case pins that sentence
+    end to end. If the stop path ever grows a dead-watchdog sweep on purpose,
+    this pin reddens with the other two and the changelog moves with it.
+    """
+    _kill_watchdog(sidecar)
+    (sidecar.sandbox / "stop.requested").write_text("go")
+    assert sidecar.wait_for(SHUTDOWN_DONE, bridge._SHUTDOWN_WAIT_S + 10.0), (
+        f"shutdown() never returned; marks={sidecar.marks()!r}")
+    assert _alive(sidecar.serve_pid, sidecar.serve_marker), (
+        "the clean stop swept the orphan — if that is deliberate now, update "
+        "the xfail above and changelog.d/t_b952885e.md")
+    assert not _port_free(sidecar.port), (
+        f"port {sidecar.port} freed by a stop that never signalled the serve")
 
 
 # --------------------------------------------------------------------------- #
