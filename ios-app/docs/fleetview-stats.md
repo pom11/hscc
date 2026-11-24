@@ -3,7 +3,7 @@
 Status: IN PROGRESS
 Assignee: ios-engineer
 Branch: feat/fleetstats-t_b07ec05f
-Repo: ios-app @ /Users/desac/.hermes/kanban/boards/hscc/workspaces/t_b07ec05f/hscc
+Repo: ios-app @ ~/.hermes/kanban/boards/hscc/workspaces/t_b07ec05f/hscc
 
 ## Goal (decision option-a from t_5e1c74b0)
 Render two previously-dropped fields in `ios-app/Sources/HSCC/Views/FleetView.swift`

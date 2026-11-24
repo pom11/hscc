@@ -46,7 +46,7 @@ marker is stripped, so the kanban write gate (`_assert_not_delegated_child_mutat
 does not reject the temp-board writes a dispatcher supervisor legitimately makes.
 Uses a real temp board, never the live DB. Green under BOTH interpreters:
 - `~/.hermes/hermes-agent/venv/bin/python -m pytest hscc-cluster/tests/test_protocol_violation_bound.py -q` → 1 passed
-- `/Users/desac/miniconda3/envs/p313/bin/python -m pytest hscc-cluster/tests/test_protocol_violation_bound.py -q` → 1 skipped
+- `~/miniconda3/envs/p313/bin/python -m pytest hscc-cluster/tests/test_protocol_violation_bound.py -q` → 1 skipped
   (hermes_cli not installed under p313; `importorskip` yields green)
 
 > Note on the delegated-child guard: the FIRST revision of this test (in-process,

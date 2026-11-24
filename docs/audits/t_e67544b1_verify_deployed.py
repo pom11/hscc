@@ -11,7 +11,7 @@ import subprocess
 import sys
 from contextlib import redirect_stdout
 
-PLUGIN = "/Users/desac/.hermes/plugins/hscc-cluster"
+PLUGIN = "~/.hermes/plugins/hscc-cluster"
 ok = True
 
 def check(label, cond, detail=""):

@@ -55,7 +55,7 @@ recorded rather than summarised):
 
 * thin — the only skip line across all five files is unrelated to this seam:
   `test_hermes_cli_import_isolation.py:420: sys.prefix '/private/tmp/hscc-ci-venv'
-  is not inside the agent tree '/Users/desac/.hermes/hermes-agent' — no nested-venv
+  is not inside the agent tree '~/.hermes/hermes-agent' — no nested-venv
   overlap to check here`
 * `p313` — the not-importable reason, from the owner module
   (`real_hermes.py:86`): `real hermes_cli.kanban_db is not importable in this
@@ -82,7 +82,7 @@ weakness reproduces:
 1. **Sibling-by-name, after the loader returned the real lib** (thin):
    `hermes_state_wal` → `ModuleNotFoundError: No module named 'hermes_state_wal'`;
    `hermes_state` → `ModuleNotFoundError: No module named 'hermes_state'`;
-   `agent.delegation_context` → **OK** (`/Users/desac/.hermes/hermes-agent/agent/
+   `agent.delegation_context` → **OK** (`~/.hermes/hermes-agent/agent/
    delegation_context.py`). `sys.path` shows no agent-tree entry before or after the
    load, so the window is closed on purpose, as `test_hermes_cli_import_isolation.py`
    pins. `agent.*` resolves because the loader's own import already left `agent`,
@@ -184,7 +184,7 @@ thin interpreter is a *test* posture, and in it no test walks to the door.
    a circular import)`. It turned a green run into a skip. An audit hook replaces it
    and cannot do this.
 3. **`HERMES_DELEGATED_CHILD_CONTEXT` masks the seam.** This worker's shell exports
-   `HERMES_DELEGATED_CHILD_CONTEXT=/Users/desac/.hermes`, and
+   `HERMES_DELEGATED_CHILD_CONTEXT=~/.hermes`, and
    `kanban_path_is_fenced` (`agent/delegation_context.py:144-165`) returns True for
    any path under that root — which includes every pytest board root (`TMPDIR` here
    is inside `~/.hermes`) and every live board. `connect()` then takes the
@@ -197,7 +197,7 @@ thin interpreter is a *test* posture, and in it no test walks to the door.
    seam must state which fencing posture it measured in.**
 
 Transparency: the first (fenced) control run resolved `kanban_db_path()` to the
-operator's live board `/Users/desac/.hermes/kanban/boards/hscc/kanban.db` — because
+operator's live board `~/.hermes/kanban/boards/hscc/kanban.db` — because
 the fencing marker pinned it — and opened it read-only for one `select 1`. Fencing
 makes that branch read-only by construction (`mode=ro`, and it raises rather than
 initialising), and the run created nothing under the tmp board root it was given.
@@ -216,7 +216,7 @@ and do not widen the window (the card's constraints, both still correct).
 ## 8. Repro
 
 ```bash
-WT=/Users/desac/dev/hscc/.worktrees/t_ace3c8d5
+WT=~/dev/hscc/.worktrees/t_ace3c8d5
 S=~/.hermes/profiles/coder/cache/scratch/t_ace3c8d5      # probes + both tracers + control
 # sweep, one process per file, runner's (unfenced) posture
 for f in test_orch_waker test_autodown test_hermes_cli_import_isolation \

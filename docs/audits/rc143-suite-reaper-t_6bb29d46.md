@@ -26,7 +26,7 @@ Primary evidence (read-only queries against profile state DBs + harness logs):
    *"Two runs are in flight; I need to fold in a design cleanup first (it changes
    conftest for every test). Killing and restarting after the edit."* — tool_calls on
    the same row carry the command, verbatim:
-   `pkill -f "run_tests.sh" 2>/dev/null; pkill -f "pytest -q /Users/desac/.hermes/kanban/boards/hscc/workspaces/t_163fa09f" 2>/dev/null; sleep 2; pgrep -fl "run_tests.sh" | head -3; echo "stopped"`
+   `pkill -f "run_tests.sh" 2>/dev/null; pkill -f "pytest -q ~/.hermes/kanban/boards/hscc/workspaces/t_163fa09f" 2>/dev/null; sleep 2; pgrep -fl "run_tests.sh" | head -3; echo "stopped"`
 2. Its tool result (msg **58990**, 03:38:57.393) shows the post-kill `pgrep`: the two
    `/bin/zsh -lic ... for i in 1 2; ... timeout 2400 bash scripts/run_tests.sh ...`
    wrappers **alive** and the inner `timeout 2400 bash scripts/run_tests.sh` listed —

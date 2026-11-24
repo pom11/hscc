@@ -63,7 +63,7 @@ confirms the panel/table bodies stay on whole lines in a pipe.
 
 - Suite under the Hermes venv: `1241 passed, 30 failed` on main →
   `1256 passed, 30 failed` on this branch (+15 new, SAME 30 failures).
-- Suite under `/Users/desac/miniconda3/envs/p313/bin/python`: `1241 passed,
+- Suite under `~/miniconda3/envs/p313/bin/python`: `1241 passed,
   30 failed` on main → `1256 passed, 30 failed` on this branch (+15 new).
 - The 30 failures are the PRE-EXISTING `tests/test_standup.py` set (Hermes
   `kanban_db_connect` sqlite3.OperationalError — a Hermes-version/env issue),
@@ -75,7 +75,7 @@ confirms the panel/table bodies stay on whole lines in a pipe.
 ## Commands that produced each number
 
 - `python -m pytest -q` (hermes venv) → `30 failed, 1256 passed` on branch.
-- `/Users/desac/miniconda3/envs/p313/bin/python -m pytest -q` → `30 failed, 1256 passed`.
+- `~/miniconda3/envs/p313/bin/python -m pytest -q` → `30 failed, 1256 passed`.
 - main checkouts: `git worktree add -f /tmp/hscc_main_check main` then same
   pytest → `30 failed, 1241 passed` under both interpreters.
 - `diff /tmp/main_failures.txt /tmp/branch_failures*.txt` → empty (same 30).

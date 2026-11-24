@@ -93,7 +93,7 @@ Pass under both required interpreters:
 
 ```
 ~/.hermes/hermes-agent/venv/bin/python -m pytest -q memori_byodb/tests   -> 5 passed
-/Users/desac/miniconda3/envs/p313/bin/python -m pytest -q memori_byodb/tests -> 5 passed
+~/miniconda3/envs/p313/bin/python -m pytest -q memori_byodb/tests -> 5 passed
 ```
 
 ## Merge / deploy

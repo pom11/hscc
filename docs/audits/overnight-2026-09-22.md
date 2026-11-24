@@ -7,7 +7,7 @@ merged INTO dev, dev pushed, and the canonical 8-package suite ALL GREEN AFTER
 the merge — measured by the orchestrator, not taken on the worker's word.
 
 Canonical test command (used for every measured number below):
-  HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh
+  HSCC_TEST_PY=~/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh
 Every suite log is a real file: /tmp/run_tests_dev.log,
 /tmp/run_tests_overnight_dev.log, /tmp/run_tests_card2_mrg.log,
 /tmp/run_tests_card3_mrg.log — all EXIT=0.
@@ -187,7 +187,7 @@ under the Hermes venv, command: PYTHONPATH=hscc-project
   test_digest.py +174, test_chat_seed.py).
 
   INDEPENDENT FULL SUITE on dev@c425267 (command:
-  HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python
+  HSCC_TEST_PY=~/miniconda3/envs/p313/bin/python
   bash scripts/run_tests.sh -> SUITE EXIT=0): bootstrap 248, commands 59,
   roles 100, cluster 384 (14 skip), project 1249 (+2 new digest tests; was
   1247), daemon 1121, sparkrun 8, api 787. ALL 8 GREEN.

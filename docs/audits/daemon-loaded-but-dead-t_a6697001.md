@@ -13,7 +13,7 @@ Assignee: devops-engineer
 launchd-supervised process is not running.
 
 The plist `~/Library/LaunchAgents/com.hermes.hscc_daemon.plist` runs
-`/Users/desac/.hermes/hermes-agent/venv/bin/python .../hscc_daemon/hscc.py
+`~/.hermes/hermes-agent/venv/bin/python .../hscc_daemon/hscc.py
 start-daemon`. That path's own log is `~/.hscc/daemon.log` (NOT the plist's
 StandardOutPath `~/Library/Logs/hscc_daemon.log`, which launchd never creates
 because the daemon writes to its own log file while a PID file exists — see
@@ -52,7 +52,7 @@ daemon was torn down in the middle of outage churn and nobody restarted it.
 The daemon loop is CURRENTLY running, but NOT under launchd. Evidence:
 - `~/.hscc/daemon.pid` → `11690`
 - `ps -p 11690` →
-  `/Users/desac/miniconda3/envs/p313/bin/python3.13 .../hscc start`
+  `~/miniconda3/envs/p313/bin/python3.13 .../hscc start`
 - `~/.hscc/daemon.log` is actively appended (last entry ~2026-09-09T03:48 UTC,
   all check streams firing: Gateway/DGX/Workers/Dispatcher-wedge etc.)
 - `3823283: Daemon loop started` at 18:57:27 with NO preceding
@@ -83,7 +83,7 @@ Sequence (all against the live runtime — this IS the task's job, and it is not
 `hscc doctor`/bootstrap, so ~/.hermes/config.yaml was never touched):
 
 1. Retired the untracked duplicate:
-   `/Users/desac/miniconda3/envs/p313/bin/hscc stop` →
+   `~/miniconda3/envs/p313/bin/hscc stop` →
    `Stopping hscc_daemon (PID 11690)... hscc_daemon stopped (PID 11690)`.
    Verified: `ps -p 11690` → gone; `~/.hscc/daemon.pid` removed;
    `daemon.log:3867744 [03:57:31] Received signal 15, stopping... Daemon loop stopped`.

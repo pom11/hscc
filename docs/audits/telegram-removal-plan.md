@@ -1,6 +1,6 @@
 # Telegram Removal Plan — hscc_daemon, hscc-bootstrap, scripts, hscc-cluster, hscc-api
 
-Scope: worktree `/Users/desac/dev/hscc/.worktrees/t_07fd5b86`. Telegram is being removed
+Scope: worktree `~/dev/hscc/.worktrees/t_07fd5b86`. Telegram is being removed
 entirely. This plan catalogues every case-insensitive `telegram` reference in the five
 packages and prescribes the exact action for each.
 

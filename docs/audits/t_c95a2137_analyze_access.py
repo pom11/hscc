@@ -12,7 +12,7 @@ import re
 import sys
 import collections
 
-DEFAULT_LOG = "/Users/desac/fleet-check/proxy-stall-2026-10-31/litellm.log"
+DEFAULT_LOG = "~/fleet-check/proxy-stall-2026-10-31/litellm.log"
 LOG = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_LOG
 
 LINE = re.compile(
