@@ -2635,13 +2635,15 @@ def test_non_green_head_moves_to_the_wait_list_so_the_fifo_proceeds(tmp_path):
     assert second["processed"][0]["result"] == "merged", second
     assert gh.merged == [8]
 
-    # The wait-listed PR is retried once the active FIFO is empty (still
-    # pending, so it goes back to the wait list rather than blocking again).
+    # The wait-listed PR is NOT retried by the claim step. With the FIFO empty
+    # nothing is claimed at all: `_drain_waiting` probed #7 on this same tick,
+    # found its checks still pending, and left it in the wait list. Claiming it
+    # anyway is exactly the #710 churn — `process_entry` would call it not green
+    # and bounce it back, once per tick, forever.
     third = mq.tick(state_path=_state(tmp_path),
                     root=str(tmp_path / "queue"), registry_path=registry,
                     gh_runner=gh, git_runner=subprocess.run)
-    assert third["processed"][0]["pr"] == 7, third
-    assert third["processed"][0]["result"] == "waiting", third
+    assert third["processed"] == [], third
     ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
     assert ps["queue"] == [] and [e["pr"] for e in ps["waiting"]] == [7]
 
