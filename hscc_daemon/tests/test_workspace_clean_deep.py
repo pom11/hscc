@@ -504,6 +504,15 @@ class TestMissingAndHangingTools:
         assert any("homebrew" in e for e in result["errors"]), result["errors"]
         assert [e["name"] for e in result["cache"]
                 if e["status"] == "timed-out"] == [wc.BREW_NAME], result["cache"]
+        # The claim the case is NAMED for, stated as a fact about the plan rather
+        # than as a race: nothing may be left unattempted. `uv`/`npm` are planned
+        # BEFORE the hang, so `ran` alone cannot see an abort — an engine that
+        # `break`s out of the loop on the first failing command kept this case
+        # green (measured: mutation "stop the pass after an error status" ->
+        # 1 passed), because everything it checked had already run. Whatever sits
+        # after the hang in the plan must still have been reached.
+        left = [e["name"] for e in result["cache"] if e["status"] == "planned"]
+        assert left == [], f"the pass stopped on the hang, never attempted: {left}"
         ran = {e["name"] for e in result["cache"] if e["status"] == "ran"}
         assert {wc.UV_NAME, wc.NPM_NAME} <= ran, "the pass stopped on the hang"
 
