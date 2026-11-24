@@ -66,9 +66,12 @@ never subtracted from a parent card's numbers.
 * Gate module `9 passed` at `cfcd7a1c` and at `7f0152cd`. `scripts/readme_lint.py` →
   **findings: 0** (files: 23, docs-index 227/227) at `7f0152cd`.
   `scripts/changelog_fragments.py check` rc **0** at the commit that adds this fragment.
-* Full `hscc-api` leg at this branch's tip (hermes venv, `pytest -q tests`): running at
-  `7f0152cd`; its rc and counts are recorded by the next commit on this branch and repeated
-  in the PR body.
+* Full `hscc-api` leg at the tip of this branch (`e4faacb9`'s tree, hermes venv, Python 3.14.10,
+  `pytest -q tests` from `hscc-api/`): **1461 passed, 1 skipped, 1 xfailed in 476.35s**, rc **0**
+  — zero failures. The SIGINT version-pin test
+  (`tests/test_api_server_stop_signal.py::test_the_event_shape_is_the_hazard[2]`) that failed in
+  an earlier card's full-leg run did not reproduce here; it is reported as measured, not waved
+  away.
 * Hermetic: nolive throughout — the probe runs in a child interpreter whose `HOME`,
   `HSCC_DIR`, `HSCC_HOME` and `HERMES_HOME` are a `tempfile.mkdtemp` sandbox set before
   `api_server` imports, with every `subprocess` entry point and every `socket.connect`
