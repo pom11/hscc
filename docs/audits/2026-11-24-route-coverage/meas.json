@@ -1,0 +1,299 @@
+{
+ "base": "f77e42b5ccaf77ebefc6f6aa2cbc60f99da668b4",
+ "routes_http": 97,
+ "routes_ws": 1,
+ "modules": 24,
+ "swift_call_sites": 50,
+ "doc_path_cells": 22,
+ "doc_identities": 22,
+ "undocumented_count": 75,
+ "ios_facing_undocumented": 29,
+ "ios_gap": [
+  {
+   "method": "GET",
+   "pattern": "^/v1/activity/feed$",
+   "handler": "routes_activity.handle_activity_feed",
+   "module": "routes_activity",
+   "ios_calls": [
+    "/v1/activity/feed"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/autodown/status$",
+   "handler": "routes_autodown.handle_autodown_status",
+   "module": "routes_autodown",
+   "ios_calls": [
+    "/v1/autodown/status"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/commands$",
+   "handler": "routes_commands.handle_commands",
+   "module": "routes_commands",
+   "ios_calls": [
+    "/v1/commands"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/cron/list$",
+   "handler": "routes_cron.handle_cron_list",
+   "module": "routes_cron",
+   "ios_calls": [
+    "/v1/cron/list"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/daemon/history$",
+   "handler": "routes_history.handle_history",
+   "module": "routes_history",
+   "ios_calls": [
+    "/v1/daemon/history"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/daemon/status$",
+   "handler": "routes_ops.handle_daemon_status",
+   "module": "routes_ops",
+   "ios_calls": [
+    "/v1/daemon/status"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/escalate$",
+   "handler": "routes_ops.handle_escalate",
+   "module": "routes_ops",
+   "ios_calls": [
+    "/v1/escalate"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/kanban/blocked$",
+   "handler": "routes_kanban.handle_kanban_blocked",
+   "module": "routes_kanban",
+   "ios_calls": [
+    "/v1/kanban/blocked"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/kanban/stale$",
+   "handler": "routes_kanban.handle_kanban_stale",
+   "module": "routes_kanban",
+   "ios_calls": [
+    "/v1/kanban/stale"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/logs$",
+   "handler": "routes_logs.handle_logs",
+   "module": "routes_logs",
+   "ios_calls": [
+    "/v1/logs"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/orchestrator/chat/(?P<id>[^/]+)$",
+   "handler": "routes_orchestrator.handle_orchestrator_chat_job",
+   "module": "routes_orchestrator",
+   "ios_calls": [
+    "/v1/orchestrator/chat/{param}"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/profile/editor/(?P<profile>[^/]+)$",
+   "handler": "routes_profile_editor.handle_profile_editor_get",
+   "module": "routes_profile_editor",
+   "ios_calls": [
+    "/v1/profile/editor/{param}"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/profiles$",
+   "handler": "routes_ops.handle_profiles",
+   "module": "routes_ops",
+   "ios_calls": [
+    "/v1/profiles"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/profiles/list$",
+   "handler": "routes_profiles.handle_list",
+   "module": "routes_profiles",
+   "ios_calls": [
+    "/v1/profiles/list"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/projects$",
+   "handler": "routes_project.handle_projects",
+   "module": "routes_project",
+   "ios_calls": [
+    "/v1/projects"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/projects/(?P<name>[^/]+)$",
+   "handler": "routes_project.handle_project_detail",
+   "module": "routes_project",
+   "ios_calls": [
+    "/v1/projects/{param}"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/sessions$",
+   "handler": "routes_sessions.handle_sessions_list",
+   "module": "routes_sessions",
+   "ios_calls": [
+    "/v1/sessions"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/template/list$",
+   "handler": "routes_template.handle_template_list",
+   "module": "routes_template",
+   "ios_calls": [
+    "/v1/template/list"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/template/status$",
+   "handler": "routes_template.handle_template_status",
+   "module": "routes_template",
+   "ios_calls": [
+    "/v1/template/status"
+   ]
+  },
+  {
+   "method": "GET",
+   "pattern": "^/v1/triggers$",
+   "handler": "routes_ops.handle_triggers",
+   "module": "routes_ops",
+   "ios_calls": [
+    "/v1/triggers"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/cluster/down$",
+   "handler": "routes_ops.handle_cluster_down",
+   "module": "routes_ops",
+   "ios_calls": [
+    "/v1/cluster/down"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/cluster/up$",
+   "handler": "routes_ops.handle_cluster_up",
+   "module": "routes_ops",
+   "ios_calls": [
+    "/v1/cluster/up"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/escalate$",
+   "handler": "routes_ops.handle_escalate_run",
+   "module": "routes_ops",
+   "ios_calls": [
+    "/v1/escalate"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/kanban/blocked/(?P<card_id>[^/]+)/recover$",
+   "handler": "routes_kanban.handle_kanban_recover",
+   "module": "routes_kanban",
+   "ios_calls": [
+    "/v1/kanban/blocked/{param}/recover"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/orchestrator/chat$",
+   "handler": "routes_orchestrator.handle_orchestrator_chat",
+   "module": "routes_orchestrator",
+   "ios_calls": [
+    "/v1/orchestrator/chat"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/profile/editor/(?P<profile>[^/]+)$",
+   "handler": "routes_profile_editor.handle_profile_editor_put",
+   "module": "routes_profile_editor",
+   "ios_calls": [
+    "/v1/profile/editor/{param}"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/sessions/(?P<session_id>[^/]+)/compact$",
+   "handler": "routes_sessions.handle_sessions_compact",
+   "module": "routes_sessions",
+   "ios_calls": [
+    "/v1/sessions/{param}/compact"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/sessions/(?P<session_id>[^/]+)/retire$",
+   "handler": "routes_sessions.handle_sessions_retire",
+   "module": "routes_sessions",
+   "ios_calls": [
+    "/v1/sessions/{param}/retire"
+   ]
+  },
+  {
+   "method": "POST",
+   "pattern": "^/v1/triggers/run$",
+   "handler": "routes_ops.handle_triggers_run",
+   "module": "routes_ops",
+   "ios_calls": [
+    "/v1/triggers/run"
+   ]
+  }
+ ],
+ "gap_by_module": {
+  "routes_activity": 1,
+  "routes_alerts": 3,
+  "routes_autodown": 5,
+  "routes_cluster": 3,
+  "routes_commands": 1,
+  "routes_cron": 1,
+  "routes_history": 1,
+  "routes_ops": 9,
+  "routes_kanban": 5,
+  "routes_logs": 1,
+  "routes_memory": 3,
+  "routes_merge_queue": 1,
+  "routes_mobile": 1,
+  "routes_orchestrator": 3,
+  "routes_profile_editor": 2,
+  "routes_profile": 4,
+  "routes_profiles": 7,
+  "routes_project": 10,
+  "routes_session": 2,
+  "routes_bootstrap": 2,
+  "routes_sessions": 3,
+  "routes_template": 3,
+  "routes_actions": 4
+ }
+}
