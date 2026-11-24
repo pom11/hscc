@@ -32,7 +32,7 @@ Evidence sources (paths as captured by the operator):
 - `~/.hscc/daemon.log` — the daemon SOT log (UTC), covering 2026-10-26 to
   2026-10-31T18:02Z.
 - `hscc` repo @ `origin/main` `928e1aa3` for the daemon repair path.
-- `/Users/desac/sparkrun/src/sparkrun` (operator fork, **read-only here**) for
+- `~/sparkrun/src/sparkrun` (operator fork, **read-only here**) for
   the gateway/status/discovery paths.
 
 ---
@@ -235,7 +235,7 @@ i.e. restart only when the proxy **answered** with a parseable **empty**
 catalogue. In windows A/B/C the probe **timed out** → `probe["ok"] is False`
 → `restart = False` → plain start → sparkrun refuses, because
 `is_running()` is state-file PID + `os.kill(pid, 0)`
-(`/Users/desac/sparkrun/src/sparkrun/proxy/_supervisor.py:570-575`) and the
+(`~/sparkrun/src/sparkrun/proxy/_supervisor.py:570-575`) and the
 uvx wrapper 91693 is alive. The daemon even prints the refusal —
 `daemon.log` line 162133 (continuation of the 02:06:55Z ERROR):
 
@@ -287,7 +287,7 @@ followed 5 min later by `Command timed out after 90s` (23:34:12Z, 23:44:59Z)
 `subprocess.run(..., timeout=…)` (`hscc_daemon/util.py:39-60`), which on
 timeout kills **only its direct child**. `sparkrun proxy start` is the
 `--foreground`-less path that first prints `Discovering inference endpoints…`
-(`/Users/desac/sparkrun/src/sparkrun/cli/_proxy.py:127`) and then runs a
+(`~/sparkrun/src/sparkrun/cli/_proxy.py:127`) and then runs a
 **4-host parallel SSH discovery sweep** (`proxy/autodiscover.py:192-198`,
 2.9-3.5 s in the logs) — so the 90 s cap covers a network sweep whose child
 processes survive the kill. **UNPROVEN** whether the timed-out sweep or a
@@ -322,7 +322,7 @@ code:
 
 - Structured path: `health.py:132-148` `_SPARKRUN_STATUS_SCRIPT` →
   `api.status(hosts, ssh_kwargs=…)` →
-  `/Users/desac/sparkrun/src/sparkrun/api/_status.py:22-70` →
+  `~/sparkrun/src/sparkrun/api/_status.py:22-70` →
   `query_status_for_cluster` — an **SSH sweep of the DGX nodes** (docker +
   local executors). `grep -n "4000|proxy" api/_status.py` → **no match**. No
   :4000 traffic. `run_cmd(..., timeout=25)` (`health.py:221`).
@@ -350,7 +350,7 @@ has no support and is withdrawn. **UNPROVEN which of (1)/(2) it was** — needs
 one capture of `sparkrun status --json` wall time plus the daemon's own CPU
 during an episode. Note the fallback WARN `structured sparkrun status
 unavailable — falling back to \`sparkrun status\` text-parse
-(venv_py='/Users/desac/sparkrun/.venv-sparkrun-041/bin/python')` appears ~35×
+(venv_py='~/sparkrun/.venv-sparkrun-041/bin/python')` appears ~35×
 in the episodes and the venv **resolved fine** (`health.py:151-164`), so the
 `[Errno 2]`-class failure of t_b543e530 is **not** what happened here: the
 interpreter was found and the SSH sweep is what failed.
@@ -893,7 +893,7 @@ same silence infects the other two inputs of the repair:
   (`health.py:1107-1108`).
 
 Two sparkrun facts make the two silent shapes decidable (paths in the
-read-only reference checkout `/Users/desac/sparkrun`):
+read-only reference checkout `~/sparkrun`):
 
 - `is_running()` — what makes `proxy start` print `already running (PID N)` —
   is state-file PID + `process_exists(pid)` (**correction to §2(b) b1: that is
