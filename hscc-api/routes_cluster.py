@@ -1446,8 +1446,11 @@ def _history_pick_fold(mh, tier, bucket_s, max_bytes, render):
         if i == len(factors) - 1:
             # The ladder is exhausted and the body is still over budget. Serve
             # the coarsest answer the fold can make and say so, rather than
-            # dropping rows to hit a number.
-            return factor, payload, False
+            # dropping rows to hit a number. Re-render to say it: `payload` here
+            # was rendered with the loop's optimistic verdict, so returning it
+            # with a False alongside it would put "the budget was met" on the
+            # wire in the one case where it demonstrably was not.
+            return factor, render(factor, False), False
     return 1, render(1), False
 
 
