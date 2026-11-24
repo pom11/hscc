@@ -455,14 +455,55 @@ class TestMissingAndHangingTools:
 
     def test_a_timing_out_tool_lands_in_errors_and_the_pass_continues(
             self, lib, cache_sandbox, monkeypatch):
+        """One command outliving its cap is killed; the pass runs on.
+
+        The compressed cap goes to THE HANG ONLY, injected at ``_run`` — the seam
+        the engine itself names for this ("patch this, not ``subprocess.run``").
+        It is deliberately NOT compressed by shrinking :data:`CACHE_TIMEOUT` for
+        the whole pass. That constant is the production 300 s because a
+        ``brew cleanup`` can wedge on a tap fetch, and shrinking it globally put
+        every OTHER command in the same pass on a 200 ms wall-clock race it was
+        never meant to enter: measured at ``f2f8bc2d`` under three concurrent
+        ``hscc_daemon`` legs (load avg 11-16), 1 of 14 samples went red with
+        ``uv cache`` missing from ``ran`` while ``npm cache``, ``conda pkgs`` and
+        ``simulators`` were in it. The pass HAD continued; the case failed anyway,
+        because it was asserting a budget in a behaviour assertion's clothes.
+        """
         cache_sandbox.plant("brew", sleep=5)
-        monkeypatch.setattr(wc, "CACHE_TIMEOUT", 0.2)
+        hang_cap = 1                           # the hang's cap only; see below
+        production_cap = wc.CACHE_TIMEOUT      # whatever ships today; the case
+        monkeypatch.setattr(wc, "CACHE_TIMEOUT", hang_cap)   # must not depend on
+        real_run = wc._run                     # the number, only on its being
+        caps = []                              # kept for everything else
+
+        def capped_run(argv, timeout):
+            """Compress the cap for the planted hang; hand the rest back."""
+            tool = os.path.basename(str(argv[0])) if argv else ""
+            if tool not in SHIMMED:
+                return real_run(argv, timeout)  # not a cache command (git, tar)
+            applied = hang_cap if tool == "brew" else production_cap
+            caps.append((tool, timeout, applied))
+            return real_run(argv, applied)
+
+        monkeypatch.setattr(wc, "_run", capped_run)
         seed_caches(cache_sandbox)
         plan = plan_for(lib, cache_sandbox)
         result = wc.execute(plan, apply=True, kanban_db=lib)
+        # Teeth for the injection, so this cannot quietly become a no-op: the
+        # hang is the one command that ran under the compressed cap, every cache
+        # command was ASKED for the patched constant (a default argument would
+        # have frozen it at def time and proved nothing), and the rest of the
+        # pass ran under the cap production actually uses.
+        assert [c for c in caps if c[0] == "brew"] == \
+            [("brew", hang_cap, hang_cap)], caps
+        assert {asked for _, asked, _ in caps} == {hang_cap}, caps
+        assert sum(1 for _, _, applied in caps
+                   if applied == production_cap) >= 2, caps
         brew = [e for e in result["cache"] if e["name"] == wc.BREW_NAME][0]
         assert brew["status"] == "timed-out", brew
         assert any("homebrew" in e for e in result["errors"]), result["errors"]
+        assert [e["name"] for e in result["cache"]
+                if e["status"] == "timed-out"] == [wc.BREW_NAME], result["cache"]
         ran = {e["name"] for e in result["cache"] if e["status"] == "ran"}
         assert {wc.UV_NAME, wc.NPM_NAME} <= ran, "the pass stopped on the hang"
 
