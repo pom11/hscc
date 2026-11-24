@@ -3077,6 +3077,200 @@ def test_daemon_entry_point_logs_merge_queue_outcomes(tmp_path, monkeypatch):
     assert "merge-queue test: PR #1 -> merged" in log_path.read_text()
 
 
+# ── t_8c461597: a declined claim must say why ──────────────────────────────
+#
+# Measured 2026-11-23: PR #716 sat unclaimed ~65 min with the queue enabled,
+# unpaused and nothing in flight, and the daemon log carried no line that
+# explained it.  These tests pin the three silences that made that possible and
+# the one state hazard (`remove` while the entry's gate is still running) that
+# made the ledger read inconsistently while it happened.
+
+def _logger():
+    """A ``log=`` sink in the shape tick() calls it: ``log(msg, level)``."""
+    lines = []
+
+    def log(msg, *args, **kwargs):
+        level = args[0] if args else kwargs.get("level", "INFO")
+        lines.append(f"[{level}] {msg}")
+
+    return lines, log
+
+
+def test_tick_names_the_pr_it_declined_when_the_registry_row_is_gone(tmp_path):
+    """A queued FIFO the tick will not touch must name the PR and the reason."""
+    pair = _repo_pair(tmp_path)
+    # alpha exists only in the ledger: the registry no longer has a row for it,
+    # so `tick()` skips its whole repo group. Before t_8c461597 that skip was
+    # silent — ~60 ticks, zero lines, PR #7 still sitting there.
+    registry = _registry(tmp_path, pair["repo"], name="gamma", gates=["true"])
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    lines, log = _logger()
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=_no_runner, git_runner=_no_runner,
+                     auto_source=lambda *a, **k: [], log=log)
+
+    assert result["processed"] == [], result
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [7] and ps["in_flight"] is None
+    reasons = [ln for ln in lines if "not claimed" in ln]
+    assert any("PR #7" in ln for ln in reasons), lines
+    assert any("config" in ln.lower() or "registry" in ln.lower()
+               for ln in reasons), reasons
+
+
+def test_tick_names_the_pr_waiting_behind_a_ci_pending_claim(tmp_path,
+                                                             monkeypatch):
+    """One claim per repo: the FIFO behind it must be told what holds the repo."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry_multi(tmp_path, [("alpha", pair["repo"]),
+                                          ("beta", pair["repo"])])
+    second = _new_branch(pair["repo"], "wt/t_second")
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    gh = FakeGh({19: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]},
+                 20: {"headRefName": "wt/t_second", "headRefOid": second}},
+                views={19: [{}, pending, pending, pending, pending]})
+    monkeypatch.setattr(mq, "_run_gate",
+                        lambda command, worktree, timeout_s: ("pass", ""))
+
+    lines, log = _logger()
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run,
+                    auto_source=lambda *a, **k: [], log=log)
+    assert first["processed"], (first, lines)
+    assert first["processed"][0]["result"] == "ci-pending", first
+    assert (mq.load_state(_state(tmp_path))["projects"]["alpha"]
+            ["in_flight"]["stage"] == "ci-pending")
+
+    mq.add_to_queue("beta", 20, path=_state(tmp_path))
+    second_tick = mq.tick(state_path=_state(tmp_path),
+                          root=str(tmp_path / "queue"), registry_path=registry,
+                          gh_runner=gh, git_runner=subprocess.run,
+                          auto_source=lambda *a, **k: [], log=log)
+
+    assert [e["pr"] for e in second_tick["projects"]["beta"]["queue"]] == [20]
+    reasons = [ln for ln in lines if "not claimed" in ln]
+    assert any("PR #20" in ln for ln in reasons), lines
+    assert any("19" in ln for ln in reasons), reasons
+
+
+def test_a_raced_pause_is_reported_against_the_pr_it_left_queued(tmp_path,
+                                                                monkeypatch):
+    """A pause that lands mid-tick must not decline the head entry silently."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+
+    def pause_during_discovery(project, cfg, **kwargs):
+        mq.set_paused("alpha", True, path=_state(tmp_path))
+        return []
+
+    monkeypatch.setattr(mq, "_drain_waiting", pause_during_discovery)
+    lines, log = _logger()
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=_no_runner, git_runner=_no_runner,
+                     auto_source=lambda *a, **k: [], log=log)
+
+    assert result["processed"] == [], result
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [7] and ps["in_flight"] is None
+    reasons = [ln for ln in lines if "not claimed" in ln]
+    assert any("PR #7" in ln and "paus" in ln.lower() for ln in reasons), lines
+
+
+def test_gate_leg_announces_itself_before_it_holds_the_queue(tmp_path,
+                                                             monkeypatch):
+    """The hour a gate runs is the hour no other PR can be claimed.
+
+    The measured 65-minute silence was one 3600 s gate leg holding the single
+    merge_queue thread; the log's first line about it was the timeout at the
+    END.  The leg must name itself (PR, command, budget) before it starts.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"], timeout_s=120)
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    lines, log = _logger()
+    at_gate_start = []
+
+    def gate(command, worktree, timeout_s):
+        at_gate_start.append(list(lines))
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     auto_source=lambda *a, **k: [], log=log)
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert at_gate_start, "the gate never ran"
+    assert any("gate start" in ln and "PR #7" in ln for ln in at_gate_start[0]), \
+        at_gate_start[0]
+    start = [ln for ln in at_gate_start[0] if "gate start" in ln][0]
+    assert "120" in start, start
+
+
+def test_a_tick_that_dies_before_claiming_is_logged(tmp_path, monkeypatch):
+    """check_merge_queue() must not swallow a tick into the state stamp only."""
+    _isolated_hscc_root(tmp_path, monkeypatch)
+
+    def explode(**kwargs):
+        raise RuntimeError("registry exploded")
+
+    monkeypatch.setattr(mq, "tick", explode)
+    result = mq.check_merge_queue()
+
+    assert result["ok"] is False, result
+    text = (tmp_path / "hscc-home" / "daemon.log").read_text()
+    assert "RuntimeError" in text and "registry exploded" in text, text
+    assert "[ERROR]" in text, text
+
+
+def test_remove_during_a_gate_leaves_no_verdict_for_a_pr_that_is_gone(
+        tmp_path, monkeypatch):
+    """FIFO and `last` may not disagree about a claim the operator removed.
+
+    The measured trigger: `hscc merge-queue remove hscc 696` while #696 was
+    in flight with a gate running. `remove_from_queue` cleared the claim (that
+    is why the stalled queue read `in_flight: null`), the gate then settled
+    afterwards and stamped `-> red-gate` for a PR no list held any more.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, card="t_removed", path=_state(tmp_path))
+
+    def gate(command, worktree, timeout_s):
+        mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
+        return "fail", "FAILED hscc_daemon/tests/test_x.py::test_y - boom"
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    lines, log = _logger()
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     auto_source=lambda *a, **k: [], log=log)
+
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert result["processed"][0]["pr"] == 7, result
+    assert ps["queue"] == [] and ps["waiting"] == [] and ps["in_flight"] is None
+    # The verdict belongs to a run the operator cancelled: it must not be
+    # recorded against a PR the FIFO no longer holds.
+    assert not (ps["last"] and ps["last"].get("pr") == 7
+                and ps["last"].get("result") == "red-gate"), ps["last"]
+    assert any("PR #7" in ln and "dropped" in ln and "removed" in ln
+               for ln in lines), lines
 # ── production-shaped runners (t_499b6919) ────────────────────────────────
 
 def _parked_ci_claim(tmp_path, pr, pair, *, waiting=False):
