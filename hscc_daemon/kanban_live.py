@@ -146,18 +146,111 @@ _HERMES_AGENT_PATH = "~/.hermes/hermes-agent"
 _CAPS_READ = {"reason": "", "warned": False}
 
 
+def _caps_warn_route(message):
+    """This module's ONE nameable caps WARN route — the only call :func:`silent_read` mutes.
+
+    An indirection rather than a bare ``log(...)`` at the call site for the same
+    reason ``board_pin._warn_route`` is one (PR #737, and ``autodown._kanban_warn``
+    before it, PR #723): the seam a borrowed read must not speak through has to be
+    nameable, so a door can borrow exactly this route and nothing else — every
+    other line this module logs stays on the file.
+
+    ``log`` is resolved through the MODULE GLOBAL at call time, not bound as a
+    default argument: ``tests/test_kanban_live_caps.py::warn_lines`` patches
+    ``kanban_live.log`` and every warn-once assertion in that suite runs through
+    this line.
+    """
+    log(message, "WARN")
+
+
+#: Messages a muted read already echoed in THIS process. Deliberately separate
+#: from ``_CAPS_READ["warned"]``: that is the once-per-process *file* alarm budget
+#: and a borrowed read may not spend it (see :func:`silent_read`), while a
+#: ``--live`` monitor re-enters a muted window every ``DEFAULT_INTERVAL`` seconds
+#: and must not reprint one line per tick into the operator's terminal.
+_MUTED_ECHOED: set = set()
+
+
+def _echo_muted_warn(message):
+    """The muted route: the operator's terminal, never the log file.
+
+    Deliberately NOT a silent stub (the shape ``board_pin._echo_muted_warn``
+    established, PR #737). "The caps config could not be read" has no payload
+    anywhere: ``collect()["caps"]`` is ``(None, None)`` whether the operator set
+    no cap or the config is unreadable — ``kanban_live.py:140-142`` says those are
+    different facts and the WARN is the only record of the second one. Silencing
+    the route as well as the file would turn a broken read into a monitor that
+    quietly claims "no caps configured". ``stderr`` is not the invariant; the file
+    is (t_88abe739).
+    """
+    if message in _MUTED_ECHOED:
+        return
+    _MUTED_ECHOED.add(message)
+    try:
+        import sys
+        print(f"[WARN] {message}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 — logging must never break the read
+        pass
+
+
+@contextlib.contextmanager
+def silent_read():
+    """Borrow this module's caps WARN route for one documented read, then give it back.
+
+    Inside the window :func:`_caps_warn_route` is :func:`_echo_muted_warn`, so the
+    once-per-process "fleet caps unreadable" WARN a read emits goes to stderr
+    instead of being appended to ``$HSCC_HOME/daemon.log`` — the door's read
+    creates no file. Used by the two documented read doors
+    (``kanban_cli._cmd_monitor``, ``cards_live.Monitor._default_collect``), never
+    inside :func:`collect` and never by a daemon loop: ``collect``'s third consumer
+    is the daemon's ``stream_silence`` check (``stream_silence.py:331``), which the
+    audit accepts as a foreground diagnostic and must keep writing the file
+    byte-for-byte.
+
+    Restoring the budget is the half that keeps this honest.
+    ``_note_caps_unreadable`` sets ``_CAPS_READ["warned"]`` *before* it emits, so a
+    caller that muted only the route would also silently spend the process's single
+    caps warning: a long-lived process that imported a read door would then never
+    tell its operator the caps are unreadable from a path that does own the file.
+    ``["reason"]`` comes back too, not just ``["warned"]`` — a read that consumed
+    the reason would make the next call report "the operator never set a cap"
+    (``kanban_live.py:140-142``: a blank reason is the *different* fact that the
+    config read fine). The read is allowed to be quiet; it is not allowed to spend
+    somebody else's alarm, nor to overwrite somebody else's finding.
+
+    Scoped to the ONE call and undone in ``finally``. It mutates module globals, so
+    a process with concurrent logging threads would see the window — the CLI doors
+    this guards are one-shot processes (``--live`` is one long read, and
+    ``_MUTED_ECHOED`` is what keeps that shape from spamming).
+    """
+    global _caps_warn_route
+    real_route = _caps_warn_route
+    saved_reason = _CAPS_READ["reason"]
+    saved_warned = _CAPS_READ["warned"]
+    _caps_warn_route = _echo_muted_warn
+    try:
+        yield
+    finally:
+        _caps_warn_route = real_route
+        _CAPS_READ["reason"] = saved_reason
+        _CAPS_READ["warned"] = saved_warned
+
+
 def _note_caps_unreadable(reason):
     """Record why the caps config could not be read and log it ONCE.
 
     Does not raise — the caller still returns ``(None, None)`` (no cap
     configured and cap unreadable render the same way, so the operator must be
     able to tell them apart from the log rather than from the value).
+
+    Emission goes through :func:`_caps_warn_route`, which a documented read door
+    may borrow (:func:`silent_read`) so the read itself creates no log file.
     """
     _CAPS_READ["reason"] = reason
     if not _CAPS_READ["warned"]:
         _CAPS_READ["warned"] = True
         try:
-            log(f"kanban monitor: fleet caps unreadable: {reason}", "WARN")
+            _caps_warn_route(f"kanban monitor: fleet caps unreadable: {reason}")
         except Exception:  # noqa: BLE001
             pass  # logging must never break the monitor
 
