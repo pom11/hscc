@@ -69,6 +69,11 @@ task: t_635ccba5
   reverted), so the row cannot quietly drift from the handler again.
 * `hscc-api` route-coverage gate + the bootstrap route module together:
   **29 passed** at `c03c456d` (gate 9, bootstrap module 20 — the module grew 15 → 20).
+* Full `hscc-api` leg (`pytest -q tests`, one process, hermes venv interpreter 3.14.10):
+  **1423 passed, 1 skipped, 1 xfailed in 464.03 s**, rc 0 — **zero failures**, so the SIGINT
+  version-pin case that failed once on the parent's run did not reproduce here. It ran
+  against the tree of `c03c456d` (the fragment wording that followed touches no code the
+  leg reads). 1418 → 1423 passed is exactly this card's 5 new plan cases.
 * `scripts/readme_lint.py` → `findings: 0` (hermes venv interpreter; the bare `python3`
   here has no `rich`). `scripts/changelog_fragments.py check` → rc 0.
 * Hermeticity: no fleet contact and no real `~/.hscc` anywhere in this card. The
