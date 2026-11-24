@@ -93,7 +93,8 @@ pause    reclaims every running card (its worker stops, the worktree stays) and
 resume   unblocks EXACTLY the cards pause blocked (each goes to ready or back to
          todo per its parents); cards blocked before the pause stay blocked.
 paused   lists paused boards and what they hold.
-enforce  blocks cards that became ready/running on a paused board since.
+enforce  blocks cards that became ready/running on a paused board since
+         the pause.
 State: ~/.hscc/state/kanban_paused.json.
 """
 

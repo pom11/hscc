@@ -417,8 +417,22 @@ def _get_help_text():
                 "HSCC HTTP API server: start stop status (external apps)"),
         *_entry("autodown <cmd>",
                 "Idle autodown/autoup: status enable disable wake cancel"),
+        # F3's defect class on the THIRD surface (t_00502a32): this entry named
+        # `blocked` and `stale` — 2 of the 7 verbs `hscc kanban` dispatches —
+        # and hid the four that stop workers (pause/resume/paused/enforce) from
+        # the one help surface an operator reads before typing anything. The
+        # verb list here is NOT a literal: the dispatcher's own unknown-verb
+        # inventory is the authority, and
+        # hscc_daemon/tests/test_kanban_help_honesty.py::TestPrimaryBannerHonesty
+        # demands this line name every dispatched verb and nothing the
+        # dispatcher refuses (its colon-tail is the inventory position, so a
+        # gloss goes before the colon or in parentheses, never as a bare word).
+        # A new kanban verb is named here in the same change that dispatches
+        # it. What each verb DOES stays out of the banner — `hscc help kanban`,
+        # `hscc kanban --help` and the site copy carry that.
         *_entry("kanban <cmd>",
-                "Board hygiene: blocked (show/recover), stale (list/archive)"),
+                "Board hygiene: blocked stale monitor pause resume paused "
+                "enforce"),
         # merge-queue (MQ1) is dispatched and in COMMAND_HELP; the primary
         # surface must list it like every other live top-level command
         # (F5 surface-honesty rule, t_88d896f3).
@@ -610,6 +624,12 @@ COMMAND_HELP = {
     # surfaces by hscc_daemon/tests/test_kanban_help_honesty.py, which is what
     # keeps the two surfaces from drifting again. A new kanban verb must be
     # advertised in this entry in the same change that dispatches it.
+    #
+    # The last sentence used to stop at "…on a paused board since" — the same
+    # truncation kanban_cli._PAUSE_HELP ships, inherited by this entry when F3
+    # widened it (t_46d03105's review folded the fix here, t_00502a32): both
+    # surfaces now say "since the pause." Keep them worded alike; the honesty
+    # gate compares what they ADVERTISE, not their prose.
     "kanban": "Board hygiene for autodown.\n"
               "  blocked [--json]: list BLOCKED cards with why; blocked --recover\n"
               "    <id> [--reason <t>]: recover one blocked card to ready\n"
@@ -622,6 +642,7 @@ COMMAND_HELP = {
               "    restores exactly those)\n"
               "  paused: list paused boards and what they hold; enforce: block\n"
               "    cards that became ready or running on a paused board since\n"
+              "    the pause.\n"
               "  Try 'hscc kanban --help' for each verb's full flag list.\n"
               "  Usage: hscc kanban <subcommand> [args]",
     # merge-queue (MQ1): local FIFO of green PRs run by the daemon. Lines

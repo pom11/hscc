@@ -57,7 +57,7 @@ Cluster & templates
   api <cmd>            HSCC HTTP API server: start stop status (external apps)
   autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
   kanban <cmd>
-      Board hygiene: blocked (show/recover), stale (list/archive)
+      Board hygiene: blocked stale monitor pause resume paused enforce
   merge-queue <cmd>
       Local merge queue: status list add remove pause resume enable disable
   cards monitor [--live] One live panel per running card, streaming its worker
