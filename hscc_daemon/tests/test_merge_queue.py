@@ -6,8 +6,10 @@ injects the ``gh`` runner, so no test touches a real repository or network.
 """
 
 import contextlib
+import importlib.util
 import json
 import os
+import pathlib
 import sqlite3
 import subprocess
 import threading
@@ -1407,6 +1409,7 @@ def test_empty_rollup_is_green_only_when_no_required_checks():
 
 def test_default_hscc_gates_add_build_check_for_app_changes(tmp_path):
     cfg = {"name": "hscc"}
+    _write_leg_roster(tmp_path)
     calls = []
 
     def fake_git(argv, cwd=None, **kwargs):
@@ -1416,7 +1419,7 @@ def test_default_hscc_gates_add_build_check_for_app_changes(tmp_path):
 
     gates = mq._resolve_gates(cfg, str(tmp_path), fake_git)
     assert gates[0] == "python3 scripts/address_guard.py --tracked"
-    assert "bash scripts/run_tests.sh" in gates
+    assert gates[1] == 'HSCC_TEST_LEGS="scripts" bash scripts/run_tests.sh'
     assert "bash ios-app/scripts/build_check.sh" in gates
     assert "bash macos-app/scripts/build_check.sh" not in gates
 
@@ -1454,7 +1457,8 @@ def test_local_gate_runs_only_the_touched_leg(tmp_path):
                   "changelog.d/t_0763da12.md"))
 
     assert gates[0] == "python3 scripts/address_guard.py --tracked"
-    assert gates[1] == 'HSCC_TEST_LEGS="hscc_daemon" bash scripts/run_tests.sh'
+    assert gates[1] == ('HSCC_TEST_LEGS="hscc_daemon scripts" '
+                        'bash scripts/run_tests.sh')
     assert len(gates) == 2
 
 
@@ -1494,9 +1498,111 @@ def test_more_than_three_legs_falls_back_to_the_full_suite(tmp_path):
 def test_a_diff_outside_every_leg_falls_back_to_the_full_suite(tmp_path):
     _write_leg_roster(tmp_path)
     gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
-                              _diff_git("docs/readme.md"))
+                              _diff_git("tools/deploy.sh"))
 
     assert gates[1] == "bash scripts/run_tests.sh"
+
+
+def test_local_gate_narrows_a_docs_only_pr_to_the_scripts_leg(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git("docs/audits/2026-11-23-main-only-surface.md"))
+
+    assert gates[0] == "python3 scripts/address_guard.py --tracked"
+    assert gates[1] == 'HSCC_TEST_LEGS="scripts" bash scripts/run_tests.sh'
+    assert len(gates) == 2
+
+
+def test_local_gate_narrows_a_changelog_only_pr_to_the_scripts_leg(tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("changelog.d/t_8bffa4f7.md"))
+
+    assert gates[1] == 'HSCC_TEST_LEGS="scripts" bash scripts/run_tests.sh'
+    assert len(gates) == 2
+
+
+def test_local_gate_narrows_an_apple_only_pr_to_scripts_and_its_build_check(
+        tmp_path):
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("ios-app/widgets/x.json"))
+
+    assert gates[1] == 'HSCC_TEST_LEGS="scripts" bash scripts/run_tests.sh'
+    assert "bash ios-app/scripts/build_check.sh" in gates
+
+
+def test_local_gate_keeps_a_docs_path_under_a_leg_dir_in_that_leg(tmp_path):
+    """The prose prefixes are ROOT-anchored, exactly like leg_select's rules."""
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("hscc-api/docs/WIDGET_ROUTES.md"))
+
+    assert gates[1] == 'HSCC_TEST_LEGS="hscc-api" bash scripts/run_tests.sh'
+
+
+def test_local_gate_widens_prose_when_the_roster_has_no_scripts_leg(tmp_path):
+    """A roster without the leg that guards prose cannot be narrowed."""
+    _write_leg_roster(tmp_path, ("hscc_daemon", "hscc-api"))
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("docs/x.md"))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+# ── leg_select parity (t_3e4e44ea) ─────────────────────────────────────────
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def _leg_select():
+    """Load the CI selector by path (stdlib only, so no import machinery)."""
+    path = REPO_ROOT / ".github" / "scripts" / "leg_select.py"
+    spec = importlib.util.spec_from_file_location("leg_select_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("paths", [
+    ["docs/audits/2026-11-23-main-only-surface.md"],
+    ["changelog.d/t_8bffa4f7.md"],
+    ["ios-app/widgets/x.json"],
+    ["macos-app/App.swift"],
+    ["README.md", "CHANGELOG.md"],
+    ["hscc-api/x.py", "docs/x.md"],
+    ["hscc-api/docs/WIDGET_ROUTES.md"],
+    ["tools/deploy.sh"],
+    ["conftest.py"],
+])
+def test_local_selection_agrees_with_leg_select(paths):
+    """The daemon's narrowing mirrors .github/scripts/leg_select.py::_RULES.
+
+    Runs against the REAL roster so a drift on either side goes red. A CI
+    selection of the whole roster maps to the daemon's ``None``; above
+    MAX_LOCAL_TEST_LEGS the daemon widens where CI does not (pinned below).
+    """
+    roster = mq._test_leg_roster(str(REPO_ROOT))
+    assert roster, "scripts/run_tests.sh must declare a roster"
+
+    ci_legs, _ = _leg_select().select_legs(list(paths), roster)
+    local = mq._local_test_legs(list(paths), roster)
+    if len(ci_legs) > mq.MAX_LOCAL_TEST_LEGS:
+        assert local is None, (ci_legs, local)
+    else:
+        assert local == ci_legs
+
+
+def test_local_selection_widens_above_max_where_ci_does_not():
+    roster = mq._test_leg_roster(str(REPO_ROOT))
+    assert roster, "scripts/run_tests.sh must declare a roster"
+    paths = ["hscc-bootstrap/x.py", "hscc-commands/x.py",
+             "hscc-roles/x.py", "hscc-cluster/x.py"]
+
+    ci_legs, _ = _leg_select().select_legs(paths, roster)
+    assert len(ci_legs) > mq.MAX_LOCAL_TEST_LEGS, ci_legs
+    assert mq._local_test_legs(paths, roster) is None
 
 
 # ── read-only view (kanban monitor + GET /v1/merge-queue) ──────────────────
@@ -2969,3 +3075,130 @@ def test_daemon_entry_point_logs_merge_queue_outcomes(tmp_path, monkeypatch):
     mq._daemon_log("merge-queue test: PR #1 -> merged")
     log_path = tmp_path / "hscc-home" / "daemon.log"
     assert "merge-queue test: PR #1 -> merged" in log_path.read_text()
+
+
+# ── production-shaped runners (t_499b6919) ────────────────────────────────
+
+def _parked_ci_claim(tmp_path, pr, pair, *, waiting=False):
+    """A claim parked exactly as the daemon writes it after a push."""
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", pr, path=state)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    entry = ps["queue"].pop()
+    entry.update({
+        "branch": pair["branch"], "stage": "ci-pending",
+        "pushed_sha": pair["head"], "ci_base": "main",
+        "ci_since": mq._now_iso(),
+    })
+    if waiting:
+        ps["waiting"].append(entry)
+    else:
+        ps["in_flight"] = entry
+    mq.save_state(doc, state)
+    return state, entry
+
+
+def test_resume_ci_pending_defaults_the_production_runners(tmp_path,
+                                                          monkeypatch):
+    """The daemon calls `_resume_ci_pending` with no runners; it must default."""
+    pair = _repo_pair(tmp_path)
+    state, entry = _parked_ci_claim(tmp_path, 23, pair)
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(
+            returncode=0, stdout='{"mergeCommit": {"oid": "squash-23"}}',
+            stderr="")
+
+    monkeypatch.setattr(mq, "_default_runner", runner)
+    monkeypatch.setattr(mq, "pr_view_settled", lambda repo, pr, runner=None: {
+        "state": "OPEN", "headRefName": pair["branch"],
+        "headRefOid": pair["head"], "mergeable": "MERGEABLE",
+        "isDraft": False,
+        "statusCheckRollup": [{"__typename": "CheckRun",
+                               "status": "COMPLETED",
+                               "conclusion": "SUCCESS"}],
+    })
+    cfg = {"repo": str(pair["repo"]), "enabled_declared": True,
+           "enabled": True}
+
+    result = mq._resume_ci_pending("alpha", cfg, entry, state_path=state)
+
+    assert result["result"] == "merged", result
+    assert ["gh", "pr", "merge", "23", "--squash", "--delete-branch",
+            "--match-head-commit", pair["head"]] in calls, calls
+
+
+def test_parked_ci_pending_entry_is_drained_and_merged(tmp_path):
+    """A `waiting` entry with stale ci-pending fields is not stranded."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {24: {"headRefName": pair["branch"], "headRefOid": pair["head"]}})
+    state, _ = _parked_ci_claim(tmp_path, 24, pair, waiting=True)
+    doc = mq.load_state(state)
+    entry = mq._project_state(doc, "alpha")["waiting"][0]
+    entry.update({"attempts": 1,
+                  "last_error": "'NoneType' object is not callable"})
+    mq.save_state(doc, state)
+
+    result = mq.tick(state_path=state,
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert [row["pr"] for row in result["processed"]] == [24], result
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [24]
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["waiting"] == [] and ps["queue"] == []
+
+
+def test_a_raising_resume_keeps_its_traceback_in_last_error(tmp_path,
+                                                            monkeypatch):
+    """A crash on the ci-pending path must leave a traceback, not just str()."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    state, _ = _parked_ci_claim(tmp_path, 25, pair)
+    gh = FakeGh({25: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    logged = []
+
+    def boom(project, cfg, entry, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(mq, "_resume_ci_pending", boom)
+    result = mq.tick(
+        state_path=state, root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        log=lambda msg, level="INFO", **kwargs: logged.append((msg, level)))
+
+    assert result["processed"][0]["result"] == "retry", result
+    ps = mq.load_state(state)["projects"]["alpha"]
+    error = ps["queue"][0]["last_error"]
+    assert isinstance(error, str)
+    assert error.splitlines()[0] == "RuntimeError: kaboom"
+    assert "Traceback (most recent call last)" in error
+    assert "boom" in error
+    assert any(level == "ERROR" and "PR #25" in msg
+               and "Traceback (most recent call last)" in msg
+               for msg, level in logged), logged
+
+
+def test_a_failed_pr_comment_logs_a_warn_and_does_not_raise(tmp_path):
+    """A swallowed gh failure must at least name the PR it lost."""
+    pair = _repo_pair(tmp_path)
+    logged = []
+
+    def failing_gh(argv, cwd=None, **kwargs):
+        raise OSError("gh missing")
+
+    mq._handback({"pr": 26, "card": "t_x"},
+                 {"repo": str(pair["repo"])}, "body",
+                 lambda card, assignee, msg: True, failing_gh,
+                 log=lambda msg, level="INFO", **kwargs:
+                     logged.append((msg, level)))
+
+    assert any(level == "WARN" and "PR #26" in msg
+               and "gh missing" in msg for msg, level in logged), logged

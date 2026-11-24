@@ -2151,6 +2151,70 @@ def _refused_main_only_check() -> dict:
                    "suite must never read the operator's profile trees."}
 
 
+# --- kanban notify+wake subscription posture (t_639b2834) ------------------
+#
+# The 2026-11-23 duplicate-orchestrator incident was 307 notify+wake
+# subscriptions pointing at one gateway session while the real orchestrator sat
+# in a tmux pane; the gateway kept waking a SECOND copy of that identity, which
+# worked the boards alongside the pane REPL for about two weeks. The
+# subscribe-side gate is ``hscc-roles/orch_subscribe.py`` (t_31c8b258); this row
+# is the regression alarm behind it, because a pane can appear long after a
+# profile was provisioned and the gate is new.
+
+#: Fallback for the check name when the feature module cannot be imported — same
+#: trick as ``_MAIN_ONLY_SURFACE_CHECK_NAME``, pinned equal to
+#: ``doctor_orch_subs.CHECK_NAME`` by the row's own suite.
+_ORCH_WAKE_SUBS_CHECK_NAME = \
+    "orch wake subs (notify+wake target = live pane session)"
+
+
+def _load_doctor_orch_subs():
+    """Import the wake-subscription feature module (t_639b2834).
+
+    The verdict lives with the feature: ``doctor_orch_subs.py`` owns which
+    subscription counts (a wake mode on a platform whose ``chat_id`` names a
+    session), which does not (a chat channel, a plain ``notify`` sub, an
+    unattributed row, a paneless owner, the root profile), and the wording that
+    names the profile, the subscription id, the target session, the expected
+    pane session and the repair. It resolves the pane through
+    ``hscc-roles/orch_subscribe.py`` rather than restating the lease rule.
+
+    Returns None when the module is not deployed next to bootstrap; the row then
+    reports itself unverifiable rather than vanishing from the list.
+    """
+    try:
+        import doctor_orch_subs
+        return doctor_orch_subs
+    except Exception:  # noqa: BLE001 - any import failure means "not deployed"
+        return None
+
+
+def _refused_orch_wake_subs_check() -> dict:
+    """In-suite stand-in for the wake-subscription check when no seam was given.
+
+    Its real inputs are the operator's live board DBs and live session
+    registries — reading them inside a suite would let the live fleet decide the
+    suite's assertions. Same fence shape as ``_refused_main_only_check``: an
+    ERROR naming the seams, never a silent pass and never a real read. The
+    wording is delegated to the feature module when it is importable, so doctor
+    and the check cannot state two different rules for the same refusal.
+    """
+    mod = _load_doctor_orch_subs()
+    refused_hook = getattr(mod, "refused", None)
+    if callable(refused_hook):
+        verdict = refused_hook()
+        if isinstance(verdict, dict):
+            return verdict
+    return {"name": _ORCH_WAKE_SUBS_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "wake-subscription check refused inside a pytest process "
+                      "— inject _orch_wake_subs_check",
+            "fix": "Call doctor_orch_subs.doctor_check(boards=..., "
+                   "subscriptions=..., registry=...) with fake sub rows and "
+                   "fake leases, or pass "
+                   "_orch_wake_subs_check=lambda: {...}; a suite must never "
+                   "open a live board or a live active-session registry."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -2383,6 +2447,35 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
         missing_detail="hscc-bootstrap/doctor_main_only.py not importable — "
                        "which homes may hold the cluster control surface "
                        "cannot be verified",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
+    # t_639b2834 (regression alarm for the 2026-11-23 duplicate-orchestrator
+    # incident): does any kanban ``notify+wake`` subscription owned by a
+    # pane-backed profile point at a session that is NOT that profile's live
+    # pane session? 307 of them did exactly that and drove a second copy of the
+    # orchestrator for two weeks. The subscribe-side gate (t_31c8b258) prevents
+    # new ones; this row catches the posture re-forming, which the gate cannot
+    # do on its own — a pane can appear after a profile was provisioned.
+    # WARN, never fatal: the row's red is the fleet's CURRENT posture (an
+    # operator-owned subscription is a decision to remove, not a broken build)
+    # and doctor is bootstrap's Stage-1 gate.
+    #
+    # ``hermes_home`` ONLY, no ``hscc_dir``: the row resolves a pane in each
+    # profile's ``runtime/active_sessions.json``, which lives under the Hermes
+    # home the doctor was handed (the same read ``orch_subscribe`` and the
+    # budget-hook row do through this one context). It takes no ``hscc_dir``
+    # because nothing here reads ``~/.hscc`` — and it must not gain a root for
+    # the BOARDS, which are Hermes' and come from Hermes' own enumeration
+    # (``autodown.board_db_paths``), never from a caller-chosen path.
+    doctor_rows.FeatureCheckRow(
+        key="orch_wake_subs", seam_kwarg="_orch_wake_subs_check",
+        row_kwargs=("hermes_home",),
+        loader="_load_doctor_orch_subs",
+        refusal="_refused_orch_wake_subs_check",
+        fallback_name="_ORCH_WAKE_SUBS_CHECK_NAME",
+        missing_detail="hscc-bootstrap/doctor_orch_subs.py not importable — "
+                       "whether any notify+wake subscription points off its "
+                       "owner's live pane session cannot be verified",
         missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
                     "(re-run bootstrap)."),
 ]
