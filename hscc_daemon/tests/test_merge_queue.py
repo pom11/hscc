@@ -81,7 +81,7 @@ def _repo_pair(tmp_path, *, shared=False, base="main"):
 
 
 def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
-              base_branch=None, timeout_s=None):
+              base_branch=None, timeout_s=None, waiting_max_age_s=None):
     path = tmp_path / "registry.yaml"
     mq_cfg = {}
     if enabled is not None:
@@ -92,6 +92,8 @@ def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
         mq_cfg["base_branch"] = base_branch
     if timeout_s is not None:
         mq_cfg["timeout_s"] = timeout_s
+    if waiting_max_age_s is not None:
+        mq_cfg["waiting_max_age_s"] = waiting_max_age_s
     body = {
         "projects": [{
             "name": name,
@@ -155,12 +157,13 @@ class FakeGh:
     """
 
     def __init__(self, heads, *, views=None, required_checks=None,
-                 rollup=None, update_results=None):
+                 rollup=None, update_results=None, closed=None):
         self.heads = heads          # pr -> {headRefName, headRefOid}
         self.views = {pr: list(seq) for pr, seq in (views or {}).items()}
         self.required_checks = required_checks
         self.rollup = rollup
         self.update_results = list(update_results or [])
+        self.closed = list(closed or [])   # PRs GitHub answers CLOSED for
         self.calls = []
         self.merged = []
         self.merge_calls = []
@@ -173,7 +176,8 @@ class FakeGh:
         info.setdefault("isCrossRepository", False)
         info.update({
             "number": pr,
-            "state": "MERGED" if pr in self.merged else "OPEN",
+            "state": ("MERGED" if pr in self.merged else
+                      "CLOSED" if pr in self.closed else "OPEN"),
             "isDraft": False,
             "mergeable": "MERGEABLE",
             "url": f"https://github.com/example/repo/pull/{pr}",
@@ -3629,7 +3633,7 @@ def test_a_green_or_unmovable_waiting_pr_is_never_handed_back(tmp_path):
     assert handed == [] and gh.comments == [] and gh.updates == []
 
     # Same red, but the PR is closed: not the queue's to comment on any more.
-    gh.merged = [10]
+    gh.closed = [10]
     gh.heads[10] = {"headRefName": pair["branch"], "headRefOid": pair["head"]}
     _park(state_path=state, project="alpha",
           entries=[_waiting_entry(10, pair["branch"])])
@@ -3757,3 +3761,292 @@ def test_the_hand_back_rule_and_its_once_per_base_sha_bound():
     assert mq._failing_check_names(info(_named_red(
         *[f"c{i}" for i in range(mq.MAX_HANDBACK_CHECK_NAMES + 3)])))[-1] \
         == "(+3 more)"
+
+
+# ── wait-list expiry and dead PRs (t_a72d0867) ──────────────────────────────
+#
+# Cards 1 and 2 made the wait list ACT on a red PR; both keep the entry, so the
+# wait list still had no exit for a PR nobody was pushing any more, and it kept
+# counting PRs that had already landed or been closed. (One of those was swept by
+# hand on 2026-11-24: a PR merged at 11:35:08Z was still in the queue afterwards,
+# and the tell was `fatal: bad revision origin/wt/<id>` — a merged PR's branch is
+# deleted on merge. That is why every case here keys on the PR's STATE and none of
+# them asks whether the branch still resolves.)
+#
+# The properties these pin: a 25 h wait is dropped with ONE comment naming the
+# budget and the command to re-add; a 23 h wait is kept and still worked; a merged
+# or closed PR leaves immediately with no comment at all; the budget is the
+# project's to set; and a non-OPEN PR in the FIFO is rejected before a rebase or
+# a gate can spend a budget on a commit already on main.
+
+_HOUR = 3600
+
+
+def _aged_entry(pr, branch, age_s):
+    """A wait-list entry stamped ``age_s`` seconds ago.
+
+    The stamp is written against the real clock because the code under test reads
+    the real clock: freezing ``_now_iso`` would freeze the fixture and the
+    measurement together, which proves nothing about either.
+    """
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                          time.gmtime(time.time() - age_s))
+    return {"pr": pr, "card": f"t_pr{pr}", "assignee": "worker",
+            "branch": branch, "enqueued_at": stamp, "attempts": 0}
+
+
+def _waiting_prs(state_path, project):
+    """The PR numbers still in the wait list, in wait-list order."""
+    return [e.get("pr") for e in
+            mq.load_state(state_path)["projects"][project]["waiting"]]
+
+
+def _last(state_path, project):
+    return mq.load_state(state_path)["projects"][project]["last"]
+
+
+def test_a_waiting_pr_past_the_budget_is_dropped_with_a_comment(tmp_path):
+    """25 h of waiting is the end of the line: out of the queue, one comment."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}},
+                rollup=_named_red("scripts"))
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_aged_entry(9, pair["branch"], 25 * _HOUR)])
+    logged = []
+
+    def drain():
+        return mq._drain_waiting("alpha", cfg, state_path=state,
+                                 gh_runner=gh, git_runner=subprocess.run,
+                                 log=lambda msg, *a, **k: logged.append(msg))
+
+    assert drain() == []                     # it goes nowhere: it is dropped
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["waiting"] == [] and ps["queue"] == []
+    assert len(gh.comments) == 1, gh.comments
+    body = gh.comments[0][-1]
+    assert "dropped from the merge queue after 25h waiting" in body
+    assert "hscc merge-queue add alpha 9" in body       # the way back in
+    assert "Still red: scripts" in body                 # what never went green
+    assert any("PR #9 dropped from the wait list after 25h waiting "
+               "(budget 24h)" in line for line in logged), logged
+    last = _last(state, "alpha")
+    assert last["result"] == "expired" and last["pr"] == 9
+    assert "waited 25h" in last["error"] and "budget 24h" in last["error"]
+    # Expired, not re-tried: the sweep runs BEFORE the red routing, so a PR the
+    # queue has given up on never burns an update-branch on a fresh base.
+    assert gh.updates == []
+
+    # Gone means gone: the next tick has an empty wait list and says nothing.
+    assert drain() == []
+    assert len(gh.comments) == 1
+
+
+def test_a_waiting_pr_inside_the_budget_is_kept_and_still_worked(tmp_path):
+    """23 h is not 25 h: the entry stays, and cards 1 and 2 still apply to it."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}},
+                rollup=_named_red("scripts"))
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_aged_entry(9, pair["branch"], 23 * _HOUR)])
+    logged = []
+
+    assert mq._drain_waiting("alpha", cfg, state_path=state, gh_runner=gh,
+                             git_runner=subprocess.run,
+                             log=lambda msg, *a, **k: logged.append(msg)) == []
+
+    assert _waiting_prs(state, "alpha") == [9]
+    assert gh.comments == []
+    # The refresh is what a kept red entry gets — the sweep did not pre-empt it.
+    assert gh.updates == [9]
+    assert _waiting(state, "alpha", 9)["refreshed_main_sha"] == _origin_sha(pair)
+    assert _last(state, "alpha") is None      # nothing terminal was recorded
+    assert not any("dropped from the wait list" in line for line in logged), logged
+
+
+def test_merged_and_closed_waiting_prs_leave_without_a_comment(tmp_path):
+    """A PR the queue no longer owns is out of the ledger, at once, silently."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+                 10: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+                rollup=_named_red("scripts"), closed=[10])
+    gh.merged = [9]
+    state = _state(tmp_path)
+    # #9 is 25 h old AND merged: the state wins, because "this landed" is the
+    # truer thing to say about it than "this ran out of budget".
+    _park(state_path=state, project="alpha",
+          entries=[_aged_entry(9, pair["branch"], 25 * _HOUR),
+                   _aged_entry(10, pair["branch"], 1 * _HOUR)])
+    logged = []
+
+    assert mq._drain_waiting("alpha", cfg, state_path=state, gh_runner=gh,
+                             git_runner=subprocess.run,
+                             log=lambda msg, *a, **k: logged.append(msg)) == []
+
+    assert _waiting_prs(state, "alpha") == []
+    assert gh.comments == []          # commenting on a merged PR is noise
+    assert gh.updates == []           # and no refresh is spent on it either
+    assert any("PR #9 merged-elsewhere; dropped from the wait list" in line
+               for line in logged), logged
+    assert any("PR #10 closed; dropped from the wait list" in line
+               for line in logged), logged
+    last = _last(state, "alpha")      # ONE slot: the last drop of the pass
+    assert last["result"] == "closed" and last["pr"] == 10
+    assert mq.outcome_state("merged-elsewhere") == "merged"
+    assert mq.outcome_state("closed") == "failed"
+
+
+def test_the_wait_list_budget_is_the_projects_to_set(tmp_path):
+    """`waiting_max_age_s` moves the line, and the pass honours it per project."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"],
+                         waiting_max_age_s=6 * _HOUR)
+    cfg = mq.project_config("alpha", registry_path=registry)
+    assert mq.waiting_budget_s(cfg) == 6 * _HOUR     # read through the registry
+    gh = FakeGh({9: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+                 10: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+                rollup=_named_red("scripts"))
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_aged_entry(9, pair["branch"], 7 * _HOUR),
+                   _aged_entry(10, pair["branch"], 5 * _HOUR)])
+
+    assert mq._drain_waiting("alpha", cfg, state_path=state, gh_runner=gh,
+                             git_runner=subprocess.run) == []
+
+    assert _waiting_prs(state, "alpha") == [10]      # 5 h is inside 6 h
+    assert len(gh.comments) == 1, gh.comments
+    assert "hscc merge-queue add alpha 9" in gh.comments[0][-1]
+    assert "after 7h waiting" in gh.comments[0][-1]
+    assert "6h wait-list budget" in gh.comments[0][-1]
+    last = _last(state, "alpha")
+    assert last["result"] == "expired" and last["pr"] == 9
+
+
+def test_the_sweep_through_the_production_default_runner_shape(tmp_path):
+    """No injected git runner: the drop and the base probe share one pass.
+
+    Every queue case injects ``git_runner``, which hides ``_default_runner`` —
+    the same seam that once raised ``TypeError`` on every production call while
+    the injected runners passed. Here the 25 h entry is dropped AND a second,
+    in-budget red entry still needs the base sha, so the drop is proven alongside
+    the daemon's own git path rather than instead of it.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+                 11: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+                rollup=_named_red("scripts"))
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_aged_entry(9, pair["branch"], 25 * _HOUR),
+                   _waiting_entry(11, pair["branch"])])
+
+    assert mq._drain_waiting("alpha", cfg, state_path=state,
+                             gh_runner=gh) == []
+
+    assert _waiting_prs(state, "alpha") == [11]
+    assert len(gh.comments) == 1 and gh.updates == [11]
+    assert _waiting(state, "alpha", 11)["refreshed_main_sha"] == _origin_sha(pair)
+
+
+def test_the_sweep_predicates_their_budget_their_clock_and_their_state():
+    """The predicate table behind the sweep, including every bad-ledger shape."""
+    assert mq.WAITING_MAX_AGE_S == 24 * 3600
+    # The budget is the project's to set — and a bad line never empties one.
+    for cfg, want in (({}, 24 * 3600), (None, 24 * 3600),
+                      ({"waiting_max_age_s": 3600}, 3600),
+                      ({"waiting_max_age_s": "3600"}, 3600),
+                      ({"waiting_max_age_s": 3600.9}, 3600),
+                      ({"waiting_max_age_s": 0}, 24 * 3600),
+                      ({"waiting_max_age_s": -1}, 24 * 3600),
+                      ({"waiting_max_age_s": "24h"}, 24 * 3600),
+                      ({"waiting_max_age_s": ""}, 24 * 3600),
+                      ({"waiting_max_age_s": True}, 24 * 3600),
+                      ({"waiting_max_age_s": None}, 24 * 3600),
+                      ({"waiting_max_age_s": []}, 24 * 3600)):
+        assert mq.waiting_budget_s(cfg) == want, cfg
+
+    # The clock: exactly the budget is KEPT, and a missing stamp is no expiry.
+    assert mq._waiting_expired(86401, 86400)
+    assert not mq._waiting_expired(86400, 86400)
+    assert not mq._waiting_expired(None, 86400)
+
+    # The state decides, so a deleted branch cannot be mistaken for a fault and
+    # an OPEN answer with a squash commit already on main is still "landed".
+    assert mq._pr_gone({"state": "MERGED"}) == "merged-elsewhere"
+    assert mq._pr_gone({"state": "OPEN",
+                        "mergeCommit": {"oid": "abc"}}) == "merged-elsewhere"
+    assert mq._pr_gone({"state": "CLOSED"}) == "closed"
+    for still_ours in ({}, None, {"state": "OPEN"},
+                       {"state": "OPEN", "mergeCommit": None},
+                       {"state": "OPEN", "mergeCommit": {"oid": None}},
+                       {"state": "OPEN", "mergeCommit": "junk"}):
+        assert mq._pr_gone(still_ours) is None, still_ours
+
+    # Spans read as a person would say them; entry numbers survive a ledger that
+    # stored them as strings.
+    assert mq._age_span(24 * 3600) == "24h"
+    assert mq._age_span(90000) == "25h"
+    assert mq._age_span(3599) == "59m"
+    assert mq._age_span(59) == "59s"
+    assert mq._age_span(0) == "0s"
+    assert mq._age_span(None) == "0s"
+    assert mq._entry_pr({"pr": "9"}) == 9
+    assert mq._entry_pr({"pr": 9.0}) == 9
+    for junk in ({}, {"pr": None}, {"pr": "x"}, None, "x", 9):
+        assert mq._entry_pr(junk) is None, junk
+
+
+def test_a_merged_or_closed_pr_in_the_fifo_is_rejected_before_any_gate(tmp_path):
+    """Tick time: the tell is the PR's state, and nothing past it may run.
+
+    The branch is deleted from origin first — the exact shape of the specimen, a
+    merged PR still sitting in the queue — so a rebase or a diff attempted here
+    would die on a ref that no longer exists and read as a broken queue. The gate
+    leaves a marker behind, so "no gate ran" is a fact about a file, not a vibe.
+    """
+    pair = _repo_pair(tmp_path)
+    marker = tmp_path / "gate-ran"
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=[f"sh -c 'touch {marker}'"])
+    gh = FakeGh({9: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+                 10: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+                rollup=_named_red("scripts"), closed=[10])
+    gh.merged = [9]
+    _git(pair["repo"], "push", "origin", "--delete", pair["branch"])
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 9, card="t_pr9", path=state)
+
+    def tick():
+        return mq.tick(state_path=state, root=str(tmp_path / "queue"),
+                       registry_path=registry, gh_runner=gh,
+                       git_runner=subprocess.run)
+
+    result = tick()
+    assert result["processed"][0]["result"] == "already-merged", result
+    assert not marker.exists()              # no budget spent on a landed commit
+    assert gh.merge_calls == []             # GitHub was never asked to merge it
+    assert gh.comments == []
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["waiting"] == [] and ps["in_flight"] is None
+    assert ps["last"]["result"] == "already-merged"
+
+    # A CLOSED claim is the same rejection — and it no longer answers with the
+    # merged label this path used to return for every non-OPEN PR.
+    mq.add_to_queue("alpha", 10, card="t_pr10", path=state)
+    result = tick()
+    assert result["processed"][0]["result"] == "already-closed", result
+    assert not marker.exists() and gh.merge_calls == []
+    assert _last(state, "alpha")["result"] == "already-closed"
+
