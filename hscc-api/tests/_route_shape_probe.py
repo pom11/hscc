@@ -67,6 +67,19 @@ SHAPE_CHECKED: dict[str, dict] = {
     # a missing-template artefact. No stub: the missing-name path never reaches
     # _resolve, so nothing here can touch the fleet.
     "GET /v1/template/validate/{name}": {"name": "demo"},
+    # The D9 dashboard pair (a79990a7). NO stub on either: both handlers spread their
+    # backing's own dict and add only `speak`, and both backings answered for real in
+    # the sandbox, so the key sets measured are the handlers' own.
+    # main/status measured 12 keys -- and the row's set is not branch-luck: every
+    # pane-state return in main_cli.status() (:449 discovery-failed, :455
+    # not-running, :460 ambiguous, :475 busy/idle/screen-unknown) builds the same
+    # receipt + state/running/busy/pane/target/panes/detail/ok. The two smaller
+    # answers (:440 resolver unloadable, and the handler's own {speak}-only catch)
+    # are documented in the row as the exception, exactly as /v1/sessions' does.
+    "GET /v1/main/status": {},
+    # waker/status measured 7 keys == the row's 7, with no stub.
+    # orch_waker.waker_status() is pure file reads under the sandbox HOME.
+    "GET /v1/orch/waker/status": {},
     "GET /v1/profile/list": {},
     # --- t_b9808146: the iOS-facing reads the shipped client calls ------------------ #
     "GET /v1/projects/{name}": {"name": "demo"},
