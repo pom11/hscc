@@ -5,7 +5,15 @@ is each of them doing right now". Every running card on every board gets a
 bordered panel that follows its worker's transcript. The grid re-flows on every
 refresh: a card that starts gets a panel, a card that stops keeps its panel for
 ``LINGER_S`` with its outcome (done / blocked / ...) and then drops out. Cards
-waiting for a slot are listed along the bottom.
+waiting for a slot are listed along the bottom, and below them ONE compact
+``mq`` line for the whole local merge queue — one segment per enabled project
+that has something queued, waiting or in flight (``<proj> #<pr> <stage> <age> ·
+Nq · Mw``, plus that project's last outcome), shared with
+``hscc kanban monitor`` via ``kanban_live.merge_queue_line`` and hidden when no
+project has anything in the queue. The per-PR rows and their stored errors are
+gone: ``hscc merge-queue list <proj>`` carries them. Read-only there too:
+the ledger is parsed through the same read ``GET /v1/merge-queue`` serves,
+never ticked, and ``gh`` is never called.
 
 Transcript source (``SessionTail`` is the primary, ``LogTail`` the fallback):
 under Hermes v0.23 the dispatcher spawns ``hermes_cli.kanban_worker_client``, a
@@ -46,6 +54,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import datetime
 import json
 import math
 import os
@@ -686,6 +695,19 @@ class Monitor:
         for t in self.tails.values():
             t.poll()
 
+    def refresh_merge_queue(self, now: float | None = None):
+        """Attach the merge-queue block's data (:func:`merge_queue_view`, read-only).
+
+        Called by the loops (:func:`run_live`, :func:`snapshot`) on the card-list
+        cadence rather than from :meth:`refresh`: ``refresh`` is the collector
+        seam every layout test stubs, and folding a second ambient read into it
+        would make ~50 offline tests read the operator's queue ledger and
+        evaluate the project registry. Here it is one explicit, stubbable call —
+        the same shape ``kanban_live.run_live`` uses for its own queue attach.
+        """
+        self.data["merge_queue"] = merge_queue_view(
+            self.board, self.clock() if now is None else now)
+
     def panels(self) -> list[tuple]:
         return [k for k in self.order if k in self.cards]
 
@@ -805,10 +827,15 @@ def status_line(mon: Monitor, tools_only: bool, paused: bool, zoom: bool, now: f
     cap = d.get("caps", (None, None))[0]
     running = len(d.get("running", []))
     slots = f"{running}/{cap}" if cap else str(running)
+    mq = mq_token(mon)
     t = Text()
     t.append("hscc cards", style="title")
-    t.append(f"  slots {slots} · waiting {len(d.get('ready', []))} · "
-             f"{time.strftime('%H:%M:%S', time.localtime(now))}", style="text")
+    # `mq` names the PR the local merge queue is working right now: a card's
+    # work is not done until its PR lands, and the queue is otherwise only
+    # visible through `hscc merge-queue status` (absent when there is no queue).
+    t.append(f"  slots {slots} · waiting {len(d.get('ready', []))}"
+             + (f" · mq {mq}" if mq else "")
+             + f" · {time.strftime('%H:%M:%S', time.localtime(now))}", style="text")
     flags = ["tools" if tools_only else "full"] \
         + (["short"] if short else []) \
         + (["PAUSED"] if paused else []) \
@@ -831,6 +858,66 @@ def ready_lines(mon: Monitor, width: int) -> list[Text]:
     return out
 
 
+# ── merge queue ────────────────────────────────────────────────────────────
+#
+# A card's work is not finished when its worker completes: it is finished when
+# the PR lands. The formatter is SHARED with `hscc kanban monitor` —
+# ``kanban_live.merge_queue_line`` prints the one global `mq` line, one segment
+# per enabled project with something in the queue. The per-project block this
+# view used to print (a line per project plus up to three wait-listed PR rows
+# carrying their stored error) is gone by the operator's request: it read as
+# hscc-only and took a third of the pane. The errors stay where they always
+# were — `hscc merge-queue list <proj>` — and the full rows in `--json`.
+# Read-only by construction: the one shared read model, no tick, no gh.
+
+def merge_queue_view(board=None, now=None) -> dict:
+    """The local merge queue's rows, read-only, or ``{}`` when unreadable.
+
+    THE sanctioned read: :func:`hscc_daemon.kanban_live.attach_merge_queue` →
+    :func:`hscc_daemon.merge_queue.view` (which is itself a single
+    ``merge_queue.load_state()`` plus the registry), the same call
+    ``hscc kanban monitor`` and ``GET /v1/merge-queue`` make — so this view can
+    never disagree with those about a PR's position or state. Nothing here
+    ticks the queue, writes the ledger or shells out to ``gh``; a missing,
+    unreadable or corrupt state file is an empty queue, not a crash, and this
+    returns ``{}`` on ANY failure because a monitor must never die over the
+    thing it is reporting on.
+    """
+    try:
+        return kanban_live.attach_merge_queue({}, board=board, now=now)["merge_queue"]
+    except Exception:  # noqa: BLE001 — see above: report nothing, never fail
+        return {}
+
+
+def merge_queue_lines(mon: Monitor, now: float | None = None,
+                      width: int | None = None) -> list[Text]:
+    """The merge-queue foot line: ``kanban_live.merge_queue_line``, or ``[]``.
+
+    One row for the whole local queue, whatever the terminal width — the shared
+    formatter drops its ``· last …`` cells and then whole projects (``+N proj``)
+    rather than wrapping, and ``MUTED`` keeps the line in this foot's grey.
+    Empty when no enabled project has anything queued, waiting or in flight:
+    a queue with nothing in it says nothing.
+    """
+    line = kanban_live.merge_queue_line(
+        mon.data, width=width, now=mon.clock() if now is None else now,
+        muted=MUTED)
+    return [] if line is None else [line]
+
+
+def mq_token(mon: Monitor) -> str | None:
+    """The status line's ``mq`` cell: the PR the queue is working, ``-`` when
+    the queue has projects but nothing in flight, None when there is no queue
+    to report (empty, disabled, or no ledger) — nothing printed."""
+    projects = kanban_live.merge_queue_projects(mon.data)
+    if not projects:
+        return None
+    for _name, _proj, flight in projects:
+        if flight is not None and flight.get("pr") is not None:
+            return f"#{flight['pr']}"
+    return "-"
+
+
 def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = False,
            tools_only: bool = False, paused: bool = False, now: float | None = None,
            cols: int | None = None, short: bool = False) -> Layout:
@@ -842,7 +929,7 @@ def render(mon: Monitor, width: int, height: int, focus: int = 0, zoom: bool = F
     top = status_line(mon, tools_only, paused, zoom, now, cols, short)
     errors = mon.data.get("errors", [])
     blind = not mon.data.get("boards") and bool(errors)
-    foot = ready_lines(mon, width)
+    foot = ready_lines(mon, width) + merge_queue_lines(mon, now, width)
     if errors and not blind:
         foot += [Text(e, style="error") for e in errors][:2]
     grid_h = max(height - 1 - len(foot), 3)
@@ -964,6 +1051,7 @@ def run_live(console, interval: int = DEFAULT_INTERVAL, board: str | None = None
                 now = time.time()
                 if now >= next_refresh:
                     mon.refresh()
+                    mon.refresh_merge_queue(now)
                     next_refresh = now + interval
                 if not view.paused:
                     mon.poll_logs()
@@ -986,6 +1074,7 @@ def snapshot(console, board: str | None = None, tools_only: bool = False,
              kanban_db=None, short: bool = False) -> int:
     mon = Monitor(board=board, kanban_db=kanban_db)
     mon.refresh()
+    mon.refresh_merge_queue()
     mon.poll_logs()
     height = max(console.height, 12 * max(len(mon.panels()), 1))
     height = min(height, 200)
@@ -1004,8 +1093,16 @@ One panel per running kanban card, streaming its worker's transcript — each
 row's thinking (dim italic, one logical line, whole text by default) above its
 reply text, and one ┊ line per tool call; the grid re-flows as cards start and
 finish (a finished card lingers ~10 s with its outcome). Waiting cards are
-listed at the bottom. Each panel header shows board · card · worker │ run ·
-heartbeat · tokens (as space allows).
+listed at the bottom, and under them ONE line for the whole local merge queue,
+shared with `hscc kanban monitor`:
+`mq  <proj> #<pr> <stage> <age> · Nq · Mw · last #<pr> <result> <age>` — one
+segment per enabled project with something queued, waiting or in flight (`idle`
+when nothing is claimed), ` | ` apart, hidden when none has; over the terminal
+width the `· last …` cells go first, then whole projects (`+N proj`). The
+wait-listed PRs and the errors they sit on are not listed here:
+`hscc merge-queue list <proj>` carries them.
+Each panel header shows board · card · worker │ run · heartbeat · tokens
+(as space allows).
 
   --live          full-screen, refreshing until q / Ctrl-C
   --interval <s>  card-list refresh period for --live (default 3; logs stream

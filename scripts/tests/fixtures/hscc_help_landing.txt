@@ -57,7 +57,7 @@ Cluster & templates
   api <cmd>            HSCC HTTP API server: start stop status (external apps)
   autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
   kanban <cmd>
-      Board hygiene: blocked (show/recover), stale (list/archive)
+      Board hygiene: blocked stale monitor pause resume paused enforce
   merge-queue <cmd>
       Local merge queue: status list add remove pause resume enable disable
   cards monitor [--live] One live panel per running card, streaming its worker
@@ -80,6 +80,9 @@ Utility
                        flags pass through: --yes --dry-run --force --no-backup
       --skip-{skills,roles,daemon,patches,cli} (see `hscc help bootstrap`)
   update --check       Check GitHub releases for a newer version (read-only)
+  clean [--apply] [--deep] [--confirm] [--days N] [--board <slug>] [--json]
+      Archive + remove finished cards' workspaces, then prune rebuildable
+      caches (DRY RUN until --apply; --deep needs --confirm)
 
 Examples
   hscc status                          # is the daemon healthy?

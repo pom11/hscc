@@ -1,6 +1,6 @@
 # GOAL REPORT — 2026-09-26 24h autonomous run
 
-Contract: /Users/desac/Desktop/HSCC_ORCH_GOAL_2026-09-26.md
+Contract: ~/Desktop/HSCC_ORCH_GOAL_2026-09-26.md
 Run window: acknowledged 2026-09-26 ~17:41 → finalised 2026-09-27 ~03:33 EEST
 Baseline: HSCC 2.2.0, main == origin/main @ 1037b22, board had 2 dead (blocked) cards.
 Ledger (trail of truth): docs/audits/GOAL_LEDGER_2026-09-26.md (updated every heartbeat tick).
@@ -140,7 +140,7 @@ should keep watching worker-session stability.
 ## Suite status
 Workers verified green under BOTH interpreters for backend-affecting parts:
 `~/.hermes/hermes-agent/venv/bin/python -m pytest -q` and
-`/Users/desac/miniconda3/envs/p313/bin/python -m pytest -q` per card self-report. iOS harness
+`~/miniconda3/envs/p313/bin/python -m pytest -q` per card self-report. iOS harness
 green: model_decode_check 62/62 (Phase 4), check_theme + check_sources + build_check clean.
 Final standalone suite re-run not re-executed at report time — see ledger; all cards self-reported
 green before merging.

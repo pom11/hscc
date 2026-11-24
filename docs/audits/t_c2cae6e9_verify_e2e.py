@@ -3,7 +3,7 @@ stay byte-identical / machine-pure. Run under BOTH interpreters the suite gates
 on. Non-tty pipe: pure plain text, no \\x1b, content preserved.
 
     ~/.hermes/hermes-agent/venv/bin/python docs/audits/t_c2cae6e9_verify_e2e.py
-    /Users/desac/miniconda3/envs/p313/bin/python docs/audits/t_c2cae6e9_verify_e2e.py
+    ~/miniconda3/envs/p313/bin/python docs/audits/t_c2cae6e9_verify_e2e.py
 """
 import argparse
 import contextlib as _contextlib

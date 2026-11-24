@@ -630,7 +630,7 @@ def test_the_tier_0_branch_never_reports_row_counts_it_did_not_count(
     assert api["store"]["tier0_resident"] is False
 
 
-#: The top-level keys #407 shipped. This card is additive only, so a window-axis
+#: The top-level keys #407 shipped. That card was additive only, so a window-axis
 #: answer may differ from this set by exactly the two keys the ruling names.
 _407_TOP_LEVEL_KEYS = {
     "window", "window_s", "tier", "resolution_s", "resolution", "tier_summary",
@@ -638,11 +638,34 @@ _407_TOP_LEVEL_KEYS = {
     "engines_included", "store", "hosts", "engines", "counts", "note", "speak",
 }
 
+#: The four keys t_d732d50d adds, each for a stated reason. They are the
+#: downsampling t_25fcf502 measured as unavoidable: the route's narrowest
+#: possible 7 d read (one node, one metric) measured 119,531 B against the
+#: contract's ≤ 16 KiB soft ceiling, so a caller that wants that surface has to
+#: be served FEWER BUCKETS, and the response has to say it was.
+#:   * `max_bytes`          — the budget the caller asked for, echoed like `node`
+#:                            and `metrics` are, so an answer can be audited
+#:                            against the request that produced it;
+#:   * `fold`               — how many stored buckets went into each point served
+#:                            (1 = nothing was folded), the code for "this is
+#:                            downsampled" so no client infers it from a gap in
+#:                            the timestamps;
+#:   * `native_resolution_s`— the tier's OWN stored bucket width, because
+#:                            `resolution_s` now honestly names what was SERVED
+#:                            and the stored step would otherwise be lost;
+#:   * `budget_met`         — whether the body served actually fits the budget
+#:                            asked for; False is a real outcome (the fold has a
+#:                            floor) and rows are never cut to make it True. None
+#:                            when no budget was asked, per this payload's
+#:                            not-a-default convention (`store.tier0_resident`).
+_BUDGET_KEYS = {"max_bytes", "fold", "native_resolution_s", "budget_met"}
+
 
 def test_the_window_axis_gained_only_axis_and_source(running, token,
                                                      pinned_clock,
                                                      store_dir):
-    """#407's shape is unchanged: this card adds `axis` and `source`, nothing else.
+    """#407's shape is unchanged apart from the two keys that ruling names and
+    the four t_d732d50d states the reason for.
 
     The regression half of "additive only" — every caller shipped before the tier
     axis keeps working, so the deletion card can retire the loser without a
@@ -650,12 +673,19 @@ def test_the_window_axis_gained_only_axis_and_source(running, token,
     """
     status, api = get(running, token, "/v1/cluster/history?window=1h")
     assert status == 200, api
-    assert set(api) - _407_TOP_LEVEL_KEYS == {"axis", "source"}, sorted(
-        set(api) - _407_TOP_LEVEL_KEYS)
+    assert set(api) - _407_TOP_LEVEL_KEYS == {"axis", "source"} | _BUDGET_KEYS, \
+        sorted(set(api) - _407_TOP_LEVEL_KEYS)
     assert api["axis"] == "window" and api["source"] == "sqlite_store"
     # The default is still #407's, so a caller that names no axis is unaffected.
     assert api["window"] == "1h" and api["window_s"] == 3600
     assert api["since"] == NOW - 3600 and api["until"] == NOW
+    # ...and an unbudgeted read is the SAME read it always was: no fold, and the
+    # served step is still the stored one. This is the half that pins the new
+    # keys as additive — a caller that never asks for a budget must not be able
+    # to observe that the code to fold it exists.
+    assert api["fold"] == 1 and api["max_bytes"] is None
+    assert api["native_resolution_s"] == api["resolution_s"] == 60
+    assert api["budget_met"] is None
 
 
 # ── validation: a clear 400 naming the rule, never a silent empty answer ───

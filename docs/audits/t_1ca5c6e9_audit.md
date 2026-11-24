@@ -65,7 +65,7 @@ wins. hscc_daemon's task tables (short, narrow columns) keep the daemon default.
 
 - `1254 passed` baseline (both interpreters) before conversion.
 - `1271 passed` (1254 + 17 new) on BOTH `~/.hermes/hermes-agent/venv/bin/python`
-  and `/Users/desac/miniconda3/envs/p313/bin/python` after conversion + tests.
+  and `~/miniconda3/envs/p313/bin/python` after conversion + tests.
   No existing assertion weakened; all `--json` payload lines untouched.
 - Terminal proof captured by `docs/audits/t_1ca5c6e9_verify_e2e.py`.
 

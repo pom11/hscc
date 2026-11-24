@@ -57,9 +57,17 @@ orphaned by the SIGKILL escalation. The case below reproduces that environment
 by blocking the signal in the forking thread; the fix is product-side (clear
 the inherited mask where the handlers are installed, and again in `_serve`).
 
-Every child this file spawns is its own session (`start_new_session=True`) and
-is reaped by PROCESS GROUP, so a failed case cannot leave a harness child or a
-fake sidecar orphaned on the host (measured for 7 h before this card).
+Every child this file spawns is its own session leader (`start_new_session=True`)
+and is reaped by PROCESS GROUP, so a failed case cannot leave a harness child or
+a fake sidecar orphaned on the host (measured for 7 h before this card). That
+covers the double-forked `hscc api start` server only because the harness KEEPS
+it in that group by fencing `os.setsid`: production `_handle_start` detaches into
+a new session (api_cli.py:986), out of reach of the group-wide SIGKILL a queue
+gate's timeout performs, and a kill of this leg skips every fixture teardown
+anyway. `test_a_hard_kill_of_the_harness_group_takes_the_double_forked_server`
+reddens if that ownership ever lapses. Every child also binds port 0 and reports
+the port it actually bound, so no case reserves one and hands it back to the
+kernel while the child is still looking for it.
 """
 import ast
 import collections
@@ -67,7 +75,6 @@ import inspect
 import os
 import re
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -145,15 +152,34 @@ SERVE_RC_PREFIX = "rc="
 # So the budgets are sized for a runner that is two orders of magnitude slower
 # than an idle one, and a stall is judged against the child's own progress rather
 # than against its whole life.
+#
+# CAN THE VERDICT COME EARLIER OFF THE CHILD'S OWN WATCHDOG? It says
+# `@@HANDLER-LATE@@` eight seconds after the raise, so on paper the stall could
+# collapse to about nine. It does not, and not from caution: measured under ~100x
+# oversubscription this file's own rig writes that line for a handler that is
+# merely UNSCHEDULED and then finishes fine (see :data:`HANDLER_LATE`). The line
+# is the diagnosis; the silence after it is the verdict, and silence can only be
+# observed over an interval. What can be cut without weakening anything is the
+# interval itself — these were sized ~7x over the worst observation on record —
+# and that is what changed here.
 #: Silence from a live child between two announced stages (or, once the parent
 #: has asked it to stop, between the signal and its exit) before it is called
-#: stuck. ~1000x the idle gap, ~7x the worst CI observation.
-CHILD_STAGE_STALL = 180.0
+#: stuck. ~1000x the idle gap and ~5x the worst CI observation on record (run
+#: 45081900690: a child with NOTHING written — stdout or `api.log` — in 25 s).
+#: 120 s rather than 180 s because this is what a genuine wedge costs the queue
+#: gate: the gate's whole allowance is `DEFAULT_GATE_TIMEOUT_S = 1800`
+#: (hscc_daemon/merge_queue.py), so one wedge spent 10% of the gate reporting
+#: itself at 180 s and spends 7% here. Set equal to the sibling leg's copy
+#: (t_eed6b74d), which measured the same child on the same runner.
+CHILD_STAGE_STALL = 120.0
 #: One child's entire life, whatever it is doing — the backstop behind the stall.
-CHILD_LIFE_CAP = 420.0
+#: 360 s is 20% of the gate's allowance instead of 420 s' 23%, and still 1000x
+#: the idle whole-life measurement of this file's slowest arm.
+CHILD_LIFE_CAP = 360.0
 #: Spawn -> the child's own `HSCC API listening on ...` line. Same import phase
-#: as above, so the same order of budget.
-CHILD_READY_BUDGET = 180.0
+#: as the stall above, so the same order of budget and the same ~5x over the
+#: worst CI observation.
+CHILD_READY_BUDGET = 120.0
 #: How long the child's watchdog waits, AFTER the signal has been raised, for the
 #: handler to come back out of the log-write window before it says the handler is
 #: still in there. The handler's body is an attribute write and a return, so this
@@ -320,6 +346,29 @@ from hscc_daemon import api_cli
 print("@@MARK_STAGE@@ api_cli-imported", flush=True)
 
 verb, rest = sys.argv[1], sys.argv[2:]
+
+if verb == "start":
+    # `api_cli._handle_start` calls `os.setsid()` in its first forked child
+    # (api_cli.py:986), and that moves the serving grandchild — and the gateway
+    # sidecar the bridge spawns inside it — into a NEW session, out of the
+    # process group the harness was spawned with. Nothing the test owns can then
+    # reach them: the queue gate's timeout kills the gate's own group
+    # (`hscc_daemon/merge_queue.py:_kill_gate_group`), a SIGKILL of the leg skips
+    # every pytest fixture teardown, and both leave a server plus a sidecar
+    # holding the sandbox token running on the host. Keeping the grandchild in
+    # THIS group is what makes the `killpg` in :func:`_reap` sufficient instead
+    # of merely best-effort.
+    #
+    # What this fence does NOT weaken: both forks still happen, so does
+    # `_detach_stdio`, the pid-file handover from the CLI parent to the
+    # grandchild, and the whole `_serve` path down to the real sidecar subprocess
+    # this case has to kill. What it skips is the daemon's SESSION detach —
+    # deliberate production behaviour for an operator typing `hscc api start`,
+    # and not the subject of this file. The guard case
+    # `test_a_hard_kill_of_the_harness_group_takes_the_double_forked_server`
+    # asserts the grandchild's pgid equals this process's pid, so the fence
+    # cannot silently stop applying.
+    os.setsid = lambda: None
 
 if verb == "serve":
     # Install the stop handlers the way `hscc api start` does in its forked
@@ -530,13 +579,31 @@ HARNESS = (HARNESS
 # sandbox
 # --------------------------------------------------------------------------- #
 
-def _free_port():
-    """An ephemeral loopback port, released before the child binds it."""
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+#: Every child in this file binds THIS port: 0 means "the kernel picks one".
+#: The number is then read back out of the child's own log line (:func:
+#: `_await_listening`), because that is the only place the bound port exists.
+#:
+#: The old shape was `_free_port()`: bind port 0 in the parent to LEARN a number,
+#: CLOSE the socket, and tell the child to bind it. Closing is the defect — it
+#: hands the number back to the kernel before the child has it, and any other
+#: suite on this host (a queue gate plus workers' legs run concurrently here) can
+#: take it in that window. The child then died of EADDRINUSE inside whichever
+#: case happened to be waiting on it, which reads as a signal-handler failure and
+#: is neither. Same fix t_eed6b74d made on the sibling leg, carried here rather
+#: than shared (each leg is its own pytest process with its own conftest
+#: sys.path, so there is no importable home for such a helper — see
+#: scripts/run_tests.sh's header).
+PORT_AUTO = 0
+
+#: `_serve`'s startup line, with the RESOLVED port in it — the pattern the
+#: readiness wait reads the port back from. `api_server.create_servers` adopts
+#: the OS-assigned port for ALL its listeners (`if port == 0: port =
+#: server.server_address[1]`) and re-publishes it into `ctx.config` as
+#: `int(servers[0].server_address[1])`; `_serve` logs `f"HSCC API listening on
+#: {host}:{addr['port']}"` from that same dict (api_cli.py:482-487), so the line
+#: carries the port the child actually bound, not the 0 it was asked for. The
+#: `NOT listening` line is `HSCC API NOT listening on ...` and cannot match.
+LISTENING_RE = re.compile(r"HSCC API listening on 127\.0\.0\.1:(\d+)")
 
 
 def _child_env(home):
@@ -627,6 +694,19 @@ def _alive(pid):
     return True
 
 
+def _await_gone(pid, timeout=10.0):
+    """True once `pid` is no longer live; False if it outlived `timeout`.
+
+    SIGKILL is not cooperative, so this is a reaping wait, not a load budget:
+    ten seconds on an idle host is a zombie waiting for its (reparented-to)
+    parent to notice, not a process still working.
+    """
+    deadline = time.time() + timeout
+    while _alive(pid) and time.time() < deadline:
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
 def _kill_pid(pid):
     """SIGKILL a pid, taking its process group when it owns one.
 
@@ -656,15 +736,31 @@ def _reap(proc):
     (t_7c2eb604). Every Popen here uses start_new_session, so proc.pid is the
     group id, and killpg reaches all of them; wait() then reaps the direct child
     so no zombie is left for pytest.
+
+    The killpg is UNCONDITIONAL, and that is the whole point of this function.
+    It used to sit behind `if proc.poll() is None`, which is false for the
+    normal `start` arm: `hscc api start` returns as soon as the server is up, so
+    by the time the fixture reaps it the CLI parent is gone while the serving
+    grandchild and the sidecar are still alive in that same group. Gating on the
+    direct child therefore skipped the one signal that reaches them and left the
+    pid-file poll as the only thing between a red test and an orphan — the exact
+    shape this card is about. A process GROUP's liveness has nothing to do with
+    whether our direct child is still ours to wait on.
+
+    `proc.kill()` stays as a belt, not as the mechanism: it reaches the direct
+    child only, so on its own it is what orphans a sidecar.
     """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        # ESRCH: the group is already empty (everybody exited on their own, the
+        # ordinary case for the non-forking verbs). Nothing to reach.
+        pass
     if proc.poll() is None:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            proc.kill()
         except OSError:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            pass
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
@@ -720,8 +816,15 @@ def _harness_argv(sandbox, verb, *args):
     return [sys.executable, "-u", str(sandbox["harness"]), verb, *args]
 
 
-def _start_api(sandbox, port):
-    """`hscc api start`, with the child's output redirected to a FILE.
+def _start_api(sandbox):
+    """`hscc api start` on an OS-assigned port, with output redirected to a FILE.
+
+    `--port 0` (see :data:`PORT_AUTO`): the port the child bound is read back out
+    of its own log line by :func:`_await_listening`, so nothing here has to
+    reserve one first. `--no-qr` keeps the QR off the child's output; the QR is
+    built from `_handle_start`'s PRE-BIND `resolve_config` port, which for
+    `--port 0` is the literal 0 and would be a useless QR — a product quirk on a
+    path this file does not test, and the reason the sandbox asks for no QR.
 
     Why not `capture_output=True`, measured rather than guessed: `start`
     double-forks and the serving grandchild INHERITS the CLI parent's
@@ -736,7 +839,7 @@ def _start_api(sandbox, port):
     `daemon_ops.log` echo land together, and nothing here asserts on one
     without the other.
     """
-    argv = _harness_argv(sandbox, "start", "--no-qr", "--port", str(port))
+    argv = _harness_argv(sandbox, "start", "--no-qr", "--port", str(PORT_AUTO))
     out_path = sandbox["home"].parent / START_OUTPUT
     with open(out_path, "w") as fh:
         proc = subprocess.Popen(argv, env=sandbox["env"], stdout=fh,
@@ -954,54 +1057,73 @@ def _await_child(proc, trail, *, stall=CHILD_STAGE_STALL, cap=CHILD_LIFE_CAP):
         time.sleep(0.05)
 
 
-def _wait_listening(sandbox, port, timeout=CHILD_READY_BUDGET):
-    """Block until the child's OWN log says it is listening on `port`.
+def _await_listening(sandbox, timeout=CHILD_READY_BUDGET):
+    """Block until the child's OWN log says it is listening; return that port.
 
     The log line — not a port probe — is the readiness here: `_serve` writes it
     after every bind and it is the line the operator reads, and unlike a probe
     it also proves the child got far enough into startup to have a log.
+
+    The port comes OUT of the line instead of being handed in: every child binds
+    `PORT_AUTO`, so the number is the kernel's and this is the only place it can
+    be learned (see :data:`PORT_AUTO` for why reserving one in the parent is the
+    wrong shape). A port of 0 in the line would mean the child logged the number
+    it was ASKED for rather than the one it bound — product drift, not a slow
+    runner, so it is named rather than returned to a caller that would then wait
+    on a listener that cannot exist.
     """
-    needle = f"HSCC API listening on 127.0.0.1:{port}"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             text = sandbox["log"].read_text()
         except FileNotFoundError:
             text = ""
-        if needle in text:
-            return
+        found = LISTENING_RE.search(text)
+        if found:
+            port = int(found.group(1))
+            assert port != 0, (
+                f"the child logged its own port as 0 — it bound nothing and "
+                f"reported the number it was asked for. That is a regression in "
+                f"the port adoption api_server.create_servers does today "
+                f"(`if port == 0: port = server.server_address[1]`), not a slow "
+                f"runner.\n{_describe(sandbox)}")
+            return port
         time.sleep(0.05)
     raise AssertionError(
-        f"the child never reached {needle!r} within {timeout}s.\n"
-        f"{_describe(sandbox)}")
+        f"the child never wrote its own {LISTENING_RE.pattern!r} line within "
+        f"{timeout}s.\n{_describe(sandbox)}")
 
 
-def _wait_serving_child(sandbox, port, not_pid, timeout=CHILD_READY_BUDGET):
-    """:func:`_wait_listening` plus the promise `start` makes on top of it.
+def _wait_serving_child(sandbox, not_pid, timeout=CHILD_READY_BUDGET):
+    """`:func:`_await_listening`` plus the promise `start` makes on top of it.
 
     `hscc api start` is a double fork, so the pid the caller must signal is not
     the pid of the CLI process it spawned: the CLI parent writes its OWN pid
     into the pid file and the server grandchild overwrites it a moment later.
     The pid to return therefore has to be alive AND not the harness's, or the
     caller would SIGTERM a process that has already exited and test nothing.
+
+    Returns `(server_pid, port)` — the port the serving process reports, read
+    out of its own log line.
     """
-    _wait_listening(sandbox, port, timeout)
+    port = _await_listening(sandbox, timeout)
     deadline = time.time() + timeout
     while time.time() < deadline:
         pid = _read_int(sandbox["pid_file"])
         if pid and pid != not_pid and _alive(pid):
-            return pid
+            return pid, port
         time.sleep(0.05)
     raise AssertionError(
-        f"`hscc api start` served but never left a live pid of its own in "
-        f"{sandbox['pid_file'].name} within {timeout}s (the caller would have "
-        f"had nothing to signal).\n{_describe(sandbox)}")
+        f"`hscc api start` served on port {port} but never left a live pid of "
+        f"its own in {sandbox['pid_file'].name} within {timeout}s (the caller "
+        f"would have had nothing to signal).\n{_describe(sandbox)}")
 
 
 # --------------------------------------------------------------------------- #
 # the user-reachable path: `hscc api start`, then `hscc api stop`
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.loadstress
 def test_api_stop_tears_the_sidecar_down(sandbox):
     """The defect, from the verb an operator actually types.
 
@@ -1014,11 +1136,10 @@ def test_api_stop_tears_the_sidecar_down(sandbox):
     it: the sidecar pid is GONE, the fake bridge recorded the shutdown, and the
     stop reported a clean stop rather than having to escalate to SIGKILL.
     """
-    port = _free_port()
-    started = _start_api(sandbox, port)
+    started = _start_api(sandbox)
     assert started.returncode == 0, (
         f"`hscc api start` failed: {started.stdout}\n{started.stderr}")
-    pid = _wait_serving_child(sandbox, port, not_pid=started.pid)
+    pid, _port = _wait_serving_child(sandbox, not_pid=started.pid)
 
     stopped = _run(sandbox, "stop")
     try:
@@ -1064,9 +1185,136 @@ def test_api_stop_tears_the_sidecar_down(sandbox):
 
 
 # --------------------------------------------------------------------------- #
+# the leak guard: a hard kill of the harness's group must take the whole tree
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.loadstress
+def test_a_hard_kill_of_the_harness_group_takes_the_double_forked_server(sandbox):
+    """A leg-level hard kill must not be able to orphan `hscc api start`.
+
+    This is the case that proves the leak is closed, and it is deliberately NOT
+    a teardown test. It performs the kill a queue-gate timeout performs
+    (`hscc_daemon/merge_queue.py:_kill_gate_group`: SIGKILL the group, with no
+    Python left afterwards to clean up) and then asks whether anything of the
+    child survived. No fixture teardown runs on this path, and that omission is
+    the scenario rather than an oversight — a SIGKILL of the leg skips every
+    `finally:` and every generator teardown, so the process group is the only
+    thing a test can own a descendant with.
+
+    Before this card's fix the case was red, and for a reason no fixture could
+    paper over: `api_cli._handle_start` calls `os.setsid()` (api_cli.py:986), so
+    the serving grandchild had already left the group and the group-wide kill
+    found nobody. The server and the fake `hermes serve` inside it stayed on the
+    host holding the sandbox token, and the only cleanup that had ever reached
+    them was the pid-file poll in the fixture — which is precisely the cleanup a
+    hard-killed leg does not run.
+
+    Non-vacuity, asserted BEFORE anything is killed and sampled before this case
+    cleans up after itself (a guard arm that samples after its own sweep passes
+    on the arm's hygiene rather than on the mechanism):
+
+      * the dummy sidecar is a LIVE pid — otherwise "it is gone" is free; and
+      * the serving grandchild's pgid IS the harness's pid — the one property a
+        group kill depends on and the one a removed `os.setsid` fence breaks. It
+        is named here rather than left to the death assertion below, which
+        cannot tell "the fence stopped working" apart from "the kill missed".
+    """
+    started = _start_api(sandbox)
+    assert started.returncode == 0, (
+        f"`hscc api start` failed: {started.stdout}\n{started.stderr}")
+    server_pid, _port = _wait_serving_child(sandbox, not_pid=started.pid)
+
+    assert _have(sandbox, SIDECAR_STARTED), (
+        "the sidecar never started, so 'it died with the group' below would be "
+        f"satisfied by a run that never had one: {_describe(sandbox)}")
+    sidecar_pid = _read_int(sandbox["sidecar_pid"])
+    assert sidecar_pid is not None and _alive(sidecar_pid), (
+        f"the dummy sidecar (pid {sidecar_pid}) is not a live process, so "
+        f"nothing below proves a leak was closed: {_describe(sandbox)}")
+
+    # Sampled now, while both are alive and before anything of ours sweeps.
+    pgid = os.getpgid(server_pid)
+    assert pgid == started.pid, (
+        f"the serving grandchild (pid {server_pid}) lives in process group "
+        f"{pgid}, not in the harness's group {started.pid}. Nothing the test "
+        f"owns can reach it from there: a group-wide SIGKILL — the queue gate's "
+        f"timeout, or a SIGKILL of the leg, both of which skip every fixture "
+        f"teardown — leaves the server and its sidecar running on the host "
+        f"holding the sandbox token. The harness fences `os.setsid` for the "
+        f"`start` verb precisely to keep this true (see HARNESS); that fence has "
+        f"stopped applying.")
+
+    # The kill a gate timeout performs, on the group the harness owns.
+    try:
+        os.killpg(started.pid, signal.SIGKILL)
+    except OSError as exc:
+        pytest.fail(
+            f"the group kill found nobody ({exc}) although a live member was "
+            f"just observed in it (server pid {server_pid}, pgid {pgid}): the "
+            f"grandchild has left the group the harness owns, which is the "
+            f"orphan path this case exists to close.")
+
+    assert _await_gone(server_pid), (
+        f"the serving grandchild (pid {server_pid}) survived a SIGKILL of its "
+        f"own process group — it is orphaned, still serving the sandbox token "
+        f"and still the parent of the sidecar below. {_describe(sandbox)}")
+    assert _await_gone(sidecar_pid), (
+        f"the sidecar (pid {sidecar_pid}) outlived a SIGKILL of the group "
+        f"`hscc api start` was spawned into. A hard kill of this leg therefore "
+        f"still orphans a real process holding the sandbox token, which is the "
+        f"leak this card was written to close. {_describe(sandbox)}")
+
+
+@pytest.mark.loadstress
+def test_the_reap_every_teardown_calls_takes_the_serving_childs_sidecar(sandbox):
+    """`_reap` must reach the bridge's subprocess, not just the pid it waited on.
+
+    `_reap` is the cleanup every case in this file ends up in — the `finally:` of
+    each behavioural case and the fixture teardown behind them — so it, and not
+    a test, decides whether a RED leaves an orphan. It used to skip its `killpg`
+    whenever the direct child had already exited, which for the `start` arm is
+    the normal case: the CLI parent returns as soon as the server is up, so the
+    gate was false exactly when the grandchild and the sidecar most needed
+    reaching.
+
+    Drives the real `_reap` rather than a hand-written kill, because the point is
+    that this function is what runs when a case fails. The sidecar pid is
+    sampled before `_reap` is called: an arm that reads it afterwards would see
+    a dead pid thanks to its own cleanup and pass on a mutated `_reap` that only
+    kills the direct child.
+    """
+    proc = _popen(sandbox, "serve", str(PORT_AUTO))
+    trail = _ChildTrail(proc)
+    try:
+        _await_listening(sandbox)
+        assert _have(sandbox, SIDECAR_STARTED), (
+            "the sidecar never started, so the assertions below prove nothing "
+            f"about a teardown: {_describe(sandbox)}")
+        sidecar_pid = _read_int(sandbox["sidecar_pid"])
+        assert sidecar_pid is not None and _alive(sidecar_pid), (
+            f"the dummy sidecar (pid {sidecar_pid}) is not a live process, so "
+            f"nothing below proves anything: {_describe(sandbox)}")
+
+        _reap(proc)                      # the real cleanup path, unmodified
+
+        assert proc.poll() is not None, (
+            "`_reap` returned with its direct child still un-reaped")
+        assert _await_gone(sidecar_pid), (
+            f"the sidecar (pid {sidecar_pid}) outlived `_reap`. A red case "
+            f"therefore still leaves a fake `hermes serve` on the host holding "
+            f"the sandbox token: `_reap` reached only the direct child "
+            f"(`proc.kill()` hits one pid), and the sidecar is a grandchild of "
+            f"the group. {_describe(sandbox)}")
+    finally:
+        trail.finish()
+        _reap(proc)
+
+
+# --------------------------------------------------------------------------- #
 # the same exit, with an observable exit code
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
     """A signalled `_serve` must RETURN, so its `finally:` gets to run.
@@ -1087,15 +1335,14 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
     introduced: a handler that blocks instead of setting the flag hangs the same
     signal an operator in the foreground sends.
     """
-    port = _free_port()
-    proc = _popen(sandbox, "serve", str(port))
+    proc = _popen(sandbox, "serve", str(PORT_AUTO))
     trail = _ChildTrail(proc)
     try:
         # No pid file here: this arm runs `_serve` in the foreground exactly as
         # `python -m api_server serve` does, and that entry path deliberately
         # writes none. The signal goes to the pid WE spawned, so there is no
         # double-fork to resolve and no pid file to wait for.
-        _wait_listening(sandbox, port)
+        _await_listening(sandbox)
         assert _have(sandbox, SIDECAR_STARTED), (
             f"the sidecar never started, so nothing below proves a teardown: "
             f"{_describe(sandbox)}")
@@ -1129,6 +1376,7 @@ def test_the_serving_loop_returns_instead_of_being_cut_short(sandbox, sig):
         _reap(proc)
 
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
     """A serving process must not inherit its stop signal BLOCKED.
@@ -1150,11 +1398,10 @@ def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
     The premise is asserted from the child's own `stage: harness-up` line: a
     green here cannot be a run that forgot to block the signal.
     """
-    port = _free_port()
-    proc = _popen_with_blocked_signal(sandbox, {sig}, "serve", str(port))
+    proc = _popen_with_blocked_signal(sandbox, {sig}, "serve", str(PORT_AUTO))
     trail = _ChildTrail(proc)
     try:
-        _wait_listening(sandbox, port)
+        _await_listening(sandbox)
         upstream = next(
             (line for line in trail.text().splitlines()
              if line.startswith(STAGE_PREFIX + " harness-up")), "")
@@ -1194,6 +1441,7 @@ def test_a_stop_signal_the_spawner_blocked_is_still_honoured(sandbox, sig):
         _reap(proc)
 
 
+@pytest.mark.loadstress
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
     """A stop arriving mid-log-write must still tear the sidecar down.
@@ -1227,8 +1475,7 @@ def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
     (run 45081900690, both arms, empty stdout and no `api.log`) with the child not
     yet entered into the handler at all — and the child had no way to say so.
     """
-    port = _free_port()
-    proc = _popen(sandbox, "serve-lograce", str(port), sig.name)
+    proc = _popen(sandbox, "serve-lograce", str(PORT_AUTO), sig.name)
     trail = _ChildTrail(proc)
     try:
         run = _await_child(proc, trail)

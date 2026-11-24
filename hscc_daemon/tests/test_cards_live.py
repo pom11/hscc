@@ -4,6 +4,7 @@ Offline only: a fake collector, a fake clock, worker logs and fake session
 stores under tmp_path. NEVER the operator's live boards or ~/.hermes.
 """
 
+import datetime
 import io
 import json
 import os
@@ -24,6 +25,22 @@ NOW = 1_800_000_000.0
 @pytest.fixture(autouse=True)
 def _no_real_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setattr(kanban_live, "HERMES_HOME", str(tmp_path / "hermes-home"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_project_registry(tmp_path, monkeypatch):
+    """Hermeticity (t_6702105c): no test here may read the operator's registry.
+
+    ``Monitor.refresh_merge_queue`` asks the flightdeck PROJECT registry whether
+    a queue is enabled — host state, and the reason a merge-queue block would
+    otherwise appear or vanish depending on the machine. The pin points the
+    seam at a missing file: an absent registry is "no projects", which is both
+    the CI posture (see test_kanban_registry_hermetic.py) and the pre-change
+    behaviour for every test in this file. A test that wants a queue installs
+    its own registry in its body, which overrides this.
+    """
+    monkeypatch.setenv("FLIGHTDECK_REGISTRY",
+                       str(tmp_path / "absent-registry.yaml"))
 
 
 class Clock:
@@ -979,3 +996,287 @@ def test_the_reasoning_columns_read_are_the_measured_pair():
     assert cards_live.REASONING_COLUMNS == ("reasoning", "reasoning_content")
     assert not any(k in c for c in cards_live.REASONING_COLUMNS
                    for k in ("details", "codex"))
+
+
+# ── merge queue block ──────────────────────────────────────────────────────
+#
+# A card's work is not finished until its PR lands, so the monitor shows the
+# local merge queue under the waiting-card rows. Every test here plants the
+# ledger in a temp HSCC_HOME (conftest's autouse ~/.hscc seal plus an explicit
+# HSCC_HOME, so the live ledger is never read) and pins FLIGHTDECK_REGISTRY, so
+# the answer cannot depend on the machine. No test ticks the queue and the
+# suite's gh probe fence proves `gh` is never reached.
+
+def _mq_iso(seconds_ago):
+    return datetime.datetime.fromtimestamp(NOW - seconds_ago,
+                                           datetime.timezone.utc).isoformat()
+
+
+def _mq_entry(pr, card, *, age_s, **over):
+    entry = {"pr": pr, "card": card, "assignee": "worker",
+             "enqueued_at": _mq_iso(age_s), "attempts": 0}
+    entry.update(over)
+    return entry
+
+
+def _mq_doc(**over):
+    """A ledger shaped the way the daemon writes one: an in-flight claim, a
+    queued FIFO, a wait list (one entry carrying a stored error) and a last
+    outcome. Ages are fixed against ``NOW`` so the printed ages are pinned."""
+    doc = {"version": 1, "projects": {"alpha": {
+        "enabled": True,
+        "paused": False,
+        "queue": [_mq_entry(12, "t_b", age_s=600)],
+        "waiting": [_mq_entry(13, "t_c", age_s=3600, attempts=2,
+                              last_error="gate failed: bash scripts/run_tests.sh hscc-api\n"
+                                         "2 failed, 114 passed"),
+                    _mq_entry(14, "t_d", age_s=1800)],
+        "in_flight": _mq_entry(11, "t_a", age_s=480, attempts=1,
+                               branch="wt/t_a", stage="gating"),
+        "last": {"pr": 10, "result": "merged", "at": _mq_iso(7200)},
+    }}}
+    doc["projects"]["alpha"].update(over)
+    return doc
+
+
+def _mq_doc_three():
+    """Three enabled projects with content, for the global line.
+
+    ``alpha`` is :func:`_mq_doc` (a live claim, a queue, a wait list, a last
+    outcome); ``beta`` has a queue and nothing claimed — the `idle` case;
+    ``gamma`` has a claim and a wait list but no ``last``. ``gamma`` carries no
+    ledger ``enabled`` of its own, so a test can switch it off from the registry
+    and prove the line covers ENABLED projects only.
+    """
+    alpha = _mq_doc()
+    return {"version": 1, "projects": {
+        "alpha": alpha["projects"]["alpha"],
+        "beta": {"enabled": True, "paused": False,
+                 "queue": [_mq_entry(21, "t_e", age_s=900)],
+                 "waiting": [], "in_flight": None,
+                 "last": {"pr": 20, "result": "failed", "at": _mq_iso(900)}},
+        "gamma": {"paused": False, "queue": [],
+                  "waiting": [_mq_entry(32, "t_f", age_s=600)],
+                  "in_flight": _mq_entry(31, "t_g", age_s=180, stage="rebasing"),
+                  "last": None}}}
+
+
+def _mq_registry(tmp_path, *, names=("alpha",), enabled=True, disabled=()):
+    """A registry whose projects declare the queue on (or off).
+
+    ``enabled`` is declared explicitly so the eligibility rule is the registry's
+    answer, not a git/remote probe against a repo path that only exists on this
+    host — the same reason test_merge_queue.py's helper writes it. ``disabled``
+    names the projects that declare it off, which is how a test covers a
+    registry-disabled project beside two enabled ones.
+    """
+    body = ["projects:"]
+    for name in names:
+        on = enabled and name not in disabled
+        body += [f"- name: {name}", f"  repo: {tmp_path / 'repo'}",
+                 "  merge_queue:",
+                 f"    enabled: {'true' if on else 'false'}",
+                 '    gates: ["true"]']
+    path = tmp_path / "mq-registry.yaml"
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _mq_home(tmp_path, monkeypatch, doc=None, *, raw=None, enabled=True,
+             registry=True, names=("alpha",), disabled=()):
+    """Point HSCC_HOME at a temp home holding one ledger; return its path.
+
+    ``raw`` writes the file verbatim (the corrupt-JSON case); neither ``doc``
+    nor ``raw`` leaves the ledger absent; ``registry=False`` points the seam at
+    a missing file.
+    """
+    home = tmp_path / "mq-home"
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "merge-queue-state.json"
+    if raw is not None:
+        path.write_text(raw, encoding="utf-8")
+    elif doc is not None:
+        path.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setenv("HSCC_HOME", str(home))
+    monkeypatch.setenv(
+        "FLIGHTDECK_REGISTRY",
+        _mq_registry(tmp_path, names=names, enabled=enabled,
+                     disabled=disabled) if registry
+        else str(tmp_path / "absent-registry.yaml"))
+    return str(path)
+
+
+def _mq_mon(tmp_path, monkeypatch, *, ready=(), **kw):
+    """A monitor with the queue attached, exactly the way the loops do it."""
+    _mq_home(tmp_path, monkeypatch, **kw)
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path),
+                  collect=lambda: snap([], ready=list(ready)))
+    mon.refresh()
+    mon.refresh_merge_queue()
+    return mon
+
+
+def test_queue_line_is_one_global_line_for_every_enabled_project(tmp_path,
+                                                                 monkeypatch):
+    """One `mq` line, one segment per enabled project, ` | ` apart.
+
+    The whole spec in one pinned string: the PR the queue is working, its stage
+    and age, the queue/wait counts, the project's last outcome — and a project
+    whose queue is disabled is not on the line even with a live claim.
+    """
+    mon = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc_three(),
+                  names=("alpha", "beta", "gamma"), disabled=("gamma",))
+    assert cards_live.merge_queue_lines(mon)[0].plain == (
+        "mq  alpha #11 gating 8m · 1q · 2w · last #10 merged 2h00m"
+        " | beta idle · 1q · 0w · last #20 failed 15m")
+    out = render_text(mon)
+    assert "gamma" not in out                       # disabled by the registry
+    assert "queue alpha" not in out                 # the per-project block is gone
+
+
+def test_queue_line_costs_one_row_whatever_the_queue_holds(tmp_path, monkeypatch):
+    """Three enabled projects with content — the foot still spends ONE line.
+
+    The block this replaces spent up to 9 (`MQ_MAX_LINES` + the `+N more`
+    marker), and `render` sizes the card grid as `height - 1 - len(foot)`.
+    """
+    mon = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc_three(),
+                  names=("alpha", "beta", "gamma"))
+    lines = cards_live.merge_queue_lines(mon)
+    assert len(lines) == 1
+    assert "alpha" in lines[0].plain and "beta" in lines[0].plain \
+        and "gamma" in lines[0].plain
+
+
+def test_queue_line_drops_last_then_whole_projects_to_fit(tmp_path, monkeypatch):
+    """The overflow order the operator asked for: history first, then projects."""
+    mon = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc_three(),
+                  names=("alpha", "beta", "gamma"))
+    full = cards_live.merge_queue_lines(mon)[0].plain
+    # The `· last …` cells alone cost more than the 10 columns taken away, so
+    # this width is reachable only by dropping them — every project stays.
+    mid = cards_live.merge_queue_lines(mon, width=len(full) - 10)[0].plain
+    assert "· last" not in mid
+    assert all(p in mid for p in ("alpha", "beta", "gamma"))
+    # Too narrow even without them: whole projects go from the END, counted.
+    alpha_only = "mq  alpha #11 gating 8m · 1q · 2w"
+    tight = cards_live.merge_queue_lines(
+        mon, width=len(alpha_only) + len("  +2 proj"))[0].plain
+    assert tight == alpha_only + "  +2 proj"
+
+
+def test_queue_line_shows_idle_for_a_project_with_nothing_claimed(tmp_path,
+                                                                  monkeypatch):
+    mon = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc(in_flight=None))
+    assert cards_live.merge_queue_lines(mon)[0].plain == (
+        "mq  alpha idle · 1q · 2w · last #10 merged 2h00m")
+
+
+def test_queue_line_sits_under_the_waiting_card_rows(tmp_path, monkeypatch):
+    ready = [{"board": "b", "id": "t_9", "worker": "qa", "wait_s": 300,
+              "title": "waiting card", "priority": 0}]
+    mon = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc(), ready=ready)
+    out = render_text(mon)
+    assert out.index("⏳ b · t_9") < out.index("mq  alpha")
+
+
+def test_queue_line_prints_nothing_when_the_queue_is_empty(tmp_path, monkeypatch):
+    """A stale `last` alone is not a queue: a merged PR is not in flight."""
+    mon = _mq_mon(tmp_path, monkeypatch,
+                  doc=_mq_doc(queue=[], waiting=[], in_flight=None))
+    assert cards_live.merge_queue_lines(mon) == []
+    out = render_text(mon)
+    assert "mq  alpha" not in out and "last #10" not in out
+
+
+def test_queue_line_prints_nothing_when_the_state_file_is_missing(tmp_path,
+                                                                  monkeypatch):
+    path = _mq_home(tmp_path, monkeypatch)          # no doc, no raw → no file
+    assert not os.path.exists(path)
+    mon = _mq_mon(tmp_path, monkeypatch)
+    assert "mq  alpha" not in render_text(mon)
+    assert cards_live.merge_queue_view() != {}      # the read itself is well-formed
+
+
+def test_queue_line_survives_a_corrupt_or_unreadable_state_file(tmp_path,
+                                                                monkeypatch):
+    mon = _mq_mon(tmp_path, monkeypatch, raw="{ this is not json {{{")
+    assert "mq  alpha" not in render_text(mon)
+    path = _mq_home(tmp_path, monkeypatch)
+    os.remove(path)
+    os.mkdir(path)                                  # unreadable: a directory
+    mon = _mq_mon(tmp_path, monkeypatch)
+    assert "mq  alpha" not in render_text(mon)
+
+
+def test_queue_line_prints_nothing_for_a_project_whose_queue_is_off(tmp_path,
+                                                                    monkeypatch):
+    """The ledger's own override wins (as in `merge-queue status`), and so does
+    an invisible registry: a project the read model cannot describe is off."""
+    off = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc(enabled=False))
+    assert "mq  alpha" not in render_text(off)
+    no_registry = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc(), registry=False)
+    assert "mq  alpha" not in render_text(no_registry)
+
+
+def test_queue_line_marks_a_paused_queue(tmp_path, monkeypatch):
+    """The one flag kept from the old title: a paused queue says why nothing
+    moves, and it is the only thing on the line allowed to explain itself."""
+    mon = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc(paused=True))
+    assert "alpha (paused) #11 gating 8m" in cards_live.merge_queue_lines(mon)[0].plain
+
+
+def test_status_line_carries_the_in_flight_pr_and_stays_quiet_without_one(
+        tmp_path, monkeypatch):
+    mon = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc())
+    assert "mq #11" in cards_live.status_line(mon, False, False, False, NOW).plain
+    idle = _mq_mon(tmp_path, monkeypatch, doc=_mq_doc(in_flight=None))
+    assert "mq -" in cards_live.status_line(idle, False, False, False, NOW).plain
+    empty = _mq_mon(tmp_path, monkeypatch,
+                    doc=_mq_doc(queue=[], waiting=[], in_flight=None))
+    line = cards_live.status_line(empty, False, False, False, NOW).plain
+    assert " mq " not in line and "slots 0" in line
+
+
+def test_snapshot_wires_the_queue_line_into_the_cli(tmp_path, monkeypatch):
+    """`hscc cards monitor` (the non-live render) is the surface the operator
+    asked about — the line has to reach it, not just the pure render.
+
+    No age is asserted: the CLI builds its own monitor on the real clock, while
+    the ledger stamps are pinned to ``NOW``.
+    """
+    _mq_home(tmp_path, monkeypatch, doc=_mq_doc())
+    monkeypatch.setattr(Monitor, "_default_collect", lambda self: snap([]))
+    console = make_console(file=io.StringIO(), width=160, height=30,
+                           color_system=None)
+    assert cmd_cards(["monitor"], console=console) == 0
+    out = console.file.getvalue()
+    assert "mq  alpha #11 gating" in out
+    assert "gate failed: bash scripts/run_tests.sh hscc-api" not in out
+    assert "mq #11" in out                         # the header token too
+
+
+def test_the_monitor_never_writes_the_ledger(tmp_path, monkeypatch):
+    """Read-only is a promise, not a comment: the file stays byte-identical and
+    no lock or worktree directory appears under the temp home."""
+    path = _mq_home(tmp_path, monkeypatch, doc=_mq_doc())
+    with open(path, encoding="utf-8") as f:
+        before = (os.stat(path).st_mtime_ns, f.read())
+    mon = Monitor(clock=Clock(), hermes_home=str(tmp_path), collect=lambda: snap([]))
+    mon.refresh()
+    mon.refresh_merge_queue()
+    mon.poll_logs()
+    render_text(mon)
+    cards_live.status_line(mon, False, False, False, NOW)
+    with open(path, encoding="utf-8") as f:
+        assert (os.stat(path).st_mtime_ns, f.read()) == before
+    assert os.listdir(os.path.dirname(path)) == ["merge-queue-state.json"]
+
+
+def test_merge_queue_view_reports_nothing_when_the_read_fails(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("ledger unreadable in a way nobody predicted")
+
+    monkeypatch.setattr(cards_live.kanban_live, "attach_merge_queue", boom)
+    assert cards_live.merge_queue_view() == {}
+    assert cards_live.merge_queue_view(board="hscc") == {}
