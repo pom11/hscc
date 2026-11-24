@@ -265,8 +265,16 @@ def _cmd_stale(rest, json_mode, theme_name=None):
     if older_than is None:
         older_than = DEFAULT_STALE_DAYS
 
-    result = autodown.list_stale_tasks(
-        older_than=older_than, registered_only=True)
+    from hscc_daemon import board_pin
+    # t_4dcb34e6: ``hscc kanban stale`` (no ``--archive``) is the documented list
+    # verb, and the board opens inside it report a worker shell's pin conflict by
+    # appending a WARN to ``$HSCC_HOME/daemon.log`` — a file write inside a read
+    # (board_pin.py:192 -> :203 via guard_board(mode="read"):226). The WARN route is
+    # borrowed for this ONE call; the operator still gets it on stderr and
+    # ``_WARNED`` is deferred, not spent.
+    with board_pin.silent_read():
+        result = autodown.list_stale_tasks(
+            older_than=older_than, registered_only=True)
     tasks = result["tasks"]
 
     if json_mode:

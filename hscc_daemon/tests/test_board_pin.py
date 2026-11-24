@@ -858,3 +858,145 @@ def test_wedge_capped_assignees_without_a_pin_passes_board_through(
     assert not warnings, _warn_text(warnings)
     assert dw._capped_assignees(lib, "alpha", 2) == {"other"}
     assert lib.connects[-1][0] == "alpha"
+
+
+# --------------------------------------------------------------------------- #
+# the door invariant: a documented read writes NO file (t_4dcb34e6)
+# --------------------------------------------------------------------------- #
+#
+# ``_emit`` reports a conflict through ``daemon_ops.log``, which appends to
+# ``$HSCC_HOME/daemon.log``. So on a host whose env pin conflicts with the board a
+# read asks for, the documented read doors created that file *during the read* —
+# the latent class t_88abe739 measured and the doctor door guard cannot see,
+# because a sandbox never arms a pin. The doors now borrow the WARN route
+# (:func:`board_pin.silent_read`), which echoes to stderr instead of writing.
+#
+# Recipe from ``hscc-cluster/tests/test_doctor_tool.py::_seal_door_env``: sandbox
+# HOME plus the import-anchored log path, snapshot the tree around the REAL door
+# call, then prove the snapshot can see a write (canary) and that the conflict
+# branch really fired (stderr) — a guard that passes because the latent condition
+# never happened is the #704 hole, not a guard.
+
+def _tree(root):
+    """name -> bytes for every file under ``root`` ({} when absent)."""
+    from pathlib import Path
+    p = Path(root)
+    if not p.exists():
+        return {}
+    return {str(f.relative_to(p)): f.read_bytes()
+            for f in sorted(p.rglob("*")) if f.is_file()}
+
+
+def _board_file(path, marker):
+    """A board DB ON DISK with one blocked card — ``open_board_ro`` opens the
+    resolved path with a ``mode=ro`` URI, so the file has to exist for a read to
+    succeed at all (the in-memory fake conns serve ``connect_closing`` only)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, "
+                 "assignee TEXT, created_at INTEGER, block_kind TEXT, "
+                 "status TEXT, last_failure_error TEXT, "
+                 "consecutive_failures INTEGER, title TEXT)")
+    conn.execute("DELETE FROM tasks")
+    conn.execute("INSERT INTO tasks (id, assignee, created_at, block_kind, "
+                 "status, last_failure_error, consecutive_failures, title) "
+                 "VALUES ('t_b1','devops',1700000000,'dependency','blocked',"
+                 "'stuck',1,?)", (marker,))
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+class _ReadableFleetLib(_PinAwareLib):
+    """The measured resolver, with the boards present on disk and queryable."""
+
+    def __init__(self, root, slugs):
+        self.root = str(root)
+        self.slugs = list(slugs)
+        self.connects = []
+        self._by_path = {str(self._canonical(s)): _board_file(
+            self._canonical(s), s) for s in slugs}
+
+
+@pytest.fixture
+def sealed_log(tmp_path, monkeypatch):
+    """HOME + the two import-anchored ``daemon_ops`` paths, in one sandbox.
+
+    ``LOG_FILE``/``PID_FILE`` are bound at import (``daemon_ops.py:17-19``), so a
+    test that only moved HOME would assert about a file it cannot create while
+    quietly writing the operator's real log.
+    """
+    from types import SimpleNamespace
+    import hscc_daemon.daemon_ops as daemon_ops
+    home = tmp_path / "fakehome"
+    hscc = home / ".hscc"
+    hscc.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(daemon_ops, "LOG_FILE", str(hscc / "daemon.log"))
+    monkeypatch.setattr(daemon_ops, "PID_FILE", str(hscc / "daemon.pid"))
+    # The two dedupe sets are per-process; a stale one would make the presence
+    # control below read as a failure (or let a warning through from elsewhere).
+    monkeypatch.setattr(board_pin, "_WARNED", set())
+    monkeypatch.setattr(board_pin, "_MUTED_ECHOED", set())
+    return SimpleNamespace(home=home, hscc=hscc, log=hscc / "daemon.log")
+
+
+class TestReadDoorWritesNoLogFile:
+    """The invariant the doors advertise, guarded against the doors themselves."""
+
+    def test_blocked_listing_with_an_armed_pin_creates_no_log_file(
+            self, tmp_path, armed, sealed_log, capsys):
+        from hscc_daemon import kanban_blocked
+        lib = _ReadableFleetLib(tmp_path / "kanban-home",
+                                ["alpha", "beta", "default"])
+        before = _tree(sealed_log.home)
+
+        out = kanban_blocked.list_blocked_tasks(kanban_db=lib)
+        captured = capsys.readouterr()
+
+        assert len(out["tasks"]) == 3, out          # the read still ran every board
+        assert out["errors"] == [], out["errors"]
+        # Presence control: the pin conflict fired — this guard is not passing
+        # because nothing was pinned (the #704 hole).
+        assert "board-pin conflict" in captured.err, captured.err
+        assert board_pin.PIN_ENV in captured.err, captured.err
+        assert not sealed_log.log.exists(), (
+            "hscc kanban blocked created $HSCC_HOME/daemon.log during a read")
+        assert _tree(sealed_log.home) == before, (
+            f"a read wrote into the sandbox: "
+            f"{sorted(set(_tree(sealed_log.home)) ^ set(before))}")
+        (sealed_log.hscc / "canary.json").write_text("{}", encoding="utf-8")
+        assert _tree(sealed_log.home) != before, (
+            "the snapshot cannot see a write — the read-only claim proves nothing")
+
+    def test_the_conflict_is_still_loud_after_the_read_is_over(
+            self, tmp_path, armed, sealed_log, capsys):
+        """The borrow is returned: a later read outside any window keeps the file.
+
+        Muting the module would have made the conflict invisible to the daemon,
+        which is the fail-open PR #716 refuses to ship.
+        """
+        from hscc_daemon import kanban_blocked
+        lib = _ReadableFleetLib(tmp_path / "kanban-home", ["alpha", "beta"])
+        assert kanban_blocked.list_blocked_tasks(kanban_db=lib)["tasks"]
+        capsys.readouterr()
+        assert not sealed_log.log.exists()
+
+        board_pin.guard_board(lib, "beta", mode="read")     # outside a window
+
+        assert sealed_log.log.exists(), (
+            "the read never gave the WARN route back")
+        text = sealed_log.log.read_text(encoding="utf-8")
+        assert "board-pin conflict" in text, text
+
+    def test_the_budget_survives_the_window(self, tmp_path, armed, sealed_log,
+                                            capsys):
+        """``_WARNED`` is deferred, not spent — the read may be quiet, it may not
+        spend the process's one warning per (pin, board)."""
+        from hscc_daemon import kanban_blocked
+        lib = _ReadableFleetLib(tmp_path / "kanban-home", ["alpha", "beta"])
+        assert board_pin._WARNED == set()
+        kanban_blocked.list_blocked_tasks(kanban_db=lib)
+        capsys.readouterr()
+        assert board_pin._WARNED == set(), (
+            f"the read spent the once-per-process budget: {board_pin._WARNED}")
