@@ -1,7 +1,12 @@
 # Read surfaces that inherit a log write from a borrowed call — audit (t_88abe739)
 
-Base: `52494e03` (origin/main). Parent: t_2c218de8 (PR #716, **open, not merged** —
-its fix is therefore NOT in this base, and row `orch_wake_subs` still writes here).
+Base: `52494e03` (origin/main at authoring time), rebased onto `f2f8bc2d`. Parent:
+t_2c218de8 (PR #716) — **merged while this doc was open** (`1e024992`, then hardened by
+#732 `ce2dc23d`), so row `orch_wake_subs` no longer writes here and the fence §5 asks
+for already exists on main. Every measurement below was taken at the original base,
+where that fence did not exist yet: the `door:` row in §2 is that pre-fix door and is
+now closed. The other five surfaces are unaffected — none of the files carrying them
+changed in between, and their call sites are still unwrapped at this base.
 
 Verdict up front: **the class is real and it is not one instance.** Five documented
 read surfaces create `$HSCC_HOME/daemon.log` today, all through ONE borrowed seam.
@@ -21,7 +26,7 @@ module dict *and* writes, gated by a `warned` flag that the write consumes:
 | `autodown._note_kanban_unavailable` | `hscc_daemon/autodown.py:829` (log at `:842`) | `_KANBAN_LOAD["warned"]` | `_has_active_work:549`, `_board_has_active_work:578`, `_load_kanban_db_or_default:877`, `:897` |
 | `autodown._note_prci_unavailable` | `hscc_daemon/autodown.py:1440` (log at `:1453`) | `_PRCI_LOAD["warned"]` | `_has_active_pr_ci:1380`, `:1396` |
 | `board_pin._emit` | `hscc_daemon/board_pin.py:192` (log at `:203`) | `_WARNED` set | `guard_board(mode="read")` at `:226` ← `open_board:232`, `open_board_ro:257`, `resolve_board_db_path:284` |
-| `kanban_live._note_caps_unreadable` | `hscc_daemon/kanban_live.py:145` (log at `:156`) | `_CAPS_READ["warned"]` | `_read_caps:187` (kanban/cards monitor) |
+| `kanban_live._note_caps_unreadable` | `hscc_daemon/kanban_live.py:149` (log at `:160`) | `_CAPS_READ["warned"]` | `_read_caps:191` (kanban/cards monitor) |
 | `node_pauses._warn` | `hscc_daemon/node_pauses.py:96` (log at `:106`) | module `_WARNED` | the pause-file **parser** `:234,:253,:261,:273,:280,:289,:313,:320,:326,:353` → `hscc node paused` |
 | `kanban_pause._warn_pin_once` | `hscc_daemon/kanban_pause.py:200` (log at `:213`) | module `_WARNED` | read-refused branch `:291` |
 
@@ -32,15 +37,17 @@ autodown — `board_db_paths:469`, `_has_active_work:538`, `list_stale_tasks:654
 and each is a read. Every module that borrows that seam inherits the write:
 
 * `hscc_daemon/kanban_blocked.py:199` (`hscc kanban blocked`) and `:262` (`stale`)
-* `hscc_daemon/kanban_live.py:382` (`hscc kanban monitor`, `hscc cards monitor`)
+* `hscc_daemon/kanban_live.py:386` (`hscc kanban monitor`, `hscc cards monitor`)
 * `hscc_daemon/autodown.py:538` / `:654` — via `_has_active_work()` and
   `list_stale_tasks()` inside `_status_interlock_context` (`:1744`, calls at `:1754`,
   `:1757`, `:1776`) ← `status_snapshot` (`:1802`) ← `autodown_cli._cmd_status`
   (`autodown_cli.py:223`, call at `:234`), ← agent tool `autodown_status`
   (`hscc-cluster/autodown_tools.py::_report_status`) ←
   `GET /v1/autodown/status` (`hscc-api/routes_autodown.py:90`, handler `:168`)
-* `hscc-bootstrap/doctor_orch_subs.py:190` (`autodown.board_db_paths`) — the
-  parent's instance, fixed in #716.
+* `hscc-bootstrap/doctor_orch_subs.py:265` (`autodown.board_db_paths`) — the
+  parent's instance, fixed in #716: that row now borrows the logger for the ONE
+  call and gives it back in `finally` together with the `_KANBAN_LOAD["warned"]`
+  budget (`:181-193`). That helper is the shape §5 asks the other doors to copy.
 
 ## 2. Measured, not reasoned
 
@@ -113,8 +120,12 @@ do not weaken the door guard:
    `_PRCI_LOAD["warned"]`** (the once-per-process budget — the write must not be
    *spent*, only deferred, or the daemon loses its one WARN forever). `_KANBAN_LOAD`
    ok/reason stays recorded, so `hscc autodown status` still owns the answer.
+   **This helper is no longer hypothetical** — #716 shipped exactly it for
+   `_KANBAN_LOAD`, inside the consumer (`doctor_orch_subs.py:181-193`). The card is
+   therefore "lift that shape to the seam and point the existing consumer at it",
+   not "invent it"; `_PRCI_LOAD` is the half nobody has covered yet.
 2. Wrap the four read doors: `autodown_cli._cmd_status`'s `status_snapshot()` call,
-   `kanban_blocked.py:199` and `:262`, `kanban_live.py:382`.
+   `kanban_blocked.py:199` and `:262`, `kanban_live.py:386`.
 3. Same treatment for `board_pin` reads (`_WARNED`), `kanban_live._CAPS_READ`,
    `node_pauses._WARNED` — each is a separate call site, each has its own budget.
 4. Add the snapshot guard **in the same commit as the fix**, per surface (a red
