@@ -2616,7 +2616,7 @@ def _hand_back_own_red(project, cfg, base, candidates, *, state_path, base_sha,
     return sorted(patches)
 
 
-# ── wait-list expiry: the queue eventually gives up ──────────────────────────
+# ── wait-list expiry: the queue eventually gives up ─────────────────────────
 #
 # Everything above KEEPS the entry: a red PR is refreshed once per base commit,
 # handed back once per base commit, and goes on waiting.  Nothing decided when
