@@ -505,14 +505,22 @@ class TestMissingAndHangingTools:
         assert [e["name"] for e in result["cache"]
                 if e["status"] == "timed-out"] == [wc.BREW_NAME], result["cache"]
         # The claim the case is NAMED for, stated as a fact about the plan rather
-        # than as a race: nothing may be left unattempted. `uv`/`npm` are planned
-        # BEFORE the hang, so `ran` alone cannot see an abort — an engine that
-        # `break`s out of the loop on the first failing command kept this case
-        # green (measured: mutation "stop the pass after an error status" ->
-        # 1 passed), because everything it checked had already run. Whatever sits
-        # after the hang in the plan must still have been reached.
-        left = [e["name"] for e in result["cache"] if e["status"] == "planned"]
-        assert left == [], f"the pass stopped on the hang, never attempted: {left}"
+        # than as a race. Two halves, because an abort has two shapes: `uv`/`npm`
+        # are planned BEFORE the hang, so `ran` alone cannot see an abort at all —
+        # an engine that `break`s out of the loop on the first failing command kept
+        # this case green (measured: "stop the pass after an error status" ->
+        # 1 passed) — and it kept it green after a first attempt at this pin that
+        # only looked for entries left `planned`, because the loop appends each
+        # entry BEFORE running it, so an abort leaves those actions with NO entry
+        # rather than a `planned` one. So: one entry per planned action, in plan
+        # order, and none of them still unattempted.
+        wanted = [str(a.get("name") or "")
+                  for a in (plan.get("cache_actions") or []) if isinstance(a, dict)]
+        got = [e["name"] for e in result["cache"]]
+        assert got == wanted, ("the pass stopped on the hang; never attempted: "
+                               f"{[n for n in wanted if n not in got]}")
+        assert [e["name"] for e in result["cache"]
+                if e["status"] == "planned"] == [], result["cache"]
         ran = {e["name"] for e in result["cache"] if e["status"] == "ran"}
         assert {wc.UV_NAME, wc.NPM_NAME} <= ran, "the pass stopped on the hang"
 
