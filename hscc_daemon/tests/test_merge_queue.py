@@ -1335,7 +1335,7 @@ def test_remove_during_gate_cancels_before_push_and_never_merges(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 7, card="t_removed", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
         return "pass", ""
 
@@ -1367,7 +1367,7 @@ def test_pause_or_disable_during_gate_stops_before_push_and_keeps_entry(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 8, card="t_hold", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         if action == "pause":
             mq.set_paused("alpha", True, path=_state(tmp_path))
         else:
@@ -1679,7 +1679,7 @@ def test_view_shows_the_live_gating_stage_while_the_gate_runs(tmp_path,
                     path=_state(tmp_path))
     seen = {}
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         seen.update(mq.view(state_path=_state(tmp_path),
                             registry_path=registry))
         return "fail", "gate exploded"
@@ -2658,7 +2658,7 @@ def test_gate_heartbeat_advances_the_stream_while_the_gate_runs(tmp_path,
     seen = []          # (timestamp, stamp) per DISTINCT stamp read in-leg
     leg = {}
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         leg["start"] = time.monotonic()
         deadline = leg["start"] + 10.0
         while time.monotonic() < deadline:
@@ -2714,7 +2714,11 @@ def test_heartbeat_stops_the_moment_the_gate_leg_ends(tmp_path, monkeypatch):
 
     interval = 0.2
     monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
-    monkeypatch.setattr(mq, "_run_gate", lambda c, w, t: ("pass", ""))
+    # Stub matches the real `_run_gate` signature, `cancel_check` included: a
+    # stub that silently absorbed `**kwargs` would keep passing if the parameter
+    # were renamed, and the real caller would then be the only thing that knows.
+    monkeypatch.setattr(mq, "_run_gate",
+                        lambda c, w, t, cancel_check=None: ("pass", ""))
 
     result = mq.tick(state_path=_state(tmp_path),
                      root=str(tmp_path / "queue"), registry_path=registry,
@@ -2952,7 +2956,7 @@ def test_ci_pending_is_rechecked_in_place_without_rerunning_the_gates(
     mq.add_to_queue("alpha", 19, path=_state(tmp_path))
     gate_calls = []
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         gate_calls.append(command)
         return "pass", ""
 
