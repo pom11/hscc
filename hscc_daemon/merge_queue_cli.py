@@ -7,6 +7,8 @@ operator's read/steer surface:
     hscc merge-queue list [<project>] [--json]
     hscc merge-queue add <project> <pr> [--card <id>] [--assignee <name>]
     hscc merge-queue remove <project> <pr> [--json]
+    hscc merge-queue hold <project> <pr> [--reason <text>]
+    hscc merge-queue unhold <project> <pr> [--json]
     hscc merge-queue pause <project> [--json]
     hscc merge-queue resume <project> [--json]
     hscc merge-queue enable <project> [--json]
@@ -61,7 +63,18 @@ Usage: hscc merge-queue <subcommand> [args]
                               Enqueue a PR (idempotent by PR number). --card
                               gives the resolve handback its target.
   hscc merge-queue remove <project> <pr> [--json]
-                              Drop a PR from the queue / in-flight claim.
+                              Drop a PR from the queue / in-flight claim. That
+                              is a PULL, not a hold: the next empty tick
+                              auto-enqueues the PR again.
+  hscc merge-queue hold <project> <pr> [--reason <text>]
+                              Park a PR until an explicit `unhold`. A push, a
+                              green check or elapsed time never lift a hold —
+                              auto-enqueue, the wait-list drain and the claim
+                              all skip a held PR. This is the per-PR lever;
+                              `pause` below is project-wide.
+  hscc merge-queue unhold <project> <pr> [--json]
+                              Release a hold. The PR re-enters the queue the
+                              ordinary way (auto-enqueue, or an explicit `add`).
   hscc merge-queue pause <project> [--json]
   hscc merge-queue resume <project> [--json]
                               Hold/resume processing for one project. Queued
@@ -85,7 +98,15 @@ SUBCOMMAND_HELP = {
            "[--assignee <name>] [--json]\n\n"
            "Enqueue a PR. Idempotent by PR number.",
     "remove": "hscc merge-queue remove <project> <pr> [--json]\n\n"
-              "Drop a PR from the queue (and any in-flight claim).",
+              "Drop a PR from the queue (and any in-flight claim). A pull, not\n"
+              "a hold: auto-enqueue may put the PR straight back. Use `hold`.",
+    "hold": "hscc merge-queue hold <project> <pr> [--reason <text>]\n\n"
+            "Park a PR until an explicit `unhold`: a push, a green check or\n"
+            "elapsed time never lift a hold. Pulls it from the queue, the wait\n"
+            "list and any live claim, and shows in status/list/monitors.",
+    "unhold": "hscc merge-queue unhold <project> <pr> [--json]\n\n"
+              "Release a hold — the only way one ends. The PR re-enters the\n"
+              "queue by the next tick's auto-enqueue or an explicit `add`.",
     "pause": "hscc merge-queue pause <project> [--json]\n\n"
              "Stop processing this project; the queue is kept.",
     "resume": "hscc merge-queue resume <project> [--json]\n\n"
@@ -123,6 +144,8 @@ def _status_doc(registry_path=None, state_path=None):
     for name in dict.fromkeys(projects):
         ps = mq._project_state(doc, name)
         cfg = mq.project_config(name, registry_path)
+        held = [dict(h) for h in (ps.get("held") or [])
+                if isinstance(h, dict)]
         out["projects"][name] = {
             "enabled": mq.effective_enabled(cfg, ps),
             "enabled_source": mq.enabled_source(cfg, ps),
@@ -133,6 +156,8 @@ def _status_doc(registry_path=None, state_path=None):
             "queue": list(ps.get("queue") or []),
             "waiting_len": len(ps.get("waiting") or []),
             "waiting": list(ps.get("waiting") or []),
+            "held_len": len(held),
+            "held": held,
             "in_flight": ps.get("in_flight"),
             "last": ps.get("last"),
             "repo": (cfg or {}).get("repo"),
@@ -183,8 +208,14 @@ def cmd_merge_queue(argv):
             console.print(
                 f"{name}: {state}, queued={row['queue_len']}, "
                 f"waiting={row['waiting_len']}, "
+                f"held={row['held_len']}, "
                 f"in-flight={row['in_flight']['pr'] if row['in_flight'] else '-'}, "
                 f"last={(row['last'] or {}).get('result', '-')}")
+            for hold in row["held"]:
+                # The reason on the line is the whole point: a parked PR whose
+                # reason lives only in a PR comment is folklore (t_662753d6).
+                console.print(f"  held #{hold.get('pr')}  "
+                              f"{hold.get('reason') or '(no reason given)'}")
         return 0
 
     if sub == "list":
@@ -213,6 +244,11 @@ def cmd_merge_queue(argv):
                     f"{name}  PR #{entry.get('pr')}  waiting  "
                     f"card={entry.get('card') or '-'}  "
                     f"assignee={entry.get('assignee') or '-'}")
+            for entry in row["held"]:
+                empty = False
+                console.print(
+                    f"{name}  PR #{entry.get('pr')}  held  "
+                    f"{entry.get('reason') or '(no reason given)'}")
         if empty:
             console.print("merge queue is empty")
         return 0
@@ -225,6 +261,11 @@ def cmd_merge_queue(argv):
             pr = int(pr)
         except (TypeError, ValueError):
             return _error(f"pr must be an integer, got {pr!r}", json_mode)
+        if mq.is_held(project, pr):
+            # `add` is not a way to defeat a hold; `unhold` is (t_662753d6).
+            return _error(
+                f"PR #{pr} is held for {project}; run "
+                f"`hscc merge-queue unhold {project} {pr}` first", json_mode)
         card = _flag(rest, "--card")
         assignee = _flag(rest, "--assignee")
         mq.add_to_queue(project, pr, card=card, assignee=assignee)
@@ -247,6 +288,42 @@ def cmd_merge_queue(argv):
             print(json.dumps({"ok": True, "project": project, "pr": pr}))
         else:
             print(f"removed PR #{pr} from {project}")
+        return 0
+
+    if sub == "hold":
+        if len(rest) < 2:
+            return _error("hold needs <project> <pr>", json_mode)
+        project, pr = rest[0], rest[1]
+        try:
+            pr = int(pr)
+        except (TypeError, ValueError):
+            return _error(f"pr must be an integer, got {pr!r}", json_mode)
+        reason = _flag(rest, "--reason")
+        mq.hold_pr(project, pr, reason=reason)
+        if json_mode:
+            print(json.dumps({"ok": True, "project": project, "pr": pr,
+                              "held": True, "reason": reason}))
+        else:
+            print(f"held PR #{pr} for {project}"
+                  + (f": {reason}" if reason else "")
+                  + " (only `merge-queue unhold` releases it)")
+        return 0
+
+    if sub == "unhold":
+        if len(rest) < 2:
+            return _error("unhold needs <project> <pr>", json_mode)
+        project, pr = rest[0], rest[1]
+        try:
+            pr = int(pr)
+        except (TypeError, ValueError):
+            return _error(f"pr must be an integer, got {pr!r}", json_mode)
+        mq.unhold_pr(project, pr)
+        if json_mode:
+            print(json.dumps({"ok": True, "project": project, "pr": pr,
+                              "held": False}))
+        else:
+            print(f"released PR #{pr} for {project}; it re-enters the queue on "
+                  "the next tick")
         return 0
 
     # pause / resume / enable / disable
