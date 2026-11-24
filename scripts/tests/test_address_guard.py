@@ -525,5 +525,207 @@ def test_cli_failure_text_is_actionable(tmp_path):
     assert "notes.txt:1" in err and "10.0.0.x" in err and "100.64.0.1" in err
 
 
+# ── operator home paths (t_3480956c) ─────────────────────────────────────────
+#
+# PR #724 reached origin with an interpreter path in two docs files. Not a review
+# failure — the guard had no home-path concept, so `--tracked`, `--staged` and a
+# reviewer grepping for addresses were all equally blind. These pin the class both
+# ways: a concrete user trips, and BOTH documented replacements do not.
+#
+# `"/Users"` and `"/home"` as bare literals are safe to write here (the pattern
+# needs a user component after the slash, and the source has a quote instead); the
+# user names are assembled so this tracked file cannot be its own offence.
+
+_HOME_ROOTS = ("/Users", "/home")
+_REAL_USER = "hscc" + "-realuser"          # non-sanctioned, and nobody's real name
+
+
+def _home(root, user=_REAL_USER, rest=""):
+    return f"{root}/{user}{rest}"
+
+
+@pytest.mark.parametrize("text,expect_hit", [
+    # trips: every concrete user, whatever the context around it
+    (f"venv {_home('/Users', rest='/.hermes/venv/bin/python')}", True),
+    (f"home = {_home('/home')}", True),
+    (f'quoted "{_home("/Users", rest="/x")}"', True),       # no \b: quotes do not hide it
+    (f"link ]({_home('/home', rest='/deploy/run.sh')})", True),   # no \b: parens do not hide it
+    (_home("/Users"), True),                                      # bare, no tail
+    (f"/Users/{'hscc-fixture'}-2/x", True),                       # no allowance by prefix
+    # clean: the two documented replacements, and the out-of-scope shapes
+    ("socket /Users/<operator>/.hermes/gateway.sock", None),
+    ("suite /home/<operator>/.hscc/suite", None),
+    ('json {"home": "/Users/<operator>"}', None),
+    (f"/Users/{'hscc-fixture'}/.venv/bin/python", None),
+    (f"/home/{'hscc-fixture'}/work", None),
+    ("/home/runner/work/_temp/pytest-of-runner/pytest-0", None),   # GitHub's CI account
+    ("~/.hermes/gateway.sock", None),
+    ("/usr/local/bin/python3", None),
+    ("/private/var/folders/9x/T/pytest-of-someone", None),
+])
+def test_find_in_text_home_verdicts(text, expect_hit):
+    hits = address_guard.home_hits(text)
+    if expect_hit is None:
+        assert hits == [], f"false positive on a home path: {text!r}"
+    else:
+        assert hits, f"missed the home path in {text!r}"
+        assert address_guard.is_home_occurrence(hits[0][1])
+
+
+def test_an_address_never_hides_behind_a_home_path_on_the_same_line():
+    """THE interaction hazard of making one class advisory, pinned in both orders.
+
+    With one match per line, a line holding a home path and a real LAN address
+    would have reported only the home path while the home class is advisory — so
+    the blocking address would leave the gate unseen and the commit would pass.
+    `find_in_text` returns every match for that reason, and this is the test that
+    would have caught it.
+    """
+    addr = "10" + ".0.0.5"
+    path = _home("/Users", rest="/x")
+    for line, label in ((f"host {addr} and {path}", "address first"),
+                        (f"{path} and host {addr}", "home path first")):
+        assert [v for _, v in address_guard.address_hits(line)] == [addr], label
+        assert [v for _, v in address_guard.home_hits(line)] == [path], label
+        offenders = address_guard.scan_blob("d.md", line.encode())
+        assert len(offenders) == 2, (label, offenders)
+        assert address_guard.blocking(offenders) == [f"d.md:1: {addr}"], (
+            f"{label}: the address escaped the blocking subset")
+
+
+def test_home_path_is_visible_to_the_pattern_the_redactor_loads():
+    """THE cross-file invariant, not a nicety.
+
+    `.github/scripts/redact_guard_report.py` redacts the CI report by loading the
+    guard's `FORBIDDEN` and nothing else. A home rule written as a SECOND pattern
+    would therefore print `/Users/<operator's real name>/...` into a public job log
+    — the backstop publishing the leak it exists to stop. Home paths live inside
+    FORBIDDEN for exactly this reason, so pin that the redactor's one pattern sees
+    them.
+    """
+    planted = _home("/Users", rest="/.hermes/gateway.sock")
+    assert address_guard.FORBIDDEN.search(planted), (
+        "FORBIDDEN no longer matches a home path: the CI redactor (which loads only"
+        " FORBIDDEN) would print the operator's real home path into a public log")
+    assert address_guard.is_home_occurrence(address_guard.FORBIDDEN.search(planted).group(0))
+
+
+def test_scan_blob_formats_a_home_offender_with_file_line_and_fix():
+    got = address_guard.scan_blob("docs/testing/loadstress-leg.md",
+                                  f"run {_home('/Users', rest='/bin/python')}\n".encode())
+    assert len(got) == 1
+    assert got[0].startswith(f"docs/testing/loadstress-leg.md:1: {_home('/Users')}")
+    assert address_guard.is_home_offender(got[0]), "an offender the report cannot classify"
+    assert address_guard.HOME_PATH_OFFENDER_SUFFIX in got[0]
+
+
+# ── the fixture pair, pinned both ways (the readme_lint habit) ───────────────
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "home_path"
+
+
+def _fixture_files():
+    return sorted(p.relative_to(_FIXTURES).as_posix() for p in _FIXTURES.rglob("*")
+                  if p.is_file())
+
+
+@pytest.mark.parametrize("root", _HOME_ROOTS)
+def test_broken_fixture_trips_under_either_root(root):
+    """The must-trip fixture, substituted — and every line of it trips."""
+    text = (_FIXTURES / "broken" / "leak.md.template").read_text(encoding="utf-8")
+    body = [ln for ln in text.splitlines() if ln.startswith("    ")]
+    assert len(body) == 5, f"the must-trip fixture lost a line: {len(body)}"
+    for line in body:
+        filled = line.replace("__HOME_ROOT__", root).replace("__OPERATOR_USER__", _REAL_USER)
+        assert address_guard.home_hits(filled), f"must-trip line went unseen: {filled!r}"
+
+
+def test_clean_fixtures_do_not_trip():
+    """The must-not-trip fixtures: the placeholder and the sanctioned fixture user."""
+    for rel in _fixture_files():
+        if not rel.startswith("clean/"):
+            continue
+        text = (_FIXTURES / rel).read_text(encoding="utf-8")
+        assert address_guard.scan_blob(rel, text.encode()) == [], (
+            f"the documented replacement in {rel} is itself an offender — the scrub "
+            "would have nowhere to scrub to")
+
+
+def test_the_fixtures_themselves_are_clean_tracked_content():
+    """Anti-vacuity for the fixtures.
+
+    These files are tracked, so the pytest gate scans them. A fixture that only
+    trips *after* substitution is worthless if the committed bytes flag the gate:
+    it would turn the suite red the moment HOME_PATHS_ENFORCE flips, and the fix
+    would be to delete the coverage that proves the rule works.
+    """
+    assert address_guard.scan_paths(_FIXTURES, _fixture_files()) == []
+
+
+# ── advisory now, blocking on the flip ───────────────────────────────────────
+
+def test_report_explains_a_home_path_differently_from_an_address():
+    """The fix for a home path is not `10.0.0.x`, and a wrong fix on a commit path
+    is how --no-verify gets used."""
+    planted = address_guard.home_offender("a.md", 3, _home("/Users", rest="/x"))
+    text = address_guard.report([planted])
+    assert "a.md:3" in text
+    assert address_guard.HOME_PLACEHOLDER in text
+    assert address_guard.FIXTURE_HOME_USER in text
+    assert "PUBLIC" in text
+    assert "ADVISORY" in text, "advisory must be stated, not left to the exit code"
+    # mixed: the address still gets its own placeholders, the home path gets its own
+    mixed = address_guard.report([planted, "b.md:1: " + REAL_LAN])
+    assert "10.0.0.x" in mixed and "100.64.0.1" in mixed
+    assert "a.md:3" in mixed and "b.md:1" in mixed
+
+
+def test_cli_reports_a_home_path_without_blocking_and_blocks_when_enforced(tmp_path):
+    """Both halves of the posture, through the CLI the hook and CI both call."""
+    r = _repo(tmp_path)
+    (r / "loadstress.md").write_text(
+        f"interpreter: {_home('/Users', rest='/.hermes/venv/bin/python')}\n",
+        encoding="utf-8")
+    _git(r, "add", "loadstress.md")
+
+    def run(**env):
+        import os
+        proc_env = {**os.environ, **env}
+        return subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "address_guard.py"),
+             "--staged", "--repo", str(r)],
+            capture_output=True, env=proc_env)
+
+    advisory = run()
+    assert advisory.returncode == 0, advisory.stderr.decode()   # advisory: reported
+    err = advisory.stderr.decode()
+    assert "loadstress.md:1" in err, err                          # ...and visible
+    assert "ADVISORY" in err
+    assert address_guard.HOME_PLACEHOLDER in err                  # ...with the fix
+
+    enforced = run(**{address_guard.HOME_PATHS_ENFORCE_ENV: "true"})
+    assert enforced.returncode == 1, (
+        "the home class can never be turned on — advisory would be permanent, which"
+        " is the blind gate this card replaces with a slower one")
+    assert "blocked" in enforced.stderr.decode()
+    # a real address still blocks whatever the home knob says
+    (r / "leak.md").write_text("host " + REAL_LAN + "\n", encoding="utf-8")
+    _git(r, "add", "leak.md")
+    assert run().returncode == 1
+
+
+def test_the_backslash_form_is_a_named_limit_not_a_claim():
+    """Windows-shaped home paths are NOT detected, and that is stated not hidden.
+
+    Zero occurrences in the tracked tree today (measured on origin/main), so the
+    rule does not claim them. This test exists so the gap is a decision someone can
+    read, rather than a silent hole someone has to rediscover.
+    """
+    windows = "C:" + chr(92) + "Users" + chr(92) + _REAL_USER
+    assert address_guard.find_in_text(windows) == [], (
+        "the backslash form is now matched — delete this test or move it to the"
+        " verdict list; do not leave a passing 'limit' pin masking coverage")
+
+
 # keep pytest import light: imported late so the module-under-test load order is explicit
 import pytest  # noqa: E402

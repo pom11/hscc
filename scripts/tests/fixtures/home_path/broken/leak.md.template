@@ -1,0 +1,15 @@
+# Must trip: a concrete home path (t_3480956c)
+
+TOKENS, on purpose. `__HOME_ROOT__` is substituted with `/Users` or `/home` and
+`__OPERATOR_USER__` with any name that is not sanctioned; every indented line below
+then becomes an offender. A tracked fixture holding a *contiguous* real-shaped home
+path would itself be flagged by the very gate that scans every tracked file — the
+anti-vacuity fixture would silently become the offence, and turn the suite red the
+day `HOME_PATHS_ENFORCE` flips. So the shape lives here and the value is assembled
+by `scripts/tests/test_address_guard.py`.
+
+    venv: __HOME_ROOT__/__OPERATOR_USER__/.hermes/hermes-agent/venv/bin/python -m pytest
+    quoted: "__HOME_ROOT__/__OPERATOR_USER__/x"
+    link: ](__HOME_ROOT__/__OPERATOR_USER__/deploy/run.sh)
+    json: {"home": "__HOME_ROOT__/__OPERATOR_USER__"}
+    bare: __HOME_ROOT__/__OPERATOR_USER__
