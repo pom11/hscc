@@ -3493,6 +3493,176 @@ def test_which_wait_listed_pr_is_eligible_for_a_base_refresh():
                                      info(_RED_CHECK, isDraft=True))
 
 
+def test_update_branch_separates_a_local_fault_from_an_answer():
+    """``answered`` — not ``ok`` — is what the base-sha bound keys on.
+
+    A gh that could not run at all leaves the base unburned; a gh that answered
+    with a non-zero exit is a verdict on this base and does burn it, which is
+    what ``test_a_failed_update_records_the_attempt_and_does_not_loop`` pins.
+    """
+    def raiser(argv, **kwargs):
+        raise OSError("gh missing")
+
+    def silent(argv, **kwargs):
+        return None                                  # a runner with no proc
+
+    def refuses(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="",
+                               stderr="could not resolve to PullRequest")
+
+    ok, conflict, output, answered = mq._update_branch("/repo", 9, raiser)
+    assert (ok, conflict, answered) == (False, False, False)
+    assert "raised" in output
+    assert mq._update_branch("/repo", 9, silent)[3] is False
+    ok, conflict, output, answered = mq._update_branch("/repo", 9, refuses)
+    assert (ok, conflict, answered) == (False, False, True)
+    assert "could not resolve" in output
+
+
+def test_a_local_gh_fault_does_not_burn_the_base_sha(tmp_path):
+    """gh not runnable/raised is a LOCAL fault: the next tick must try again.
+
+    Recording the base sha on such a fault locks the entry out of every later
+    refresh for that commit — the 18 h wait this feature exists to open, made
+    permanent by one transient local error (the None-runner crash the live
+    daemon hit every tick). The entry keeps the error for the monitors and the
+    refresh resumes the moment gh can run.
+
+    Under the routing drain the entry must ALSO keep being routed to the refresh
+    rather than to the hand-back: a local fault is not a verdict on this base,
+    so the author must not be blamed for it.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=_RED_CHECK)
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    logged = []
+    runnable = {"gh": False}
+    attempts = []
+
+    def local_gh(argv, cwd=None, **kwargs):
+        argv = list(argv)
+        if argv[:3] == ["gh", "pr", "update-branch"]:
+            attempts.append(int(argv[3]))
+            if not runnable["gh"]:
+                raise FileNotFoundError(2, "No such file or directory: 'gh'")
+        return gh(argv, cwd=cwd)
+
+    def drain():
+        return mq._drain_waiting(
+            "alpha", cfg, state_path=state, gh_runner=local_gh,
+            git_runner=subprocess.run,
+            log=lambda msg, level="INFO", **k: logged.append((msg, level)))
+
+    for _ in range(2):
+        assert drain() == []
+
+    entry = _waiting(state, "alpha", 9)
+    assert attempts == [9, 9], attempts            # asked again, not once
+    assert gh.updates == []                        # never reached GitHub
+    assert "refreshed_main_sha" not in entry, entry
+    assert "No such file or directory" in entry["last_update_error"]
+    assert not entry.get("handed_back_main_sha"), entry   # not the author's fault
+    assert any("could not run" in msg and level == "WARNING"
+               for msg, level in logged), logged
+
+    # gh comes back: the same base is refreshed after all, because it was
+    # never written off as attempted.
+    runnable["gh"] = True
+    assert drain() == []
+    assert gh.updates == [9]
+    entry = _waiting(state, "alpha", 9)
+    assert entry["refreshed_main_sha"] == _origin_sha(pair)
+    assert entry["refreshed_at"]
+
+
+def test_refresh_through_the_production_default_gh_runner(tmp_path,
+                                                          monkeypatch):
+    """NO injected runners at all: the refresh runs the production path.
+
+    The daemon's ``check_merge_queue`` calls ``tick`` — and with it the drain —
+    with no runners, and every other case here injects one, which is exactly
+    how a ``None`` reached ``_gh`` in production and killed the whole tick
+    (``TypeError: 'NoneType' object is not callable``). This drives the drain
+    the way the daemon does and pins the argv the default runner was handed.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=_RED_CHECK)
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    seen = []
+
+    def production_default(argv, **kwargs):
+        # The argv _gh/_git build, then the keywords they add — the real
+        # signature of the runner the daemon installs.
+        argv = [str(part) for part in argv]
+        seen.append(argv)
+        if argv[0] == "gh":
+            return gh(argv, cwd=kwargs.get("cwd"))
+        return subprocess.run(argv, **kwargs)
+
+    monkeypatch.setattr(mq, "_default_runner", production_default)
+
+    assert mq._drain_waiting("alpha", cfg, state_path=state) == []
+
+    assert [a for a in seen
+            if a[:3] == ["gh", "pr", "update-branch"]] == [
+                ["gh", "pr", "update-branch", "9"]], seen
+    entry = _waiting(state, "alpha", 9)
+    assert entry["refreshed_main_sha"] == _origin_sha(pair)
+    assert not entry.get("last_update_error")
+
+
+def test_the_refresh_defaults_its_own_runners(tmp_path, monkeypatch):
+    """Called directly, ``_refresh_stale_red`` still has no ``None`` to hand on.
+
+    The drain's defaults cover what the drain calls. This is the seam that makes
+    the ``gh`` call, so it defaults for ITSELF: a caller that reaches it
+    directly — or one added later — cannot repeat the production crash. Pinned
+    the way ``test_resume_ci_pending_defaults_the_production_runners`` pins that
+    path: NO runners injected anywhere, and the argv the default runner was
+    handed is the assertion, so a callee defaulting once more layers down would
+    not save it either.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=_RED_CHECK)
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    seen = []
+
+    def production_default(argv, **kwargs):
+        argv = [str(part) for part in argv]
+        seen.append(argv)
+        if argv[0] == "gh":
+            return gh(argv, cwd=kwargs.get("cwd"))
+        return subprocess.run(argv, **kwargs)
+
+    monkeypatch.setattr(mq, "_default_runner", production_default)
+
+    assert mq._refresh_stale_red("alpha", cfg, "main",
+                                [_waiting_entry(9, pair["branch"])],
+                                state_path=state) == [9]
+
+    assert [a for a in seen
+            if a[:3] == ["gh", "pr", "update-branch"]] == [
+                ["gh", "pr", "update-branch", "9"]], seen
+    entry = _waiting(state, "alpha", 9)
+    assert entry["refreshed_main_sha"] == _origin_sha(pair)
+    assert not entry.get("last_update_error")
+
+
 # ── wait-list hand-back: red for its own reasons (t_bcc4e414) ───────────────
 #
 # The refresh (above) is the queue's last move. After it there are two kinds of
@@ -3757,3 +3927,79 @@ def test_the_hand_back_rule_and_its_once_per_base_sha_bound():
     assert mq._failing_check_names(info(_named_red(
         *[f"c{i}" for i in range(mq.MAX_HANDBACK_CHECK_NAMES + 3)])))[-1] \
         == "(+3 more)"
+
+
+def test_the_drain_never_hands_a_none_runner_downward(tmp_path, monkeypatch):
+    """Whatever the drain calls gets a runner, never the ``None`` it was given.
+
+    The defaults at the top of ``_drain_waiting`` are the point, not the one
+    call they happen to cover today: the daemon enters the wait list through
+    here with no runners, and ``pr_view``, ``default_branch`` and the base probe
+    each default for themselves — which is exactly how a ``None`` survived all
+    the way to the exec seam in production. So the capture is on the seam: every
+    runner is recorded as it is HANDED DOWN, before any callee can paper over it.
+
+    The routing drain has TWO downward paths, and both are parked here: an entry
+    never refreshed yet (the stale-base refresh, whose ``update-branch`` is the
+    call that crashed) and an entry red on THIS base (the hand-back's PR
+    comment). Removing the drain defaults therefore goes red on card 1's path AND
+    on card 2's, not just on whichever one happens to run.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]},
+                 11: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}},
+                rollup=_named_red("scripts"))
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"]),                   # refresh
+                   dict(_waiting_entry(11, pair["branch"]),             # hand-back
+                        refreshed_main_sha=_origin_sha(pair))])
+    seen = []
+
+    def runner_at(index):
+        def extract(*args, **kwargs):
+            if len(args) > index:
+                return args[index]
+            return kwargs.get("runner")
+        return extract
+
+    def spy(name, runner_of):
+        real = getattr(mq, name)
+
+        def wrapper(*args, **kwargs):
+            seen.append((name, runner_of(*args, **kwargs)))
+            return real(*args, **kwargs)
+        return wrapper
+
+    def production_default(argv, **kwargs):
+        argv = [str(part) for part in argv]
+        if argv[0] == "gh":
+            return gh(argv, cwd=kwargs.get("cwd"))
+        return subprocess.run(argv, **kwargs)
+
+    monkeypatch.setattr(mq, "_default_runner", production_default)
+    # ``_gh``/``_git`` take the runner as their third positional argument: that
+    # IS the seam the live daemon died on. The rest are the callees each of the
+    # drain's two red paths reaches, so a ``None`` cannot hide by being default
+    # once more layers down.
+    for name, index in (("_gh", 2), ("_git", 2), ("_remote_base_sha", 2),
+                        ("_update_branch", 2), ("_comment_pr", 3)):
+        monkeypatch.setattr(mq, name, spy(name, runner_at(index)))
+    monkeypatch.setattr(mq, "pr_view", spy("pr_view", runner_at(2)))
+
+    assert mq._drain_waiting("alpha", cfg, state_path=state,
+                             handback=_handback_recorder([])) == []
+
+    # Both red paths were really walked, so the capture is not vacuous: the
+    # refresh moved PR 9 and the hand-back commented on PR 11.
+    assert gh.updates == [9], gh.calls
+    assert len(gh.comments) == 1, gh.calls
+    seams = {name for name, _ in seen}
+    assert {"_update_branch", "_comment_pr", "_gh"} <= seams, seen
+    handed = [runner for _, runner in seen]
+    assert handed, seen
+    assert all(callable(runner) for runner in handed), seen

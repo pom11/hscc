@@ -23,7 +23,7 @@ task: t_bcc4e414
 kind: Verified
 order: 1
 
-- `hscc_daemon/tests/test_merge_queue.py`: 142 -> **148** cases. The new ones
+- `hscc_daemon/tests/test_merge_queue.py`: 147 -> **153** cases. The new ones
   pin the counts rather than the prose — a conflict produces EXACTLY one PR
   comment and one board handback across five ticks, red-after-refresh produces
   one and is re-armed only by a newer main sha (which first earns the PR its one
