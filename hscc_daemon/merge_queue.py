@@ -1879,18 +1879,37 @@ def _handback(entry, cfg, body, handback, gh_runner, log=None):
         pass
 
 
-def _finish(doc, project, state_path, ps, result, entry, **fields):
+def _finish(doc, project, state_path, ps, result, entry, *, log=None,
+            **fields):
     """Record a terminal outcome on a FRESH ledger read.
 
     The tick may spend minutes in gates; a CLI ``add``/``remove`` can land in
     that window. Re-reading before writing keeps those edits instead of
     clobbering them with the tick's older copy.
+
+    A verdict is stamped only on a PR the queue still holds — in flight, in the
+    FIFO, or in the wait list. ``remove_from_queue`` clears the in-flight claim
+    while the gate that claim was running keeps running, and stamping that late
+    verdict is precisely how the FIFO and ``last`` come apart: the measured case
+    was ``remove hscc 696`` mid-gate followed by ``-> red-gate`` for a PR that
+    was in no list at all (t_8c461597). Such a verdict is dropped, loudly, and
+    the outcome is NOT recorded. Returns True when it was.
     """
+    log = log or (lambda *a, **k: None)
+    pr = int(entry.get("pr") or 0)
     with _file_lock():
         doc = load_state(state_path)
         ps = _project_state(doc, project)
         flight = ps.get("in_flight")
-        if flight and int(flight.get("pr", 0)) == int(entry.get("pr", 0)):
+        held = bool(
+            (flight and int(flight.get("pr", 0)) == pr)
+            or _find_entry(ps["queue"], pr) is not None
+            or _find_entry(ps["waiting"], pr) is not None)
+        if not held:
+            log(f"merge-queue {project}: PR #{pr} verdict '{result}' dropped: "
+                "the claim was removed while it ran", "WARN")
+            return False
+        if flight and int(flight.get("pr", 0)) == pr:
             ps["in_flight"] = None
         ps["last"] = {
             "pr": entry.get("pr"),
@@ -1901,6 +1920,7 @@ def _finish(doc, project, state_path, ps, result, entry, **fields):
             **fields,
         }
         save_state(doc, state_path)
+    return True
 
 
 def _refuse_entry(doc, state_path, project, entry, reason, cfg, gh_runner,
@@ -1911,7 +1931,8 @@ def _refuse_entry(doc, state_path, project, entry, reason, cfg, gh_runner,
             "It stays out of the queue until it is retargeted (base branch) "
             "or re-opened from a branch in this repo.\n")
     _comment_pr(cfg["repo"], entry["pr"], body, gh_runner, log=log)
-    _finish(doc, project, state_path, None, "refused", entry, error=reason)
+    _finish(doc, project, state_path, None, "refused", entry, error=reason,
+            log=log)
     return {"pr": entry["pr"], "result": "refused", "error": reason}
 
 
@@ -1972,7 +1993,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     state = str(info.get("state", "")).upper()
     if state in ("MERGED", "CLOSED"):
         _finish(doc, project, state_path, ps, "already-" + state.lower(),
-                entry, sha=info.get("headRefOid"))
+                entry, sha=info.get("headRefOid"), log=log)
         return {"pr": entry["pr"], "result": "already-merged"}
     reason = refusal_reason(info, base)
     if reason:
@@ -2022,7 +2043,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                 f"{resolve_instructions(info.get('headRefName'), base)}\n"
                 f"{output}")
         _finish(doc, project, state_path, ps, "conflict", entry,
-                conflicted=conflicted)
+                conflicted=conflicted, log=log)
         _handback(entry, cfg, body, handback, gh_runner, log=log)
         log(f"merge-queue {project}: PR #{entry['pr']} conflict in {names}",
             "WARN")
@@ -2038,6 +2059,12 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                    stage="gating" if gates else "merging")
     timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
     for command in gates:
+        # Name the leg BEFORE it runs. It can hold the whole queue for its
+        # entire budget, and until now the first line the log ever got about it
+        # was the verdict at the far end — the measured 65 minutes of silence
+        # was exactly one such leg (t_8c461597).
+        log(f"merge-queue {project}: PR #{entry['pr']} gate start: {command} "
+            f"(budget {timeout_s}s)", "INFO")
         # One gate leg can hold the entire DEFAULT_GATE_TIMEOUT_S budget, so the
         # stream is heartbeated from around the call, not after it: the wrapper
         # starts the heartbeat immediately before the leg and stops it in a
@@ -2061,7 +2088,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             # in the wait list before anything records an outcome.  The row
             # renders `waiting` (see _OUTCOME_STATES), never `resolve`.
             _finish(doc, project, state_path, ps, "gate-timeout", entry,
-                    gate=command, timeout_s=timeout_s)
+                    gate=command, timeout_s=timeout_s, log=log)
             body = (
                 f"Merge queue: the gate ran out of its time budget.\n\n"
                 f"Gate: {command}\n"
@@ -2094,7 +2121,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                     f"{output}\n\n"
                     f"{resolve_instructions(info.get('headRefName'), base)}\n")
             _finish(doc, project, state_path, ps, "red-gate", entry,
-                    gate=command, head_sha=info.get("headRefOid"))
+                    gate=command, head_sha=info.get("headRefOid"), log=log)
             _handback(entry, cfg, body, handback, gh_runner, log=log)
             log(f"merge-queue {project}: PR #{entry['pr']} gate failed: "
                 f"{command}", "WARN")
@@ -2764,7 +2791,7 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
     state = str(info.get("state", "")).upper()
     if state in ("MERGED", "CLOSED"):
         _finish(None, project, state_path, None, "already-" + state.lower(),
-                entry, sha=info.get("headRefOid"))
+                entry, sha=info.get("headRefOid"), log=log)
         log(f"merge-queue {project}: PR #{pr} is already {state.lower()}",
             "INFO")
         return {"pr": pr, "result": "already-merged"}
@@ -2786,7 +2813,7 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             "but the repository's own checks failed on the result.\n\n"
             f"{resolve_instructions(entry.get('branch'), base)}\n")
         _finish(None, project, state_path, None, "red-ci", entry,
-                head_sha=head_sha)
+                head_sha=head_sha, log=log)
         _handback(entry, cfg, body, handback, gh_runner, log=log)
         log(f"merge-queue {project}: PR #{pr} CI red on pushed head "
             f"{head_sha[:12]}", "WARN")
@@ -2843,8 +2870,8 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
     merged = pr_view(cfg["repo"], pr, runner=gh_runner)
     if isinstance(merged, dict) and isinstance(merged.get("mergeCommit"), dict):
         merged_sha = merged["mergeCommit"].get("oid") or merged_sha
-    _finish(None, project, state_path, None, "merged", entry, sha=merged_sha,
-            pushed_sha=head_sha)
+    _finish(None, project, state_path, None, "merged", entry,
+            sha=merged_sha, pushed_sha=head_sha, log=log)
     log(f"merge-queue {project}: merged PR #{pr} as {merged_sha}", "INFO")
     return {"pr": pr, "result": "merged", "sha": merged_sha}
 
@@ -2901,6 +2928,49 @@ def _repo_groups(projects, names):
             groups[key] = [name]
             order.append(key)
     return order, groups
+
+
+def _decline(log, project, pr, reason):
+    """One line naming the queued PR this tick did NOT claim, and why.
+
+    A tick that leaves an eligible, enabled, unpaused FIFO untouched is allowed
+    — something has to decide it — but it is not allowed to be silent about it.
+    The 2026-11-23 incident had ~60 such ticks and zero lines: the queue looked
+    healthy (`enabled: true`, `paused: false`, `in_flight: null`) and the log
+    said nothing at all about PR #716 (t_8c461597).
+    """
+    log(f"merge-queue {project}: PR #{pr} not claimed: {reason}", "INFO")
+
+
+def _skip_reason(cfg, ps):
+    """The condition that makes this tick leave a project alone."""
+    if cfg is None:
+        return "no registry config for this project (its state is history only)"
+    if ps.get("paused"):
+        return "paused"
+    return "merge-queue disabled for this project"
+
+
+def _note_decline(declined, project, ps, cfg):
+    """Record that ``project``'s FIFO head is being left behind this tick."""
+    head = (ps.get("queue") or [None])[0]
+    if not isinstance(head, dict) or head.get("pr") is None:
+        return
+    row = (project, head["pr"], _skip_reason(cfg, ps))
+    if row not in declined:
+        declined.append(row)
+
+
+def _outcome_line(log, project, entry, outcome):
+    """The one line every processed claim gets — including why it stopped.
+
+    ``result`` alone is not a reason: ``-> retry`` says nothing about whether
+    the branch would not resolve, the worktree would not build or ``gh`` died.
+    The error ``_retry_or_drop`` already carries is printed with it.
+    """
+    detail = outcome.get("error")
+    log(f"merge-queue {project}: PR #{entry['pr']} -> {outcome.get('result')}"
+        + (f": {detail}" if detail else ""))
 
 
 def tick(*, state_path=None, root=None, registry_path=None,
@@ -2960,6 +3030,14 @@ def tick(*, state_path=None, root=None, registry_path=None,
                       if cfgs.get(n) is not None and enabled.get(n)
                       and not _project_state(doc, n).get("paused")]
             if not active:
+                # Nothing on this repo may run right now, but its FIFO may be
+                # full: name the PR that is sitting there and what decides it.
+                declined = []
+                for name in members:
+                    _note_decline(declined, name, _project_state(doc, name),
+                                  cfgs.get(name))
+                for name, pr, why in declined:
+                    _decline(log, name, pr, why)
                 continue
 
             # Every tick, whether or not the FIFO is empty: a PR whose checks
@@ -3067,8 +3145,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         outcome = _retry_or_drop(
                             None, state_path, claim_name, entry, error)
                 result["processed"].append({"project": claim_name, **outcome})
-                log(f"merge-queue {claim_name}: PR #{entry['pr']} -> "
-                    f"{outcome.get('result')}")
+                _outcome_line(log, claim_name, entry, outcome)
                 doc = load_state(state_path)
                 for name in members:
                     ps = _project_state(doc, name)
@@ -3077,12 +3154,20 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         ps, member_cfg,
                         effective_enabled(member_cfg, ps)
                         if member_cfg else False)
+                    if name == claim_name:
+                        continue
+                    head = (ps.get("queue") or [None])[0]
+                    if isinstance(head, dict) and head.get("pr") is not None:
+                        _decline(log, name, head["pr"],
+                                 f"repo busy: PR #{entry['pr']} holds the "
+                                 f"claim ({CI_PENDING_STAGE})")
                 continue
 
             # Claim the oldest entry across every project on this repo, under
             # the lock and on a FRESH read, so an operator's `add` between our
             # earlier save and this claim is not lost. Re-reading enabled and
             # paused also makes a pause/disable raced in during discovery win.
+            declined = []
             with _file_lock():
                 doc = load_state(state_path)
                 best = None
@@ -3092,6 +3177,9 @@ def tick(*, state_path=None, root=None, registry_path=None,
                     ps = _project_state(doc, name)
                     if (cfg is None or not effective_enabled(cfg, ps)
                             or ps.get("paused")):
+                        # A pause/disable that raced in during discovery still
+                        # owes the operator a line naming the PR it left queued.
+                        _note_decline(declined, name, ps, cfg)
                         continue
                     for pos, entry in enumerate(ps.get("queue") or []):
                         rank = (str(entry.get("enqueued_at") or ""), idx, pos)
@@ -3107,19 +3195,25 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         ps = _project_state(doc, name)
                         if (cfg is None or not effective_enabled(cfg, ps)
                                 or ps.get("paused")):
+                            _note_decline(declined, name, ps, cfg)
                             continue
                         for pos, entry in enumerate(ps.get("waiting") or []):
                             rank = (str(entry.get("enqueued_at") or ""), idx,
                                     pos)
                             if best is None or rank < best[0]:
                                 best = (rank, name, pos, entry)
-                if best is None:
-                    continue
-                _, claim_name, pos, entry = best
-                ps = _project_state(doc, claim_name)
-                entry = ps[source].pop(pos)
-                ps["in_flight"] = entry
-                save_state(doc, state_path)
+                if best is not None:
+                    _, claim_name, pos, entry = best
+                    ps = _project_state(doc, claim_name)
+                    entry = ps[source].pop(pos)
+                    ps["in_flight"] = entry
+                    save_state(doc, state_path)
+            # Outside the file lock: a log write must not extend how long the
+            # CLI waits on the ledger (same rule as `_update_flight`'s stamp).
+            for name, pr, why in declined:
+                _decline(log, name, pr, why)
+            if best is None:
+                continue
 
             # The claim itself is a stage worth stamping: from this instant the
             # tick may spend the whole gate budget before it returns, and the
@@ -3146,8 +3240,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
                     outcome = _retry_or_drop(
                         doc, state_path, claim_name, entry, error)
             result["processed"].append({"project": claim_name, **outcome})
-            log(f"merge-queue {claim_name}: PR #{entry['pr']} -> "
-                f"{outcome.get('result')}")
+            _outcome_line(log, claim_name, entry, outcome)
             doc = load_state(state_path)
             for name in members:
                 ps = _project_state(doc, name)
@@ -3219,6 +3312,12 @@ def check_merge_queue():
     try:
         result = tick(log=_daemon_log)
     except Exception as exc:
+        # The stamp is not the only record. A tick that dies before it can claim
+        # left ~60 ticks with zero lines in the daemon log and the reason only in
+        # `state/merge_queue.json`, which `merge-queue status` never shows
+        # (t_8c461597, measured 65 minutes).
+        _daemon_log(f"merge-queue tick failed: {type(exc).__name__}: {exc}",
+                    "ERROR")
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     try:
         write_state(STREAM_NAME, result)
