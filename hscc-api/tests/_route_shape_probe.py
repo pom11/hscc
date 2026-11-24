@@ -14,6 +14,16 @@ NO-LIVE: before any handler runs, every subprocess entry point and every socket 
 in the child raises. A route that reaches for the fleet fails the measurement instead of
 doing real cluster work, which is the whole reason this file refuses to guess shapes.
 
+SEAM STUBS (``SEAM_STUBS``) exist for one reason: a handler whose backing cannot answer
+in a sandbox takes its DEGRADED branch, and pinning that branch as the row's contract
+would publish a fiction (``GET /v1/sessions`` on an unreachable profile answers three
+keys, its real answer has five). A stub therefore only ever selects the branch -- it
+never supplies a top-level payload key. Each entry says which branch it pins, and the
+stub value is empty/absent wherever the handler builds the keys itself.
+``GET /v1/profile/editor/{profile}`` deliberately has NO stub: its key set IS its
+backing's return literal, so the sandbox gets a real profile directory and the real
+backing runs.
+
 Writes go only into a ``tempfile.mkdtemp`` sandbox. Output is one JSON line prefixed with
 the sentinel the gate looks for, so an import-time warning can never be parsed as data.
 """
@@ -24,11 +34,13 @@ import json
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
-#: ``(METHOD, display path) -> query dict`` for every row THIS card documented and can
+#: ``(METHOD, display path) -> query dict`` for every row this lane documented and can
 #: measure hermetically. Path groups merge into the query dict the way
-#: ``api_server._dispatch`` does it. Rows whose payload is conditional are deliberately
-#: absent -- see ``SHAPE_UNCHECKED`` in the gate.
+#: ``api_server._dispatch`` does it, so a value here is a SCALAR string -- the dispatcher
+#: collapses ``parse_qs`` lists to ``v[-1]`` (``_parse_path``). Rows whose payload is
+#: conditional are deliberately absent -- see ``SHAPE_UNCHECKED`` in the gate.
 SHAPE_CHECKED: dict[str, dict] = {
     "GET /v1/fleet/usage": {},
     "GET /v1/projects": {},
@@ -48,7 +60,53 @@ SHAPE_CHECKED: dict[str, dict] = {
     "GET /v1/template/list": {},
     "GET /v1/template/status": {},
     "GET /v1/profile/list": {},
+    # --- t_b9808146: the iOS-facing reads the shipped client calls ------------------ #
+    "GET /v1/projects/{name}": {"name": "demo"},
 }
+
+#: ``(METHOD, display path) -> [(module, attribute, replacement)]``, applied to the
+#: handler's own module immediately before that handler is called. Every replacement here
+#: pins the NON-degraded branch and supplies no payload keys of its own.
+_SEAM_ProjectNotFound = type("ProjectNotFoundError", (Exception,), {})
+_SEAM_project = SimpleNamespace(name="demo", repo=None, board=None, topic=None)
+
+SEAM_STUBS: dict[str, list[tuple[str, str, object]]] = {
+    # The registry module is this module's documented seam
+    # (``hscc-api/tests/test_routes_project.py`` replaces the same names). One project,
+    # no repo and no board, so ``_project_detail`` degrades inside ``board_counts``/``git``
+    # exactly as it does live -- the keys measured are the handler's own.
+    "GET /v1/projects/{name}": [
+        ("routes_project", "_registry", SimpleNamespace(
+            ProjectNotFoundError=_SEAM_ProjectNotFound,
+            load_registry=lambda path=None: [_SEAM_project],
+            get_project=lambda name, path=None: _SEAM_project)),
+    ],
+    # An EMPTY session list is a real answer ("reachable, nothing there"), not a
+    # fabricated row: it keeps ``_backing_open_profile_db`` out of the measurement
+    # (it needs the profile's own ``state.db``) while still taking the full branch,
+    # which is the one that carries ``count`` and ``bloated_count``.
+    "GET /v1/sessions": [
+        ("routes_sessions", "_backing_list_sessions",
+         lambda profile, context_window: []),
+    ],
+}
+
+#: A profile directory the REAL ``_backing_read`` can open, so the profile-editor row's
+#: key set is that backing's own return literal rather than a stub's.
+_SEED_PROFILE = "demo"
+_SEED_CONFIG_YAML = """\
+model:
+  default: demo-model
+  provider: demo-provider
+toolsets:
+  - dev
+skills:
+  preload: []
+compression:
+  threshold: 0.8
+  threshold_tokens: 120000
+"""
+_SEED_PROFILE_YAML = "description: A seeded profile for a docs measurement.\n"
 
 SENTINEL = "@@ROUTE_SHAPE@@"
 
@@ -59,6 +117,22 @@ def _sandbox_home() -> str:
         os.environ[var] = root
     os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
     return root
+
+
+def _seed_profile_dir(root: str) -> None:
+    """Seed one profile directory under every plausible hermes-profiles root.
+
+    ``routes_profile_editor._hermes_profiles_dir()`` decides the layout; seeding both
+    ``<HOME>/.hermes/profiles`` and ``<HOME>/profiles`` keeps the measurement honest
+    (the real backing reads real YAML) without the probe guessing which resolver won.
+    """
+    for rel in ((".hermes", "profiles"), ("profiles",)):
+        pdir = os.path.join(root, *rel, _SEED_PROFILE)
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(_SEED_CONFIG_YAML)
+        with open(os.path.join(pdir, "profile.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(_SEED_PROFILE_YAML)
 
 
 def _refuse(*_a, **_k):
@@ -78,8 +152,23 @@ def _no_fleet_contact() -> None:
     socket.create_connection = _refuse
 
 
+def _apply_stubs(key: str) -> list[str]:
+    """Install this route's seam stubs; return the names actually replaced."""
+    import importlib
+
+    applied = []
+    for mod_name, attr, value in SEAM_STUBS.get(key, ()):  # noqa: B007
+        mod = importlib.import_module(mod_name)
+        if not hasattr(mod, attr):
+            raise RuntimeError(f"{key}: seam {mod_name}.{attr} does not exist")
+        setattr(mod, attr, value)
+        applied.append(f"{mod_name}.{attr}")
+    return applied
+
+
 def measure() -> dict:
     root = _sandbox_home()
+    _seed_profile_dir(root)
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import api_server  # noqa: E402  (the whole routes_* chain registers at import)
 
@@ -94,16 +183,24 @@ def measure() -> dict:
             continue
         handler = hits[0][2]
         try:
+            stubs = _apply_stubs(key)
+        except Exception as exc:  # noqa: BLE001 - a bad stub is data, not a crash
+            out["routes"][key] = {"error": f"stub: {exc}",
+                                  "handler": f"{handler.__module__}.{handler.__name__}"}
+            continue
+        try:
             status, payload = handler(None, None, dict(query), None)
         except Exception as exc:  # noqa: BLE001 - a failed measurement is data
             out["routes"][key] = {
                 "error": f"{type(exc).__name__}: {exc}",
                 "handler": f"{handler.__module__}.{handler.__name__}",
+                "stubs": stubs,
             }
             continue
         out["routes"][key] = {
             "handler": f"{handler.__module__}.{handler.__name__}",
             "status": status,
+            "stubs": stubs,
             "keys": sorted(payload) if isinstance(payload, dict) else None,
         }
     return out
