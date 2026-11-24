@@ -76,6 +76,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.parse
 
 STREAM_NAME = "merge_queue"
@@ -85,6 +86,11 @@ DEFAULT_GATE_TIMEOUT_S = 3600
 DEFAULT_PROCESS_TIMEOUT_S = 120
 MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
+
+#: Cap on the retry error kept in ``last_error``. The first line stays the
+#: exception type + message (what a surface renders), followed by the tail of
+#: the traceback; the cap keeps a pathological traceback out of the ledger.
+MAX_LAST_ERROR_CHARS = 2000
 
 #: How many verbatim failure lines a red handback carries ahead of the tail.
 #:
@@ -198,6 +204,15 @@ SHARED_GATE_PATHS = (
 #: Above this many legs a narrowed local gate stops being a saving, so the
 #: queue runs the whole roster instead.
 MAX_LOCAL_TEST_LEGS = 3
+
+#: Changed paths whose only Python reader is scripts/tests. Mirrors the prose and
+#: Apple-client arms of .github/scripts/leg_select.py::_RULES — the two tables
+#: must stay in step, pinned by test_local_selection_agrees_with_leg_select.
+NARROW_TO_SCRIPTS_LEG = ("changelog.d/", "docs/", "site/", "README",
+                         "CLAUDE.md", "AGENTS.md", "macos-app/", "ios-app/")
+
+#: The leg that parses and lints them (scripts/tests), per that same map.
+SCRIPTS_LEG = "scripts"
 
 #: A leg name that is safe to put in the gate's shell string verbatim
 #: (``.github/scripts`` is a real roster entry, hence the leading-dot arm).
@@ -898,13 +913,15 @@ def _test_leg_roster(worktree):
 def _local_test_legs(changed, roster):
     """Legs a narrowed local gate may run, or ``None`` for the full suite.
 
-    Only a path under a leg's own directory selects that leg. A shared harness
-    path, an unreadable/odd roster, an empty diff, or more than
+    A path under a leg's own directory selects that leg. Repo prose and the
+    Apple client trees select :data:`SCRIPTS_LEG`, mirroring
+    ``.github/scripts/leg_select.py`` — ``scripts/tests`` is their only Python
+    reader (it parses ``changelog.d/`` and ``CHANGELOG.md``, lints the README
+    and docs index, and reads/executes the app publishers). A shared harness
+    path, an unreadable/odd roster, a roster without :data:`SCRIPTS_LEG` for
+    such a path, an empty diff, a path no rule claims, or more than
     :data:`MAX_LOCAL_TEST_LEGS` distinct legs widen to ``None`` (full suite):
-    under-selection is the failure mode this gate must not have. Paths outside
-    every leg (docs, changelog fragments, app builds) select nothing, so a diff
-    that is *only* those also widens to the full suite rather than running
-    zero legs.
+    under-selection is the failure mode this gate must not have.
     """
     if not roster or any(not _LEG_NAME_RE.match(leg) for leg in roster):
         return None
@@ -915,8 +932,18 @@ def _local_test_legs(changed, roster):
         if any(path == shared or path.startswith(shared)
                for shared in SHARED_GATE_PATHS):
             return None
-    chosen = {leg for leg in roster
-              if any(path.startswith(leg.rstrip("/") + "/") for path in paths)}
+    chosen = set()
+    for path in paths:
+        claimed = {leg for leg in roster
+                   if path.startswith(leg.rstrip("/") + "/")}
+        # Root-anchored like leg_select: hscc-api/docs/x.md is hscc-api's.
+        if any(path.startswith(prefix) for prefix in NARROW_TO_SCRIPTS_LEG):
+            if SCRIPTS_LEG not in roster:
+                return None
+            claimed.add(SCRIPTS_LEG)
+        if not claimed:
+            return None
+        chosen |= claimed
     if not chosen or len(chosen) > MAX_LOCAL_TEST_LEGS:
         return None
     return [leg for leg in roster if leg in chosen]
@@ -1604,11 +1631,13 @@ def default_handback(card, assignee, message):
     return True
 
 
-def _comment_pr(repo, pr, body, gh_runner):
+def _comment_pr(repo, pr, body, gh_runner, log=None):
+    log = log or (lambda *a, **k: None)
     try:
         _gh(["pr", "comment", str(pr), "--body", body], repo, gh_runner)
-    except Exception:
-        pass
+    except Exception as exc:
+        log(f"merge-queue: PR #{pr} comment failed: "
+            f"{type(exc).__name__}: {exc}", "WARN")
 
 
 def resolve_instructions(branch, base="main"):
@@ -1831,8 +1860,8 @@ def _update_flight(state_path, project, pr, **fields):
         _stream_stamp(project=project, pr=pr, stage=stage)
 
 
-def _handback(entry, cfg, body, handback, gh_runner):
-    _comment_pr(cfg["repo"], entry["pr"], body, gh_runner)
+def _handback(entry, cfg, body, handback, gh_runner, log=None):
+    _comment_pr(cfg["repo"], entry["pr"], body, gh_runner, log=log)
     try:
         handback(entry.get("card"), entry.get("assignee"), body)
     except Exception:
@@ -1863,13 +1892,14 @@ def _finish(doc, project, state_path, ps, result, entry, **fields):
         save_state(doc, state_path)
 
 
-def _refuse_entry(doc, state_path, project, entry, reason, cfg, gh_runner):
+def _refuse_entry(doc, state_path, project, entry, reason, cfg, gh_runner,
+                  log=None):
     """Record a terminal refusal (base/fork) and say why on the PR."""
     body = ("Merge queue: refusing this PR.\n\n"
             f"{reason}\n\n"
             "It stays out of the queue until it is retargeted (base branch) "
             "or re-opened from a branch in this repo.\n")
-    _comment_pr(cfg["repo"], entry["pr"], body, gh_runner)
+    _comment_pr(cfg["repo"], entry["pr"], body, gh_runner, log=log)
     _finish(doc, project, state_path, None, "refused", entry, error=reason)
     return {"pr": entry["pr"], "result": "refused", "error": reason}
 
@@ -1940,7 +1970,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         log(f"merge-queue {project}: PR #{entry['pr']} refused: {reason}",
             "WARN")
         return _refuse_entry(doc, state_path, project, entry, reason, cfg,
-                             gh_runner)
+                             gh_runner, log=log)
     required = _required_for_info(cfg, base, info, git_runner, gh_runner)
     if not _pr_ready(info, required_checks=required):
         if _mergeable_unknown(info):
@@ -1982,7 +2012,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                 f"{output}")
         _finish(doc, project, state_path, ps, "conflict", entry,
                 conflicted=conflicted)
-        _handback(entry, cfg, body, handback, gh_runner)
+        _handback(entry, cfg, body, handback, gh_runner, log=log)
         log(f"merge-queue {project}: PR #{entry['pr']} conflict in {names}",
             "WARN")
         return {"pr": entry["pr"], "result": "conflict",
@@ -2034,7 +2064,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                 "needed from you; do not rebase or 'fix the gate' because of "
                 "this comment.\n"
                 f"{output}")
-            _handback(entry, cfg, body, handback, gh_runner)
+            _handback(entry, cfg, body, handback, gh_runner, log=log)
             log(f"merge-queue {project}: PR #{entry['pr']} gate timed out "
                 f"after {timeout_s}s: {command} (not a test failure)", "WARN")
             return {"pr": entry["pr"], "result": "gate-timeout",
@@ -2054,7 +2084,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                     f"{resolve_instructions(info.get('headRefName'), base)}\n")
             _finish(doc, project, state_path, ps, "red-gate", entry,
                     gate=command, head_sha=info.get("headRefOid"))
-            _handback(entry, cfg, body, handback, gh_runner)
+            _handback(entry, cfg, body, handback, gh_runner, log=log)
             log(f"merge-queue {project}: PR #{entry['pr']} gate failed: "
                 f"{command}", "WARN")
             return {"pr": entry["pr"], "result": "red-gate",
@@ -2185,8 +2215,21 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
     return moved
 
 
+def _capped_error(error):
+    """Cap a retry error while keeping its first line and traceback tail."""
+    error = str(error)
+    if len(error) <= MAX_LAST_ERROR_CHARS:
+        return error
+    head, _, rest = error.partition("\n")
+    room = MAX_LAST_ERROR_CHARS - len(head) - 1
+    if room <= 0:
+        return error[:MAX_LAST_ERROR_CHARS]
+    return head + "\n" + rest[-room:]
+
+
 def _retry_or_drop(doc, state_path, project, entry, error):
     entry["attempts"] = int(entry.get("attempts") or 0) + 1
+    error = _capped_error(error)
     entry["last_error"] = error
     with _file_lock():
         fresh = load_state(state_path)
@@ -2286,7 +2329,7 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             f"{resolve_instructions(entry.get('branch'), base)}\n")
         _finish(None, project, state_path, None, "red-ci", entry,
                 head_sha=head_sha)
-        _handback(entry, cfg, body, handback, gh_runner)
+        _handback(entry, cfg, body, handback, gh_runner, log=log)
         log(f"merge-queue {project}: PR #{pr} CI red on pushed head "
             f"{head_sha[:12]}", "WARN")
         return {"pr": pr, "result": "red-ci", "head_sha": head_sha}
@@ -2353,6 +2396,8 @@ def _resume_ci_pending(project, cfg, entry, *, state_path, git_runner=None,
     """One tick's look at a claim parked on a pending pushed-head CI."""
     log = log or (lambda *a, **k: None)
     handback = handback or default_handback
+    git_runner = git_runner or _default_runner
+    gh_runner = gh_runner or _default_runner
     cancel = _cancel_reason(state_path, project, entry, cfg)
     if cancel:
         return _stop_cancelled(state_path, project, entry, cancel)
@@ -2557,8 +2602,12 @@ def tick(*, state_path=None, root=None, registry_path=None,
                             git_runner=git_runner, gh_runner=gh_runner,
                             handback=handback, log=log)
                     except Exception as exc:
+                        error = (f"{type(exc).__name__}: {exc}\n"
+                                 f"{traceback.format_exc()}")
+                        log(f"merge-queue {claim_name}: PR #{entry['pr']} "
+                            f"raised:\n{error}", "ERROR")
                         outcome = _retry_or_drop(
-                            None, state_path, claim_name, entry, str(exc))
+                            None, state_path, claim_name, entry, error)
                 result["processed"].append({"project": claim_name, **outcome})
                 log(f"merge-queue {claim_name}: PR #{entry['pr']} -> "
                     f"{outcome.get('result')}")
@@ -2632,8 +2681,12 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         git_runner=git_runner, gh_runner=gh_runner,
                         handback=handback, log=log)
                 except Exception as exc:
+                    error = (f"{type(exc).__name__}: {exc}\n"
+                             f"{traceback.format_exc()}")
+                    log(f"merge-queue {claim_name}: PR #{entry['pr']} "
+                        f"raised:\n{error}", "ERROR")
                     outcome = _retry_or_drop(
-                        doc, state_path, claim_name, entry, str(exc))
+                        doc, state_path, claim_name, entry, error)
             result["processed"].append({"project": claim_name, **outcome})
             log(f"merge-queue {claim_name}: PR #{entry['pr']} -> "
                 f"{outcome.get('result')}")

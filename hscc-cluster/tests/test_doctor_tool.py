@@ -381,6 +381,28 @@ class TestReadOnly:
             "the control ran against a door call that never produced findings "
             f"(rc={result.get('rc')}: {result.get('report')!r})")
 
+    def test_the_guard_ran_on_a_payload_that_contains_the_wake_subs_row(
+            self, _seal_door_env, monkeypatch):
+        """Presence control for the snapshot above: a door whose problem row had
+        simply disappeared also satisfies "nothing was written".
+
+        The wake-subscription row is the one that broke this invariant on main
+        (t_2c218de8 — it logged a ``daemon.log`` during a read), so the guard is
+        pinned to run against a payload that still contains it, produced by the
+        same sealed spawn the snapshot is taken around.
+        """
+        _the_seal_actually_took()
+        monkeypatch.setattr(dt, "_run_door", _run_door_for_real)
+        out = dt.doctor_findings({})
+        names = [c.get("name") for c in out.get("checks", [])]
+        row = [c for c in out.get("checks", []) if "orch wake subs" in str(c)]
+        assert row, f"the wake-subs row is not in the door payload: {names}"
+        assert len(row) == 1, f"the row is wired twice: {names}"
+        assert row[0].get("detail"), "the row reported nothing at all — it did not run"
+        assert not row[0].get("fatal"), (
+            "this row is WARN by design: an operator-owned subscription is a "
+            "decision to remove, not a reason to refuse bootstrap's Stage-1 gate")
+
     def test_the_handler_has_no_path_to_a_mutation(self):
         """Structural pin: no reference to the repair side, its writer, or a
         transport. ``subprocess`` IS allowed here — it is the door to the CLI,

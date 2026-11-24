@@ -205,6 +205,26 @@ endpoints (confirm-gated, see below).
 | GET | `/v1/fleet/streams` | Daemon stream health — a map of stream name → status; `ok: true` per stream. Returns `{streams, speak}`. | read |
 | GET | `/v1/autoscale` | Scaling advice from current queue depth (read-only — it only *advises*). | read |
 
+### Orchestrator (read)
+
+The dashboard pair from audit §2.6 / decision D9: the two questions behind
+`hscc main status` and `hscc orch waker status`, which had no HTTP surface at
+all. Each route answers exactly ONE CLI verb's question by calling the same
+function that verb renders from, and each adds nothing to the payload but
+`speak`.
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/main/status` | The configured main orchestrator and its pane — the `hscc main status` answer: `{name, profile, board, state, running, busy, pane, target, panes, detail, speak}`. `state` is `busy` / `idle` / `not-running` / `ambiguous` (several panes, never guessed between) / `unknown` (a pane whose screen could not be read). The identity is the one resolver's answer, so a renamed main needs no client change. Read-only: it never starts, re-attaches or renames the main orchestrator, and it takes no `profile` — it can only be asked about the configured one. | read |
+| GET | `/v1/orch/waker/status` | The daemon-resident orchestrator waker — the `hscc orch waker status` answer: `{enabled, config, stream: {name, interval_s, scan_every_s, last_tick, tick_age_s, ok, message}, boards, paneless_skip, audit, speak}`. `tick_age_s` is `null` when the waker has never ticked (never a fabricated `0s ago`), `paneless_skip` names the boards it stopped nudging and why. Read-only: `enable`/`disable` stay CLI verbs, so nothing over HTTP can change when the operator is woken. | read |
+
+> **These two are not one question.** `/v1/main/status` reports the operator's
+> pane (is the orchestrator process up, is it mid-turn); `/v1/orch/waker/status`
+> reports the daemon-side waker that knocks on it (is it enabled, when did it
+> last tick). A dashboard that wants "is the main orchestrator being woken"
+> needs both, and a green pane with a stale waker tick is exactly the state this
+> pair exists to show.
+
 ### Project / kanban (read)
 
 | Method | Path | Description | Mutates |
@@ -215,6 +235,20 @@ endpoints (confirm-gated, see below).
 | GET | `/v1/review/queue` | Cards genuinely awaiting review, newest first. Returns `{queue, count, speak}`. | read |
 | GET | `/v1/review/{card_id}` | **Dry-run** review facts for one card (branch state, merge conflicts, the VERIFY line). Read-only — never merges, never closes. `404` if the card does not resolve to a reviewable branch. | read |
 | GET | `/v1/qa/queue` | The pre-merge QA queue + the manual-QA store. Returns `{queue, manual_qa, speak}`. | read |
+
+### Templates (read)
+
+The cluster template engine's read verbs (`hscc-cluster`), served verbatim the
+way `hscc template …` runs them — never a second implementation. `validate`
+answers the same two-layer verdict `hscc template validate` prints. All four are
+read-only; the mutating `apply` is the confirm-gated POST in the Actions table.
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/template/list` | Available cluster templates. Returns `{count, templates, speak}`. | read |
+| GET | `/v1/template/status` | Which template is currently applied. Returns `{applied, speak}`. | read |
+| GET | `/v1/template/preview/{name}` | Dry-run: what applying `name` would change. `404 not_found` if unknown. | read |
+| GET | `/v1/template/validate/{name}` | Preflight `name` — is it deployable? Returns `{template, structural: {ok, errors, warnings}, placement: {ok, errors, warnings}, ok, speak}` (the CLI's two-layer verdict). A missing template returns `ok: false` (not `404`) — the verdict itself is the answer. Optional `?structural-only=1` skips the live placement layer. | read |
 
 ### Actions (mutating — confirm-gated)
 
