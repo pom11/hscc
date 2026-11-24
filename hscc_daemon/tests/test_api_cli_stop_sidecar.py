@@ -1589,17 +1589,21 @@ def _warn_lines(sandbox):
     return [line for line in text.splitlines() if WEDGED_WARN in line]
 
 
-def _stop_a_serving_child(sandbox, port, wedge_host):
+def _stop_a_serving_child(sandbox, wedge_host):
     """Run `serve-wedged`, wait for what it promises, SIGTERM it. -> (run, proc, pid).
 
     The ORDER is part of the measurement: listening first (accept loops exist, the
     fake sidecar is really up), then — only for the wedge arm — the wedge's own
     entry marker, and only then the signal.
+
+    No port is handed IN and none comes OUT: the child binds `PORT_AUTO` and the
+    kernel's number is only ever needed as a witness, which `_await_listening`
+    already enforces when it reads the line back (see :data:`PORT_AUTO`).
     """
-    proc = _popen(sandbox, "serve-wedged", str(port), ",".join(BOTH_BINDS),
+    proc = _popen(sandbox, "serve-wedged", str(PORT_AUTO), ",".join(BOTH_BINDS),
                   wedge_host)
     trail = _ChildTrail(proc)
-    _wait_listening(sandbox, port)
+    _await_listening(sandbox)
     assert _have(sandbox, SIDECAR_STARTED), (
         f"the sidecar never started, so no stop below can prove a teardown: "
         f"{_describe(sandbox)}")
@@ -1629,8 +1633,7 @@ def test_a_wedged_listener_is_abandoned_reported_and_the_stop_says_so(sandbox):
     wait), the log names the wedged host, it names ONLY the wedged host, and the
     process reports 1 where the healthy arm reports 0.
     """
-    port = _free_port()
-    run, proc, sidecar_pid = _stop_a_serving_child(sandbox, port, WEDGED_HOST)
+    run, proc, sidecar_pid = _stop_a_serving_child(sandbox, WEDGED_HOST)
     try:
         if run.verdict != "clean":
             pytest.fail(
@@ -1702,8 +1705,7 @@ def test_a_stop_that_lost_nothing_reports_nothing(sandbox):
     Same binds, same harness arm, same signal — the only difference is that no
     listener is parked inside `service_actions`, and every one of them comes back.
     """
-    port = _free_port()
-    run, proc, sidecar_pid = _stop_a_serving_child(sandbox, port, "-")
+    run, proc, sidecar_pid = _stop_a_serving_child(sandbox, "-")
     try:
         assert run.verdict == "clean", (
             f"an ordinary stop did not return through `_serve`: it {run.verdict} "
