@@ -12,7 +12,9 @@ owns:
      print the COMMAND_HELP text, and cannot reach `plan_clean` (pinned by
      making plan_clean raise, and structurally by the engine import sitting
      INSIDE the handler);
-  3. an unknown flag — `--deep` above all, since card t_a4d6b78d will add it —
+  3. an unknown flag — `--deep` used to be the pinned example (card
+     t_fc9296a7 refused it for card t_701e22fc to claim); it is legal now, so
+     the refused-flag cases here are typos instead —
      exits 2 with the usage line instead of being silently accepted;
   4. the two output paths: the human view says DRY RUN and prefixes every
      mutating line with `would`; `--json` is the engine's dict verbatim
@@ -217,8 +219,10 @@ class TestHelpIsInert:
 
 class TestArgvContract:
     @pytest.mark.parametrize("argv,needle", [
-        (["--deep"], "unknown flag: --deep"),
-        (["--apply", "--deep"], "unknown flag: --deep"),
+        # `--deep` was refused here until t_701e22fc: it is a legal flag now, and
+        # `--apply --deep` without `--confirm` is still a usage error — with a
+        # different reason, which is the whole point of the gate.
+        (["--apply", "--deep"], "--deep with --apply needs --confirm"),
         (["--day", "7"], "unknown flag: --day"),
         (["hscc"], "unexpected argument: hscc"),
         (["--days"], "--days needs a value"),
@@ -370,8 +374,10 @@ class TestJsonIsTheEngineDict:
         rc, out = run_clean(["--apply", "--json"], lib)
         assert rc == 0
         payload = json.loads(out)
-        assert set(payload) == {"apply", "archived", "removed", "skipped",
-                                "errors", "freed_bytes"}
+        assert {"apply", "archived", "removed", "skipped", "errors",
+                "freed_bytes"} <= set(payload)
+        # t_701e22fc adds the cache half to the result dict too.
+        assert {"cache", "cache_freed_bytes", "report_only"} <= set(payload)
         assert payload["apply"] is True
         assert payload["removed"] == 3
         assert payload["freed_bytes"] > 0

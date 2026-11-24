@@ -307,8 +307,15 @@ def test_a_card_younger_than_days_is_not_a_candidate(lib):
     lib.add_task("hscc", "t_new", created_at=YOUNG, completed_at=YOUNG)
     make_ws(lib, "hscc", "t_new", mode="plain")
     plan = wc.plan_clean(now=NOW, kanban_db=lib)
-    assert plan == {"days": 7, "cutoff": NOW - 7 * DAY, "actions": [],
-                    "skipped": [], "errors": []}
+    # t_701e22fc extends the plan dict with two cache keys. The workspace keys
+    # pinned here keep their exact meaning — "no candidate" is still no entry in
+    # actions/skipped, and the cache half is asserted to exist, not to be empty
+    # (whether a cache row appears is the cache tiers' business, not this one).
+    assert plan["days"] == 7 and plan["cutoff"] == NOW - 7 * DAY
+    assert plan["actions"] == [] and plan["skipped"] == []
+    assert plan["errors"] == []
+    assert set(plan) == {"days", "cutoff", "actions", "skipped", "errors",
+                         "cache_actions", "report_only", "deep"}
 
 
 def test_archived_status_cards_are_planned_too(lib):
@@ -731,9 +738,15 @@ def test_the_archive_root_follows_the_injected_home(lib):
 
 
 def test_execute_tolerates_an_empty_or_foreign_plan(lib):
-    assert wc.execute({}, apply=True, kanban_db=lib) == {
+    res = wc.execute({}, apply=True, kanban_db=lib)
+    assert {k: res[k] for k in ("apply", "archived", "removed", "skipped",
+                                "errors", "freed_bytes")} == {
         "apply": True, "archived": [], "removed": 0, "skipped": [],
         "errors": [], "freed_bytes": 0}
+    # t_701e22fc's cache half rides alongside the workspace half; an empty plan
+    # carries no cache rows, so it comes back empty rather than absent.
+    assert res["cache"] == [] and res["cache_freed_bytes"] == 0
+    assert res["report_only"] == []
     assert wc.execute({"actions": [{"kind": "delete_everything"}]},
                       apply=True, kanban_db=lib)["removed"] == 0
 
