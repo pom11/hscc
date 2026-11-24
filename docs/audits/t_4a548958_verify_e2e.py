@@ -25,8 +25,8 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = "/Users/desac/.hermes/kanban/boards/hscc/workspaces/t_4a548958"
-PY = "/Users/desac/.hermes/hermes-agent/venv/bin/python"
+ROOT = "~/.hermes/kanban/boards/hscc/workspaces/t_4a548958"
+PY = "~/.hermes/hermes-agent/venv/bin/python"
 HSCC_PROJECT = os.path.join(ROOT, "hscc-project")
 sys.path.insert(0, HSCC_PROJECT)
 from flightdeck.core import registry  # noqa: E402

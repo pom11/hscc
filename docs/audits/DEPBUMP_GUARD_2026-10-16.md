@@ -100,7 +100,7 @@ card comment thread.
 5. **hscc-dep-watcher cron (investigate-only item).** The job EXISTS and is
    ACTIVE (id 09304286e562, daily 08:00) — it is NOT paused and NOT absent,
    so `cron resume` does not apply. It has FAILED 17 runs in a row:
-   `Script not found: /Users/desac/.hermes/profiles/backend-engineer/scripts/dep_pr_watcher.py`.
+   `Script not found: ~/.hermes/profiles/backend-engineer/scripts/dep_pr_watcher.py`.
    Root cause: the job was created from the backend-engineer profile, and
    hermes resolves `--script` names against THIS profile's scripts dir
    (cron/scheduler_script.py:~294 — "profiles never share files"), while

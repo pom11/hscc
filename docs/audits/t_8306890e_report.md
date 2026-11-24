@@ -19,7 +19,7 @@
 ## Verification (all by execution)
 - AL compile file count (the number the compiler walks): 2 tools.
   ```
-  find /Users/desac/dev/EcoFire_customizations_bc -type f -name '*.al' -not -path '*/.git/*' | wc -l
+  find ~/dev/EcoFire_customizations_bc -type f -name '*.al' -not -path '*/.git/*' | wc -l
   ```
   BEFORE: 2487 (1,991 in the 4 in-tree worktrees) — raises AL1021.
   AFTER:  500  (0 .worktrees dirs remain; compiler enumerates .al across the tree).
@@ -30,11 +30,11 @@
   count.
 - `git worktree list` (EcoFire): all 4 worktrees OUTSIDE the project root:
   ```
-  /Users/desac/dev/EcoFire_customizations_bc                       58ab75c [feat/wcollect-descr-pr]
-  /Users/desac/dev/.worktrees/EcoFire_customizations_bc/ctw1       81a76a1 [wt/t_d4705029]
-  /Users/desac/dev/.worktrees/EcoFire_customizations_bc/t_49627a43 bae45d0 [feat/transfer-stock-fix]
-  /Users/desac/dev/.worktrees/EcoFire_customizations_bc/t_4dbda030 864d6a8 [wt/t_4dbda030]
-  /Users/desac/dev/.worktrees/EcoFire_customizations_bc/t_c27d531b 51725f0 [wt/t_c27d531b]
+  ~/dev/EcoFire_customizations_bc                       58ab75c [feat/wcollect-descr-pr]
+  ~/dev/.worktrees/EcoFire_customizations_bc/ctw1       81a76a1 [wt/t_d4705029]
+  ~/dev/.worktrees/EcoFire_customizations_bc/t_49627a43 bae45d0 [feat/transfer-stock-fix]
+  ~/dev/.worktrees/EcoFire_customizations_bc/t_4dbda030 864d6a8 [wt/t_4dbda030]
+  ~/dev/.worktrees/EcoFire_customizations_bc/t_c27d531b 51725f0 [wt/t_c27d531b]
   ```
   git status (main tree) clean w.r.t. worktrees.
 - Relocated branches still exist, checked out at their original commits (identical
@@ -43,19 +43,19 @@
   wt/t_4dbda030 @ 864d6a8 · wt/t_c27d531b @ 51725f0.
 - End-to-end dispatcher anchor (HERMES_HOME=~/.hermes, the gateway/dispatcher home):
   ```
-  EcoFire anchor: /Users/desac/dev/.worktrees/EcoFire_customizations_bc   (OUT of tree)
-  hscc anchor   : /Users/desac/dev/hscc/.worktrees                          (in-tree, unchanged)
+  EcoFire anchor: ~/dev/.worktrees/EcoFire_customizations_bc   (OUT of tree)
+  hscc anchor   : ~/dev/hscc/.worktrees                          (in-tree, unchanged)
   ```
 - Other-projects exposure: ecofire (Flutter, 10 .worktrees), efsdriver (Flutter, 1)
   EXPOSED same way → registered. flosana (static docs) / hscc (python) / others not exposed.
 - Test suites: 8 packages ALL GREEN under BOTH
-  ~/.hermes/hermes-agent/venv/bin/python AND /Users/desac/miniconda3/envs/p313/bin/python.
+  ~/.hermes/hermes-agent/venv/bin/python AND ~/miniconda3/envs/p313/bin/python.
   hermes-side kanban tests: 73 passed, 2 skipped.
 
 ## How each number was produced (commands)
-- .al count: `find /Users/desac/dev/EcoFire_customizations_bc -type f -name '*.al' -not -path '*/.git/*' | wc -l` → 500 (was 2487).
-- worktree list: `git -C /Users/desac/dev/EcoFire_customizations_bc worktree list`.
-- anchor check: `HERMES_HOME=/Users/desac/.hermes <venv> python /tmp/verify_anchor3.py`.
+- .al count: `find ~/dev/EcoFire_customizations_bc -type f -name '*.al' -not -path '*/.git/*' | wc -l` → 500 (was 2487).
+- worktree list: `git -C ~/dev/EcoFire_customizations_bc worktree list`.
+- anchor check: `HERMES_HOME=~/.hermes <venv> python /tmp/verify_anchor3.py`.
 - tests: `HSCC_TEST_PY=<interp> bash scripts/run_tests.sh` (both interpreters).
 
 ## Branch/merge/deploy state

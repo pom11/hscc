@@ -740,6 +740,26 @@ def _hermetic_process_table(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_board_handback(monkeypatch):
+    """A queue hand-back never reaches the operator's board from a test.
+
+    ``merge_queue.default_handback`` shells out to ``hermes kanban comment``
+    against the live board, and since t_bcc4e414 the per-tick wait-list drain
+    can reach it — a test that parks a red PR in the wait list would otherwise
+    comment on (and reassign) a real card. Default it to the answer a machine
+    with no hermes install gives: nothing landed. That reproduces the pre-change
+    semantics exactly (the drain never handed anything back), so no existing test
+    widens. A test that cares passes its own ``handback=`` callable, which the
+    production code prefers over this one.
+    """
+    from hscc_daemon import merge_queue
+
+    monkeypatch.setattr(merge_queue, "default_handback",
+                        lambda card, assignee, message: False)
+    yield
+
+
 class _SubprocessResult:
     """Fake subprocess.CompletedProcess for controlling command output."""
 

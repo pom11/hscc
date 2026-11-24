@@ -39,12 +39,12 @@ script still passes in the merged tree.
 - **Commits ahead of main before merge:** `git rev-list --count main..wt/t_c2cae6e9` → **4** (e490e40, 583e060, 4d44eb3).
 - **Merge:** clean fast-forward `481d74e..4d44eb3` into `main` (no conflicts; sibling sub-c's files were already on main and are a disjoint set). **YES.**
 - **Push:** `git push origin main` → `481d74e..4d44eb3 main -> main` on github.com/pom11/hscc. **YES.**
-- **Deploy:** `python3 hscc-bootstrap/install_payload.py` from `/Users/desac/dev/hscc` → all payload entries installed with backups, `missing: []`. Verified deployed runtime has `make_console` in sync(3)/metrics(2)/ingest(2)/release(4), and monitor(0, unthemed). **YES.**
+- **Deploy:** `python3 hscc-bootstrap/install_payload.py` from `~/dev/hscc` → all payload entries installed with backups, `missing: []`. Verified deployed runtime has `make_console` in sync(3)/metrics(2)/ingest(2)/release(4), and monitor(0, unthemed). **YES.**
 - **Suite on merged main:** `1339 passed` under BOTH interpreters.
 
 ## Note: concurrent bootstrap work in primary checkout
 
-At merge/deploy time `/Users/desac/dev/hscc` (primary checkout, where `main`
+At merge/deploy time `~/dev/hscc` (primary checkout, where `main`
 is checked out) held another agent's **uncommitted** changes deleting
 `hscc-bootstrap/install_cli.py` + its test and trimming `bootstrap.sh`. These
 are disjoint from this card's 4 command files + tests/audits, so the fast-forward

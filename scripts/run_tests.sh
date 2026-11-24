@@ -17,6 +17,15 @@
 #         HSCC_TEST_LEGS="hscc-api scripts"  run ONLY those legs (see the leg
 #         selection block below for the full contract; unknown names exit 64
 #         rather than running a subset silently).
+#         HSCC_TEST_LEGS="loadstress"  the STRESS leg: re-runs every case
+#         pytest.ini marks `loadstress` N repeats deep under bounded CPU
+#         pressure owned by scripts/load_burners.sh (scripts/loadstress_leg.py
+#         owns the rest). It is selectable and never part of the default roster,
+#         and every roster leg above deselects those cases with
+#         `-m "not loadstress"` — so a normal gate never pays for the repeats,
+#         and nothing that only fails under load is left to the queue gate to
+#         discover. Measured load, budgets and how to raise the pressure:
+#         docs/testing/loadstress-leg.md.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -346,6 +355,16 @@ DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_dae
 # "run exactly these legs" expressible at all.
 SELECTED_LEGS="${HSCC_TEST_LEGS:-}"
 SELECTED_LEGS="${SELECTED_LEGS//,/ }"
+# ── selectable-only legs ────────────────────────────────────────────────────
+# `loadstress` is a leg this runner can run and the default roster must never
+# run: it re-runs the cases pytest.ini marks `loadstress` under bounded CPU
+# pressure, which is the one thing no ordinary gate should pay for. It is NOT in
+# DIRS for that reason (DIRS *is* the default roster), and it is declared here
+# rather than beside DIRS because scripts/tests/test_run_tests_leg_selection.py
+# executes THIS block under `set -u` against a stub roster — a name defined
+# outside the block is unbound there, and a stress leg nobody can name by
+# accident is a stress leg that rots.
+OPTIONAL_LEGS="loadstress"
 # Collapse whitespace before anything else: `set -f` so a stray glob char in the
 # value cannot pathname-expand into whatever happens to be in the cwd, and a
 # whitespace-only value has to read as "unset" (full suite) rather than as a
@@ -367,8 +386,14 @@ else
       if [ "$_d" = "$_want" ]; then _known=1; break; fi
     done
     if [ "$_known" -eq 0 ]; then
+      # A selectable-only leg is known; it just is not in the default roster.
+      case " $OPTIONAL_LEGS " in
+        *" $_want "*) _known=1 ;;
+      esac
+    fi
+    if [ "$_known" -eq 0 ]; then
       echo "run_tests.sh: HSCC_TEST_LEGS names an unknown leg: '$_want'" >&2
-      echo "  valid legs: ${DIRS[*]}" >&2
+      echo "  valid legs: ${DIRS[*]} $OPTIONAL_LEGS" >&2
       exit 64
     fi
   done
@@ -378,15 +403,28 @@ else
       if [ "$_d" = "$_want" ]; then LEGS+=("$_d"); break; fi
     done
   done
+  # Optional legs after the roster ones, so a run that asks for both has a
+  # deterministic order regardless of how the caller listed them. The empty
+  # check is deliberately AFTER this: `HSCC_TEST_LEGS=loadstress` selects one
+  # leg that DIRS cannot ever produce.
+  for _want in $OPTIONAL_LEGS; do
+    for _sel in $SELECTED_LEGS; do
+      if [ "$_sel" = "$_want" ]; then LEGS+=("$_want"); break; fi
+    done
+  done
   if [ "${#LEGS[@]}" -eq 0 ]; then
     echo "run_tests.sh: HSCC_TEST_LEGS='$HSCC_TEST_LEGS' selected zero legs" >&2
-    echo "  valid legs: ${DIRS[*]}" >&2
+    echo "  valid legs: ${DIRS[*]} $OPTIONAL_LEGS" >&2
     exit 64
   fi
 fi
-unset _want _known _d
+unset _want _known _d _sel
 
-if [ "${#LEGS[@]}" -eq "${#DIRS[@]}" ]; then
+# "FULL SUITE" means exactly one thing: nobody selected anything. A selection
+# that happens to name all twelve roster legs is still a selection, and a log
+# reader who cannot tell the two apart cannot tell a partial gate from a whole
+# one (the same reason the count is printed as n/N).
+if [ -z "$SELECTED_LEGS" ] && [ "${#LEGS[@]}" -eq "${#DIRS[@]}" ]; then
   echo "legs: FULL SUITE (${#LEGS[@]} legs)"
 else
   echo "legs: SELECTED ${#LEGS[@]}/${#DIRS[@]} -> ${LEGS[*]}"
@@ -549,8 +587,25 @@ for d in "${LEGS[@]}"; do
     bash "$ROOT/scripts/leg_heartbeat.sh" "$d" "$$" "$LEG_T0" "$HEARTBEAT_SECONDS" &
     HB_PID=$!
   fi
-  env "${ENV_UNSET_ARGS[@]}" \
-    "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider "$@"
+  # ── the marker every ordinary leg deselects ────────────────────────────────
+  # `-m "not loadstress"` runs on EVERY roster leg, so the load-sensitive cases
+  # (pytest.ini's marker) execute in exactly one place: the loadstress leg,
+  # under load. Two reasons they are not simply run twice: an idle-box pass over
+  # a case that only fails loaded proves nothing new, and the repeats that make
+  # the stress leg worth running are wall time no normal gate should pay for.
+  # The operator's own `-m` (in "$@") comes last and therefore wins, so this is
+  # a default posture, not a cage.
+  if [ "$d" = "loadstress" ]; then
+    # Not a `<dir>/tests` pytest run, so it does not go through the line below.
+    # Extra argv is forwarded as pytest args — same contract, same surprise
+    # budget, as every other leg.
+    env "${ENV_UNSET_ARGS[@]}" \
+      "$PY" "$ROOT/scripts/loadstress_leg.py" "$@"
+  else
+    env "${ENV_UNSET_ARGS[@]}" \
+      "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider \
+      -m "not loadstress" "$@"
+  fi
   code=$?
   [ -n "$HB_PID" ] && kill "$HB_PID" 2>/dev/null
   if [ $code -eq 0 ]; then

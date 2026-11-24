@@ -71,7 +71,7 @@ hscc-roles/tests/test_generator.py (47 passed) under BOTH interpreters:
     ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_generator.py -q
     -> 47 passed in 0.51s
 
-    /Users/desac/miniconda3/envs/p313/bin/python -m pytest tests/test_generator.py -q
+    ~/miniconda3/envs/p313/bin/python -m pytest tests/test_generator.py -q
     -> 47 passed in 0.28s
 
 Full repo suite via scripts/run_tests.sh (8 plugin dirs, per-dir pytest

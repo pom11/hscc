@@ -420,6 +420,70 @@ def _backticked(section):
     return re.findall(r"`([^`]+)`", section)
 
 
+# --------------------------------------------------------------------------
+# what "mapped" means: a SHAPE, not a mention (t_053a7210)
+# --------------------------------------------------------------------------
+#
+# Both coverage pins below were, until now, `` f"`{tool}`" in section ``.
+# Measured on t_8024d1ff: deleting the whole `doctor` row left the roles leg
+# GREEN, because a neighbouring sentence happened to carry "not on the `doctor`
+# tool above". A tool the main only meets in a parenthetical is a tool it will
+# not think to call — the exact failure this gate exists to prevent, which a
+# substring check cannot prevent.
+#
+# So the pins ask for the section's OWN convention, stated in the section:
+# "Each line is a shipped door: the agent tool, then the CLI verb it mirrors in
+# brackets." A tool is MAPPED when a bullet row carries its backticked name in
+# NAME POSITION — at the head of the row, just after a short ``Label: `` at the
+# row head or a clause boundary, or as the next name of a ``, ` / ` and ` /
+# ` then `` list — and the row goes on to carry a definition (the ` — ` job
+# clause, a bracketed CLI verb, or a name list). A name dropped into prose
+# satisfies none of that, so a passing mention no longer closes the gate.
+_MAP_NAME = re.compile(r"`([a-z][a-z_]*)`")
+_MAP_LABEL = re.compile(r"[^`:—.;]{1,48}: ")
+_MAP_NOTE = re.compile(r"(?:\s*(?:\[[^\]]*\]|\([^)]*\)))*")
+_MAP_LIST = re.compile(r"(?:,\s(?:then\s)?|\sand\s)")
+_MAP_JOB = re.compile(r"\s—\s")
+_MAP_CLAUSE = re.compile(r"(?:\.|;|:)(?:\s|$)")
+_MAP_DEFINES = re.compile(r"(?:\s—\s|\s\[|,\s)")
+_MAP_BOUNDARY = re.compile(r"[.;] ")
+
+
+def _mapped_tools(section):
+    """Every tool the section MAPS — name position plus a definition.
+
+    Returns the tool names, not the rows: the pins ask membership, and a caller
+    that wants the row can re-read it. See the block comment above for the rule
+    and for the mutation that made it necessary.
+    """
+    mapped = set()
+    for line in section.splitlines():
+        if not line.startswith("- ") or not _MAP_DEFINES.search(line):
+            continue  # not a row, or a sentence no agent reads as a door
+        for start in [2] + [m.end() for m in _MAP_BOUNDARY.finditer(line)]:
+            pos, at_row_head = start, start == 2
+            label = _MAP_LABEL.match(line, start)
+            if label:
+                pos, at_row_head = label.end(), False
+            while True:
+                name = _MAP_NAME.match(line, pos)
+                if not name:
+                    break
+                note = _MAP_NOTE.match(line, name.end())
+                after = note.end() if note else name.end()
+                listing = _MAP_LIST.match(line, after)
+                if listing:
+                    mapped.add(name.group(1))
+                    pos = listing.end()
+                    continue
+                if _MAP_JOB.match(line, after):
+                    mapped.add(name.group(1))
+                elif not at_row_head and _MAP_CLAUSE.match(line, after):
+                    mapped.add(name.group(1))
+                break
+    return mapped
+
+
 def test_every_backticked_tool_name_is_a_registered_tool():
     """A tool name the registry does not register is a tool that will not exist.
 
@@ -456,12 +520,18 @@ def test_the_named_read_tools_include_the_two_read_only_additions():
     cases from the registry and would also pass if a later diff moved a mapped
     tool into its exclusion set; this one is the static pin that keeps these
     reads named whatever the registry does.
+
+    MAPPED, not mentioned: ``_mapped_tools`` is the whole predicate, so a diff
+    that deletes one of these rows and leaves a sentence about it goes red here
+    rather than green (t_8024d1ff measured exactly that on `doctor`).
     """
-    section = _section_only(orchestrators.main_cluster_control_block())
+    mapped = _mapped_tools(_section_only(orchestrators.main_cluster_control_block()))
     for tool in ("autodown_status", "merge_queue_status", "doctor",
                  "heal_status",
                  "node_paused", "node_pause", "node_resume", "orch_message"):
-        assert f"`{tool}`" in section, f"{tool} is not mapped to a job"
+        assert tool in mapped, (
+            f"{tool} is not mapped to a job — the section must carry it as a "
+            "row (the tool in name position, then its job), not merely name it")
 
 
 @pytest.mark.parametrize("tool", sorted(_registered_tools()))
@@ -471,15 +541,44 @@ def test_every_registered_tool_is_named_or_deliberately_excluded(tool):
     Exclusion is allowed but must be argued: a tool the section skips is a tool
     the main will not think to call, so the exclusion list is deliberately short
     and any NEW registered tool must either be mapped or be reasoned about here.
+
+    "Mapped" is the shape rule in ``_mapped_tools``, tightened on t_053a7210
+    after a deleted `doctor` row passed the old substring check on a passing
+    mention. The exclusion set itself is deliberately UNCHANGED by that
+    tightening: this hardens what a row is, it does not widen who is exempt.
     """
     excluded = {
         "pick_node",       # a helper inside provision_model, not a job on its own
         "list_recipes",    # recipe browsing; provisioning names the recipe path
     }
-    section = _section_only(orchestrators.main_cluster_control_block())
-    assert tool in excluded or f"`{tool}`" in section, (
-        f"{tool} is registered but neither mapped in the section nor listed in "
-        "its exclusion set — add the row, or say here why the main never needs it")
+    mapped = _mapped_tools(_section_only(orchestrators.main_cluster_control_block()))
+    assert tool in excluded or tool in mapped, (
+        f"{tool} is registered but neither mapped as a row in the section nor "
+        "listed in its exclusion set — add the row (the tool in name position, "
+        "then the job it does), or say here why the main never needs it")
+
+
+def test_a_passing_mention_is_not_a_mapping():
+    """The mutant this card was cut for, kept as a case: a mention is not a row.
+
+    t_8024d1ff deleted the `doctor` row and the roles leg stayed GREEN, because a
+    neighbouring sentence carried "not on the `doctor` tool above". The shapes
+    that hid it are fed here to the SAME predicate the two coverage pins use, and
+    each must come back unmapped. The last arm is the positive control: a real
+    row must still map, because a predicate that refused everything would also
+    pass the first three arms and be worth nothing.
+    """
+    mention = ("- Two reads stay CLI-only on purpose. The preflight verdict is "
+               "not on the `doctor` tool above.")
+    bare = "- `doctor`."
+    labelled = "- Note: `doctor`."
+    row = "- `doctor` — what the preflight door says about this host."
+    prose = f"{HEADING}\n{mention}\n{bare}\n{labelled}\n"
+    assert "doctor" not in _mapped_tools(prose), (
+        "a passing mention satisfied the coverage gate — the shape rule broke")
+    assert "doctor" in _mapped_tools(f"{HEADING}\n{row}\n"), (
+        "the predicate refuses a real mapping row too, which would make both "
+        "coverage pins vacuous")
 
 
 def test_every_named_cli_verb_is_dispatched_by_the_cli():

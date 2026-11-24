@@ -1,5 +1,5 @@
 import re
-log = "/Users/desac/.hscc/daemon.log"
+log = "~/.hscc/daemon.log"
 lines = open(log).read().splitlines()
 
 def ts(l):

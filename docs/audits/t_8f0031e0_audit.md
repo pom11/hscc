@@ -82,7 +82,7 @@ Interpreter A — `~/.hermes/hermes-agent/venv/bin/python`:
   sparkrun-hermes 8 passed, hscc-api 786 passed (1 skipped).
 - ALL GREEN, exit 0.
 
-Interpreter B — `/Users/desac/miniconda3/envs/p313/bin/python`:
+Interpreter B — `~/miniconda3/envs/p313/bin/python`:
 - hscc-bootstrap 248 passed, hscc-commands 59 passed, hscc-roles 101 passed,
   hscc-cluster 384 passed (14 skipped — platform-dependent skips, green),
   hscc-project 1298 passed, hscc_daemon 1123 passed, sparkrun-hermes 8 passed,
