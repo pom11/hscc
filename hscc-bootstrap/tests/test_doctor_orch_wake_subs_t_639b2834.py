@@ -458,12 +458,17 @@ def test_the_silent_window_gives_the_logger_and_the_warn_budget_back(
     autodown = pytest.importorskip("hscc_daemon.autodown")
     log_file = _unreachable_hermes(tmp_path, monkeypatch)
     real_log = autodown.log
+    real_warn = autodown._kanban_warn
 
     dos.enumerate_boards()
 
     assert autodown.log is real_log, (
         "the window leaked a no-op logger into autodown — every later daemon "
         "log line in this process would vanish")
+    assert autodown._kanban_warn is real_warn, (
+        "the window leaked its mute: the row borrows "
+        "``autodown.silent_read``, and a leaked window would silence the "
+        "interlock WARN for the rest of the process")
     assert autodown._KANBAN_LOAD["warned"] is False, (
         "the row spent the process's one WARN: autodown can no longer warn "
         "about a real interlock failure in this process")
@@ -474,23 +479,33 @@ def test_the_silent_window_gives_the_logger_and_the_warn_budget_back(
     assert not log_file.exists()
 
 
-def test_the_window_restores_the_logger_even_when_the_read_raises():
-    """The ``finally`` is the whole design: a leaked no-op logger would silence
-    the daemon for the rest of the process, and a raise is exactly when a
-    cleanup is easy to forget."""
-    borrowed = SimpleNamespace(
-        # Instance attributes, deliberately: a function defined in a class BODY
-        # would be re-bound on every attribute access, so the identity assertion
-        # below would fail for a reason that has nothing to do with the window.
-        log=lambda *a, **k: None,
-        _KANBAN_LOAD={"ok": None, "reason": "", "warned": True})
-    original = borrowed.log
-    with pytest.raises(RuntimeError):
-        with dos._silent_read(borrowed):
-            raise RuntimeError("the read died")
-    assert borrowed.log is original
-    assert borrowed._KANBAN_LOAD["warned"] is True, (
-        "a budget that was already spent must not be re-armed")
+def test_the_row_hands_the_window_back_even_when_the_read_raises(
+        monkeypatch):
+    """The row's ``finally`` is the whole design — driven through the real seam.
+
+    A mute leaked into ``autodown`` would silence the interlock WARN for the
+    rest of the process, and a raise is exactly when a cleanup is easy to
+    forget. This runs the row's OWN call path (``enumerate_boards`` → the
+    delegated ``board_db_paths``), made to fail: #716 shipped a private copy of
+    the window here and t_85875291 deleted it in favour of
+    ``autodown.silent_read``, so what this row still has to guarantee is that
+    ITS call borrows and returns the shared window. A test against a stand-in
+    module object could pass while the row called nothing at all.
+    """
+    autodown = pytest.importorskip("hscc_daemon.autodown")
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the read died")
+
+    monkeypatch.setattr(autodown, "board_db_paths", explode)
+    real_warn = autodown._kanban_warn
+
+    assert dos.enumerate_boards() == {}, (
+        "a failing enumeration is 'not checked', which the row reports — never "
+        "a crash out of a doctor run")
+    assert autodown._kanban_warn is real_warn, (
+        "the row leaked its mute on the failure path: every later kanban WARN "
+        "in this process would be silently dropped")
 
 
 def test_pane_resolution_uses_the_shared_resolver_and_its_surface_rule():
