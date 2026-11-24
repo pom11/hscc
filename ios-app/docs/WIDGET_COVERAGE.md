@@ -351,7 +351,10 @@ project/card text. Its golden `v1_merge_queue.cli.json` is not transcribed:
 `ios-app/scripts/merge_queue_cli_parity.py` feeds the fixture's per-project rows
 into the REAL `hscc_daemon/kanban_live.py::merge_queue_table` and records the
 header and every cell. The decode gate then compares `MergeQueueTableReading`
-against that golden, one project table at a time.
+against that golden, one project table at a time. Since 2.17.5 the two CLI
+monitors print ONE compact `mq` line instead of this table
+(`kanban_live.merge_queue_line`); the widget keeps the table, and the golden
+pins the widget to the renderer, not to the monitor.
 
 Families:
 

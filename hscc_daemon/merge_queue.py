@@ -380,6 +380,12 @@ def _file_lock(path=None):
 
 def _project_state(doc, project):
     ps = doc.setdefault("projects", {}).setdefault(str(project), {})
+    if not isinstance(ps, dict):
+        # A hand-edited or half-written ledger can hold anything under a project
+        # name, and every reader below calls `.get` on this value. Garbage is an
+        # empty state, not a crash: one bad value must not wedge
+        # `hscc merge-queue list`, `GET /v1/merge-queue` or a monitor.
+        ps = doc["projects"][str(project)] = {}
     ps.setdefault("enabled", None)       # None = registry/default-on decides
     ps.setdefault("paused", False)
     ps.setdefault("queue", [])
