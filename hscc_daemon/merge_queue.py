@@ -2487,7 +2487,7 @@ def _own_red_body(base, base_sha, reason, branch, checks, entry, card):
                f"and its checks are red again on that base, so this is a "
                f"verdict on the PR — not on a base that was broken at the time "
                f"and has since been fixed.")
-    failed = checks or "(gh reported no failing check names)"
+    failed = ", ".join(checks) if checks else "(gh reported no failing check names)"
     body = (f"{lead}\n\n"
             f"Failing check(s): {failed}\n\n"
             f"{why}\n")
