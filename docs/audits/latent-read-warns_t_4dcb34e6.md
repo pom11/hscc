@@ -181,13 +181,25 @@ conflict itself (`kill_switch.py:223-225`), so it is not log-only anywhere.
 
 * `hscc_daemon/board_pin.py` — `silent_read()` + `_warn_route`; doors wrapped:
   `autodown_cli._cmd_status`, `kanban_blocked.list_blocked_tasks`,
-  `kanban_cli._cmd_stale`, `kanban_cli._cmd_monitor` (x2), `cards_live._default_collect`.
-  Guard: `hscc_daemon/tests/test_board_pin.py::TestReadDoorWritesNoLogFile`.
+  `kanban_cli._cmd_stale`.
+  Guard: `hscc_daemon/tests/test_board_pin.py::TestReadDoorWritesNoLogFile`
+  (armed pin + on-disk board DBs + sandbox HOME, canary + stderr presence control).
 * `hscc_daemon/node_pauses.py` — `silent_read()` + `_warn_route`; door wrapped:
-  `hscc.py::_node_paused`. Guard: `hscc_daemon/tests/test_node_pauses.py`.
-* `hscc_daemon/kanban_live.py` — `silent_read()` + `_caps_warn_route`; doors wrapped
-  with the §1 wrap at `_cmd_monitor` / `cards_live`. Guard:
-  `hscc_daemon/tests/test_kanban_live_caps.py`.
+  `hscc.py::_node_paused`. Guard:
+  `hscc_daemon/tests/test_node_pauses.py::TestPausedDoorWritesNoFile` (malformed
+  overlay planted, real door driven, route proven to be given back afterwards).
+
+### Open on this branch
+
+* §3 (`kanban_live` caps) and the two monitor doors (`kanban_cli._cmd_monitor`,
+  `cards_live.Monitor._default_collect`, which need the §1 wrap **and** the §3
+  wrap on the same `with` line) are not in these commits yet: the helper
+  `kanban_live.silent_read()` is unwritten, so `board_pin.silent_read()` is
+  deliberately not applied to the monitor doors either — landing half a door's
+  mute would be the #704 hole from the other side. The verdicts and the shape for
+  them stand as written above.
+* §4 is a verdict, not a change: nothing in `kanban_pause.py` is touched and no
+  guard is added for it (there is no read door for one to guard).
 
 Each guard plants the state the sandbox cannot otherwise have (the armed pin, the
 malformed overlay, the unloadable Hermes tree), drives the real door, asserts the
