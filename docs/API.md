@@ -286,6 +286,12 @@ every one of them is confirm-gated and is documented there rather than here.
 | GET | `/v1/profile/list` | Browse installed **agent profiles** (the `hscc-roles` surface — a different subject from `/v1/profiles` above). Returns `{count, profiles, speak}`. | read |
 | GET | `/v1/profile/editor/{profile}` | The fields the profile editor reads (and, over `POST`, writes) plus the option lists its pickers render. Returns `{compression, description, model, preload_skills, profile, provider, skills_all, speak, toolsets, toolsets_all}`: `compression` is `{threshold, threshold_tokens}`, `toolsets_all` is the toolset catalog and `skills_all` the profile's installed skill names, and no key here carries `api_key` or `base_url`. `404 not_found` for an unknown profile; `400 bad_request` for a name outside `[A-Za-z0-9._-]` (the path-traversal guard on the path segment). A backing that fails mid-read answers `{profile, error, speak}` with `error: "unavailable"` rather than a blank editor — absence of the fields is never "the profile has none". Shipped consumer: iOS `ProfileEditorResponse`. | read |
 
+### Sessions (read)
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/sessions?profile=<name>` | A profile's sessions with the bloat signals an operator needs before a chat session wedges. Returns `{bloated_count, count, profile, sessions, speak}`: `sessions` are that profile's own listable, non-archived **root** sessions newest first (sub-agent runs are not listed), read from the profile's `state.db` opened **READ-ONLY**, and `bloated_count` is how many of them carry positive evidence that compaction is not firing. `profile` is required — absent/blank is `400 bad_request`. A profile whose `state.db` cannot be opened answers `{profile, sessions, speak}` with an empty `sessions` and **no** `count`: an unreachable profile is not "a profile with no sessions", and the absent keys are how a client tells the two apart. Shipped consumer: the iOS session list (`HSCCClient.swift`). | read |
+
 > **This reference is curated, not exhaustive — but it is now gated.** Every route
 > `hscc-api/api_server.py` registers (the `routes_*.py` modules append to
 > `api_server.ROUTES`, and `WS_ROUTES` carries the WebSocket upgrade) must appear as a

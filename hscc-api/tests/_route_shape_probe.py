@@ -65,6 +65,7 @@ SHAPE_CHECKED: dict[str, dict] = {
     # No stub: this route's key set IS its backing's return literal, so the sandbox
     # seeds a real profile directory and the real _backing_read answers.
     "GET /v1/profile/editor/{profile}": {"profile": "demo"},
+    "GET /v1/sessions": {"profile": "demo"},
 }
 
 #: ``(METHOD, display path) -> [(module, attribute, replacement)]``, applied to the

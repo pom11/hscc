@@ -66,7 +66,6 @@ UNDOCUMENTED_ROUTES = {
     ("WS", "/v1/projects/{name}/session/ws"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("GET", "/v1/projects/{name}/standup"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("GET", "/v1/review/{card_id}/diff"): "surface: named outside the Endpoint reference only — see docs/DESIGN-api.md; deferred: t_b9808146",
-    ("GET", "/v1/sessions"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("POST", "/v1/sessions/{session_id}/compact"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("POST", "/v1/sessions/{session_id}/retire"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("GET", "/v1/template/preview/{name}"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
