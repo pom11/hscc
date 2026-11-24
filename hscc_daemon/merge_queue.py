@@ -205,6 +205,15 @@ SHARED_GATE_PATHS = (
 #: queue runs the whole roster instead.
 MAX_LOCAL_TEST_LEGS = 3
 
+#: Changed paths whose only Python reader is scripts/tests. Mirrors the prose and
+#: Apple-client arms of .github/scripts/leg_select.py::_RULES — the two tables
+#: must stay in step, pinned by test_local_selection_agrees_with_leg_select.
+NARROW_TO_SCRIPTS_LEG = ("changelog.d/", "docs/", "site/", "README",
+                         "CLAUDE.md", "AGENTS.md", "macos-app/", "ios-app/")
+
+#: The leg that parses and lints them (scripts/tests), per that same map.
+SCRIPTS_LEG = "scripts"
+
 #: A leg name that is safe to put in the gate's shell string verbatim
 #: (``.github/scripts`` is a real roster entry, hence the leading-dot arm).
 _LEG_NAME_RE = re.compile(r"^[A-Za-z0-9.][A-Za-z0-9._/-]*$")
@@ -904,13 +913,15 @@ def _test_leg_roster(worktree):
 def _local_test_legs(changed, roster):
     """Legs a narrowed local gate may run, or ``None`` for the full suite.
 
-    Only a path under a leg's own directory selects that leg. A shared harness
-    path, an unreadable/odd roster, an empty diff, or more than
+    A path under a leg's own directory selects that leg. Repo prose and the
+    Apple client trees select :data:`SCRIPTS_LEG`, mirroring
+    ``.github/scripts/leg_select.py`` — ``scripts/tests`` is their only Python
+    reader (it parses ``changelog.d/`` and ``CHANGELOG.md``, lints the README
+    and docs index, and reads/executes the app publishers). A shared harness
+    path, an unreadable/odd roster, a roster without :data:`SCRIPTS_LEG` for
+    such a path, an empty diff, a path no rule claims, or more than
     :data:`MAX_LOCAL_TEST_LEGS` distinct legs widen to ``None`` (full suite):
-    under-selection is the failure mode this gate must not have. Paths outside
-    every leg (docs, changelog fragments, app builds) select nothing, so a diff
-    that is *only* those also widens to the full suite rather than running
-    zero legs.
+    under-selection is the failure mode this gate must not have.
     """
     if not roster or any(not _LEG_NAME_RE.match(leg) for leg in roster):
         return None
@@ -921,8 +932,18 @@ def _local_test_legs(changed, roster):
         if any(path == shared or path.startswith(shared)
                for shared in SHARED_GATE_PATHS):
             return None
-    chosen = {leg for leg in roster
-              if any(path.startswith(leg.rstrip("/") + "/") for path in paths)}
+    chosen = set()
+    for path in paths:
+        claimed = {leg for leg in roster
+                   if path.startswith(leg.rstrip("/") + "/")}
+        # Root-anchored like leg_select: hscc-api/docs/x.md is hscc-api's.
+        if any(path.startswith(prefix) for prefix in NARROW_TO_SCRIPTS_LEG):
+            if SCRIPTS_LEG not in roster:
+                return None
+            claimed.add(SCRIPTS_LEG)
+        if not claimed:
+            return None
+        chosen |= claimed
     if not chosen or len(chosen) > MAX_LOCAL_TEST_LEGS:
         return None
     return [leg for leg in roster if leg in chosen]
