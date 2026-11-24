@@ -60,13 +60,14 @@ task: t_3b7bd26d
   "asked for the patched constant" pin. **M0** no-op control green.
 * `test_workspace_clean_deep.py` + `test_workspace_clean.py` + `test_workspace_clean_cli.py`:
   **115 passed, 1 skipped** (the pre-existing `real_hermes` skip), leg interpreter.
-* Full `hscc_daemon` leg at the tip: **not stamped by this card, and that is stated
-  rather than papered over.** The host never emptied inside the run — this card's own
-  induced storm (3 concurrent legs, the thing the flake needed) plus another worker's leg
-  were still finishing when the run's budget ran out, and a contended leg wall is not a
-  quotable number. The leg is left to the merge-queue gate, which runs the whole suite at
-  the head regardless. What *is* measured here: the matched before/after A/B above, the
-  3-file clean run, the mutation battery, and the two harness checks.
+* Full `hscc_daemon` leg, CI shape (`scripts/run_tests.sh`, sealed `HOME`, leg
+  interpreter 3.14.10 / pytest 9.1.1), at `83687678`: **5257 passed, 1 skipped,
+  9 deselected in 310.74 s**, `RUNNER_EXIT=0`, `✓ hscc_daemon`, **ALL GREEN** — host
+  load avg 4.56 falling to 2.69 across the run (the card's own induced storm had just
+  drained, so the wall is not a storm wall; the load is recorded with the number, per the
+  lane rule). The tip `7d5e09f5` differs from `83687678` only in this fragment's prose,
+  which no test reads. The one skip is the pre-existing
+  `test_orch_waker_wake_claim.py:1495` (deployed Hermes has no wake-claim helpers yet).
 * Hermeticity: test-only diff, no product change, no new probe surface. Everything stays
   inside the file's own `cache_sandbox` (HOME/TMPDIR under `tmp_path`, every one of the
   seven cache binaries resolved into the shim dir); the injection delegates to the
