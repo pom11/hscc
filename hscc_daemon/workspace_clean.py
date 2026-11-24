@@ -124,7 +124,9 @@ CACHE_TIMEOUT = 300
 #: reference script's ``-mtime +1``).
 PYTEST_TEMP_AGE_SECONDS = 86400
 
-#: ``${TMPDIR}/pytest-of-$USER`` — the tree the script sweeps.
+#: ``${TMPDIR}/<prefix>$USER`` — the tree the script sweeps, and the ONLY place
+#: this package names the pytest temp-dir prefix (the single-source guard in
+#: ``tests/test_planted_hermes_cli_single_source.py`` pins it here).
 PYTEST_TEMP_PREFIX = "pytest-of-"
 
 #: ``$HOME/.cache/hscc-uitest*`` — the UI-test caches.

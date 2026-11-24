@@ -272,7 +272,9 @@ class TestSafeTier:
                    if e["kind"] == wc.KIND_COMMAND and e["name"] != "uv cache")
 
     def test_pytest_dirs_are_filtered_by_age(self, lib, cache_sandbox):
-        root = cache_sandbox.tmp / "pytest-of-tester"
+        # The prefix is the ENGINE's constant, not spelled here: this file is
+        # swept by test_planted_hermes_cli_single_source for exactly that copy.
+        root = cache_sandbox.tmp / f"{wc.PYTEST_TEMP_PREFIX}tester"
         old = root / "pytest-1"
         new = root / "pytest-2"
         for d in (old, new):
