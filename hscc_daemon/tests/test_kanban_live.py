@@ -4,6 +4,7 @@ Offline only: a fake Hermes kanban lib over real in-memory sqlite boards with
 the columns the collector reads. NEVER the operator's live boards or ~/.hermes.
 """
 
+import datetime
 import inspect
 import io
 import json
@@ -1311,28 +1312,175 @@ def test_outcomes_answer_for_every_card_not_just_the_panels_slice():
 
 
 
-# ── merge queue section (MQ4) ──────────────────────────────────────────────
+# ── merge queue: the one global line (MQ4) ─────────────────────────────────
+#
+# Both monitors print the queue as ONE `mq` line (`kanban_live.merge_queue_line`),
+# never a table per project. Every test here plants a real ledger + a real
+# registry in tmp_path and goes through `attach_merge_queue` → the same
+# `merge_queue.view` the API route serves, so nothing depends on the host.
 
-def test_attach_merge_queue_renders_a_table_per_project(tmp_path):
-    from hscc_daemon import merge_queue as mq
-    state = str(tmp_path / "merge-queue-state.json")
-    mq.add_to_queue("alpha", 7, card="t_a", branch="wt/t_a", path=state)
-    mq.add_to_queue("alpha", 8, card="t_b", branch="wt/t_b", path=state)
+def _mq_iso(seconds_ago):
+    return datetime.datetime.fromtimestamp(NOW - seconds_ago,
+                                           datetime.timezone.utc).isoformat()
 
+
+def _mq_entry(pr, card, *, age_s, **over):
+    e = {"pr": pr, "card": card, "assignee": "worker", "attempts": 0,
+         "enqueued_at": _mq_iso(age_s)}
+    e.update(over)
+    return e
+
+
+def _mq_registry(tmp_path, *, names=("alpha", "beta"), disabled=("gamma",)):
+    """A registry declaring the queue on for ``names`` and off for ``disabled``.
+
+    Declared explicitly so eligibility is the registry's answer rather than a
+    git/remote probe against a repo path that only exists on this host
+    (test_merge_queue.py's helper writes it the same way).
+    """
+    body = ["projects:"]
+    for name in list(names) + list(disabled):
+        on = name not in disabled
+        body += [f"- name: {name}", f"  repo: {tmp_path / 'repo'}",
+                 "  merge_queue:",
+                 f"    enabled: {'true' if on else 'false'}",
+                 '    gates: ["true"]']
+    path = tmp_path / "mq-registry.yaml"
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _mq_doc():
+    """Two enabled projects with content plus one disabled project with a live
+    claim. Ages are pinned to ``NOW``, so the printed ages are pinned too.
+
+    ``alpha`` is mid-gate with a queued FIFO, a wait-listed PR carrying a stored
+    error and a merged ``last``; ``beta`` has a queue and nothing claimed (the
+    `idle` case); ``gamma`` is registered but disabled — it must not appear.
+    """
+    return {"version": 1, "projects": {
+        "alpha": {"enabled": True, "paused": False,
+                  "queue": [_mq_entry(12, "t_b", age_s=600)],
+                  "waiting": [_mq_entry(13, "t_c", age_s=3600, attempts=2,
+                                        last_error="gate failed: run_tests.sh\n"
+                                                   "2 failed, 114 passed")],
+                  "in_flight": _mq_entry(11, "t_a", age_s=480, branch="wt/t_a",
+                                         stage="gating"),
+                  "last": {"pr": 10, "result": "merged", "at": _mq_iso(7200)}},
+        "beta": {"enabled": True, "paused": False,
+                 "queue": [_mq_entry(21, "t_e", age_s=900)],
+                 "waiting": [], "in_flight": None,
+                 "last": {"pr": 20, "result": "failed", "at": _mq_iso(900)}},
+        "gamma": {"paused": False, "queue": [], "waiting": [],
+                  "in_flight": _mq_entry(31, "t_g", age_s=60, stage="merging"),
+                  "last": None}}}
+
+
+def _mq_attach(tmp_path, doc=None, *, raw=None, registry=None, now=NOW):
+    """The real read: a planted ledger and registry through attach_merge_queue."""
+    state = tmp_path / "merge-queue-state.json"
+    if raw is not None:
+        state.write_text(raw, encoding="utf-8")
+    elif doc is not None:
+        state.write_text(json.dumps(doc), encoding="utf-8")
     d = {"caps": (None, None), "running": [], "ready": [], "boards": [],
-         "events": [], "errors": [], "at": NOW}
+         "events": [], "errors": [], "at": now}
     kanban_live.attach_merge_queue(
-        d, registry_path=str(tmp_path / "none.yaml"), state_path=state,
-        now=NOW)
+        d, registry_path=registry or _mq_registry(tmp_path),
+        state_path=str(state), now=now)
+    return d
 
-    assert d["merge_queue"]["rows"][0]["pr"] == 7
+
+def _mq_render(d, width=160):
     buf = io.StringIO()
-    make_console(file=buf, width=160, color_system=None).print(
-        kanban_live.render(d, snapshot=True))
-    out = buf.getvalue()
-    assert "merge queue — alpha" in out
-    assert "#7" in out and "#8" in out
-    assert "queued" in out
+    make_console(file=buf, width=width, color_system=None).print(
+        kanban_live.render(d, snapshot=True, width=width))
+    return buf.getvalue()
+
+
+def test_merge_queue_line_is_one_line_covering_every_enabled_project(tmp_path):
+    d = _mq_attach(tmp_path, _mq_doc())
+    assert kanban_live.merge_queue_line(d, now=NOW).plain == (
+        "mq  alpha #11 gating 8m · 1q · 1w · last #10 merged 2h00m"
+        " | beta idle · 1q · 0w · last #20 failed 15m")
+    out = _mq_render(d)
+    assert "gamma" not in out                       # registry-disabled: off the line
+    assert "gate failed" not in out                 # no error text (see merge-queue list)
+    assert "merge queue — alpha" not in out         # the per-project table is gone
+
+
+def test_merge_queue_line_costs_the_view_one_row(tmp_path):
+    d = _mq_attach(tmp_path, _mq_doc())
+    lines = [l for l in _mq_render(d).splitlines() if l.startswith("mq ")]
+    assert len(lines) == 1
+
+
+def test_merge_queue_line_fits_by_dropping_last_then_projects(tmp_path):
+    d = _mq_attach(tmp_path, _mq_doc())
+    full = kanban_live.merge_queue_line(d, now=NOW).plain
+    mid = kanban_live.merge_queue_line(d, now=NOW, width=len(full) - 10).plain
+    assert "· last" not in mid and "alpha" in mid and "beta" in mid
+    alpha_only = "mq  alpha #11 gating 8m · 1q · 1w"
+    assert kanban_live.merge_queue_line(
+        d, now=NOW, width=len(alpha_only) + len("  +1 proj")).plain \
+        == alpha_only + "  +1 proj"
+    # A single project that still will not fit is cropped, never wrapped.
+    tight = kanban_live.merge_queue_line(d, now=NOW, width=20)
+    assert tight.plain.startswith("mq  alpha") and "\n" not in tight.plain
+
+
+def test_merge_queue_line_is_hidden_when_nothing_is_in_the_queue(tmp_path):
+    """A stale ``last`` alone is not a queue, and a disabled project with a
+    live claim says nothing either: no line at all."""
+    empty = _mq_attach(tmp_path, {"version": 1, "projects": {
+        "alpha": {"enabled": True, "paused": False, "queue": [], "waiting": [],
+                  "in_flight": None,
+                  "last": {"pr": 10, "result": "merged", "at": _mq_iso(7200)}}}})
+    assert kanban_live.merge_queue_line(empty, now=NOW) is None
+    assert "mq  " not in _mq_render(empty)
+    only_disabled = _mq_attach(tmp_path, {"version": 1, "projects": {
+        "gamma": {"paused": False, "queue": [_mq_entry(40, "t_h", age_s=60)],
+                  "waiting": [], "in_flight": None, "last": None}}})
+    assert kanban_live.merge_queue_line(only_disabled, now=NOW) is None
+
+
+def test_merge_queue_line_never_crashes_on_a_missing_or_corrupt_ledger(tmp_path):
+    for kw in ({"doc": None},                                   # no file at all
+               {"raw": "{ this is not json {{{"},               # garbage
+               {"raw": json.dumps({"version": 1, "projects": {"alpha": "nope"}})},
+               {"doc": _mq_doc(), "registry": str(tmp_path / "absent.yaml")}):
+        d = _mq_attach(tmp_path, **kw)
+        assert kanban_live.merge_queue_line(d, now=NOW) is None
+        assert "mq  " not in _mq_render(d)
+    unreadable = tmp_path / "merge-queue-state.json"
+    unreadable.write_text("{}", encoding="utf-8")
+    unreadable.unlink()
+    unreadable.mkdir()                                           # a directory
+    d = _mq_attach(tmp_path)
+    assert kanban_live.merge_queue_line(d, now=NOW) is None
+
+
+def test_monitor_json_still_carries_the_whole_read(tmp_path):
+    """The compact line is a RENDERING change only: what `--json` prints is the
+    unedited read model, per-PR rows and stored errors included."""
+    d = _mq_attach(tmp_path, _mq_doc())
+    rows = d["merge_queue"]["rows"]
+    assert {r["pr"] for r in rows} >= {11, 12, 13, 21, 31}
+    assert [r for r in rows if r["pr"] == 13][0]["detail"].startswith("gate failed")
+    assert json.loads(json.dumps(d["merge_queue"]))["count"] == len(rows)
+
+
+def test_merge_queue_table_stays_for_the_widget_parity_golden():
+    """The per-project table renderer is no longer drawn by a monitor, and it
+    must NOT be swept as dead code: `ios-app/scripts/merge_queue_cli_parity.py`
+    imports it to write the committed golden the iOS merge-queue widget is
+    compared against. This pins the name and the columns that golden encodes.
+    """
+    t = kanban_live.merge_queue_table([
+        {"position": 1, "pr": 7, "card": "t_a", "branch": "wt/t_a",
+         "state": "queued", "age_s": 60, "last_result": None, "detail": None}])
+    assert [c.header for c in t.columns] == [
+        "Pos", "PR", "Card", "Branch", "State", "Age", "Last result"]
 
 
 # ---------------------------------------------------------------------------

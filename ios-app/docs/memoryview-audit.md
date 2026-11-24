@@ -15,7 +15,7 @@ bug in the iOS surface; no code changes made to it.
 **The whole screen is defeated by a BACKEND bug** (routes_memory.py), not an iOS
 bug: the memory endpoint resolves a profile's memories dir through
 `routes_profile._hermes_profiles_dir()`, which honors the `HERMES_HOME` env var.
-The live API process runs with `HERMES_HOME=/Users/desac/.hermes/profiles/hscc-orch`
+The live API process runs with `HERMES_HOME=~/.hermes/profiles/hscc-orch`
 (the orchestrator's own profile dir), so the memory dir resolves to a
 NON-EXISTENT path and every `GET /v1/memory` returns "no memory store" (empty)
 for EVERY profile -- while `/v1/sessions` for the same profiles returns full
@@ -48,7 +48,7 @@ title / body`; count + speak at handler).
      "profile_count":0,"speak":"Profile 'hscc-orch' has no memory store."}
 
     GET /v1/memory?profile=ios-engineer -> 200, same empty "no memory store"
-        (even though /Users/desac/.hermes/profiles/ios-engineer/memories/MEMORY.md
+        (even though ~/.hermes/profiles/ios-engineer/memories/MEMORY.md
         exists with 7 entries on this host)
 
     GET /v1/memory?profile=backend-engineer -> 200, same empty
@@ -189,9 +189,9 @@ profile field (lines 88-89) prevent it mangling profile names. CLEAN.
    live deployment, so the Memories screen is EMPTY for every profile.**
    routes_memory.py:73-81 uses `routes_profile._hermes_profiles_dir()`
    (routes_profile.py:58-60) which returns `$HERMES_HOME/profiles`. The live API
-   process runs with `HERMES_HOME=/Users/desac/.hermes/profiles/hscc-orch`
+   process runs with `HERMES_HOME=~/.hermes/profiles/hscc-orch`
    (verified: `ps eww -p <api_pid>`), so the memory dir is
-   `/Users/desac/.hermes/profiles/hscc-orch/profiles/<p>/memories` == NON-EXISTENT
+   `~/.hermes/profiles/hscc-orch/profiles/<p>/memories` == NON-EXISTENT
    for every profile -> `_memory_dir` returns None -> empty list + "no memory
    store". In CONTRAST, the sessions endpoint resolves via
    `hermes_cli.profiles` (routes_orchestrator.py:509-520) and returns FULL data

@@ -52,7 +52,7 @@ a failed result rather than propagating.
 
 **Verdict: the hang is sparkrun's readiness wait, NOT a missing stdin EOF.**
 Attribution is against the tree the live `sparkrun` actually runs from
-(v0.4.1, editable install `/Users/desac/dev/sparkrun-041-verify@1aaa6479` —
+(v0.4.1, editable install `~/dev/sparkrun-041-verify@1aaa6479` —
 the `.pth` under `.venv-sparkrun-041` points there; the `~/dev/sparkrun`
 checkout is a *newer* tree whose CLI already gates the wait behind
 `--no-ready-wait`).

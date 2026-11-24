@@ -39,7 +39,7 @@ so the provider the orchestrator profile actually loads comes from
 
 ```
 HERMES_HOME=~/.hermes/profiles/hscc-orch find_provider_dir('memori_byodb')
-  -> /Users/desac/.hermes/profiles/hscc-orch/plugins/memori_byodb
+  -> ~/.hermes/profiles/hscc-orch/plugins/memori_byodb
 ```
 That dir's local_augmentation.py is the OLD 8942-byte buggy version (dated
 Jun 12, the one raising `AttributeError: 'list' object has no attribute

@@ -10,12 +10,19 @@ reading the code and transcribing it (a transcribed golden tests the
 transcription, not the CLI).
 
 So this script feeds a committed `GET /v1/merge-queue` fixture into the REAL
-renderer (`hscc_daemon.kanban_live.merge_queue_table`) — one table per project,
-exactly as the monitor builds them — and writes out each column title and each
-cell. `model_decode_check.sh` then runs the Swift projection on the same
-fixture and compares. Edit `merge_queue_table`/`fmt_age` and the golden moves;
-`--write` refreshes it, and the Swift parity check fails until the widget's
-reading moves too.
+renderer (`hscc_daemon.kanban_live.merge_queue_table`) and writes out each
+column title and each cell. `model_decode_check.sh` then runs the Swift
+projection on the same fixture and compares. Edit `merge_queue_table`/`fmt_age`
+and the golden moves; `--write` refreshes it, and the Swift parity check fails
+until the widget's reading moves too.
+
+Note the honesty condition: since 2.17.5 the CLI monitors print ONE compact
+`mq` line (`kanban_live.merge_queue_line`), not a table — this table is the
+renderer the WIDGET is pinned to, kept in the CLI module so the golden still
+comes from real CLI code rather than from a transcription of it. The widget
+still draws the table (there is room for it on the iPhone home screen); the
+two surfaces were never claimed to render identically, only that the widget's
+cells match this function's cells.
 
 The golden is COMMITTED: the decode gate runs offline and must stay that way.
 

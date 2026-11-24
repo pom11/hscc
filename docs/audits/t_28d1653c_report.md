@@ -101,10 +101,10 @@ would be a no-op for this card (it copies runtime, excludes tests).
 
     # package suite (per interpreter)
     ~/.hermes/hermes-agent/venv/bin/python -m pytest -q sparkrun-hermes/tests -p no:cacheprovider
-    /Users/desac/miniconda3/envs/p313/bin/python -m pytest -q sparkrun-hermes/tests -p no:cacheprovider
+    ~/miniconda3/envs/p313/bin/python -m pytest -q sparkrun-hermes/tests -p no:cacheprovider
     # full suite (per interpreter, serial to avoid CPU contention)
     HSCC_TEST_PY=~/.hermes/hermes-agent/venv/bin/python bash scripts/run_tests.sh
-    HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh
+    HSCC_TEST_PY=~/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh
     # commit / merge / push
     git commit -m "test(sparkrun-hermes): ..."
     git rebase origin/main

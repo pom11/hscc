@@ -32,7 +32,11 @@ collects:
   bootstrap, so no argv shape reliably identifies one.
 
 The title line shows the global ``kanban.max_in_progress`` slots in use, because
-when every slot is taken the ready cards on other boards strand silently.
+when every slot is taken the ready cards on other boards strand silently. The
+foot carries the local merge queue as ONE compact ``mq`` line covering every
+enabled project that has something queued, waiting or in flight
+(``merge_queue_line``, shared with ``hscc cards monitor``); the full rows stay
+in ``--json`` and in ``hscc merge-queue list <proj>``.
 Nothing here writes to a board: no claim, no promote, no archive. The one
 write is the orchestrator token ledger (``LEDGER_PATH``, 5-min samples, 8 days). The kanban lib, the
 config reader and the clock are injectable so the collector and renderer test
@@ -972,9 +976,10 @@ def attach_merge_queue(data, board=None, registry_path=None, state_path=None,
     """Add ``data["merge_queue"]``: the local queue's rows, project by project.
 
     One call to :func:`hscc_daemon.merge_queue.view` — the same read
-    ``GET /v1/merge-queue`` serves — so the monitor's table and the route can
-    never disagree about a PR's position or state. Read-only: the ledger is
-    parsed, never ticked.
+    ``GET /v1/merge-queue`` serves — so the monitor's :func:`merge_queue_line`
+    and the route can never disagree about a PR's position or state. Read-only:
+    the ledger is parsed, never ticked. The full rows stay here (``--json``
+    prints this dict), whatever the compact line chooses to show.
     """
     from hscc_daemon import merge_queue
     data["merge_queue"] = merge_queue.view(
@@ -1183,7 +1188,17 @@ def events_table(events, now_s) -> Table:
 
 
 def merge_queue_table(rows) -> Table:
-    """One project's merge-queue rows: FIFO position, PR, card, branch, state."""
+    """One project's merge-queue rows: FIFO position, PR, card, branch, state.
+
+    NOT the monitor's rendering: since 2.17.5 both monitors print the ONE
+    compact :func:`merge_queue_line` instead of a table per project. This
+    renderer stays because it is the pinned reference the iOS merge-queue
+    widget is checked against — ``ios-app/scripts/merge_queue_cli_parity.py``
+    feeds the committed route fixture through it to write
+    ``v1_merge_queue.cli.json``, and the decode gate compares
+    ``MergeQueueTableReading`` against that golden. Delete it and that gate
+    goes red without the CLI changing a pixel.
+    """
     t = _plain_table()
     for col, just in (("Pos", "right"), ("PR", "right"), ("Card", "left"),
                       ("Branch", "left"), ("State", "left"), ("Age", "right"),
@@ -1208,6 +1223,160 @@ def merge_queue_table(rows) -> Table:
             Text(fmt_age(r.get("age_s")), style="dim"),
             esc(str(result).replace("\n", " ")))
     return t
+
+
+# ── merge queue: the one global line ───────────────────────────────────────
+#
+# A card's work is not finished when its worker completes: it is finished when
+# the PR lands. Both monitors used to say so with a table per project (this
+# file) or a block of lines per project (`cards_live`), which read as
+# hscc-only and ate a third of a short pane. They now share ONE formatter:
+# a single `mq` line covering every enabled project that has something in it.
+#
+#     mq  hscc #726 gating 12m · 9q · 7w · last #733 merged 5m
+#
+# One segment per project, ` | ` apart, each `<proj> #<pr> <stage> <age> · Nq ·
+# Mw` (`idle` in place of the PR when nothing is claimed), plus the project's
+# last terminal outcome. The per-PR rows and their stored errors are GONE by
+# design — `hscc merge-queue list <proj>` carries them, and `--json` still
+# carries the whole read model. Read-only by construction: the data comes from
+# :func:`attach_merge_queue` → :func:`merge_queue.view`, never ticked.
+
+#: The stages the daemon stamps on its in-flight claim (the live subset of
+#: ``merge_queue.MERGE_QUEUE_STATES``). Anything else a row carries is a queued
+#: entry or a terminal outcome, never "what the queue is doing right now".
+#: ``claimed`` is listed because the daemon's own stage vocabulary may reach the
+#: ledger before a real one does; an unknown stage is simply not in-flight.
+MQ_FLIGHT_STAGES = ("claimed", "rebasing", "gating", "merging", "ci-pending")
+
+#: The label the line opens with. Short on purpose: it is the same fact in both
+#: monitors and the row it lives on is shared with other sections.
+MQ_LABEL = "mq"
+
+
+def _pr(value) -> str:
+    """A PR number as the queue line prints it: ``#747``, or ``-`` when unknown."""
+    return "-" if value is None else f"#{value}"
+
+
+def _iso_age_s(value, now) -> int | None:
+    """Seconds since an ISO stamp (naive stamps are UTC, as the ledger writes
+    them), or None when there is nothing to age.
+
+    Only the queue's ``last`` record needs this: the rows arrive with their
+    ``age_s`` already computed by the read model.
+    """
+    if not value:
+        return None
+    try:
+        stamp = datetime.datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return max(0, int(now - stamp.timestamp()))
+
+
+def merge_queue_projects(data) -> list[tuple]:
+    """``[(name, project, in_flight_row)]`` for the projects the line covers.
+
+    A project shows when the queue is ENABLED for it and there is SOMETHING IN
+    IT — a queued entry, a wait-listed entry or a live claim. A stale ``last``
+    alone is not "in it": a PR that merged yesterday must not hold the line
+    open forever, and a project with nothing in it has nothing to say (rule 2
+    of the operator's spec: the line is hidden entirely when no enabled project
+    has anything queued, waiting or in flight). ``enabled`` comes from the read
+    model, so an unregistered or registry-invisible project is treated as off —
+    the same posture ``hscc merge-queue status`` prints (``disabled``), rather
+    than this view inventing its own eligibility rule.
+    """
+    mq = (data or {}).get("merge_queue") or {}
+    out = []
+    for name, proj in (mq.get("projects") or {}).items():
+        if not isinstance(proj, dict) or not proj.get("enabled"):
+            continue
+        rows = [r for r in (proj.get("rows") or []) if isinstance(r, dict)]
+        flight = next((r for r in rows
+                       if r.get("state") in MQ_FLIGHT_STAGES), None)
+        if flight is None and not (proj.get("queue_len") or proj.get("waiting_len")):
+            continue
+        out.append((name, proj, flight))
+    return out
+
+
+def merge_queue_line(data, width=None, now=None, muted="dim") -> Text | None:
+    """The whole local merge queue as ONE line, or ``None`` when there is none.
+
+    ``data`` is a monitor's data dict (``data["merge_queue"]`` as
+    :func:`attach_merge_queue` leaves it). ``width`` is the terminal width the
+    line has to live in — over it, every ``· last …`` cell goes first (history,
+    not state), then whole projects from the END, counted by a ``+N proj``
+    marker; a single project that still overflows is cropped, never wrapped
+    onto a second row. ``muted`` is each view's own grey so the line matches the
+    foot it is printed in (``cards_live`` passes its ``MUTED``).
+
+    The line is built from the read model's own fields and nothing else, so it
+    cannot disagree with ``GET /v1/merge-queue``; a missing, unreadable or
+    corrupt ledger simply has no projects and returns ``None``.
+    """
+    projects = merge_queue_projects(data)
+    if not projects:
+        return None
+    now_s = time.time() if now is None else float(now)
+
+    def segment(name, proj, flight):
+        """(the project's always-on text, its droppable `· last …` text)."""
+        main = Text()
+        main.append(esc(str(name)), style=muted)
+        if proj.get("paused"):
+            # The one flag kept from the old per-project title: a queue that is
+            # paused explains why nothing moves, and it costs nine characters.
+            main.append(" (paused)", style="warn")
+        if flight is None:
+            main.append(" idle", style=muted)
+        else:
+            main.append(f" {_pr(flight.get('pr'))} ", style=muted)
+            # The stage is the one live thing on the line: the same warn the
+            # queue table gave a rebasing/gating/merging row.
+            main.append(f"{flight.get('state')} {fmt_age(flight.get('age_s'))}",
+                        style="warn")
+        main.append(f" · {int(proj.get('queue_len') or 0)}q"
+                    f" · {int(proj.get('waiting_len') or 0)}w", style=muted)
+        last = proj.get("last")
+        tail = None
+        if isinstance(last, dict) and last.get("pr") is not None:
+            tail = Text(style=muted)
+            tail.append(f" · last {_pr(last.get('pr'))}"
+                        f" {last.get('result') or '-'}"
+                        f" {fmt_age(_iso_age_s(last.get('at'), now_s))}")
+        return main, tail
+
+    segs = [segment(name, proj, flight) for name, proj, flight in projects]
+
+    def build(kept, with_last):
+        line = Text(no_wrap=True, overflow="crop")
+        line.append(f"{MQ_LABEL}  ", style="title")
+        for i, (main, tail) in enumerate(kept):
+            if i:
+                line.append(" | ", style=muted)
+            line.append_text(main)
+            if with_last and tail is not None:
+                line.append_text(tail)
+        return line
+
+    line = build(segs, True)
+    if width and len(line) > width:
+        line = build(segs, False)                    # 1. drop every `last …`
+    if width and len(line) > width and len(segs) > 1:
+        keep = len(segs)                             # 2. drop whole projects
+        while keep > 1:
+            keep -= 1
+            probe = build(segs[:keep], False)
+            probe.append(f"  +{len(segs) - keep} proj", style=muted)
+            if len(probe) <= width:
+                line = probe
+                break
+    return line
 
 
 def board_error_panel(errors, title="board read failed"):
@@ -1275,20 +1444,12 @@ def render(data, interval=DEFAULT_INTERVAL, snapshot=False, width=None, height=N
             ready_table(data["ready"], width)]))
     optional.append((len(live_boards) + 3, [
         Text(""), Text("boards", style="title"), boards_table(data["boards"])]))
-    mq = data.get("merge_queue") or {}
-    for name, proj in (mq.get("projects") or {}).items():
-        mq_rows = proj.get("rows") or []
-        if not mq_rows:
-            continue
-        flags = []
-        if proj.get("paused"):
-            flags.append("paused")
-        if not proj.get("enabled"):
-            flags.append("disabled")
-        suffix = f" ({', '.join(flags)})" if flags else ""
-        optional.append((len(mq_rows) + 3, [
-            Text(""), Text(f"merge queue — {name}{suffix}", style="title"),
-            merge_queue_table(mq_rows)]))
+    mq_line = merge_queue_line(data, width=width)
+    if mq_line is not None:
+        # One row for every enabled project with something in the queue — the
+        # old view spent three rows per project on a title, a blank and a
+        # table, and printed only when the project happened to be hscc.
+        optional.append((2, [Text(""), mq_line]))
     if data["events"]:
         optional.append((len(data["events"]) + 3, [
             Text(""), Text("last hour", style="title"), events_table(data["events"], data["at"])]))

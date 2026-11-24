@@ -134,7 +134,7 @@ init (StreamingChatView.swift:38-40) — fresh per ProjectDetailView. PASS: no
   at large Dynamic Type could compress on iPhone SE width. Board names here are
   short (< 12 chars); topic is a short int. Low probability in practice.
 - ProjectOverviewView gitSection "Repo" uses `.lineLimit(1).truncationMode(.middle)`
-  (line 300) — correctly guards the long "/Users/desac/dev/…" path. Good.
+  (line 300) — correctly guards the long "~/dev/…" path. Good.
 - Everything lives in List rows (self-sizing) and VStacks; survives Dynamic Type
   by default. No fixed heights. PASS overall; low-risk items listed.
 

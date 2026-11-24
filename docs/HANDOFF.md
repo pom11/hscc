@@ -47,7 +47,7 @@ runtime**. Compile-green proves almost nothing here.
 4. iOS: `build_check.sh` (fails on warnings now), plus `check_sources`,
    `model_decode_check`, `chat_state_check`, `streaming_check`,
    `session_activity_check`, `first_run_check`, `reconnect_check`, `check_theme`.
-5. Python: `HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh`
+5. Python: `HSCC_TEST_PY=~/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh`
    — **run it backgrounded**, the Bash tool caps at 10 minutes.
    — **NEVER stop or restart a suite with a name-based sweep.** Commands like
    `pkill -f "run_tests.sh"` or `pkill -f pytest` match by script name and kill

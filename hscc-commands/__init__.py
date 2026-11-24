@@ -1062,8 +1062,8 @@ def register(ctx) -> None:
     )
     ctx.register_command(
         name="template", handler=cmd_template,
-        description="List/preview/validate/apply cluster templates.",
-        args_hint="list|preview <name>|apply <name> [confirm]",
+        description="List/status/validate/preview/apply cluster templates.",
+        args_hint="list|status|validate <name>|preview <name>|apply <name> [confirm]",
     )
     ctx.register_command(
         name="workers-up", handler=cmd_workers_up,

@@ -61,7 +61,7 @@ exposed by any API either.
 
 ### Hermes agent knows how to read this (`hermes cron list`)
 
-The `hermes` CLI (`/Users/desac/.hermes/hermes-agent/venv/bin/hermes`) resolves
+The `hermes` CLI (`~/.hermes/hermes-agent/venv/bin/hermes`) resolves
 the profile's cron store. But the HSCC API deliberately reads `jobs.json`
 directly rather than shelling out (see `hscc_daemon/autodown.py:154-161`).
 

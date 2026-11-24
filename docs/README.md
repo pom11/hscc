@@ -128,6 +128,15 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   `hscc orch waker status|enable|disable` verbs, state + audit schemas, the doctor
   row, and the retirement procedure for the `~/bin/orch-waker` stopgap — including
   the resolved state-file / stream-state collision that once made the built-in inert. **live**
+- `docs/ops/disk-hygiene.md` — `hscc clean`: the kanban workspace hygiene (archive a
+  finished card's workspace, then remove it). The five flags, why the dry run is the
+  default and read-only by construction, the `would` prefix, the engine's closed
+  skip vocabulary (`dirty / unpushed / stashed / unreadable / claim / archive-failed`),
+  what the verb never touches (`~/dev`, `~/.hscc`, hermes config/sessions/memory, the
+  board DBs, comments, attachments, unfinished cards), the archive location under the
+  hermes home and how to restore one with `tar -xzf`, and the standing note that the
+  gateway's weekly `~/bin/clean-mac.sh --apply` crontab line stays until the operator
+  moves it. **live**
 
 ## audit/
 
@@ -220,6 +229,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/backup-retain-atomicity_t_9462260b.md` — backup pile growth + non-atomic backup writes.
 - `docs/audits/drift-guard-test-dir-census-t_69a1c9f2.md` — widening the DIRS drift guard to every `tests/` dir.
 - `docs/audits/run-tests-scripts-leg-t_95d864fc.md` — `run_tests.sh` never ran `scripts/tests`: the fix + evidence.
+- `docs/testing/loadstress-leg.md` — the `loadstress` leg: the stop/sidecar teardown class under bounded CPU pressure, with the measured load and the anti-rot arms.
 - `docs/audits/memory-path-resolution-t_7a16aed0.md` — memory endpoint profile-resolution fix.
 - `docs/audits/t_c95a2137_analyze_access.py` — read-only analysis companion to `docs/audits/2026-10-31-proxy-stalls.md`: reconstructs per-connection structure of the uvicorn access capture from the client ephemeral source port.
 - `docs/audits/t_c95a2137_shape_split.py` — read-only analysis companion: shape split (long-lived vs fresh connections, loopback-holder correlation, response-backlog trace) over the operator capture.
@@ -268,6 +278,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/readme-review-t_d90de5b6.md` — README review (root + hscc-cli + install), 2026-09-25. **superseded** by `docs/audits/README_REVIEW_2026-10-15.md`.
 - `docs/audits/audit-ux-pass-2026-09-24.md` — full audit + UX pass epic decomposition.
 - `docs/audits/dead-code-audit-t_58f21007.md` — dead-code & dangling-reference audit.
+- `docs/audits/verdict-api-autodown-status-read_t_85875291.md` — verdict on the question the parent read-surface audit left open: may a server route append to the daemon's log? `GET /v1/autodown/status` shares `hscc autodown status`'s payload builder, so one un-cached GET appended the kanban interlock WARN to `$HSCC_HOME/daemon.log` from the API process. VIOLATION, with the three readings that fail to keep the write, the repo's own-log convention (`api_cli.py`'s `log_file=API_LOG_FILE`, the rename-rotating handler), and the shipped shape — `autodown.silent_read()` around the one borrowed call, kanban leaf only, WARN budget deferred not spent. **live**
 - `docs/audits/confirm-gate-audit-t_c77f243f.md` — confirm-gate audit: iOS client ↔ hscc-api.
 
 ### iOS / Phase-1 reconciliation & screen audits (record)
