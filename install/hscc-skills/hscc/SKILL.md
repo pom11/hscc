@@ -70,7 +70,7 @@ F3; trust the group `--help`).
 | `hscc autodown status\|enable [--idle-minutes n] [--force]\|disable\|wake\|cancel` | idle serving-layer down/up; **operator policy: stay OFF** |
 | `hscc kanban blocked [--recover <id>]\|stale [--archive <id>]\|monitor\|pause <board>…\|resume\|paused\|enforce` | board hygiene + board brake; the pause family is **CLI-only by operator ruling (audit D6)** |
 | `hscc cards monitor [--live] [--interval <s>] [--board <slug>] [--tools]` | interactive per-card transcript panel (keys tab/enter/t/p/q); TTY-only |
-| `hscc merge-queue status\|list\|add\|remove\|pause\|resume\|enable\|disable` | local merge queue; see "Merge queue" |
+| `hscc merge-queue status\|list\|add\|remove\|hold\|unhold\|pause\|resume\|enable\|disable` | local merge queue; see "Merge queue" |
 | `hscc orch inject <profile> "<msg>" [--mode auto\|plain\|queue\|steer] [--dry-run] [--json] [--pane <t>]` \| `orch waker status\|enable\|disable` | live tmux-pane steering — **CLI-only**; the agent path is the `orch_message` tool — every `orch`-named capability is tabulated under "Naming traps" |
 | `hscc main start\|status [--json]\|wakeups list\|set <name> <sched>\|enable\|disable <name>` | the main orchestrator's pane + daemon-fired wake-ups |
 | `hscc node pause <host> [--reason <t>] [--until <dur>] [--force] [--yes] [--dry-run]` \| `node resume <host> [--yes] [--dry-run]` \| `node paused [--json]` | the node-pause overlay; rules below |
@@ -235,7 +235,17 @@ Plain git + `gh`, no GitHub org merge queue.
 
 Read surface: `hscc merge-queue status|list` and the read-only
 `merge_queue_status` agent tool (same payload as `status --json`).
-**Mutations (`add/remove/pause/resume/enable/disable`) stay CLI-only** (D8).
+**Mutations (`add/remove/hold/unhold/pause/resume/enable/disable`) stay
+CLI-only** (D8).
+
+To park ONE PR, `hold <project> <pr> [--reason <text>]` — not `remove`: a
+`remove` is a pull, and the next empty tick auto-enqueues the PR again (a push
+lifts even the red-gate suppression, which only covers a PR that just failed a
+red gate on the same head). A hold survives a push, a green check and elapsed
+time — only `unhold` releases it — is honoured by auto-enqueue, the wait-list
+drain and the claim, and shows with its reason in `status`, `list` and the
+monitor line. `pause <project>` remains the project-wide lever, and halts every
+other queued PR with it.
 
 ## Kanban: native Hermes, with HSCC hygiene verbs
 
