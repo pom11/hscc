@@ -65,6 +65,38 @@ class _Resp(io.BytesIO):
 
 
 def test_probe_still_runs_when_not_opted_out(monkeypatch):
+    """The knob off => the probe runs, and the seam that runs it is the live one.
+
+    Since t_8bf34130 the probe also has an in-suite FENCE in front of its default
+    transport, so "not opted out" alone no longer reaches the network inside a
+    pytest process — that is the point of the fence, and a child that forgot the
+    opt-out used to dial the operator's orch and get a free "model present" verdict.
+    So this is split into the two facts that used to be conflated here:
+
+      * an injected transport is honoured, once, with the probe's own URL — this is
+        what a rig uses;
+      * the DEFAULT transport is a real ``urlopen`` with the 5 s budget the opt-out
+        exists to avoid, which is what makes points 1 and 2 of the module docstring
+        meaningful (a deleted probe would still pass them). Tested by calling the
+        default transport directly: it is the live seam, and it is deliberately NOT
+        behind the fence.
+    """
+    seen = []
+
+    def _fake(models_url):
+        seen.append(models_url)
+        return {"data": [{"id": "orchestrator-model"}]}
+
+    monkeypatch.delenv("HSCC_SKIP_COMPACT_PROBE", raising=False)
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:9/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orchestrator-model")
+
+    assert enable_plugins._probe_compaction_endpoint(_fetch=_fake) is True
+    assert seen == ["http://192.0.2.1:9/v1/models"]
+
+
+def test_default_transport_reaches_urlopen_with_the_5s_budget(monkeypatch):
+    """The live seam itself: one Request, ``timeout=5``, the /v1/models form."""
     seen = []
 
     def _fake(req, timeout=None):
@@ -72,11 +104,9 @@ def test_probe_still_runs_when_not_opted_out(monkeypatch):
         return _Resp(json.dumps({"data": [{"id": "orchestrator-model"}]}).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake)
-    monkeypatch.delenv("HSCC_SKIP_COMPACT_PROBE", raising=False)
-    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://192.0.2.1:9/v1")
-    monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orchestrator-model")
 
-    assert enable_plugins._probe_compaction_endpoint() is True
+    data = enable_plugins._compact_probe_default_fetch("http://192.0.2.1:9/v1/models")
+    assert data == {"data": [{"id": "orchestrator-model"}]}
     # one call, at the /v1/models form, and it still carries the 5 s budget the
     # opt-out exists to avoid — the timeout is the thing that cost the leg.
     assert seen == [("http://192.0.2.1:9/v1/models", 5)]
