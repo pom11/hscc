@@ -2646,6 +2646,55 @@ def test_non_green_head_moves_to_the_wait_list_so_the_fifo_proceeds(tmp_path):
     assert ps["queue"] == [] and [e["pr"] for e in ps["waiting"]] == [7]
 
 
+def test_a_pending_waiting_pr_is_not_claimed_again_every_tick(tmp_path):
+    """A wait-listed PR whose checks are still running must be LEFT alone.
+
+    Live churn, PR #710 on 2.17.5: 16 ticks in a row each logged
+    `checks not green; moved to the wait list` then `-> waiting`. The claim step
+    reached into `waiting` whenever the active FIFO was empty — with no
+    readiness check of its own — so it popped an entry `_drain_waiting` had
+    already probed and found not green, handed it to `process_entry`, and got it
+    bounced straight back. The drain is the only door back into the FIFO, and it
+    admits a green rollup and nothing else; three ticks after this PR is parked
+    there must be zero claims, zero queue moves and zero log lines.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=pending)
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    logged = []
+    run_tick = lambda: mq.tick(
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        log=lambda msg, *a, **k: logged.append(msg))
+
+    # Tick 1 is a legitimate claim: the entry was in the FIFO, its checks are
+    # pending, so it goes to the wait list. That is the ONE move.
+    first = run_tick()
+    assert first["processed"][0]["pr"] == 7, first
+    assert first["processed"][0]["result"] == "waiting", first
+    parked = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in parked["waiting"]] == [7], parked
+
+    # Ticks 2, 3 and 4: still pending, so nothing may be claimed at all. The
+    # old code processed #7 again on every one of these.
+    for tick_no in (2, 3, 4):
+        del logged[:]
+        result = run_tick()
+        assert result["processed"] == [], (tick_no, result)
+        assert not [line for line in logged if "moved to the wait list" in line], \
+            (tick_no, logged)
+        ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+        assert ps["queue"] == [] and ps["in_flight"] is None, (tick_no, ps)
+        assert [e["pr"] for e in ps["waiting"]] == [7], (tick_no, ps)
+        assert (ps["waiting"][0]["enqueued_at"]
+                == parked["waiting"][0]["enqueued_at"]), (tick_no, ps)
+    assert gh.merged == []
+
+
 # ── generated_at is the ledger write time, not the read time (F14) ─────────
 
 # ── the four "the stamp moved" cases, and what an absolute freeze does to them ──
