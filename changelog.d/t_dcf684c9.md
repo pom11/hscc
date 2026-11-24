@@ -51,3 +51,9 @@ task: t_dcf684c9
   the key-set test; deleting one register entry reddened coverage; breaking a register
   pointer's `see <file>` reddened the reason test; deleting the `/v1/profiles/list` row
   reddened the prefix-trap test. All five died; after `restore` the module was green again.
+* Full `hscc-api` leg at `575ea31d` (`pytest -q tests`, one process): **1418 passed, 1
+  skipped, 1 xfailed** in 460 s, rc 0 — **1420 items** = `origin/main`'s **1400**
+  (collect-only, throwaway `--detach` worktree) + PR #714's 11 (this branch's base) + this
+  file's 9. `scripts/readme_lint.py` → `findings: 0` (CI interpreter; the bare `python3`
+  here has no `rich`); `scripts/changelog_fragments.py check` → rc 0. No route, payload or
+  handler is in the diff.
