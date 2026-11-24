@@ -2969,3 +2969,130 @@ def test_daemon_entry_point_logs_merge_queue_outcomes(tmp_path, monkeypatch):
     mq._daemon_log("merge-queue test: PR #1 -> merged")
     log_path = tmp_path / "hscc-home" / "daemon.log"
     assert "merge-queue test: PR #1 -> merged" in log_path.read_text()
+
+
+# ── production-shaped runners (t_499b6919) ────────────────────────────────
+
+def _parked_ci_claim(tmp_path, pr, pair, *, waiting=False):
+    """A claim parked exactly as the daemon writes it after a push."""
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", pr, path=state)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    entry = ps["queue"].pop()
+    entry.update({
+        "branch": pair["branch"], "stage": "ci-pending",
+        "pushed_sha": pair["head"], "ci_base": "main",
+        "ci_since": mq._now_iso(),
+    })
+    if waiting:
+        ps["waiting"].append(entry)
+    else:
+        ps["in_flight"] = entry
+    mq.save_state(doc, state)
+    return state, entry
+
+
+def test_resume_ci_pending_defaults_the_production_runners(tmp_path,
+                                                          monkeypatch):
+    """The daemon calls `_resume_ci_pending` with no runners; it must default."""
+    pair = _repo_pair(tmp_path)
+    state, entry = _parked_ci_claim(tmp_path, 23, pair)
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(
+            returncode=0, stdout='{"mergeCommit": {"oid": "squash-23"}}',
+            stderr="")
+
+    monkeypatch.setattr(mq, "_default_runner", runner)
+    monkeypatch.setattr(mq, "pr_view_settled", lambda repo, pr, runner=None: {
+        "state": "OPEN", "headRefName": pair["branch"],
+        "headRefOid": pair["head"], "mergeable": "MERGEABLE",
+        "isDraft": False,
+        "statusCheckRollup": [{"__typename": "CheckRun",
+                               "status": "COMPLETED",
+                               "conclusion": "SUCCESS"}],
+    })
+    cfg = {"repo": str(pair["repo"]), "enabled_declared": True,
+           "enabled": True}
+
+    result = mq._resume_ci_pending("alpha", cfg, entry, state_path=state)
+
+    assert result["result"] == "merged", result
+    assert ["gh", "pr", "merge", "23", "--squash", "--delete-branch",
+            "--match-head-commit", pair["head"]] in calls, calls
+
+
+def test_parked_ci_pending_entry_is_drained_and_merged(tmp_path):
+    """A `waiting` entry with stale ci-pending fields is not stranded."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh(
+        {24: {"headRefName": pair["branch"], "headRefOid": pair["head"]}})
+    state, _ = _parked_ci_claim(tmp_path, 24, pair, waiting=True)
+    doc = mq.load_state(state)
+    entry = mq._project_state(doc, "alpha")["waiting"][0]
+    entry.update({"attempts": 1,
+                  "last_error": "'NoneType' object is not callable"})
+    mq.save_state(doc, state)
+
+    result = mq.tick(state_path=state,
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert [row["pr"] for row in result["processed"]] == [24], result
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [24]
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["waiting"] == [] and ps["queue"] == []
+
+
+def test_a_raising_resume_keeps_its_traceback_in_last_error(tmp_path,
+                                                            monkeypatch):
+    """A crash on the ci-pending path must leave a traceback, not just str()."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    state, _ = _parked_ci_claim(tmp_path, 25, pair)
+    gh = FakeGh({25: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    logged = []
+
+    def boom(project, cfg, entry, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(mq, "_resume_ci_pending", boom)
+    result = mq.tick(
+        state_path=state, root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        log=lambda msg, level="INFO", **kwargs: logged.append((msg, level)))
+
+    assert result["processed"][0]["result"] == "retry", result
+    ps = mq.load_state(state)["projects"]["alpha"]
+    error = ps["queue"][0]["last_error"]
+    assert isinstance(error, str)
+    assert error.splitlines()[0] == "RuntimeError: kaboom"
+    assert "Traceback (most recent call last)" in error
+    assert "boom" in error
+    assert any(level == "ERROR" and "PR #25" in msg
+               and "Traceback (most recent call last)" in msg
+               for msg, level in logged), logged
+
+
+def test_a_failed_pr_comment_logs_a_warn_and_does_not_raise(tmp_path):
+    """A swallowed gh failure must at least name the PR it lost."""
+    pair = _repo_pair(tmp_path)
+    logged = []
+
+    def failing_gh(argv, cwd=None, **kwargs):
+        raise OSError("gh missing")
+
+    mq._handback({"pr": 26, "card": "t_x"},
+                 {"repo": str(pair["repo"])}, "body",
+                 lambda card, assignee, msg: True, failing_gh,
+                 log=lambda msg, level="INFO", **kwargs:
+                     logged.append((msg, level)))
+
+    assert any(level == "WARN" and "PR #26" in msg
+               and "gh missing" in msg for msg, level in logged), logged
