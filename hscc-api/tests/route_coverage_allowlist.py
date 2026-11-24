@@ -37,7 +37,6 @@ UNDOCUMENTED_ROUTES = {
     ("POST", "/v1/memory/{node_id}/delete"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_790a985a",
     ("POST", "/v1/memory/{node_id}/edit"): "surface: named outside the Endpoint reference only — see hscc-api/routes_memory.py; deferred: t_790a985a",
     ("GET", "/v1/node-pauses"): "surface: named outside the Endpoint reference only — see docs/DESIGN-api.md; deferred: t_790a985a",
-    ("POST", "/v1/orchestrator/chat/{id}/stop"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/profile/export"): "surface: named outside the Endpoint reference only — see docs/audits/confirm-gate-audit-t_c77f243f.md; deferred: t_790a985a",
     ("GET", "/v1/profile/export/{file}"): "surface: named outside the Endpoint reference only — see hscc-api/routes_profile.py; deferred: t_790a985a",
     ("POST", "/v1/profile/install"): "surface: named outside the Endpoint reference only — see docs/audits/confirm-gate-audit-t_c77f243f.md; deferred: t_790a985a",
