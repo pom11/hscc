@@ -23,8 +23,13 @@ mid-flight is recovered to the head of its project's queue on the next tick.
 
 A PR that is not green yet sits in ``waiting``; EVERY tick re-checks that list
 (one cheap ``gh pr view`` per entry) and returns the green ones to the FIFO,
-whether or not the active queue is empty. After a push the new head's CI is
-usually pending, so the entry keeps its in-flight claim at ``ci-pending`` and
+whether or not the active queue is empty.  A wait-listed PR whose checks are
+``red`` (or ``cancelled``) gets its branch updated onto the current base with
+``gh pr update-branch``, which re-runs CI on a base that may since have been
+fixed; the entry records the base sha it was refreshed onto, so this happens
+at most once per base commit per PR and cannot loop.  After a push the new
+head's CI is usually pending, so the entry keeps its in-flight claim at
+``ci-pending`` and
 is re-read each tick until green (merge that exact SHA), red (hand back) or the
 CI budget expires (release to the rechecked wait list) — never re-gated on the
 same pushed head. GitHub answers ``mergeable: UNKNOWN`` for a few seconds after
@@ -2163,9 +2168,415 @@ def _release_to_head(state_path, project, entry):
         save_state(doc, state_path)
 
 
+# ── stale-base auto-refresh ───────────────────────────────────────────────
+#
+# A red PR in the wait list was red AT THE MOMENT ITS CI RAN, and nothing ever
+# looked again: PRs sat 9-18 h red because main itself was broken, or because
+# one flaky leg happened to fail on their run. Neither is the PR's fault, and
+# the wait list was strictly passive about it. ``gh pr update-branch`` moves the
+# PR's branch onto the current base, which re-triggers CI on a base that may
+# since have been fixed.
+#
+# The bound IS the design: at most ONE update per (PR, base sha). The sha is
+# recorded on the entry the moment gh ANSWERS — updated, already current,
+# conflicted, or a gh error — so the next tick reads the same sha and does
+# nothing. Without that record a red PR would re-update every tick and keep CI
+# busy forever. A gh that could not run at all (no runner installed, the
+# process would not start) answered nothing, so it records the error and keeps
+# the sha: a local fault must not write off the base for the PR.
+
+def _remote_base_sha(repo, base, git_runner=None):
+    """The CURRENT sha of ``refs/heads/<base>`` on origin, or None.
+
+    ``ls-remote`` rather than ``git rev-parse origin/<base>`` on purpose: this
+    drain does not fetch, and the case it exists for is a queue that is IDLE —
+    nothing fetches then, so the local remote-tracking ref never moves and a
+    stale base would never be noticed. One bounded network read, taken only
+    when a red waiting entry actually needs the answer.
+    """
+    runner = git_runner or _default_runner
+    try:
+        proc = _git(["ls-remote", "--", "origin", f"refs/heads/{base}"],
+                    repo, runner)
+    except Exception:
+        return None
+    if proc is None or proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        fields = line.split()
+        if fields and fields[0].strip():
+            return fields[0].strip().lower()
+    return None
+
+
+def _red_on_stale_base(entry, info):
+    """True when a waiting entry's checks are red/cancelled AND a refresh is
+    still allowed for it.
+
+    A ``CANCELLED`` check lands here too: GitHub cancels a run when a newer
+    commit pushes it aside, ``_truthy_check`` reads that as not-green, and the
+    PR is then waiting on a verdict that can never arrive.  No ``required``
+    answer is needed: an empty rollup reads as green or pending, never red, so
+    this cannot be flipped by branch protection.  A PR that is not open, a
+    draft, or a refresh that already conflicted (card 2 hands that one back) is
+    left strictly alone.
+    """
+    if bool(entry.get("update_conflict")):
+        return False
+    if str(info.get("state", "")).upper() != "OPEN" or info.get("isDraft"):
+        return False
+    return _checks_verdict(info) == "red"
+
+
+def _update_branch(repo, pr, gh_runner):
+    """ONE ``gh pr update-branch <pr>``.
+
+    Returns ``(ok, conflict, output, answered)``. ``answered`` is False only
+    when ``gh`` never got to reply — no runner installed, or the process could
+    not be started at all. That is a LOCAL fault rather than a verdict on this
+    base, and the caller must not count it as an attempt; a non-zero exit with
+    a message from GitHub IS an answer.
+
+    Never retries — the caller decides what a conflict means.
+    """
+    try:
+        proc = _gh(["pr", "update-branch", str(pr)], repo, gh_runner)
+    except Exception as exc:
+        return False, False, f"gh pr update-branch raised {exc!r}", False
+    if proc is None:
+        return False, False, "gh pr update-branch: gh not runnable", False
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        return False, "conflict" in output.lower(), output, True
+    return True, False, output, True
+
+
+def _stamp_waiting(state_path, project, patches):
+    """Write ``patches`` (pr -> fields) onto the entries still in the wait list.
+
+    Shared by the refresh and the hand-back, which both stamp bookkeeping after
+    a pass of network calls. It reads the ledger FRESH under the file lock and
+    skips any PR that has since left ``waiting`` — a CLI ``add`` during the
+    ``gh`` call moves the entry, and its history belongs wherever it landed.
+    """
+    if not patches:
+        return
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        for entry in ps.get("waiting") or []:
+            if not isinstance(entry, dict):
+                continue
+            pr = entry.get("pr")
+            if pr is None:
+                continue
+            try:
+                pr = int(pr)
+            except (TypeError, ValueError):
+                continue
+            if pr in patches:
+                entry.update(patches[pr])
+        save_state(doc, state_path)
+
+
+def _refresh_stale_red(project, cfg, base, entries, *, state_path,
+                       git_runner=None, gh_runner=None, log=None,
+                       base_sha=None):
+    """Update red wait-listed PRs onto the current base, once per base sha.
+
+    Returns the PR numbers this pass wrote a patch for. Only entries that are
+    still in this project's wait list are written back — a CLI ``add`` during
+    the ``gh`` call moves the entry out, and a moved entry's bookkeeping
+    belongs to wherever it landed.
+
+    ``base_sha`` lets the caller hand down the sha it already probed (the
+    wait-list drain needs the same answer to decide the hand-back, and two
+    ``ls-remote`` calls per tick for one wait list would be silly). Left None it
+    probes for itself, so every other caller keeps its own behaviour.
+
+    An entry whose ``gh`` never got to answer (no runner installed, the process
+    could not start) gets ONLY ``last_update_error``: no base sha, so the next
+    tick asks again. A local fault is not an attempt at this base.
+    """
+    log = log or (lambda *a, **k: None)
+    # The daemon calls this with NO runners (``check_merge_queue`` injects
+    # none), exactly like ``process_entry`` and ``_resume_ci_pending``: default
+    # them here, at the seam that uses them, never inside ``_gh``/``_git``.
+    # Every gh/git call below — ``pr_view``, the base probe, ``update-branch``,
+    # the hand-back comment — inherits from these two lines.
+    git_runner = git_runner or _default_runner
+    gh_runner = gh_runner or _default_runner
+    candidates = [entry for entry in entries
+                  if isinstance(entry, dict) and entry.get("pr") is not None]
+    if not candidates:
+        return []
+    sha = base_sha or _remote_base_sha(cfg["repo"], base, git_runner)
+    if not sha:
+        # Base unknown: doing nothing is the read-only answer, and the next
+        # tick asks again — no attempt was made, so nothing is recorded.
+        return []
+    patches = {}
+    for entry in candidates:
+        if str(entry.get("refreshed_main_sha") or "") == sha:
+            # Already refreshed onto exactly this base: the bound.
+            continue
+        pr = int(str(entry["pr"]))
+        ok, conflict, output, answered = _update_branch(cfg["repo"], pr,
+                                                        gh_runner)
+        head = sha[:12]
+        if not answered:
+            # gh never got to answer — not installed, not runnable, or the call
+            # raised (the None-runner crash the daemon hit every tick). That is
+            # a LOCAL fault, not a verdict on this base, so the sha stays
+            # unrecorded and the next tick tries again. Recording it here would
+            # burn the whole base on one transient local error and the PR would
+            # sit red forever, which is the trap this refresh exists to open.
+            patch = {"last_update_error": _tail(output, 3) or "gh not runnable"}
+            log(f"merge-queue {project}: PR #{pr} update-branch could not run "
+                f"on main {head}: {patch['last_update_error']}", "WARNING")
+            patches[pr] = patch
+            continue
+        patch = {"refreshed_main_sha": sha, "refreshed_at": _now_iso()}
+        if ok:
+            verb = ("branch already onto main"
+                    if "already up to date" in output.lower()
+                    else "updated branch onto main")
+            log(f"merge-queue {project}: PR #{pr} red on stale base; "
+                f"{verb} {head}", "INFO")
+        elif conflict:
+            patch["update_conflict"] = True
+            log(f"merge-queue {project}: PR #{pr} update-branch conflicted "
+                f"onto main {head}; left in the wait list for handback: "
+                f"{_tail(output, 3)}", "WARNING")
+        else:
+            patch["last_update_error"] = _tail(output, 3) or "gh failed"
+            log(f"merge-queue {project}: PR #{pr} update-branch failed on "
+                f"main {head}: {patch['last_update_error']}", "WARNING")
+        patches[pr] = patch
+    _stamp_waiting(state_path, project, patches)
+    return sorted(patches)
+
+
+# ── wait-list hand-back: red for its OWN reasons ────────────────────────────
+#
+# The refresh above gives a red wait-listed PR one free re-run on the current
+# base. When that is spent there is nothing left the queue can do by itself:
+# either `update-branch` refused to move the branch at all (a conflict, which is
+# never retried) or CI came back red AGAIN on the current base, which is a
+# verdict on this PR's code. The wait list used to sit on those silently as
+# well — the author only found out by opening the PR, which is how a card sat
+# untouched for a day while its PR waited on nobody.
+#
+# The hand-back reuses the gating path's `_handback` (a PR comment naming what
+# is red + a board handback to the card and its assignee) and the entry STAYS in
+# the wait list: it is not dropped, and once its checks go green the drain
+# returns it to the FIFO exactly as before.
+#
+# The bound is structural again — at most ONE hand-back per (PR, base sha),
+# recorded on the entry as `handed_back_main_sha` — so a PR that stays red can
+# not re-comment every tick. A newer base sha re-arms it, which is the intent:
+# the earlier hand-back asked the author to fix a red that was partly about the
+# base it was tried against.
+
+#: How many failing check names the hand-back lists before it counts the rest.
+MAX_HANDBACK_CHECK_NAMES = 8
+
+
+def _waiting_own_red(entry, info):
+    """True when a wait-listed PR is red in a way only its author can clear.
+
+    Two shapes: the checks read red/cancelled, or the base update conflicted
+    (a hard wall whatever CI says — the PR cannot land however green it is). A
+    closed, merged or draft PR is left strictly alone: the queue has no claim on
+    it and a comment there is noise.
+    """
+    if str(info.get("state", "")).upper() != "OPEN" or info.get("isDraft"):
+        return False
+    return bool(entry.get("update_conflict")) or _checks_verdict(info) == "red"
+
+
+def _own_red_reason(entry, base_sha):
+    """``"conflict"``, ``"red-after-refresh"`` or None — why to hand it back.
+
+    ``base_sha`` is the CURRENT sha of the base branch. Only an entry already
+    refreshed onto THAT sha is handed back: if the base moved since, the red
+    verdict is stale and card 1 still has an update to make, so this answers
+    None and the caller routes the entry to the refresh instead. That exclusion
+    is what stops the queue from blaming an author for a base that has since
+    been fixed, and it is why the sha is probed once and shared by both passes.
+    """
+    if not base_sha:
+        return None
+    if str(entry.get("handed_back_main_sha") or "") == base_sha:
+        return None                             # the bound: once per base sha
+    if bool(entry.get("update_conflict")):
+        return "conflict"
+    if str(entry.get("refreshed_main_sha") or "") == base_sha:
+        return "red-after-refresh"
+    return None
+
+
+def _failing_check_names(info, cap=MAX_HANDBACK_CHECK_NAMES):
+    """The names of the checks the rollup says failed, in rollup order.
+
+    ``name`` for a CheckRun, ``context`` for a StatusContext; a failing entry
+    that reports neither still counts as ``?`` so the list can never understate
+    how many checks are red. An empty answer means the rollup named nothing —
+    callers must not turn that into "nothing failed".
+    """
+    names = []
+    for item in (info or {}).get("statusCheckRollup") or []:
+        if _truthy_check(item) is not False:
+            continue
+        if isinstance(item, dict):
+            names.append(str(item.get("name") or item.get("context") or "?"))
+        else:
+            names.append("?")
+    if len(names) <= cap:
+        return names
+    return names[:cap] + [f"(+{len(names) - cap} more)"]
+
+
+def _card_from_branch(branch):
+    """The card id a PR branch name names, or None.
+
+    The queue's own convention is that a PR branch IS the card branch
+    ``wt/<card>`` (see :func:`resolve_instructions`, which tells the worker to
+    push back to exactly that ref), so ``wt/t_1a2b3c`` hands back to
+    ``t_1a2b3c``. A manually enqueued PR has no card on its entry and this is
+    the only way to find whose work it is.
+    """
+    name = str(branch or "").strip()
+    if not name.startswith("wt/"):
+        return None
+    return name[len("wt/"):] or None
+
+
+def _board_card(cfg, card, kanban_db=None):
+    """``(card, assignee)`` for ``card`` proven on the project's board.
+
+    The same read-only board seam :func:`_discover_ready_cards` uses — the
+    daemon never opens a board any other way. No board configured, no hermes, an
+    unknown board, no such card or any error at all answers ``(None, None)``,
+    which leaves the caller with a comment-only hand-back rather than a guess.
+    """
+    board = (cfg or {}).get("board")
+    if not board or not card:
+        return None, None
+    try:
+        from . import autodown, board_pin
+        kb = kanban_db or autodown._load_kanban_db_or_default()
+        if kb is None:
+            return None, None
+        boards, multi = autodown._enum_board_names(kb, registered_only=True)
+        label = str(board)
+        if label not in [b if b else "default" for b in boards]:
+            return None, None
+        with board_pin.open_board_ro(kb, label, multi=multi) as conn:
+            row = conn.execute(
+                "SELECT id, assignee FROM tasks WHERE id = ?",
+                (str(card),)).fetchone()
+    except Exception:
+        return None, None
+    if row is None:
+        return None, None
+    return str(row["id"]), (row["assignee"] or None)
+
+
+def _handback_target(entry, cfg, branch=None):
+    """``(card, assignee)`` this wait-list hand-back should reach.
+
+    The entry's own card when it has one — that is how the entry was enqueued.
+    Without one, the branch name is the card and the board fills in the
+    assignee, so the reassign still has a target. A card that cannot be proved
+    on the board is still passed through: the PR comment lands either way, and
+    a board comment for a card that turns out not to exist fails harmlessly.
+    """
+    if entry.get("card"):
+        return entry["card"], entry.get("assignee")
+    derived = _card_from_branch(branch or entry.get("branch"))
+    if not derived:
+        return None, entry.get("assignee")
+    found, assignee = _board_card(cfg, derived)
+    return (found or derived), (assignee or entry.get("assignee"))
+
+
+def _own_red_body(base, base_sha, reason, branch, checks, entry, card):
+    """The hand-back text: what is red, what was already tried, how to fix it.
+
+    Evidence first like the other handbacks: the failing checks lead, the
+    resolve step for the PR's own branch follows, and the boilerplate about the
+    wait list is last so a reader sees the verdict before the queue's housekeeping.
+    """
+    if reason == "conflict":
+        lead = "Merge queue: this branch cannot be moved onto the current base."
+        why = (f"`gh pr update-branch` refused to rebase it onto `{base}` "
+               f"{base_sha[:12]} because of a conflict, and the queue does not "
+               f"retry a conflict. The branch has to be rebased by hand.")
+    else:
+        lead = "Merge queue: the checks are red on the current base."
+        why = (f"The queue already moved this PR onto `{base}` {base_sha[:12]} "
+               f"and its checks are red again on that base, so this is a "
+               f"verdict on the PR — not on a base that was broken at the time "
+               f"and has since been fixed.")
+    failed = ", ".join(checks) if checks else "(gh reported no failing check names)"
+    body = (f"{lead}\n\n"
+            f"Failing check(s): {failed}\n\n"
+            f"{why}\n")
+    if entry.get("last_update_error"):
+        body += f"\nThe queue's own update attempt also failed: {entry['last_update_error']}\n"
+    body += ("\n"
+             f"{resolve_instructions(branch, base)}\n"
+             f"It stays in the merge queue's wait list{' (card ' + card + ')' if card else ''}: "
+             "the queue keeps looking every tick and returns it to the FIFO "
+             "when its checks go green.\n")
+    return body
+
+
+def _hand_back_own_red(project, cfg, base, candidates, *, state_path, base_sha,
+                       gh_runner=None, handback=None, log=None):
+    """Comment on the PR and hand the card back; keep the entry waiting.
+
+    ``candidates`` is ``[(entry, info, reason)]`` from :func:`_drain_waiting`.
+    Returns the PR numbers handed back. Like :func:`_refresh_stale_red` the
+    bookkeeping is written on a FRESH read under the file lock and only onto
+    entries still in this project's wait list: a CLI ``add`` during the ``gh``
+    call moves the entry, and its history belongs wherever it landed.
+    """
+    log = log or (lambda *a, **k: None)
+    handback = handback or default_handback
+    if not candidates:
+        return []
+    patches = {}
+    for entry, info, reason in candidates:
+        try:
+            pr = int(str(entry["pr"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+        branch = entry.get("branch") or info.get("headRefName")
+        card, assignee = _handback_target(entry, cfg, branch=branch)
+        body = _own_red_body(base, base_sha, reason, branch,
+                             _failing_check_names(info), entry, card)
+        target = dict(entry)
+        target["card"], target["assignee"] = card, assignee
+        _handback(target, cfg, body, handback, gh_runner, log=log)
+        patches[pr] = {"handed_back_at": _now_iso(),
+                       "handed_back_main_sha": base_sha}
+        log(f"merge-queue {project}: PR #{pr} handed back to card "
+            f"{card or '(none — branch names no card)'}: {reason} on main "
+            f"{base_sha[:12]}", "WARN")
+    _stamp_waiting(state_path, project, patches)
+    return sorted(patches)
+
+
 def _drain_waiting(project, cfg, *, state_path, git_runner=None,
-                   gh_runner=None, log=None):
+                   gh_runner=None, log=None, handback=None):
     """Return every wait-listed PR whose checks are green to the FIFO.
+
+    Only a green PR LEAVES the wait list here. While looking it also drives the
+    two red passes above (the stale-base refresh, then the hand-back for a PR
+    that is red on its own), either of which comments and stamps the entry but
+    leaves it waiting.
 
     Runs on EVERY tick, with a cheap ``gh pr view`` per waiting entry, and does
     not require the active queue to be empty.  Before this the wait list was
@@ -2173,8 +2584,16 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
     so one non-empty queue kept green PRs waiting forever.  Entries move in
     their original wait-list order; ``enqueued_at`` still ranks them against
     the queue's existing entries.
+
+    The daemon calls this with NO runners (``check_merge_queue`` injects none),
+    so both are defaulted at the top: every ``gh``/``git`` call below — the
+    view, the base probe, ``update-branch``, the hand-back comment — inherits
+    from these two lines. Without them a ``None`` runner reaches ``_gh`` and
+    the ``TypeError`` escapes the drain and kills the whole tick.
     """
     log = log or (lambda *a, **k: None)
+    git_runner = git_runner or _default_runner
+    gh_runner = gh_runner or _default_runner
     with _file_lock():
         ps = _project_state(load_state(state_path), project)
         waiting = [dict(entry) for entry in (ps.get("waiting") or [])
@@ -2183,6 +2602,7 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
         return []
     base = expected_base(cfg, git_runner) or "main"
     ready = []
+    red = []
     for entry in waiting:
         info = pr_view(cfg["repo"], entry.get("pr"), runner=gh_runner)
         if not isinstance(info, dict):
@@ -2190,6 +2610,38 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
         required = _required_for_info(cfg, base, info, git_runner, gh_runner)
         if _pr_ready(info, required_checks=required):
             ready.append(entry)
+        elif _waiting_own_red(entry, info):
+            red.append((entry, info))
+    # Not green because its own checks are red/cancelled: the wait list used to
+    # be passive about that forever. Two answers, and the SAME base sha decides
+    # which, so it is probed once here and handed to both passes:
+    #   red on a base it has not been tried against yet -> ONE update-branch
+    #     (card 1: a red may be main's fault, not the PR's).
+    #   red on THIS base, or unmovable onto it -> hand it back to the author
+    #     (card 2: nothing the queue can do will change that verdict).
+    # An unknown base sha answers neither: doing nothing is the read-only answer
+    # and the next tick asks again.
+    if red:
+        sha = _remote_base_sha(cfg["repo"], base, git_runner)
+        if sha:
+            stale_red = []
+            own_red = []
+            for entry, info in red:
+                reason = _own_red_reason(entry, sha)
+                if reason:
+                    own_red.append((entry, info, reason))
+                elif _red_on_stale_base(entry, info):
+                    stale_red.append(entry)
+            if stale_red:
+                # Bounded to one update per (PR, base sha).
+                _refresh_stale_red(project, cfg, base, stale_red,
+                                   state_path=state_path, git_runner=git_runner,
+                                   gh_runner=gh_runner, log=log, base_sha=sha)
+            if own_red:
+                _hand_back_own_red(project, cfg, base, own_red,
+                                   state_path=state_path, base_sha=sha,
+                                   gh_runner=gh_runner, handback=handback,
+                                   log=log)
     if not ready:
         return []
     ready_prs = {int(entry["pr"]) for entry in ready
@@ -2517,7 +2969,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
             for name in active:
                 _drain_waiting(name, cfgs[name], state_path=state_path,
                                git_runner=git_runner, gh_runner=gh_runner,
-                               log=log)
+                               log=log, handback=handback)
             doc = load_state(state_path)
 
             # Auto-enqueue only when this repo's whole FIFO is empty, so a
