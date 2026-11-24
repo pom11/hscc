@@ -402,6 +402,27 @@ def test_a_pointer_verified_by_its_route_prefix_is_rejected():
         "of 38 entries name a file that never mentioned them")
 
 
+def test_a_register_entry_that_vanishes_reopens_the_route_it_covered():
+    """The completeness side must be able to fail too: delete an entry, watch it redden.
+
+    A register the coverage test trusts is only worth trusting if the test notices a
+    missing entry -- otherwise every route it holds is grandfathered. Drop ONE entry
+    from a copy, assert the deletion actually landed, and require the same
+    ``_uncovered`` comparison the coverage test runs to name that route.
+    """
+    gone = ("GET", "/v1/projects/{name}/incidents")
+    assert not _uncovered(_documented(), UNDOCUMENTED_ROUTES), (
+        "coverage is red before the deletion; this probe proves nothing then")
+    stripped = {k: v for k, v in UNDOCUMENTED_ROUTES.items() if k != gone}
+    assert len(stripped) == len(UNDOCUMENTED_ROUTES) - 1, (
+        "the entry was not deleted -- a green here would be vacuous")
+
+    missing = _uncovered(_documented(), stripped)
+    assert any(gone[1] in line for line in missing), (
+        f"deleting {gone[0]} {gone[1]} left coverage green -- the register is not "
+        "being read as coverage, so every entry in it is a grandfather clause")
+
+
 def test_a_pointer_naming_only_a_longer_sibling_route_is_rejected():
     """The other direction of the same trap: a short path inside a longer route.
 
