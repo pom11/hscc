@@ -54,10 +54,9 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 from datetime import datetime
 
-from . import node_pauses, serving, util
+from . import node_pauses, serving, suite_fence, util
 
 #: Shell-out cap for ONE lifecycle command (a stop). These are single-host
 #: sparkrun control calls, not a fleet sweep, so they sit well under
@@ -1940,7 +1939,11 @@ def _doctor_check(now=None, root=None, stream_state=None, _daemon_running=None,
     probe is injectable so no test has to reach a daemon, a node, or the
     operator's ``~/.hscc``.
     """
-    if root is None and "pytest" in sys.modules:
+    # The fence is the package's ONE shared predicate (``suite_fence``), not a
+    # module-local ``"pytest" in sys.modules`` test: the caller that reaches this
+    # default root is a fresh interpreter a suite item SPAWNED, where pytest was never
+    # imported. The marker half is what makes the refusal bite there (t_fdbc24f9).
+    if root is None and suite_fence.under_pytest():
         return refused_check()
 
     # One clock for the whole verdict: the age arithmetic and the past-due
