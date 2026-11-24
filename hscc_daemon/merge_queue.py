@@ -132,6 +132,14 @@ CI_PENDING_STAGE = "ci-pending"
 #: terminal: a CI that never reported is not a verdict about the code.
 CI_PENDING_TIMEOUT_S = 1800
 
+#: How long an entry may stay in the wait list before the queue drops it.  The
+#: wait list re-reads every waiting PR on every tick and, since cards 1 and 2,
+#: even refreshes and hands one back — but until now it never gave up, so a PR
+#: nobody was pushing any more waited on nobody forever.  A project overrides it
+#: with ``waiting_max_age_s`` in its registry ``merge_queue`` block (seconds).
+WAITING_MAX_AGE_S = 24 * 3600
+WAITING_MAX_AGE_KEY = "waiting_max_age_s"
+
 #: Task-policy class the gate asks for on macOS, and where that tool lives.
 #:
 #: The gate is a child of the `com.hermes.hscc_daemon` launchd job, whose plist
@@ -409,6 +417,24 @@ def _find_entry(queue, pr):
     return None
 
 
+def _entry_pr(entry):
+    """The PR number of a queue/wait-list entry as an int, or None.
+
+    Entries come back out of JSON, so a ``pr`` can be a string, a float or junk
+    from an older ledger. Anything that compares against it goes through here
+    instead of assuming ``int``.
+    """
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("pr")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def add_to_queue(project, pr, card=None, assignee=None, branch=None,
                  state=None, path=None):
     """Append a PR to ``project``'s FIFO (idempotent by PR number)."""
@@ -672,6 +698,17 @@ _OUTCOME_STATES = {
     # Same for a pushed head whose CI never answered: release to waiting (the
     # wait list is rechecked every tick), not a resolve the worker must chase.
     "ci-timeout": "waiting",
+    # ── the wait-list sweep (card 3) ──
+    # It landed, just not through us: the same row an in-flight PR reports when
+    # it is found already merged.
+    "merged-elsewhere": "merged",
+    # The queue gave up on it. A budget, not a verdict on the code, so it must
+    # not render `resolve` (nothing is being asked of the author but a re-add) —
+    # and not `timeout` either, which this module reserves for the live stage
+    # stamped on an in-flight claim (see MERGE_QUEUE_STATES).
+    "expired": "failed",
+    # The author closed it: nothing landed and nothing is left to resolve.
+    "closed": "failed",
 }
 
 
@@ -1879,6 +1916,18 @@ def _handback(entry, cfg, body, handback, gh_runner, log=None):
         pass
 
 
+def _last_record(result, entry, **fields):
+    """The one shape of a ``ps["last"]`` row, shared by every terminal outcome."""
+    return {
+        "pr": entry.get("pr"),
+        "card": entry.get("card"),
+        "branch": entry.get("branch"),
+        "result": result,
+        "at": _now_iso(),
+        **fields,
+    }
+
+
 def _finish(doc, project, state_path, ps, result, entry, **fields):
     """Record a terminal outcome on a FRESH ledger read.
 
@@ -1892,14 +1941,7 @@ def _finish(doc, project, state_path, ps, result, entry, **fields):
         flight = ps.get("in_flight")
         if flight and int(flight.get("pr", 0)) == int(entry.get("pr", 0)):
             ps["in_flight"] = None
-        ps["last"] = {
-            "pr": entry.get("pr"),
-            "card": entry.get("card"),
-            "branch": entry.get("branch"),
-            "result": result,
-            "at": _now_iso(),
-            **fields,
-        }
+        ps["last"] = _last_record(result, entry, **fields)
         save_state(doc, state_path)
 
 
@@ -1971,9 +2013,14 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         entry["branch"] = info["headRefName"]
     state = str(info.get("state", "")).upper()
     if state in ("MERGED", "CLOSED"):
-        _finish(doc, project, state_path, ps, "already-" + state.lower(),
-                entry, sha=info.get("headRefOid"))
-        return {"pr": entry["pr"], "result": "already-merged"}
+        # Terminal BEFORE any work is attempted: a merged PR's branch is deleted
+        # on merge, so anything past here rebases a ref that no longer exists and
+        # can spend the whole gate budget on a commit already on main.  The tell
+        # is the PR's state, not that git error.
+        result = "already-" + state.lower()
+        _finish(doc, project, state_path, ps, result, entry,
+                sha=info.get("headRefOid"))
+        return {"pr": entry["pr"], "result": result}
     reason = refusal_reason(info, base)
     if reason:
         # Terminal: a fork or wrong-base PR is not transient, so retrying (and
@@ -2569,14 +2616,161 @@ def _hand_back_own_red(project, cfg, base, candidates, *, state_path, base_sha,
     return sorted(patches)
 
 
+# ── wait-list expiry: the queue eventually gives up ──────────────────────────
+#
+# Everything above KEEPS the entry: a red PR is refreshed once per base commit,
+# handed back once per base commit, and goes on waiting.  Nothing decided when
+# the waiting was OVER, so a PR whose author had walked away waited on nobody
+# indefinitely — the same passivity that let a broken main (#716) or one flaky
+# leg (#738) hold a PR for 9-18 h while the operator guessed which of the two it
+# was.
+#
+# Two exits, both keyed on the PR's STATE and never on whether its branch still
+# resolves: a merged PR's branch is deleted on merge, so the ``fatal: bad
+# revision`` it provokes reads like a broken ref and is actually "this landed".
+# Keying on the branch would misread the good case as a fault.
+#
+#   merged or closed     out of the queue immediately and SILENTLY: the queue has
+#                        no claim on it and a comment there is noise.
+#   still open, too old  out with one comment — how long it waited, what was
+#                        still red, and the exact command to re-add it — plus a
+#                        WARN line for the daemon log.
+#
+# A GREEN entry is exempt whatever its age: it goes back to the FIFO, because
+# releasing a PR that can land now beats dropping one the operator asked for.
+
+def waiting_budget_s(cfg):
+    """Seconds an entry may stay in ``project``'s wait list (default 24 h).
+
+    ``waiting_max_age_s`` in the registry's ``merge_queue`` block overrides it,
+    so a project with slow CI can wait it out. A value that is not a positive
+    number — a typo, ``0``, a ``"24h"`` string, a YAML ``true`` — falls back to
+    the default rather than emptying the wait list on one bad registry line.
+    """
+    raw = (cfg or {}).get(WAITING_MAX_AGE_KEY)
+    if raw is None or isinstance(raw, bool):
+        return WAITING_MAX_AGE_S
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return WAITING_MAX_AGE_S
+    return value if value > 0 else WAITING_MAX_AGE_S
+
+
+def _age_span(seconds):
+    """A wait-list span as one word for a log line or a PR comment."""
+    seconds = int(max(0, seconds or 0))
+    if seconds >= 3600:
+        return f"{seconds // 3600}h"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def _pr_gone(info):
+    """``"merged-elsewhere"`` / ``"closed"`` for a PR the queue no longer owns.
+
+    A squash commit counts as merged even when ``state`` still reads OPEN:
+    GitHub has answered OPEN for a PR whose merge commit already exists, and
+    landing is landing. Everything else — OPEN, a draft, a view that could not be
+    read — answers None: the queue keeps its claim, and a read that failed is
+    simply asked again on the next tick.
+    """
+    state = str((info or {}).get("state") or "").upper()
+    commit = (info or {}).get("mergeCommit")
+    if state == "MERGED" or (isinstance(commit, dict) and commit.get("oid")):
+        return "merged-elsewhere"
+    if state == "CLOSED":
+        return "closed"
+    return None
+
+
+def _waiting_expired(age_s, budget_s):
+    """True when a wait-list entry has outlived ``budget_s``.
+
+    A None age — no ``enqueued_at``, or one this ledger cannot parse — is NEVER
+    expired: dropping a PR because the bookkeeping lost a timestamp turns a
+    bookkeeping bug into lost work.
+    """
+    return age_s is not None and age_s > budget_s
+
+
+def _expiry_body(project, pr, base, info, entry, age_s, budget_s):
+    """What the queue says on a PR it gave up on: the wait, and the way back in.
+
+    Same shape as the hand-back body — the fact first, the queue's own effort
+    next, the action last — but the action here is one command, not a rebase.
+    """
+    checks = _failing_check_names(info)
+    failed = f"\nStill red: {', '.join(checks)}\n" if checks else ""
+    if entry.get("handed_back_main_sha"):
+        tried = ("The queue already moved this branch onto the current base and "
+                 "handed the card back once.")
+    elif entry.get("refreshed_main_sha"):
+        tried = (f"The queue already moved this branch onto `{base}` "
+                 f"{str(entry['refreshed_main_sha'])[:12]} once.")
+    elif entry.get("update_conflict"):
+        tried = (f"The branch could not be moved onto `{base}` — `gh pr "
+                 f"update-branch` refused it with a conflict.")
+    else:
+        tried = (f"The queue never got a green verdict on it, and never managed "
+                 f"to move it onto `{base}`.")
+    return (
+        f"Merge queue: dropped from the merge queue after {_age_span(age_s)} "
+        f"waiting.\n\n"
+        f"It entered the queue at {entry.get('enqueued_at')} and its checks "
+        f"never went green on `{base}` — longer than this project's "
+        f"{_age_span(budget_s)} wait-list budget. It is OUT of the queue now: "
+        f"the queue will not re-add it and will not gate it.\n"
+        f"{failed}\n"
+        f"{tried}\n"
+        "Nothing here says the code is wrong. The wait list is where a PR goes "
+        "while it waits for its checks, and this one stopped being waited on.\n\n"
+        f"Re-add it once green:\n\n    hscc merge-queue add {project} {pr}\n")
+
+
+def _drop_waiting(state_path, project, drops):
+    """Remove wait-list entries and record why.  ``drops``: pr -> (result, note).
+
+    A FRESH read under the file lock, like every other write in this module: an
+    operator's ``add``/``remove`` during the ``gh`` calls above must survive, and
+    an entry that has already left the wait list is not dropped a second time —
+    its history belongs wherever it landed.  ``last`` holds ONE outcome by
+    design, so it carries the last drop of this pass; every dropped PR gets its
+    own log line and, for an expiry, its own PR comment.
+    """
+    if not drops:
+        return []
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        remaining, gone = [], []
+        for entry in ps.get("waiting") or []:
+            pr = _entry_pr(entry)
+            if pr is not None and pr in drops:
+                gone.append((pr, entry))
+            else:
+                remaining.append(entry)
+        if gone:
+            pr, entry = gone[-1]
+            result, note = drops[pr]
+            ps["last"] = _last_record(result, entry, error=note)
+        ps["waiting"] = remaining
+        save_state(doc, state_path)
+    return [pr for pr, _ in gone]
+
+
 def _drain_waiting(project, cfg, *, state_path, git_runner=None,
                    gh_runner=None, log=None, handback=None):
     """Return every wait-listed PR whose checks are green to the FIFO.
 
-    Only a green PR LEAVES the wait list here. While looking it also drives the
-    two red passes above (the stale-base refresh, then the hand-back for a PR
-    that is red on its own), either of which comments and stamps the entry but
-    leaves it waiting.
+    Only a green PR LEAVES the wait list here — except for the two exits of the
+    sweep below, which are also the only reasons an entry is ever REMOVED without
+    going somewhere: a PR GitHub says is merged or closed, and a PR still open
+    past :data:`WAITING_MAX_AGE_S`.  While looking it also drives the two red
+    passes above (the stale-base refresh, then the hand-back for a PR that is red
+    on its own), either of which comments and stamps the entry but leaves it
+    waiting.
 
     Runs on EVERY tick, with a cheap ``gh pr view`` per waiting entry, and does
     not require the active queue to be empty.  Before this the wait list was
@@ -2601,17 +2795,54 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
     if not waiting:
         return []
     base = expected_base(cfg, git_runner) or "main"
+    budget_s = waiting_budget_s(cfg)
+    now_s = _epoch(_now_iso())
     ready = []
     red = []
+    drops = {}
     for entry in waiting:
         info = pr_view(cfg["repo"], entry.get("pr"), runner=gh_runner)
         if not isinstance(info, dict):
             continue
+        pr = _entry_pr(entry)
         required = _required_for_info(cfg, base, info, git_runner, gh_runner)
+        # Green FIRST, whatever its age: a PR that can land now goes back to the
+        # FIFO rather than being dropped for having waited a day to get here.
         if _pr_ready(info, required_checks=required):
             ready.append(entry)
-        elif _waiting_own_red(entry, info):
+            continue
+        # Then the two exits, both BEFORE the red routing below: a PR that has
+        # landed, been closed, or outlived its budget must not be refreshed onto
+        # a fresh base or handed back a second time on the queue's own account.
+        gone = _pr_gone(info)
+        if gone is not None and pr is not None:
+            drops[pr] = (gone, (f"PR #{pr} merged outside the queue"
+                                if gone == "merged-elsewhere"
+                                else f"PR #{pr} closed without merging"))
+            log(f"merge-queue {project}: PR #{pr} {gone}; dropped from the "
+                "wait list (no comment — the queue has no claim on it)", "INFO")
+            continue
+        age_s = _age_seconds(entry.get("enqueued_at"), now_s)
+        if pr is not None and _waiting_expired(age_s, budget_s):
+            # The comment goes out BEFORE the ledger write: it is a gh call, and
+            # every gh call in this pass happens outside the file lock so a slow
+            # GitHub cannot block the CLI. A comment that fails is logged by
+            # `_comment_pr` and does not hold up the drop — the drop is the point.
+            _comment_pr(cfg["repo"], pr,
+                        _expiry_body(project, pr, base, info, entry,
+                                     age_s, budget_s),
+                        gh_runner, log=log)
+            drops[pr] = ("expired", f"waited {_age_span(age_s)}, "
+                                    f"budget {_age_span(budget_s)}")
+            log(f"merge-queue {project}: PR #{pr} dropped from the wait list "
+                f"after {_age_span(age_s)} waiting (budget "
+                f"{_age_span(budget_s)}); re-add with `hscc merge-queue add "
+                f"{project} {pr}` once green", "WARN")
+            continue
+        if _waiting_own_red(entry, info):
             red.append((entry, info))
+    if drops:
+        _drop_waiting(state_path, project, drops)
     # Not green because its own checks are red/cancelled: the wait list used to
     # be passive about that forever. Two answers, and the SAME base sha decides
     # which, so it is probed once here and handed to both passes:
