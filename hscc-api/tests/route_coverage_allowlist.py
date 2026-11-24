@@ -45,7 +45,6 @@ UNDOCUMENTED_ROUTES = {
     ("POST", "/v1/orchestrator/chat"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("GET", "/v1/orchestrator/chat/{id}"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("POST", "/v1/orchestrator/chat/{id}/stop"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
-    ("GET", "/v1/profile/editor/{profile}"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("POST", "/v1/profile/editor/{profile}"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_b9808146",
     ("POST", "/v1/profile/export"): "surface: named outside the Endpoint reference only — see docs/audits/confirm-gate-audit-t_c77f243f.md; deferred: t_b9808146",
     ("GET", "/v1/profile/export/{file}"): "surface: named outside the Endpoint reference only — see docs/audits/confirm-gate-audit-t_c77f243f.md; deferred: t_b9808146",

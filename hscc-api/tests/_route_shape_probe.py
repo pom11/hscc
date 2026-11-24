@@ -62,6 +62,9 @@ SHAPE_CHECKED: dict[str, dict] = {
     "GET /v1/profile/list": {},
     # --- t_b9808146: the iOS-facing reads the shipped client calls ------------------ #
     "GET /v1/projects/{name}": {"name": "demo"},
+    # No stub: this route's key set IS its backing's return literal, so the sandbox
+    # seeds a real profile directory and the real _backing_read answers.
+    "GET /v1/profile/editor/{profile}": {"profile": "demo"},
 }
 
 #: ``(METHOD, display path) -> [(module, attribute, replacement)]``, applied to the
