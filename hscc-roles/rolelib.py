@@ -1,6 +1,7 @@
 """Role framework shared helpers: paths, toolset policy, spec load/validate, hashing."""
 import hashlib
 import os
+import subprocess
 import sys
 import yaml
 
@@ -345,3 +346,155 @@ def list_spec_files():
         for f in os.listdir(ROLES_DIR)
         if f.endswith(".yaml")
     )
+
+
+# ── spec PROVENANCE: will a spec in ROLES_DIR survive the next re-sync? ──────
+#
+# WHY THIS EXISTS (t_00d9581d). ``ROLES_DIR`` is ``dirname(rolelib.__file__)/roles``
+# — whichever checkout the CLI happened to import from — and the fleet's OWN ops
+# block (generator.py, "Missing specialist? Create the profile") tells an
+# orchestrator to mint a role with
+# ``python ~/.hermes/plugins/hscc-roles/hscc.py create <name> …`` and *then* put a
+# card on the board to commit the new spec. The deployed plugin dir is not a git
+# working tree, so a spec minted there is data with no home: the next re-sync of
+# ``~/.hermes/plugins/hscc-roles/`` from the repo restores the tracked specs and
+# silently drops the untracked one, while ``~/.hermes/profiles/<name>/`` — which
+# lives OUTSIDE that tree — survives. That is precisely how the ``marketing``
+# profile was orphaned (t_f2630ca3): the spec existed for ~6 hours, so every
+# filesystem-reading check, ``role_soul_check``'s ``has_spec`` included, reported
+# healthy while the loss was already scheduled.
+#
+# So "does the spec exist" is not the safety question — "will it still exist after
+# the next re-sync" is, and that is a git question. These helpers answer it and
+# NEVER raise: no git binary, a tree that is not a repo, or a repo that is not the
+# hscc repo all come back as ``None`` / ``"outside-repo"``, which callers must
+# render as a warning — never as "nothing is tracked" (that would flag every spec
+# as doomed) and never as an all-clear.
+#
+# One census, one location: this reads the same ``roles/`` directory
+# ``list_spec_files()`` lists and asks git about it. There is no second spec
+# location and no second store.
+
+_GIT_TIMEOUT_SECONDS = 10
+
+
+def _git(cwd, *args):
+    """git's stdout for ``git -C cwd <args>``, stripped — or None on ANY failure.
+
+    Read-only, bounded, and total: a missing binary, a non-repo cwd, a timeout or
+    a non-zero exit all answer None so that provenance can never crash a
+    provisioning path or a CLI listing.
+    """
+    try:
+        proc = subprocess.run(["git", "-C", str(cwd), *args],
+                              capture_output=True, text=True,
+                              timeout=_GIT_TIMEOUT_SECONDS)
+    except Exception:                       # noqa: BLE001 - absent git is normal here
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def roles_repo(roles_dir=None):
+    """``(repo toplevel, roles-dir-relative-to-it)`` when ROLES_DIR *is* the
+    tracked hscc repo's own ``hscc-roles/roles``; else ``(None, None)``.
+
+    The identity test is ONE comparison: git's toplevel must BE this plugin dir's
+    parent. It holds for a clone and for a linked worktree
+    (``<repo>/.worktrees/<card>/hscc-roles/roles``), and it is what excludes a copy
+    that merely happens to sit inside somebody else's repo — e.g. the deployed
+    ``~/.hermes/plugins/hscc-roles`` under a dotfiles-style repo, whose toplevel is
+    not ``~/.hermes/plugins``. Accepting such a tree would report a doomed spec as
+    safely committed, which is the false all-clear this whole module exists to
+    avoid.
+    """
+    root = _canonical(roles_dir if roles_dir is not None else ROLES_DIR)
+    if not os.path.isdir(root):
+        return None, None
+    top = _git(root, "rev-parse", "--show-toplevel")
+    if not top:
+        return None, None
+    top = _canonical(top)
+    if os.path.dirname(os.path.dirname(root)) != top:
+        return None, None
+    try:
+        rel = os.path.relpath(root, top).replace(os.sep, "/")
+    except ValueError:                      # different drives (Windows); not this fleet
+        return None, None
+    return top, rel
+
+
+def tracked_spec_names(roles_dir=None):
+    """The spec file NAMES under *roles_dir* that git tracks — or None when the dir
+    is not the tracked repo's own ``hscc-roles/roles``.
+
+    One ``git ls-files`` over the roles dir, i.e. the same census the repo's own
+    guards use, rather than a per-file ``--error-unmatch`` per spec. ``None`` is
+    "cannot tell", and the caller's job is to say so out loud.
+    """
+    top, rel = roles_repo(roles_dir)
+    if top is None:
+        return None
+    out = _git(top, "ls-files", "--", rel)
+    if out is None:
+        return None
+    return {os.path.basename(line.strip()) for line in out.splitlines()
+            if line.strip().endswith(".yaml")}
+
+
+#: What an operator must run to make a freshly minted spec survive the next
+#: re-sync. Templated per role so the CLI prints copy-pasteable lines rather than
+#: a prose description of a command.
+_SPEC_COMMIT_COMMANDS = (
+    "git -C {repo} add {rel}/{name}.yaml",
+    'git -C {repo} commit -m "hscc-roles: add {name} role spec"',
+)
+
+
+def spec_provenance(path, roles_dir=None):
+    """Whether the spec at *path* will still exist after the next plugin re-sync.
+
+    ``state`` is one of:
+      ``"tracked"``      git has it — the spec is data with a home.
+      ``"untracked"``    present but not committed: the next re-sync of the
+                         deployed plugin dir deletes it while the profile minted
+                         from it survives (the t_f2630ca3 window). ``commands``
+                         names the exact lines that stop that.
+      ``"unknown"``      inside the repo but git would not answer — treated as
+                         untracked by callers, because silence is the failure
+                         mode being fixed.
+      ``"outside-repo"`` ROLES_DIR is not the tracked repo at all (the deployed
+                         plugin copy, a scratch copy). ``commands`` is EMPTY:
+                         committing there would not help — the file has to be
+                         copied into the repo first, so the caller says that.
+
+    Never raises. ``git_known`` is False exactly when git was not consulted
+    successfully, so a caller can never read an unknown tree as a healthy one.
+    """
+    path = os.path.abspath(os.path.expanduser(str(path)))
+    name = os.path.splitext(os.path.basename(path))[0]
+    top, rel = roles_repo(roles_dir)
+    if top is None:
+        return {"state": "outside-repo", "repo": None, "rel": None, "name": name,
+                "commands": [], "git_known": False,
+                "detail": (f"{path} is not inside the tracked hscc repo's "
+                           f"hscc-roles/roles — a spec minted here has no git home")}
+    tracked = tracked_spec_names(roles_dir)
+    if tracked is None:
+        return {"state": "unknown", "repo": top, "rel": rel, "name": name,
+                "commands": [c.format(repo=top, rel=rel, name=name)
+                             for c in _SPEC_COMMIT_COMMANDS],
+                "git_known": False,
+                "detail": (f"git could not report whether {rel}/{name}.yaml is "
+                           f"tracked in {top}")}
+    if f"{name}.yaml" in tracked:
+        return {"state": "tracked", "repo": top, "rel": rel, "name": name,
+                "commands": [], "git_known": True,
+                "detail": f"{rel}/{name}.yaml is tracked by git in {top}"}
+    return {"state": "untracked", "repo": top, "rel": rel, "name": name,
+            "commands": [c.format(repo=top, rel=rel, name=name)
+                         for c in _SPEC_COMMIT_COMMANDS],
+            "git_known": True,
+            "detail": (f"{rel}/{name}.yaml exists on disk but git does not track "
+                       f"it in {top}")}

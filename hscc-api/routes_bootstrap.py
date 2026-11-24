@@ -258,10 +258,40 @@ def _speak_create(data: dict) -> str:
 # Handlers
 # --------------------------------------------------------------------------- #
 
+def _query_scalar(query, key: str) -> str:
+    """One SCALAR string per key — the only shape the server ever sends.
+
+    ``api_server._parse_path`` runs ``parse_qs`` and collapses every key to
+    ``v[-1]``, and ``_dispatch`` merges matched path groups into that same dict
+    in the same scalar shape. So a handler that reads a query value as a LIST is
+    not being defensive, it is reading the FIRST CHARACTER of a string. Measured
+    over loopback HTTP against the shipped dispatcher (sandboxed HOME, no fleet,
+    no real ``~/.hscc``): ``?name=demo&repo=/tmp/demo`` reached ``_backing_plan``
+    as ``('d', '/')`` — the wizard's review screen answered a plan for a project
+    named ``d`` whose repo is the filesystem root, and said ``ready: true``.
+
+    The list/tuple branch is not tolerance for a shape the server sends: it is
+    the suite's older direct-drive style (``{"name": ["demo"]}``), which is
+    exactly the blindness that hid this defect — there ``[0]`` happened to be
+    right. ``v[-1]`` matches ``_parse_path``, so both callers agree.
+
+    An EMPTY scalar must not raise either: ``parse_qs`` drops blanks, so the
+    dispatcher cannot send ``{"repo": ""}``, but ``""[0]`` is an IndexError and
+    the same one-character read in disguise. Blank is absent, as elsewhere
+    (``tests/test_cluster_history_parity.py`` pins that rule for its own route).
+    """
+    if not isinstance(query, dict):
+        return ""
+    raw = query.get(key, "")
+    if isinstance(raw, (list, tuple)):
+        raw = raw[-1] if raw else ""
+    return str(raw).strip()
+
+
 def handle_plan(server, ctx, query, body):
     """GET /v1/projects/new/plan — READ-ONLY plan for a prospective project."""
-    name = query.get("name", [""])[0] if isinstance(query, dict) else ""
-    repo = query.get("repo", [""])[0] if isinstance(query, dict) else ""
+    name = _query_scalar(query, "name")
+    repo = _query_scalar(query, "repo")
     try:
         from routes_project import _registry_path
         registry_path = _registry_path(ctx)

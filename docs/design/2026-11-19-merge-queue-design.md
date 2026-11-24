@@ -71,6 +71,10 @@ merge_queue:
   # Optional: expect PRs against this base instead of the repo default
   # (e.g. release). PRs to any other base are refused.
   # base_branch: release
+  # Optional: how long a PR may sit in the wait list before the queue drops it
+  # (seconds; default 86400 = 24 h). Dropped entries get a PR comment with the
+  # `hscc merge-queue add` to re-add them.
+  # waiting_max_age_s: 43200
 ```
 
 `hscc`'s own defaults are the address guard plus the pytest legs, with

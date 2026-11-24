@@ -429,6 +429,20 @@ def read_history(opts, hscc_dir=None, mh=None, now=None) -> dict:
         "tier": tier,
         "resolution_s": tier_bucket(mh, tier),
         "resolution": resolution_label(mh, tier),
+        # The four byte-budget keys (t_d732d50d). The route folds when asked to;
+        # the CLI has no `--max-bytes` and never folds, because a byte budget is a
+        # property of a WIRE response and a terminal has no ceiling to fit — and
+        # a budget of the same number would not even mean the same thing on the
+        # two surfaces, since the route's body carries `speak` and the CLI's does
+        # not. These values are therefore the never-folded facts, not defaults:
+        # `fold` 1 says nothing was folded, `native_resolution_s` is this tier's
+        # own stored step (so it equals `resolution_s` here), and `budget_met` is
+        # None because no budget was asked and so nothing was measured against one
+        # — the same not-a-default convention as `store.tier0_resident` below.
+        "max_bytes": None,
+        "fold": 1,
+        "native_resolution_s": tier_bucket(mh, tier),
+        "budget_met": None,
         "tier_summary": tier_summary(mh, tier),
         "max_fields": [c for c in host_vocab
                        if c.endswith("_max")

@@ -7,7 +7,7 @@ Assignee: ios-engineer
 ## RE-AUDIT (run 477, completed 2026-09-04) — findings still hold, this is the terminal deliverable
 
 Re-claimed after the previous run blocked for review. Re-audited against the CURRENT
-operator dev head (`/Users/desac/dev/hscc`, branch `dev` @ `b2668ba`) and the workspace
+operator dev head (`~/dev/hscc`, branch `dev` @ `b2668ba`) and the workspace
 tree. The session-event contract is STILL attachment-less on every path:
 
 - `ProjectsView.swift:217` — `case .chat:` still routes to `StreamingChatView` (the only

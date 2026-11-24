@@ -47,7 +47,7 @@ left raw (documented in each site below).
 ## How ran
 
 ```
-export HOME=/Users/desac
+export HOME=~
 HSCC_TEST_PY=<interp> bash scripts/run_tests.sh
 ```
 
@@ -56,7 +56,7 @@ Full 8-package suite green under BOTH interpreters (serially, ~13 min each):
 | Interpreter | Path | Result |
 |---|---|---|
 | A (hermes venv) | `~/.hermes/hermes-agent/venv/bin/python` | **ALL GREEN** (bootstrap 256, commands 69, roles 114, cluster 422, project 1351, **hscc_daemon 1136**, sparkrun-hermes 12, api 786 passed/1 skipped) |
-| B (conda p313) | `/Users/desac/miniconda3/envs/p313/bin/python` | **ALL GREEN** (bootstrap 256, commands 69, roles 114, cluster 404 + 14 skipped, project 1351, **hscc_daemon 1136**, sparkrun-hermes 12, api 786/1 skipped) |
+| B (conda p313) | `~/miniconda3/envs/p313/bin/python` | **ALL GREEN** (bootstrap 256, commands 69, roles 114, cluster 404 + 14 skipped, project 1351, **hscc_daemon 1136**, sparkrun-hermes 12, api 786/1 skipped) |
 
 hscc_daemon (the package under change) alone: **1136 passed** under BOTH
 interpreters. This card adds 13 no-ANSI regression tests (4 kanban stale, 4
@@ -75,9 +75,9 @@ green, and the pre-existing kanban group suites covered routing.
 - **Push:** `git push origin main` → `d2e3816..2f88ed7 main -> main` on
   github.com/pom11/hscc. **YES.**
 - **Deploy:** `~/.hermes/hermes-agent/venv/bin/python hscc-bootstrap/install_payload.py`
-  from the primary checkout `/Users/desac/dev/hscc` → all payload entries
+  from the primary checkout `~/dev/hscc` → all payload entries
   installed with backups, `missing: []`. Verified deployed
-  `/Users/desac/.hermes/plugins/hscc_daemon/` kanban_cli / kanban_blocked /
+  `~/.hermes/plugins/hscc_daemon/` kanban_cli / kanban_blocked /
   event_driven are byte-identical to committed main. **YES (deployed).**
 - **No gateway restart:** changes are CLI-only (kanban stale/blocked +
   event_driven install/uninstall/status). None are on the daemon's live loop;

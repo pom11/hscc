@@ -91,7 +91,7 @@ The old README opened with several now-FALSE claims:
   contract / Tests sections.
 - The layout section now reflects the routes_*.py family modules + gateway_driver
   / session_event / ws_frame supporting modules (verified to exist in dir).
-- Tests: old README hardcoded `HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/
+- Tests: old README hardcoded `HSCC_TEST_PY=~/miniconda3/envs/p313/
   bin/python scripts/run_tests.sh`. Harmonic; simplified to `scripts/run_tests.sh`
   (the harness has a working default python). hscc-api is in run_tests.sh DIRS.
 - No LAN addresses introduced. Example endpoints are route paths, not node IPs.

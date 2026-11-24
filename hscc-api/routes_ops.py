@@ -19,6 +19,11 @@ Backing (libraries, never CLI text-parsing):
     the verdict is also recorded into the health snapshot /v1/health serves)
   * ``GET  /v1/daemon/status``-> ``daemon_ops.get_pid()`` + ``state.read_all_states()``
   * ``GET  /v1/daemon/host``  -> local platform/psutil host metrics (daemon host's OWN machine)
+  * ``GET  /v1/main/status``  -> ``main_cli.status()`` — the read ``hscc main
+    status`` prints (identity through ``hscc-roles/main_orch.py``, pane through
+    ``repl_inject``). No ``main start``/``main wakeups`` door exists here.
+  * ``GET  /v1/orch/waker/status`` -> ``orch_waker.waker_status()`` — the read
+    ``hscc orch waker status`` prints. ``enable``/``disable`` have NO route.
   * ``GET  /v1/triggers``     -> ``trigger.load_triggers()`` + ``state.read_state('triggers')`` + recent events
   * ``GET  /v1/escalate``     -> ``escalate_watcher.scan_and_escalate`` (read-only: no-op reassign/notify)
   * ``GET  /v1/profiles``     -> ``cluster_engine.cmd_profile_status()`` —
@@ -78,6 +83,42 @@ PROFILES_STATUS_PATTERN = r"^/v1/profiles$"
 #: asserts both modules' pointers agree and that this one resolves to a real
 #: registered route.
 PROFILES_ROSTER_POINTER = "GET /v1/profiles/list"
+
+
+# --------------------------------------------------------------------------- #
+# The dashboard pair (audit §2.6 / D9): two reads, each ONE route per CLI verb
+# --------------------------------------------------------------------------- #
+#
+# ``docs/audits/2026-11-23-agent-surface.md`` measured that the two dashboard
+# questions below had no HTTP surface at all (row ``main status [--json]`` and
+# row ``orch waker status``), and the operator ruled **yes — reads only**
+# (§12.2, D9). The rule that shapes them is audit §5 S1 (no second source of
+# truth): each route calls the ONE function the CLI verb itself renders from,
+# so the CLI answer and the route answer cannot drift, and each contributes
+# nothing to the payload but ``speak``.
+#
+# What is deliberately NOT here is the other half of each CLI group:
+# ``hscc main start`` (spawns/re-attaches the operator's tmux pane),
+# ``hscc main wakeups`` (rewrites the wake schedule) and
+# ``hscc orch waker enable|disable`` (moves when the operator gets woken).
+# Those stay CLI/operator-facing; the two handlers below take no body, no
+# ``confirm`` and no ``profile``, so there is no door to reach them from.
+
+#: The ONE route answering ``hscc main status`` (who the configured main
+#: orchestrator is and what its pane is doing).
+MAIN_STATUS_ROUTE = "GET /v1/main/status"
+#: Registration pattern for :data:`MAIN_STATUS_ROUTE`, compiled by the
+#: ``ROUTES.append`` below so prose and dispatch table cannot drift.
+MAIN_STATUS_PATTERN = r"^/v1/main/status$"
+#: The ONE route answering ``hscc orch waker status`` (is the built-in waker
+#: enabled, when did it last tick, what is it waiting on).
+WAKER_STATUS_ROUTE = "GET /v1/orch/waker/status"
+#: Registration pattern for :data:`WAKER_STATUS_ROUTE`.
+WAKER_STATUS_PATTERN = r"^/v1/orch/waker/status$"
+#: Where a reader who wants the waker turned on or off must go instead of a
+#: route: there is none. A literal naming the CLI verb (not an import), so the
+#: pointer can be tested against the handler's own docstring.
+WAKER_MUTATION_POINTER = "hscc orch waker enable|disable"
 
 
 # --------------------------------------------------------------------------- #
@@ -305,6 +346,42 @@ def _backing_profiles():
     return eng.cmd_profile_status()
 
 
+def _backing_main_status():
+    """``hscc main status`` — the CLI's own read, called in-process.
+
+    ``main_cli.status()`` is the function the verb renders (``cmd_main`` calls
+    it for ``status`` and prints its dict), so this route and
+    ``hscc main status --json`` have ONE implementation: identity through
+    ``hscc-roles/main_orch.py`` (``main_name``/``main_profile``/``main_board``),
+    pane discovery + busy marker through ``repl_inject`` — the same pair
+    ``hscc orch inject`` uses. Nothing here resolves a name, guesses a pane or
+    reads a waker.
+
+    Deliberately no argument: ``status(profile=...)`` exists for the CLI's own
+    tests, and accepting a caller-supplied profile would let a request ask about
+    a profile other than the configured main (profile switching, which D9 ruled
+    out). A literal ``status()`` call is the shape of that guarantee.
+    """
+    from hscc_daemon import main_cli
+    return main_cli.status()
+
+
+def _backing_waker_status():
+    """``hscc orch waker status`` — the waker's own status function.
+
+    ``orch_waker.waker_status()`` is what the CLI verb renders AND what the
+    doctor row renders (both read that one function), and it is pure file
+    reads — config block, the daemon's stream stamp, the waker's own cursor
+    ledger and the audit tail. It never ticks the waker and never writes, which
+    is why calling it per request is safe while the daemon's loop is mid-scan.
+
+    The enable/disable half is NOT wrapped here (audit D9: reads only); the
+    waker's own ``set_enabled`` stays reachable only from the CLI verb.
+    """
+    from hscc_daemon import orch_waker
+    return orch_waker.waker_status()
+
+
 def _backing_cluster_up():
     eng = _load_cluster_engine()
     if eng is None:
@@ -419,6 +496,44 @@ def _speak_profiles(data: dict) -> str:
     n_profiles = len(counts)
     return (f"{n_profiles} profile{'s' if n_profiles != 1 else ''} "
             f"running {total} task{'s' if total != 1 else ''}.")
+
+
+#: The pane states ``main_cli.status()`` reports, each with its §B sentence.
+#: ``error`` (the identity resolver itself failed) is NOT in this map: it takes
+#: the same "unavailable" wording the other reads use, so a failed read can
+#: never be misread as "the main orchestrator is not running".
+_MAIN_STATE_SPEAK = {
+    "busy": "{name} is running and busy.",
+    "idle": "{name} is running and idle.",
+    "not-running": "{name} is not running.",
+    "ambiguous": "{name} has {panes} panes — the pane target is ambiguous.",
+    "unknown": "{name}'s pane state is unknown.",
+}
+
+
+def _speak_main_status(data: dict) -> str:
+    """§B: who the configured main orchestrator is, and what its pane is doing."""
+    state = data.get("state")
+    template = _MAIN_STATE_SPEAK.get(state) if isinstance(state, str) else None
+    if template is None:
+        return "Main orchestrator status unavailable."
+    name = data.get("name") or "The main orchestrator"
+    return template.format(name=name, panes=len(data.get("panes") or []))
+
+
+def _speak_waker_status(data: dict) -> str:
+    """§B: whether the built-in waker is enabled, and how fresh its last tick is."""
+    if not data.get("enabled"):
+        return "Orchestrator waker is disabled."
+    stream = data.get("stream") or {}
+    boards = data.get("boards") or {}
+    n = len(boards)
+    tail = f" {n} board{'s' if n != 1 else ''} tracked."
+    age = stream.get("tick_age_s")
+    if isinstance(age, (int, float)):
+        return f"Orchestrator waker is enabled, last tick {int(age)}s ago." + tail
+    return ("Orchestrator waker is enabled, but no tick has been recorded yet."
+            + tail)
 
 
 def _speak_fleet_up(data: dict) -> str:
@@ -589,6 +704,62 @@ def handle_profiles(server, ctx, query, body):
     return 200, {**data, "speak": _speak_profiles(data)}
 
 
+def handle_main_status(server, ctx, query, body):
+    """GET /v1/main/status — the canonical ``hscc main status`` answer (D9).
+
+    Who the configured main orchestrator is and what its pane is doing:
+    ``name``/``profile``/``board`` from the ONE identity resolver
+    (``hscc-roles/main_orch.py``), plus ``state``/``running``/``busy``/``pane``/
+    ``target``/``panes``/``detail`` from ``repl_inject``'s discovery — the very
+    payload ``hscc main status --json`` prints, reached through
+    :func:`_backing_main_status`, the single door from this API to
+    ``main_cli.status()``. This handler adds nothing to it but ``speak``.
+
+    Read-only by shape, not by promise: no body, no ``confirm``, no
+    ``profile`` — and the backing call is a literal ``status()``, so the sibling
+    verbs (``main start`` spawns a pane, ``main wakeups`` rewrites the wake
+    schedule) have no door here. A pane the CLI cannot see stays invisible here
+    (its own honest ``not-running`` / ``ambiguous`` / ``unknown``), and a
+    resolver that cannot be read degrades to a 200 with an ``unavailable``
+    ``speak`` rather than a 500: dashboards poll this route.
+    """
+    try:
+        data = _backing_main_status()
+    except Exception:
+        return 200, {"speak": "Main orchestrator status unavailable."}
+    if not isinstance(data, dict):
+        return 200, {"speak": "Main orchestrator status unavailable."}
+    return 200, {**data, "speak": _speak_main_status(data)}
+
+
+def handle_waker_status(server, ctx, query, body):
+    """GET /v1/orch/waker/status — the canonical ``hscc orch waker status`` read (D9).
+
+    Is the daemon-resident orchestrator waker enabled, when did it last tick,
+    which boards is it waiting on and which has it stopped nudging: the payload
+    ``orch_waker.waker_status()`` returns for the CLI verb and the doctor row
+    alike (``enabled``, the whole ``config`` knob block, ``stream`` with
+    ``last_tick``/``tick_age_s``, per-board ``boards``, ``paneless_skip``,
+    ``audit``), reached through :func:`_backing_waker_status`. This handler adds
+    nothing to it but ``speak``.
+
+    Read-only, and the boundary is the ruling: ``enable``/``disable`` are
+    deliberately NOT exposed here — turning the waker off silently stops the
+    operator being woken, so that write stays on the CLI verb
+    ``hscc orch waker enable|disable`` (see :data:`WAKER_MUTATION_POINTER`). The
+    read itself is pure file reads and never ticks the waker, so calling it per
+    request cannot change the thing it reports; an unreadable waker degrades to
+    a 200 with an ``unavailable`` ``speak`` rather than a 500.
+    """
+    try:
+        data = _backing_waker_status()
+    except Exception:
+        return 200, {"speak": "Orchestrator waker status unavailable."}
+    if not isinstance(data, dict):
+        return 200, {"speak": "Orchestrator waker status unavailable."}
+    return 200, {**data, "speak": _speak_waker_status(data)}
+
+
 # --------------------------------------------------------------------------- #
 # Handlers (mutations — confirm-gated)
 # --------------------------------------------------------------------------- #
@@ -647,5 +818,9 @@ ROUTES.append(("POST", re.compile(r"^/v1/triggers/run$"), handle_triggers_run))
 ROUTES.append(("GET", re.compile(r"^/v1/escalate$"), handle_escalate))
 ROUTES.append(("POST", re.compile(r"^/v1/escalate$"), handle_escalate_run))
 ROUTES.append(("GET", re.compile(PROFILES_STATUS_PATTERN), handle_profiles))
+# The D9 dashboard pair (audit §2.6): one GET per CLI verb, patterns compiled
+# from the same constants the prose above names.
+ROUTES.append(("GET", re.compile(MAIN_STATUS_PATTERN), handle_main_status))
+ROUTES.append(("GET", re.compile(WAKER_STATUS_PATTERN), handle_waker_status))
 ROUTES.append(("POST", re.compile(r"^/v1/cluster/up$"), handle_cluster_up))
 ROUTES.append(("POST", re.compile(r"^/v1/cluster/down$"), handle_cluster_down))

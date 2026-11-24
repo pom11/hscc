@@ -113,7 +113,7 @@ interpreters; see run below.
 - Branch: `wt/t_e67544b1` — 6 commits ahead of modern main before merge.
 - Base: worktree on main (tip `2cc6d15`), no upstream drift (origin/main fetched
   fresh: 0/0).
-- Merged into main via `--no-ff` in /Users/desac/dev/hscc: `cf9330f`
+- Merged into main via `--no-ff` in ~/dev/hscc: `cf9330f`
   (`merge(t_e67544b1): theme hscc-cluster standalone CLI entry points`), pushed
   to origin/main (`2cc6d15..cf9330f`).
 - Deployed: `python3 hscc-bootstrap/install_payload.py` (EXIT=0) — themed

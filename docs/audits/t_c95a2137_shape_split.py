@@ -19,8 +19,8 @@ import collections
 import re
 import sys
 
-DEFAULT_LOG = "/Users/desac/fleet-check/proxy-stall-2026-10-31/litellm.log"
-DEFAULT_TCP = "/Users/desac/fleet-check/proxy-stall-2026-10-31/tcp_states.txt"
+DEFAULT_LOG = "~/fleet-check/proxy-stall-2026-10-31/litellm.log"
+DEFAULT_TCP = "~/fleet-check/proxy-stall-2026-10-31/tcp_states.txt"
 LOG = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_LOG
 TCP = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_TCP
 

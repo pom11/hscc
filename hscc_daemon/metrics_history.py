@@ -478,6 +478,70 @@ def rollup(points: list, tier: int, bucket_s: int) -> tuple[list, list]:
     return _fold_hosts(points, tier, bucket_s), _fold_engines(points, tier, bucket_s)
 
 
+#: The served resolutions ``fold_rows`` may widen a series to, in seconds.
+#: Every rung is a multiple of both durable bucket widths (60 s and 300 s) and
+#: divides a day, so a folded series stays on the same wall-clock boundaries the
+#: store puts its own buckets on (see ``_bucket_start``) and a folded
+#: ``resolution_s`` stays a number a human can read: 5, 10, 15, 30, 60, 120,
+#: 240, 360, 720 or 1440 minutes. A budget too small for one point per series
+#: per day cannot be met at all, and says so rather than truncating.
+FOLD_STEPS_S = (300, 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400)
+
+
+def fold_factors(bucket_s: int) -> tuple:
+    """Ascending fold factors that keep one tier's buckets wall-clock aligned.
+
+    ``1`` is always first: it means "serve what is stored", so a caller whose
+    budget the stored resolution already satisfies is served at ``1`` rather than
+    at the first coarser rung that also happens to fit.
+    """
+    return (1,) + tuple(s // bucket_s for s in FOLD_STEPS_S
+                        if s % bucket_s == 0 and s // bucket_s > 1)
+
+
+def fold_rows(rows: list, tier: int, bucket_s: int, factor: int) -> list:
+    """Re-fold stored roll-up rows to one row per ``bucket_s * factor`` seconds.
+
+    The READ side's fold, for "answer me in at most N rows", so a caller can
+    bound a series' wire size without deleting its tail. It is not a second
+    aggregation: it groups the stored rows onto the boundaries ``_bucket_start``
+    already puts the store's own buckets on, then hands each group to the SAME
+    ``_fold_hosts`` / ``_fold_engines`` the writer uses to roll tier 1 into tier
+    2 — so a folded value is an ``n``-weighted mean of the sub-averages and a
+    folded peak is the ``max`` of the stored ``*_max`` columns, i.e. the true
+    peak of the folded span rather than the peak of the averages. Averaging a
+    thermal excursion away is the failure this choice exists to avoid, and it is
+    why a fold happens BEFORE a ``metrics=`` projection: ``_fold_hosts`` falls
+    back to the plain average when a ``<k>_max`` column is absent, so folding an
+    already-projected row would report an average AS a peak.
+
+    What deliberately does not happen here:
+
+    * no row is invented for a coarse bucket that held nothing — a gap stays a
+      gap, so a node that stopped answering never renders as an idle one;
+    * no value is coerced — a field that was ``None`` in every sub-row folds to
+      ``None``, because ``None`` is the recorder's "not reported";
+    * nothing is truncated: the whole span survives, at a coarser step.
+
+    ``factor`` <= 1 returns the rows unchanged. The output keys and their order
+    are the stored row's own, so a folded answer and an unfolded one differ only
+    in how many rows they carry.
+    """
+    if factor <= 1 or not rows:
+        return rows
+    coarse_s = bucket_s * factor
+    groups: dict = {}
+    for row in rows:
+        if row.get("ts") is None:
+            continue
+        groups.setdefault(_bucket_start(row["ts"], coarse_s), []).append(row)
+    fold = _fold_engines if "node" in rows[0] else _fold_hosts
+    out: list = []
+    for start in sorted(groups):
+        out.extend(fold(groups[start], tier, coarse_s))
+    return out
+
+
 # ── the store: one bounded sqlite file for tiers 1 and 2 ───────────────────
 
 _SCHEMA = """

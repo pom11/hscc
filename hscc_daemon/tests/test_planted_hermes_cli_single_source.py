@@ -39,6 +39,14 @@ Scope decisions (stated, not hidden):
     counts as the machine's real CLI. Making it call ``is_planted_path`` would
     widen the fence and start fencing the live CLI. Recorded here so the next
     reader does not "fix" it.
+  * ``PRODUCTION_MARKER_SITES`` below — the same shape of exception, applied to
+    ONE production constant (``hscc clean --deep``'s sweep target). Production
+    cannot call the owner: ``hermes_cli_plant`` is test-only code and the
+    deployed payload at ``~/.hermes/plugins/hscc_daemon`` ships no ``tests/``
+    directory, so importing it from ``workspace_clean`` would be an
+    ``ImportError`` in the shipped CLI that every test in this tree passes. The
+    exemption is narrowed to one named constant and is itself pinned by two
+    tests, so it cannot widen into a hole.
   * A test may of course *build* a plant — that is constructing a path under a
     temp root, which is what the owner's own helpers and
     ``test_hermes_cli_import_isolation._temp_planted_module`` do. What is banned
@@ -76,6 +84,52 @@ def _frag(*parts):
 
 TMP_DIR_MARKER = _frag("pytest-", "of-")
 PRIVATE_TEMP_ROOT = _frag("/private", "/var/folders")
+
+#: The ONE production file allowed to name :data:`TMP_DIR_MARKER`, as
+#: ``{file: the constant that holds it}`` — and nothing else may ride on it.
+#:
+#: ``hscc clean --deep`` deletes the pytest temp tree, so the prefix is the
+#: *safety filter* of a destructive sweep (``CACHE_PATH_RULES`` derives the
+#: parent as ``$TMPDIR/<prefix>$USER`` and only then accepts children). The
+#: owner's ``is_planted_path`` cannot stand in for it: it matches every path
+#: under a temp root, which would widen the sweep to the whole of ``$TMPDIR``.
+#: Nor can production call the owner — see the scope note in the docstring.
+#:
+#: Narrowed three ways in :func:`_pinned_marker_use` (pinned file, pinned
+#: constant whose value must equal the marker, marker spelled exactly once),
+#: and pinned to a referent by :func:`test_the_production_exemption_has_a_referent`
+#: so it cannot survive as un-firable cover.
+PRODUCTION_MARKER_SITES = {"hscc_daemon/workspace_clean.py": "PYTEST_TEMP_PREFIX"}
+
+
+def _assigned_string(text, name):
+    """Value of the module-level ``name = "…"`` in *text*, else ``None``."""
+    for node in ast.parse(text).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            return node.value.value
+    return None
+
+
+def _pinned_marker_use(rel, text):
+    """Whether *rel* may name :data:`TMP_DIR_MARKER` without being a copy.
+
+    Refused — and each refusal is exercised by
+    :func:`test_the_production_exemption_refuses_every_shape_it_must_refuse` —
+    for an unpinned file, for a pinned file whose named constant says something
+    other than the marker (that is a second, drifting rule), and for a pinned
+    file that names the marker more than once (then the constant is no longer
+    the only place the rule lives, which is the whole thing this guard is for).
+    """
+    const = PRODUCTION_MARKER_SITES.get(rel)
+    if const is None:
+        return False
+    if _assigned_string(text, const) != TMP_DIR_MARKER:
+        return False
+    return text.count(TMP_DIR_MARKER) == 1
 
 
 def _tracked_py_files():
@@ -121,11 +175,77 @@ def test_no_other_file_carries_the_rule_literals():
         text = (REPO / rel).read_text(errors="ignore")
         for label, frag in (("pytest tmp-dir marker", TMP_DIR_MARKER),
                             ("macOS private temp root", PRIVATE_TEMP_ROOT)):
-            if frag in text:
-                hits.append(f"{rel}: {label}")
+            if frag not in text:
+                continue
+            if frag == TMP_DIR_MARKER and _pinned_marker_use(rel, text):
+                continue
+            hits.append(f"{rel}: {label}")
     assert not hits, (
         "a competing copy of the planted-hermes_cli rule was found (call "
         + OWNER + " instead):\n" + "\n".join(hits))
+
+
+def test_the_production_exemption_has_a_referent():
+    """The exemption is narrow, live, and not a hole a test can crawl through.
+
+    Same discipline as the seam-route referent pins below: a credit that
+    nothing uses is un-firable coverage and gets deleted rather than left as
+    cover, so every entry must still name a tracked file that really does
+    define the pinned constant with the marker as its value — and no entry may
+    be a test file, because a test can always import from production.
+    """
+    tracked = set(_tracked_py_files())
+    assert PRODUCTION_MARKER_SITES, (
+        "the exemption table is empty while some file still needs it — either "
+        "the site is gone (then this test and the table both go) or a real one "
+        "was dropped and the sweep went red for the wrong reason")
+    for rel, const in PRODUCTION_MARKER_SITES.items():
+        assert rel in tracked, f"{rel} is pinned but not tracked — dead cover"
+        assert "/tests/" not in rel, (
+            f"{rel} is a test file: a test must import the marker from "
+            "production, never be exempt from naming it")
+        text = (REPO / rel).read_text(errors="ignore")
+        assert _assigned_string(text, const) == TMP_DIR_MARKER, (
+            f"{rel}:{const} no longer holds the marker — the pinned site has "
+            f"no referent, so delete it from PRODUCTION_MARKER_SITES")
+        assert text.count(TMP_DIR_MARKER) == 1, (
+            f"{rel} names the marker outside {const} — the constant was the "
+            "whole exemption")
+
+
+def test_the_production_exemption_refuses_every_shape_it_must_refuse():
+    """Anti-vacuity for the exemption, on source strings rather than on hope.
+
+    The sweep is one ``if`` away from exempting everything, so each refusal is
+    named and driven here: an ordinary test, a test that *looks* like the
+    pinned site, an unpinned production file, a pinned file whose constant
+    drifts, and a pinned file that spells the marker twice.
+    """
+    rel, const = next(iter(PRODUCTION_MARKER_SITES.items()))
+    good = f'{const} = "{TMP_DIR_MARKER}"\n'
+
+    # The referent itself, and only it.
+    assert _pinned_marker_use(rel, good) is True
+    assert _pinned_marker_use("hscc_daemon/some_other_module.py", good) is False
+
+    # A test is never exempt — not even with the pinned file's exact source,
+    # because the pin is the path, not the shape of the code.
+    assert _pinned_marker_use("hscc_daemon/tests/test_planted_copy.py", good) is False
+    assert _pinned_marker_use(rel.replace("workspace_clean", "tests/x"), good) is False
+
+    # A drifting constant is a second rule, which is the thing being policed.
+    assert _pinned_marker_use(rel, f'{const} = "pytest-tmp-"\n') is False
+    assert _pinned_marker_use(rel, f'{const} = "pytest"\n') is False
+    assert _pinned_marker_use(rel, f'{const} = TMP\n') is False
+    # A file that names the marker without the pinned constant holding it.
+    assert _pinned_marker_use(rel, f'OTHER = "{TMP_DIR_MARKER}"\n') is False
+
+    # The constant is right, but the marker also appears a second time — a
+    # second rule cannot hide behind the exemption.
+    assert _pinned_marker_use(
+        rel, good + f'\ndef _looks_like_the_rule(p):\n    return "{TMP_DIR_MARKER}" in p\n'
+    ) is False
+    assert _pinned_marker_use(rel, good + f'\n# see {TMP_DIR_MARKER} too\n') is False
 
 
 def test_every_site_that_evicts_a_plant_imports_the_owner():

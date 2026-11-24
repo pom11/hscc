@@ -16,8 +16,8 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = "/Users/desac/dev/hscc/.worktrees/t_1ca5c6e9"
-PY = "/Users/desac/.hermes/hermes-agent/venv/bin/python"
+ROOT = "~/dev/hscc/.worktrees/t_1ca5c6e9"
+PY = "~/.hermes/hermes-agent/venv/bin/python"
 HSCC_PROJECT = os.path.join(ROOT, "hscc-project")
 sys.path.insert(0, HSCC_PROJECT)
 from flightdeck.core import registry  # noqa: E402
