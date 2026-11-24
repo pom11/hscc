@@ -277,6 +277,12 @@ every one of them is confirm-gated and is documented there rather than here.
 | GET | `/v1/cron/list` | Read-only roster of every scheduled job; each entry maps 1:1 from the on-disk `jobs.json` contract. Returns `{jobs, speak}` — and when the store cannot be read it degrades honestly to `{speak}` rather than fabricating a list. | read |
 | GET | `/v1/alerts?since=&limit=` | The operator alert feed behind `hscc notify`, paged by exclusive ascending id. Returns `{alerts, count, has_more, latest_id, limit, next_since, oldest_id, since, speak}`. | read |
 
+### Logs (read)
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/logs?source=daemon&limit=N` | Bounded, **server-redacted** tail of one primary log: `source` selects it — `daemon` → `~/.hscc/daemon.log`, `api` → `~/.hscc/api.log`, `worker` → the Hermes agent log. The response is a **bare JSON array, not an object**: each entry is `{timestamp, level, source, line}`, and `timestamp`/`level` are `null` when the raw line carries no recognised header (the whole line then lands in `line`). `source` is required — absent or unknown → `400 bad_request` naming the three valid values; a non-integer `limit` → `400`; `limit` defaults to 50 and is clamped to `[1, 200]`. An absent or unreadable log answers `200` with an **empty array**: an empty tail is honest, an invented one never is. The handler reverse-seeks from EOF and reads only O(`limit`) bytes, so a 280 MB log costs what a small one costs. Every line is redacted before serving — Tailnet hosts → `100.64.0.1`, RFC1918 → `10.0.0.x`, other IPv4 → `[REDACTED_IP]`, plus bearer tokens, `token=`/`api_key=`-style secrets, session ids and long opaque runs — the client-side redactor is the second line, not the first. Pinned by `hscc-api/tests/test_routes_logs.py`. Shipped consumer: iOS `LogsResponse = [LogEntry]` (`Models.swift`), whose four fields are all optional so a partial line never blanks a row. | read |
+
 ### Templates & profiles (read)
 
 | Method | Path | Description | Mutates |

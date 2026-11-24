@@ -38,7 +38,6 @@ UNDOCUMENTED_ROUTES = {
     ("POST", "/v1/escalate"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/kanban/blocked/{card_id}/recover"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/kanban/task/{task_id}/kill"): "surface: named outside the Endpoint reference only — see docs/audits/confirm-gate-audit-t_c77f243f.md; deferred: t_d47d1562",
-    ("GET", "/v1/logs"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("GET", "/v1/memory"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/memory/{node_id}/delete"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/memory/{node_id}/edit"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",

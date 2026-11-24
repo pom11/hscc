@@ -77,6 +77,13 @@ SHAPE_UNCHECKED = {
     "GET /v1/orchestrator/chat/{id}":
         "key set varies with the job's status -- see the Orchestrator chat "
         "table; no single top-level key set is the contract",
+    # routes_logs.handle_logs returns `entries[-limit:]` -- a list, so there is
+    # no top-level dict to compare keys against. The entry shape
+    # {timestamp, level, source, line} is stated in the row's prose and pinned
+    # by tests/test_routes_logs.py instead.
+    "GET /v1/logs":
+        "answers a bare ARRAY of {timestamp, level, source, line} entries -- "
+        "an array has no top-level key set to compare",
 }
 
 _REPO_ROOT = Path(api_server.__file__).resolve().parent.parent
