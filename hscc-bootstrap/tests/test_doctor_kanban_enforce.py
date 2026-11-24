@@ -229,6 +229,10 @@ def test_row_builder_reports_unverifiable_when_module_missing(tmp_path,
     # delitem restores sys.modules["pytest"] at teardown (monkeypatch's own
     # contract), so no other test can ever see the module missing.
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    # The fence is shared and child-visible now (doctor_rows.under_pytest),
+    # so the marker pytest exports for THIS item has to go too, or the row
+    # refuses and the branch under test is never taken.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     row = doctor._kanban_enforce_check_row(None)
     assert row.ok is False
     assert "kanban_pause.py" in row.detail and "not importable" in row.detail
@@ -258,6 +262,10 @@ def test_row_builder_uses_the_real_check_outside_pytest(tmp_path, monkeypatch):
 
     monkeypatch.setattr(doctor, "_load_kanban_pause", lambda: KP())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    # The fence is shared and child-visible now (doctor_rows.under_pytest),
+    # so the marker pytest exports for THIS item has to go too, or the row
+    # refuses and the branch under test is never taken.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     row = doctor._kanban_enforce_check_row(None, hscc_dir="/sandbox/.hscc")
     assert calls == [None], "the env-derived root must not reach the check"
     assert row.detail == "from the real check"

@@ -547,6 +547,12 @@ class _DoctorLike:
 
 
 def _build_row_outside_pytest(monkeypatch, *, loader, **context):
+    # The fence is the shared, child-visible predicate now, so the view of
+    # a module's ``sys.modules`` no longer decides the branch: close BOTH
+    # channels here, in the body (a setup fixture is too early — pytest
+    # re-exports the marker for the call phase after fixtures run).
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     spec = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}["main_only_surface"]
     monkeypatch.setattr(_DoctorLike, "_load_doctor_main_only", loader,
                         raising=False)
