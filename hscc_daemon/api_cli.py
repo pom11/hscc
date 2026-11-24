@@ -34,6 +34,7 @@ from pathlib import Path
 from hscc_daemon import cli_theme as theme
 from hscc_daemon import daemon_ops
 from hscc_daemon import qr_code
+from hscc_daemon import suite_fence
 from hscc_daemon import verify
 # The daemon's own stdio detach (F6, `cli._detach_stdio`). Imported — NOT
 # re-implemented — so `hscc api start` and `hscc start` daemonise through one
@@ -855,11 +856,19 @@ def _refused_launchd_status() -> dict:
     hscc-bootstrap/doctor.py's `_refused_supervision_check`: a refusal that is
     VISIBLE in the caller's output, never a silent "not loaded" that lets a
     test pass for the wrong reason while a real unit sits loaded.
+
+    The question is asked of `hscc_daemon.suite_fence`, not of this process: the
+    caller that reaches this default target without a seam is often a fresh
+    interpreter a suite item exec'd (`hscc api status` from a script a test
+    writes, a probe child of a guard), and pytest was never imported there. A
+    local `"pytest" in sys.modules` test answers for the process nobody is
+    asking about — the ruling and the two-signal reasoning are in suite_fence.
     """
     return {"available": False, "loaded": False, "pid": None, "state": None,
             "refused": True,
-            "note": "launchd probe refused inside a pytest process — inject "
-                    "launchd_status(_run_probe=...) or monkeypatch the function"}
+            "note": "launchd probe refused inside a pytest process (or a child "
+                    "one spawned) — inject launchd_status(_run_probe=...) or "
+                    "monkeypatch the function"}
 
 
 def launchd_status(_run_probe=None):
@@ -878,7 +887,7 @@ def launchd_status(_run_probe=None):
     The probe is the one doctor_supervision.py trusts for the daemon unit, so
     `hscc doctor` and `hscc api status` cannot diverge on who owns the process.
     """
-    if _run_probe is None and "pytest" in sys.modules:
+    if _run_probe is None and suite_fence.under_pytest():
         return _refused_launchd_status()
     runner = _run_probe or _launchctl_run
     target = f"gui/{os.getuid()}/{_launchd_label()}"
