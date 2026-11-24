@@ -877,6 +877,42 @@ def launchd_status(_run_probe=None):
 
     The probe is the one doctor_supervision.py trusts for the daemon unit, so
     `hscc doctor` and `hscc api status` cannot diverge on who owns the process.
+
+    RULING (t_8bf34130) — is asking the service manager acceptable from a child
+    the SUITE spawned? NO. The fence below reads ``"pytest" in sys.modules``, so
+    it answers only for the process that imported pytest. Measured in the CI shape
+    (planted HOME/HERMES_HOME, thin interpreter, ``PYTEST_CURRENT_TEST`` the only
+    difference from the control): a marked child that never imported pytest ran
+    ``['launchctl', 'print', 'gui/<uid>/com.hscc.api']`` twice — once from a direct
+    call, once through ``_handle_status`` — and printed ``HSCC API is running under
+    launchd (pid <the operator's real pid>, com.hscc.api)`` with rc 0. The suite
+    read the operator's live gui domain and reported it as fact.
+
+    NOT FIXED HERE, ON PURPOSE: the fix is to ask the one child-visible predicate
+    (``PYTEST_CURRENT_TEST``, inherited across a spawn) instead of ``sys.modules``,
+    and how a ``hscc_daemon`` module obtains that predicate — a daemon-side helper,
+    a shared low-level module, or the one place both deployment layouts already
+    resolve — is t_fdbc24f9's ruling. A second predicate written here would fork
+    the vocabulary the sweep exists to unify, so this card stops at the ruling.
+
+    Decided here, because it is this lane's call and the next worker should not
+    re-litigate it (both follow the doctor ``gateway`` row's treatment in #763: a
+    refusal is VISIBLE, and never a silent pass):
+
+      * ``refused`` is not ``available: False``. The first is "the row could not be
+        checked", the second is "launchctl cannot be asked on this host", and the
+        callers branch on them differently. Keep the key.
+      * An UNVERIFIABLE supervisor row must not degrade the screen to "not
+        running". `_handle_status` already prints a ``Supervisor: launchd probe
+        refused`` row when ``refused`` is set; the state line must say the
+        supervisor could not be consulted, because "not running" is the exact false
+        verdict this probe was added to kill (an API launchd has served since boot
+        reads as stopped to a PID-file-only view).
+      * `hscc api stop` must FAIL CLOSED on a refusal, not fall through to
+        SIGTERM. A stop that cannot tell whether launchd owns the pid is a stop
+        that may be undone by KeepAlive — the silent-un-stop the whole launchd
+        pairing exists to prevent, so it is an error naming the seam rather than
+        a best guess.
     """
     if _run_probe is None and "pytest" in sys.modules:
         return _refused_launchd_status()
