@@ -3491,3 +3491,166 @@ def test_which_wait_listed_pr_is_eligible_for_a_base_refresh():
                                      info(_RED_CHECK, state="MERGED"))
     assert not mq._red_on_stale_base({"pr": 1},
                                      info(_RED_CHECK, isDraft=True))
+
+
+def test_update_branch_separates_a_local_fault_from_an_answer():
+    """``answered`` — not ``ok`` — is what the base-sha bound keys on.
+
+    A gh that could not run at all leaves the base unburned; a gh that answered
+    with a non-zero exit is a verdict on this base and does burn it, which is
+    what ``test_a_failed_update_records_the_attempt_and_does_not_loop`` pins.
+    """
+    def raiser(argv, **kwargs):
+        raise OSError("gh missing")
+
+    def silent(argv, **kwargs):
+        return None                                  # a runner with no proc
+
+    def refuses(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="",
+                               stderr="could not resolve to PullRequest")
+
+    ok, conflict, output, answered = mq._update_branch("/repo", 9, raiser)
+    assert (ok, conflict, answered) == (False, False, False)
+    assert "raised" in output
+    assert mq._update_branch("/repo", 9, silent)[3] is False
+    ok, conflict, output, answered = mq._update_branch("/repo", 9, refuses)
+    assert (ok, conflict, answered) == (False, False, True)
+    assert "could not resolve" in output
+
+
+def test_a_local_gh_fault_does_not_burn_the_base_sha(tmp_path):
+    """gh not runnable/raised is a LOCAL fault: the next tick must try again.
+
+    Recording the base sha on such a fault locks the entry out of every later
+    refresh for that commit — the 18 h wait this feature exists to open, made
+    permanent by one transient local error (the None-runner crash the live
+    daemon hit every tick). The entry keeps the error for the monitors and the
+    refresh resumes the moment gh can run.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=_RED_CHECK)
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    logged = []
+    runnable = {"gh": False}
+    attempts = []
+
+    def local_gh(argv, cwd=None, **kwargs):
+        argv = list(argv)
+        if argv[:3] == ["gh", "pr", "update-branch"]:
+            attempts.append(int(argv[3]))
+            if not runnable["gh"]:
+                raise FileNotFoundError(2, "No such file or directory: 'gh'")
+        return gh(argv, cwd=cwd)
+
+    def drain():
+        return mq._drain_waiting(
+            "alpha", cfg, state_path=state, gh_runner=local_gh,
+            git_runner=subprocess.run,
+            log=lambda msg, level="INFO", **k: logged.append((msg, level)))
+
+    for _ in range(2):
+        assert drain() == []
+
+    entry = _waiting(state, "alpha", 9)
+    assert attempts == [9, 9], attempts            # asked again, not once
+    assert gh.updates == []                        # never reached GitHub
+    assert "refreshed_main_sha" not in entry, entry
+    assert "No such file or directory" in entry["last_update_error"]
+    assert any("could not run" in msg and level == "WARNING"
+               for msg, level in logged), logged
+
+    # gh comes back: the same base is refreshed after all, because it was
+    # never written off as attempted.
+    runnable["gh"] = True
+    assert drain() == []
+    assert gh.updates == [9]
+    entry = _waiting(state, "alpha", 9)
+    assert entry["refreshed_main_sha"] == _origin_sha(pair)
+    assert entry["refreshed_at"]
+
+
+def test_refresh_through_the_production_default_gh_runner(tmp_path,
+                                                          monkeypatch):
+    """NO injected runners at all: the refresh runs the production path.
+
+    The daemon's ``check_merge_queue`` calls ``tick`` — and with it the drain —
+    with no runners, and every other case here injects one, which is exactly
+    how a ``None`` reached ``_gh`` in production and killed the whole tick
+    (``TypeError: 'NoneType' object is not callable``). This drives the drain
+    the way the daemon does and pins the argv the default runner was handed.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=_RED_CHECK)
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    seen = []
+
+    def production_default(argv, **kwargs):
+        # The argv _gh/_git build, then the keywords they add — the real
+        # signature of the runner the daemon installs.
+        argv = [str(part) for part in argv]
+        seen.append(argv)
+        if argv[0] == "gh":
+            return gh(argv, cwd=kwargs.get("cwd"))
+        return subprocess.run(argv, **kwargs)
+
+    monkeypatch.setattr(mq, "_default_runner", production_default)
+
+    assert mq._drain_waiting("alpha", cfg, state_path=state) == []
+
+    assert [a for a in seen
+            if a[:3] == ["gh", "pr", "update-branch"]] == [
+                ["gh", "pr", "update-branch", "9"]], seen
+    entry = _waiting(state, "alpha", 9)
+    assert entry["refreshed_main_sha"] == _origin_sha(pair)
+    assert not entry.get("last_update_error")
+
+
+def test_the_drain_never_hands_a_none_runner_downward(tmp_path, monkeypatch):
+    """Whatever the drain calls gets a runner, never the ``None`` it was given.
+
+    The defaults at the top of ``_drain_waiting`` are the point, not the one
+    call they happen to cover today: the daemon enters the wait list through
+    here with no runners, and every gh call added inside this function — the
+    hand-back comment is next — inherits safety from those two lines or ships
+    the ``None`` that killed the live tick. Pinned on the seam by capture, so
+    no individual callee can hide it again by defaulting for itself.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    given = {}
+
+    def spy_view(repo, pr, runner=None):
+        given["pr_view"] = runner
+        return {"state": "OPEN", "isDraft": False, "baseRefName": "main",
+                "headRefOid": pair["head"], "mergeable": "MERGEABLE",
+                "url": f"https://github.com/example/repo/pull/{pr}",
+                "statusCheckRollup": _RED_CHECK}
+
+    def spy_refresh(project, cfg, base, entries, *, state_path,
+                    git_runner=None, gh_runner=None, log=None):
+        given["refresh"] = (git_runner, gh_runner)
+        return []
+
+    monkeypatch.setattr(mq, "pr_view", spy_view)
+    monkeypatch.setattr(mq, "_refresh_stale_red", spy_refresh)
+
+    assert mq._drain_waiting("alpha", cfg, state_path=state) == []
+
+    handed = [given.get("pr_view"), *given.get("refresh", ())]
+    assert len(handed) == 3, given
+    assert all(callable(runner) for runner in handed), handed

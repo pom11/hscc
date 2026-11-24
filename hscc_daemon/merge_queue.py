@@ -2172,10 +2172,12 @@ def _release_to_head(state_path, project, entry):
 # since have been fixed.
 #
 # The bound IS the design: at most ONE update per (PR, base sha). The sha is
-# recorded on the entry the moment the attempt is made — updated, already
-# current, conflicted, or a gh error — so the next tick reads the same sha and
-# does nothing. Without that record a red PR would re-update every tick and keep
-# CI busy forever.
+# recorded on the entry the moment gh ANSWERS — updated, already current,
+# conflicted, or a gh error — so the next tick reads the same sha and does
+# nothing. Without that record a red PR would re-update every tick and keep CI
+# busy forever. A gh that could not run at all (no runner installed, the
+# process would not start) answered nothing, so it records the error and keeps
+# the sha: a local fault must not write off the base for the PR.
 
 def _remote_base_sha(repo, base, git_runner=None):
     """The CURRENT sha of ``refs/heads/<base>`` on origin, or None.
@@ -2221,32 +2223,49 @@ def _red_on_stale_base(entry, info):
 
 
 def _update_branch(repo, pr, gh_runner):
-    """ONE ``gh pr update-branch <pr>``. Returns ``(ok, conflict, output)``.
+    """ONE ``gh pr update-branch <pr>``.
+
+    Returns ``(ok, conflict, output, answered)``. ``answered`` is False only
+    when ``gh`` never got to reply — no runner installed, or the process could
+    not be started at all. That is a LOCAL fault rather than a verdict on this
+    base, and the caller must not count it as an attempt; a non-zero exit with
+    a message from GitHub IS an answer.
 
     Never retries — the caller decides what a conflict means.
     """
     try:
         proc = _gh(["pr", "update-branch", str(pr)], repo, gh_runner)
     except Exception as exc:
-        return False, False, f"gh pr update-branch raised {exc!r}"
+        return False, False, f"gh pr update-branch raised {exc!r}", False
     if proc is None:
-        return False, False, "gh pr update-branch: gh not runnable"
+        return False, False, "gh pr update-branch: gh not runnable", False
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
     if proc.returncode != 0:
-        return False, "conflict" in output.lower(), output
-    return True, False, output
+        return False, "conflict" in output.lower(), output, True
+    return True, False, output, True
 
 
 def _refresh_stale_red(project, cfg, base, entries, *, state_path,
                        git_runner=None, gh_runner=None, log=None):
     """Update red wait-listed PRs onto the current base, once per base sha.
 
-    Returns the PR numbers an update was attempted for. Only entries that are
+    Returns the PR numbers this pass wrote a patch for. Only entries that are
     still in this project's wait list are written back — a CLI ``add`` during
     the ``gh`` call moves the entry out, and a moved entry's bookkeeping
     belongs to wherever it landed.
+
+    An entry whose ``gh`` never got to answer (no runner installed, the process
+    could not start) gets ONLY ``last_update_error``: no base sha, so the next
+    tick asks again. A local fault is not an attempt at this base.
     """
     log = log or (lambda *a, **k: None)
+    # The daemon calls this with NO runners (``check_merge_queue`` injects
+    # none), exactly like ``process_entry`` and ``_resume_ci_pending``: default
+    # them here, at the seam that uses them, never inside ``_gh``/``_git``.
+    # Every gh/git call below — ``pr_view``, the base probe, ``update-branch``,
+    # the hand-back comment — inherits from these two lines.
+    git_runner = git_runner or _default_runner
+    gh_runner = gh_runner or _default_runner
     candidates = [entry for entry in entries
                   if isinstance(entry, dict) and entry.get("pr") is not None]
     if not candidates:
@@ -2262,9 +2281,22 @@ def _refresh_stale_red(project, cfg, base, entries, *, state_path,
             # Already refreshed onto exactly this base: the bound.
             continue
         pr = int(str(entry["pr"]))
-        ok, conflict, output = _update_branch(cfg["repo"], pr, gh_runner)
-        patch = {"refreshed_main_sha": sha, "refreshed_at": _now_iso()}
+        ok, conflict, output, answered = _update_branch(cfg["repo"], pr,
+                                                        gh_runner)
         head = sha[:12]
+        if not answered:
+            # gh never got to answer — not installed, not runnable, or the call
+            # raised (the None-runner crash the daemon hit every tick). That is
+            # a LOCAL fault, not a verdict on this base, so the sha stays
+            # unrecorded and the next tick tries again. Recording it here would
+            # burn the whole base on one transient local error and the PR would
+            # sit red forever, which is the trap this refresh exists to open.
+            patch = {"last_update_error": _tail(output, 3) or "gh not runnable"}
+            log(f"merge-queue {project}: PR #{pr} update-branch could not run "
+                f"on main {head}: {patch['last_update_error']}", "WARNING")
+            patches[pr] = patch
+            continue
+        patch = {"refreshed_main_sha": sha, "refreshed_at": _now_iso()}
         if ok:
             verb = ("branch already onto main"
                     if "already up to date" in output.lower()
@@ -2309,8 +2341,16 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
     so one non-empty queue kept green PRs waiting forever.  Entries move in
     their original wait-list order; ``enqueued_at`` still ranks them against
     the queue's existing entries.
+
+    The daemon calls this with NO runners (``check_merge_queue`` injects none),
+    so both are defaulted at the top: every ``gh``/``git`` call below — the
+    view, the base probe, ``update-branch``, the hand-back comment — inherits
+    from these two lines. Without them a ``None`` runner reaches ``_gh`` and
+    the ``TypeError`` escapes the drain and kills the whole tick.
     """
     log = log or (lambda *a, **k: None)
+    git_runner = git_runner or _default_runner
+    gh_runner = gh_runner or _default_runner
     with _file_lock():
         ps = _project_state(load_state(state_path), project)
         waiting = [dict(entry) for entry in (ps.get("waiting") or [])
