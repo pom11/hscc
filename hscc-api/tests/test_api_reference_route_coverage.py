@@ -84,6 +84,17 @@ SHAPE_UNCHECKED = {
     "GET /v1/logs":
         "answers a bare ARRAY of {timestamp, level, source, line} entries -- "
         "an array has no top-level key set to compare",
+    # routes_template.handle_template_preview spreads
+    # cluster_template.preview_template(), which starts with
+    # _resolve(template_name, probe=True) -- a live-fleet resolution (the row
+    # says so). The NO-LIVE tripwire in _route_shape_probe.py therefore cannot
+    # reach that payload, and every name the sandbox does have (none: TEMPLATE_DIR
+    # is the plugin's own templates/, never the sandbox HOME) 404s before it.
+    # Measured: ApiError "no template named 'demo'". The row promises no key set.
+    "GET /v1/template/preview/{name}":
+        "its payload only exists down a live-fleet resolver path -- the "
+        "NO-LIVE tripwire cannot measure it and an unknown name 404s; the row "
+        "promises no key set",
 }
 
 _REPO_ROOT = Path(api_server.__file__).resolve().parent.parent

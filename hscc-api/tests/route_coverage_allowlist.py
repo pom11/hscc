@@ -58,6 +58,12 @@ UNDOCUMENTED_ROUTES = {
     ("WS", "/v1/projects/{name}/session/ws"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("GET", "/v1/projects/{name}/standup"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("GET", "/v1/review/{card_id}/diff"): "surface: named outside the Endpoint reference only — see docs/DESIGN-api.md; deferred: t_d47d1562",
-    ("GET", "/v1/template/preview/{name}"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
+    # --- t_f95bcaad: closed --------------------------------------------------------- #
+    # ("GET", "/v1/template/preview/{name}") is GONE: 28da0da4 (PR #708) named it in
+    # the Endpoint reference, so this entry's reason -- "named outside the Endpoint
+    # reference only" -- became false on main, and the gate reddens on a row and an
+    # entry that both name one route. Its row now lives in
+    # docs/API.md's `### Templates & profiles (read)`, payload declined and recorded
+    # in the gate's SHAPE_UNCHECKED.
     ("GET", "/v1/why/{card_id}"): "surface: named outside the Endpoint reference only — see docs/audits/GAP_PRIORITISATION_2026-09-26.md; deferred: t_d47d1562",
 }

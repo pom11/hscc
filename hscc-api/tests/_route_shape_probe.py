@@ -59,6 +59,14 @@ SHAPE_CHECKED: dict[str, dict] = {
     "GET /v1/alerts": {},
     "GET /v1/template/list": {},
     "GET /v1/template/status": {},
+    # --- t_f95bcaad: measured key sets ---------------------------------------------- #
+    # The CLI's two-layer verdict. Measured with a name that matches no template on
+    # disk, which is the branch the row documents; `validate_template` returns the
+    # SAME top-level key set on all four of its return paths
+    # (hscc-cluster/cluster_template.py:2325-2341, :2356-2358), so the pin is not
+    # a missing-template artefact. No stub: the missing-name path never reaches
+    # _resolve, so nothing here can touch the fleet.
+    "GET /v1/template/validate/{name}": {"name": "demo"},
     "GET /v1/profile/list": {},
     # --- t_b9808146: the iOS-facing reads the shipped client calls ------------------ #
     "GET /v1/projects/{name}": {"name": "demo"},

@@ -305,10 +305,19 @@ every one of them is confirm-gated and is documented there rather than here.
 
 ### Templates & profiles (read)
 
+The cluster template engine's read verbs (`hscc-cluster`), served verbatim the
+way `hscc template …` runs them — never a second implementation. All four are
+read-only; the mutating `apply` is the confirm-gated POST in the Actions table.
+`validate` and `preview` answer **different** questions and disagree on purpose
+(see the two rows): one returns a verdict for a name nothing serves, the other a
+`404`.
+
 | Method | Path | Description | Mutates |
 |---|---|---|---|
 | GET | `/v1/template/list` | The cluster templates on disk. Returns `{count, speak, templates}`. | read |
 | GET | `/v1/template/status` | Which template is currently applied. Returns `{applied, note, speak}`. | read |
+| GET | `/v1/template/preview/{name}` | Dry-run: what applying `name` would change — the plan is resolved against the **live** fleet (`_resolve(probe=True)`), so the changes name concrete nodes and ports. `404 not_found` when no template on disk has that name. | read |
+| GET | `/v1/template/validate/{name}` | Preflight `name` — is it deployable? Returns the CLI's two-layer verdict `{ok, placement, speak, structural, template}`: `structural` is the **offline** layer (version recognised, unknown keys, nodes exist, routing targets resolve, recipes exist) and `placement` the **live resolver** layer (capacity / occupancy), each `{ok, errors, warnings}`; top-level `ok` is the AND of both. A name nothing serves answers `ok: false` with `structural.errors` reading `Template not found` — **not** `404`, because the verdict is itself the answer (contrast `preview` above). Optional `?structural-only=1` skips the live layer and marks `placement.skipped: true`. | read |
 | GET | `/v1/profile/list` | Browse installed **agent profiles** (the `hscc-roles` surface — a different subject from `/v1/profiles` above). Returns `{count, profiles, speak}`. | read |
 | GET | `/v1/profile/editor/{profile}` | The fields the profile editor reads (and, over `POST`, writes) plus the option lists its pickers render. Returns `{compression, description, model, preload_skills, profile, provider, skills_all, speak, toolsets, toolsets_all}`: `compression` is `{threshold, threshold_tokens}`, `toolsets_all` is the toolset catalog and `skills_all` the profile's installed skill names, and no key here carries `api_key` or `base_url`. `404 not_found` for an unknown profile; `400 bad_request` for a name outside `[A-Za-z0-9._-]` (the path-traversal guard on the path segment). A backing that fails mid-read answers `{profile, error, speak}` with `error: "unavailable"` rather than a blank editor — absence of the fields is never "the profile has none". Shipped consumer: iOS `ProfileEditorResponse`. | read |
 
@@ -328,20 +337,6 @@ every one of them is confirm-gated and is documented there rather than here.
 > nothing caught it. Each register entry points at the file where its route *is* written
 > down and carries the card that owes the row, so the gap has an owner instead of a
 > nickname.
-
-### Templates (read)
-
-The cluster template engine's read verbs (`hscc-cluster`), served verbatim the
-way `hscc template …` runs them — never a second implementation. `validate`
-answers the same two-layer verdict `hscc template validate` prints. All four are
-read-only; the mutating `apply` is the confirm-gated POST in the Actions table.
-
-| Method | Path | Description | Mutates |
-|---|---|---|---|
-| GET | `/v1/template/list` | Available cluster templates. Returns `{count, templates, speak}`. | read |
-| GET | `/v1/template/status` | Which template is currently applied. Returns `{applied, speak}`. | read |
-| GET | `/v1/template/preview/{name}` | Dry-run: what applying `name` would change. `404 not_found` if unknown. | read |
-| GET | `/v1/template/validate/{name}` | Preflight `name` — is it deployable? Returns `{template, structural: {ok, errors, warnings}, placement: {ok, errors, warnings}, ok, speak}` (the CLI's two-layer verdict). A missing template returns `ok: false` (not `404`) — the verdict itself is the answer. Optional `?structural-only=1` skips the live placement layer. | read |
 
 ### Actions (mutating — confirm-gated)
 
