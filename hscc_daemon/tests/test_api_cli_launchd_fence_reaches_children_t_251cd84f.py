@@ -274,10 +274,11 @@ def test_the_site_asks_the_shared_predicate_for_every_signal_combination(
                                                   (0, "\tpid = 1\n"))[1])
 
     for in_modules, marker, expected_refusal in (
-            (False, False, False),   # a plain operator run: must not fire
+            (True, False, True),     # the suite process itself, OUTSIDE an item
+                                     # (collection) — the row the old copy left open
             (False, True, True),     # a child a suite item spawned
-            (True, False, True),     # the suite process itself, between items
             (True, True, True),      # a child of a suite that also imported pytest
+            (False, False, False),   # a plain operator run: must never be refused
     ):
         calls.clear()
         seen.clear()

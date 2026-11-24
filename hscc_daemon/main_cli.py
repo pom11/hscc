@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 from . import main_wakeups
+from . import suite_fence
 from .hermes_python import kanban_root_refusal
 
 VALID_SUBCOMMANDS = ("start", "status", "wakeups")
@@ -205,7 +206,19 @@ def find_hermes_bin(explicit=None):
 
 
 def _under_pytest() -> bool:
-    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    """This package's in-suite predicate — asked of :mod:`hscc_daemon.suite_fence`.
+
+    Not a copy of it. The guard below is about tmux, and the tmux module it guards
+    against (``hscc-api/repl_inject.py``) carries its own stdlib-only copy because the
+    two plugins share no namespace; a THIRD copy inside this package would be free to
+    drift from the one its own package ruled (t_fdbc24f9: one predicate per package,
+    every duplication pinned to agree). The marker-only version that lived here left
+    every phase OUTSIDE an item unguarded — ``PYTEST_CURRENT_TEST`` is unset while a
+    module is being imported (measured: unset at module import, set from session-fixture
+    setup through item teardown), so a live tmux exec reached from collection, a plugin
+    hook or an atexit path answered "no suite" and exec'd.
+    """
+    return suite_fence.under_pytest()
 
 
 def _socket_args(repl):
