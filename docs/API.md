@@ -311,10 +311,28 @@ every one of them is confirm-gated and is documented there rather than here.
 
 ### Actions (mutating — confirm-gated)
 
-All mutating endpoints require `"confirm": true` in the JSON body and return
-**409 `confirm_required`** otherwise. They are registered as **POST only** — a
-GET to the same path returns `405 method_not_allowed`. Mutating responses
-carry a human `message` (and structured fields) but **no** `speak`.
+Every mutating endpoint requires `"confirm": true` in the JSON body and returns
+**409 `confirm_required`** otherwise: every handler behind this table enforces
+the gate before it touches anything — `routes_actions.py` does it inside the
+shared `_action_fields` preamble (`routes_actions.py:204-218`), the other
+modules call their own `_require_confirm` directly. A confirm-less body is
+refused with that 409 **before** any write happens, which is the only safe way
+to probe one of these doors. Three blanket sentences an earlier version of this
+paragraph carried are not true, and the handlers — not the paragraph — are the
+evidence:
+
+* mutating routes are **not** registered as **POST only**: `PATCH /v1/cards/{card_id}`
+  is registered as `PATCH` (`hscc-api/routes_actions.py:521`).
+* a `GET` to a mutating path returns `405 method_not_allowed` only when that
+  path is registered under some other method; the dispatcher answers
+  `404 not_found` for a path nothing serves at all
+  (`hscc-api/api_server.py:928-933`), and `GET /v1/orchestrator/chat/{id}` is a
+  real route, so a `GET` there answers `200`.
+* mutating responses do **not** uniformly "carry a `message` and no `speak`":
+  `POST /v1/escalate` returns `speak` with no `message`,
+  `POST /v1/sessions/{session_id}/compact` and `/retire` carry **both**, and
+  `POST /v1/orchestrator/chat` answers `202` with `speak` and no `message`.
+  Read the row; do not infer the payload from this section.
 
 | Method | Path | Required body | Description |
 |---|---|---|---|
@@ -322,6 +340,15 @@ carry a human `message` (and structured fields) but **no** `speak`.
 | POST | `/v1/review/{card_id}/merge` | `confirm` | Merge the card's branch into `main` and close the card. `404` if unresolvable; `409 already_landed` if already merged; `502 merge_failed` if the merge didn't land (card stays open). |
 | POST | `/v1/template/apply` | `name`, `confirm` | Apply a cluster template. Optional `force_recreate`. `502 apply_failed` if not fully applied. |
 | POST | `/v1/cluster/stop` | `container_id`, `confirm` | Stop a running workload by container id. `502 stop_failed` if it could not be stopped. |
+| PATCH | `/v1/cards/{card_id}` | `assignee`, `confirm` | Re-assign one card — **the mutating route that is not a POST**. Only `assignee` is editable: `title`/`body` have no backing mutation in `kanban_db`, so a body without `assignee` is `400 bad_request` rather than a silent no-op. Unknown card → `404`; a backing failure → `502 edit_failed`. Success returns `{id, edited: true, assignee, message}`; a card the backing refused to write returns **`200`** with `{id, edited: false, message}` and **no** `assignee` — `edited` is the fact, the 200 is not. No `speak`. Shipped consumer: iOS card re-assign (`HSCCClient.swift`). |
+| POST | `/v1/cluster/up` | `confirm` | Start every unit in `serving.json` (whole-fleet up). Returns the backing's up result plus `message: "cluster up issued"`, and `speak` **only when the body did not set `dry_run`** — `dry_run` suppresses `speak` and nothing else, so it is not a preview: the backing call runs either way. `502 cluster_up_failed` when the backing raises or answers an error. Shipped consumer: iOS fleet up (`HSCCClient.swift`). |
+| POST | `/v1/cluster/down` | `confirm` | Stop **all** servings fleet-wide. Returns the backing's down result plus `message: "cluster down issued"` and `speak`. `502 cluster_down_failed` when the backing raises or answers an error. Shipped consumer: iOS fleet down (`HSCCClient.swift`). |
+| POST | `/v1/escalate` | `confirm` | Perform the pending escalations **for real** — reassigns repeatedly-failing cards to the strong tier and notifies a human where one is needed. This is the door that acts; `GET /v1/escalate` only lists. Returns `{escalations, count, performed: true, speak}` — `speak`, and deliberately **no** `message`. `502 escalate_failed` when the backing raises or answers a non-list. Shipped consumer: iOS escalate (`HSCCClient.swift`). |
+| POST | `/v1/kanban/blocked/{card_id}/recover` | `confirm` | Return one blocked card to `ready`. Optional `reason`, echoed back. Returns `{id, board, reason, message, speak}` — `board` is the board the card was found on. Not blocked on any board → `404 not_found`; a backing failure → `502 recover_failed`. Shipped consumer: iOS blocked-card recovery (`HSCCClient.swift`). |
+| POST | `/v1/profile/editor/{profile}` | `confirm` + at least one of `model`, `provider`, `toolsets`, `preload_skills`, `description`, `compression` | Write the profile editor's fields (`routes_profile_editor.py`). Only the keys you send are written; the rest of `config.yaml`/`profile.yaml` is preserved verbatim. Returns the editor state after the write — the same fields `GET /v1/profile/editor/{profile}` answers — plus `updated` (the field names actually written) and `speak`. A body carrying none of the supported fields is `400 bad_request`, not a silent success. Shipped consumer: iOS profile editor save (`HSCCClient.swift`). |
+| POST | `/v1/sessions/{session_id}/compact` | `confirm`, `profile` | Re-arm native compaction on one session **without losing it**: clears the compaction-failure latch (`compression_failure_error`, `compression_fallback_streak`, `compression_ineffective_count`) and re-ensures the profile's early threshold, so Hermes' own compressor retakes the floor on the next turn. Only the named session is touched. Returns `{session_id, title, message, speak}`. `profile` missing/blank → `400`; a profile with no session store → `404 profile_unreachable`. Shipped consumer: iOS session list compaction (`HSCCClient.swift`). |
+| POST | `/v1/sessions/{session_id}/retire` | `confirm`, `profile` | Non-destructive retirement: retitles the session to `<title>-retired-<ts>` so it leaves the live listable set while its full history stays on disk. Returns `{session_id, previous_title, retired_title, message, speak}` — `retired_title` is what to look for if the operator wants the history back. Same `400`/`404` contract as `/compact`. Shipped consumer: iOS session list retirement (`HSCCClient.swift`). |
+| POST | `/v1/triggers/run` | `confirm` | Re-evaluate every enabled trigger rule now. Enabled rules may fire `notify` / `emit_event` / `auto_restart` / `block_pipeline` immediately, which is why this needs a confirm. Returns the run's own result plus `message: "trigger engine run"` and `speak`; `502 triggers_run_failed` when the backing raises or answers a non-dict. Shipped consumer: iOS trigger run (`HSCCClient.swift`). |
 
 **Curl example of a confirm-gated call** (dispatches a card):
 
