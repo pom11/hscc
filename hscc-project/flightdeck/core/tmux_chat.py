@@ -151,8 +151,26 @@ def _pane_matcher():
 # --------------------------------------------------------------------------- #
 
 def _under_pytest() -> bool:
-    import os as _os
-    return bool(_os.environ.get("PYTEST_CURRENT_TEST"))
+    """True inside a pytest run, **or in any process one spawned**.
+
+    BOTH signals, on purpose, and the same expression the sibling hscc-api module
+    carries: ``PYTEST_CURRENT_TEST`` is the channel that crosses a spawn, and
+    ``"pytest" in sys.modules`` covers this process OUTSIDE an item — the marker is
+    unset while a module is being imported (measured on pytest 9.1.1: unset at
+    module import, set from session-fixture setup through item teardown), so the
+    marker-only copy that lived here let a live ``tmux``/``ps``/``execvp`` reached
+    from collection, a plugin hook or an atexit path answer "no suite" and exec
+    against the operator's server (t_251cd84f).
+
+    The copy is deliberate, not drift: the hscc-project and hscc-api plugin dirs are
+    deployed standalone into ``~/.hermes/plugins``, so this module cannot import a
+    predicate owned by either (the pane MATCHER it does need it loads from the
+    sibling dir at runtime and refuses loudly when absent — a fence cannot afford
+    that failure mode). Stdlib-only, unable to fail, and pinned to agree with the
+    other copies by
+    ``hscc_daemon/tests/test_suite_fence_agrees_across_packages_t_251cd84f.py``.
+    """
+    return "pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 def _guard(name: str) -> None:

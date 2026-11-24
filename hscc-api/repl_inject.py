@@ -64,6 +64,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import time
 import uuid
 
@@ -107,13 +108,33 @@ class InjectError(Exception):
 # --------------------------------------------------------------------------- #
 
 def _under_pytest() -> bool:
-    """True inside a pytest run. The ORIGINAL subprocess seams refuse to
-    execute there: tests that forget to stub them must not list — let alone
-    inject into — the operator's REAL panes (the operator's rule: no test may
-    touch a live session). Stubbing repl_inject.run_tmux/run_ps replaces the
-    module attribute, so the replaced function runs normally (identity check).
-    Same guard style as doctor's run_doctor fleet-check skip."""
-    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    """True inside a pytest run, **or in any process one spawned**.
+
+    The ORIGINAL subprocess seams refuse to execute there: tests that forget to
+    stub them must not list — let alone inject into — the operator's REAL panes
+    (the operator's rule: no test may touch a live session). Stubbing
+    repl_inject.run_tmux/run_ps replaces the module attribute, so the replaced
+    function runs normally (identity check). Same guard style as doctor's
+    run_doctor fleet-check skip.
+
+    BOTH signals, on purpose. ``PYTEST_CURRENT_TEST`` is the channel that crosses
+    a spawn (pytest exports it per item and every child inherits the environment);
+    ``"pytest" in sys.modules`` is the one that covers this process OUTSIDE an item
+    — the marker is unset while a module is being imported (measured on pytest
+    9.1.1: unset at module import, set from session-fixture setup through item
+    teardown), so a marker-only copy lets a live ``tmux``/``ps`` exec reached from
+    collection, a plugin hook or an atexit path answer "no suite" and exec.
+
+    This is a deliberate per-package copy, not drift: ``hscc_daemon`` keeps the same
+    expression in ``hscc_daemon/suite_fence.py`` and the two dirs are deployed
+    standalone into ``~/.hermes/plugins``, so neither can import the other (the
+    ruling is in that module's docstring, t_fdbc24f9). The copies are pinned to
+    agree — and against the expected answer, not only with each other — by
+    ``hscc_daemon/tests/test_suite_fence_agrees_across_packages_t_251cd84f.py``.
+    Stdlib-only and unable to fail, so a fence can never be the thing that raises.
+    """
+    return "pytest" in sys.modules or bool(
+        os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 def _exec_tmux(argv, input_text: str | None = None, timeout: float | None = None,
