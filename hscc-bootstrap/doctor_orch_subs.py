@@ -76,8 +76,11 @@ suite is not its whole seam test (t_2c218de8 shipped red on exactly that gap).
 Inside a pytest process the row's real inputs are the operator's live boards and
 live session registries, so an uninjected call returns a refusal ERROR naming the
 seams instead (the ``doctor_node_pauses`` / ``doctor_main_only`` fence shape).
-Tests inject fake subscription rows and a fake session registry and therefore
-never touch a gateway, a board or a live registry.
+The fence counts a process that a suite SPAWNED as being inside the suite too —
+see :func:`_under_pytest`, because the door this row feeds runs in one
+(``doctor_tools`` execs ``doctor.py --json`` rather than importing it). Tests
+inject fake subscription rows and a fake session registry and therefore never
+touch a gateway, a board or a live registry.
 """
 
 from __future__ import annotations
@@ -472,6 +475,37 @@ def _fix(findings: List[Dict[str, Any]]) -> str:
             "they are the posture this row reports." % (unsub, repoint))
 
 
+def _under_pytest() -> bool:
+    """True when this process is a pytest run — **or a process one spawned**.
+
+    ``"pytest" in sys.modules`` is process-local, and the door this row feeds is
+    a separate interpreter: ``doctor_tools.doctor_findings`` execs
+    ``python3 hscc-bootstrap/doctor.py --json`` instead of importing it (the
+    flat sibling imports only resolve when the script runs as a script). So the
+    row renders in a child that never imported pytest, and the fence alone reads
+    as though it had fired while refusing nothing.
+
+    That is not hypothetical — it is how this row was caught (t_14eae4b5). The
+    door's read-only guard went red the moment the row was registered, because
+    the child took the ambient path: it enumerated and OPENED the operator's
+    boards, and the fail-closed enumeration reached
+    ``autodown._note_kanban_unavailable``, whose once-per-process WARN appended
+    a line to ``$HOME/.hscc/daemon.log`` — a new file inside a HOME the caller
+    had sealed for exactly that assertion. The mute added by t_2c218de8 makes the
+    read quiet; it does not make the read refuse. A suite-spawned door still
+    resolving the operator's boards is the thing this fence exists to forbid, and
+    it is now invisible to a file-diffing guard, so it is pinned by
+    ``test_doctor_orch_subs_fence_reaches_children_t_14eae4b5.py`` instead.
+
+    ``PYTEST_CURRENT_TEST`` is the channel that does cross the spawn: pytest
+    exports it for the duration of each item and every child inherits the
+    environment. It is the same marker the repo already asks of a child rather
+    than inventing a second one (``hscc_daemon/main_cli.py``,
+    ``hscc-api/repl_inject.py``, ``hscc-project/flightdeck/core/tmux_chat.py``).
+    """
+    return "pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
 def doctor_check(hermes_home: Optional[str] = None, *,
                  boards: Optional[Mapping[str, str]] = None,
                  subscriptions: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -494,7 +528,8 @@ def doctor_check(hermes_home: Optional[str] = None, *,
     Hermes' own enumeration — so this row declares ``row_kwargs=("hermes_home",)``
     and nothing else.
 
-    A pytest process that injects nothing gets :func:`refused`: a suite must not
+    A process that injects nothing gets :func:`refused` — a pytest process, or
+    one a pytest process spawned (see :func:`_under_pytest`): a suite must not
     decide its assertions from the operator's live boards, and must not open them.
     Precisely, a *live* read is the ambient board enumeration (no ``boards=`` and
     no ``subscriptions=``) or the ambient lease files (no ``registry=``). Paths a
@@ -505,7 +540,7 @@ def doctor_check(hermes_home: Optional[str] = None, *,
     live_subs = subscriptions is None
     live_registry = registry is None
     ambient_boards = live_boards and live_subs
-    if "pytest" in sys.modules and (ambient_boards or live_registry):
+    if _under_pytest() and (ambient_boards or live_registry):
         return refused()
 
     modes = wake_modes()
