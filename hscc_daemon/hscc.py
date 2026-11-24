@@ -423,8 +423,8 @@ def _get_help_text():
         # surface must list it like every other live top-level command
         # (F5 surface-honesty rule, t_88d896f3).
         *_entry("merge-queue <cmd>",
-                "Local merge queue: status list add remove pause resume "
-                "enable disable"),
+                "Local merge queue: status list add remove hold unhold pause "
+                "resume enable disable"),
         *_entry("cards monitor [--live]",
                 "One live panel per running card, streaming its worker"),
         # main group (M4/M5): the main orchestrator's own pane + wake-ups.
@@ -619,7 +619,9 @@ COMMAND_HELP = {
     "merge-queue": "Local merge queue (daemon-run, one PR at a time per repo).\n"
                    "  status [--json] | list [<project>] [--json]\n"
                    "  add <project> <pr> [--card <id>] | remove <project> <pr>\n"
+                   "  hold|unhold <project> <pr> [--reason <text>]\n"
                    "  pause|resume|enable|disable <project> [--json]\n"
+                   "  A hold survives a push; only unhold releases it.\n"
                    "  Rebase -> gates -> force-with-lease push -> squash merge.\n"
                    "  Usage: hscc merge-queue <subcommand> [args]",
     "cards": "Live per-card worker view (read-only).\n"
