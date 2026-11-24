@@ -20,7 +20,7 @@ interpreter (`_sparkrun_venv_python()`, resolved from the `sparkrun` CLI
 binary's shebang) and drives sparkrun's structured API.
 
 I inspected the real sparkrun package source under
-`/Users/desac/sparkrun/src/sparkrun/` and its live venv. Facts:
+`~/sparkrun/src/sparkrun/` and its live venv. Facts:
 
 - `sparkrun.core.cluster_status.ClusterStatus` / `HostOccupancy.gpus`
   (`GpuOccupancy(used_memory_gb, used_util_fraction, ...)`) carries only
@@ -69,7 +69,7 @@ Sites rewired:
 - sparkrun owns host resolution + ssh kwargs. The bridge uses sparkrun's OWN
   `build_ssh_kwargs` (user, key, options) and `run_remote_script`, so it cannot
   drift from what sparkrun is configured to do. The live probe confirmed it
-  resolves to `/Users/desac/sparkrun/.venv-sparkrun-py313/bin/python`.
+  resolves to `~/sparkrun/.venv-sparkrun-py313/bin/python`.
 - It does not introduce a second transport: it *reuses* sparkrun's.
 - `query_cluster_status` was the wrong target (removed in 0.3.6, and its
   `to_dict()` never carried GPU model/VRAM/power anyway) — using it would have
@@ -84,7 +84,7 @@ Sites rewired:
 - hscc-cluster suite: **384 passed, 14 skipped.**
 - Full 8-dir suite: all green except `hscc-roles`, which fails for a
   **pre-existing, unrelated** environment reason
-  (`rolelib.PROFILES_DIR` = `/Users/desac/.hermes/profiles/devops-engineer/profiles`
+  (`rolelib.PROFILES_DIR` = `~/.hermes/profiles/devops-engineer/profiles`
   does not exist on this node). My commit touches only hscc-cluster files.
   `hscc_daemon`, `sparkrun-hermes`, `hscc-api` all pass.
 - Bridge probed live against the real sparkrun venv against the documented

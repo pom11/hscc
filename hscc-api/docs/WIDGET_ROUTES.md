@@ -238,7 +238,60 @@ that is the only span it can name — it cannot ask about last night. `tier` +
 GET /v1/cluster/history?node=<host|all>&metrics=a,b
     &window=15m|1h|6h|24h|7d                    # axis A — a preset, anchored to now
     &tier=0|1|2&since=<epoch>&until=<epoch>     # axis B — an explicit span, anchored to nothing
+    &max_bytes=<int>                            # a byte budget for the response body
 ```
+
+**`max_bytes` is the surface's budget, and it is answered by folding, not by
+truncating.** `t_25fcf502` measured this route against the widget contract's
+`wire ≤ 16 KB per surface per refresh` (§2 of
+`ios-app/docs/WIDGET_DATA_CONTRACT.md`) and found no window that fits: the
+largest case was 4,361,820 B (266×) and even the NARROWEST possible 7 d read —
+one node, one metric — was 119,531 B (7.3×). The cost is in the rows, not the
+columns: a projected row is ~107 B to carry one number, so `metrics=` (which
+removes columns) measured a 44 % saving where ~99.5 % was needed. Re-encoding
+does not rescue it either — tier 2's full width is 2,016 buckets and a `ts`
+alone is ~11 B, so a columnar shape pays ~22 KB of timestamps for one node and
+one metric before a single value rides along. Over an axis that wide, a fixed
+ceiling can only be met by serving fewer **buckets**, so the budget is stated in
+the ceiling's own currency and the route folds to it.
+
+What a fold is here, and what it is not: consecutive stored buckets are grouped
+onto the wall-clock boundaries the store already uses and handed to the
+recorder's OWN `_fold_hosts` / `_fold_engines` — the same code that rolls tier 1
+into tier 2. So a folded value is an `n`-weighted mean of the sub-averages and a
+folded peak is `max()` of the stored `*_max` columns, i.e. the true peak of the
+folded span rather than the peak of the averages (§5.6's rule that a peak is
+never drawn alone depends on this). The fold runs **before** the `metrics=`
+projection for the same reason: `_fold_hosts` falls back to the plain average
+when a `<k>_max` column is absent, so folding a projected row would report an
+average AS a peak. Nothing is truncated, no row is invented for a bucket that
+held nothing, and a field that was `None` in every sub-row folds to `None`.
+
+The finest rung that fits is served, so a budget the stored resolution already
+satisfies buys `fold: 1` and the stored buckets verbatim. A budget too small to
+meet at the coarsest rung is **reported** (`budget_met: false`) at that rung —
+never obeyed by dropping rows, because the newest point is the "now" a widget
+headlines and a cut tail is how §5.6's `nil`-is-a-gap rule dies. `max_bytes` on
+the 2 s tier is a 400: that tier is the in-memory ring, already bounded by its
+own size limit and folded raw samples would mint the `*_max` columns tier 0 does
+not store.
+
+The budget is measured against the length of the JSON body, which is the number
+the client's `Content-Length` names — `tests/test_cluster_history_byte_budget.py`
+asserts it on a real socket. The body's own length is deliberately NOT a field:
+a payload cannot state its size without the statement changing the size.
+
+Compression is a separate question and is not answered here. The deployment
+sends no `Content-Encoding` even when `Accept-Encoding: gzip` is offered
+(t_25fcf502, §9), and turning it on means editing `_send_json`, the shared
+response path for every route including the `__raw_bytes__` download hatch. A
+byte budget closes this ceiling without that change; gzip stays its own card.
+
+`hscc cluster history` takes no `--max-bytes`: a byte budget is a property of a
+wire response and a terminal has no ceiling to fit — and the same number would
+not even mean the same thing, since the route's body carries `speak` and the
+CLI's does not. The CLI still reports the four keys below with the never-folded
+values, which is what `test_cluster_history_cli_parity.py` pins.
 
 The two are rejected together rather than resolved by precedence, because they
 denote two different spans and a client whose `since`/`until` were silently
@@ -257,7 +310,11 @@ preset name the request did not use.
 | `source` | string | `recorder_ring`, `recorder_ring_absent`, `sqlite_store`, `sqlite_store_absent` — where the rows came from, as a **code**. Branch on this, not on the English of `note`. `null` only when the read itself failed, which `error` states |
 | `window` / `window_s` | string / integer | the window label and its length in seconds. On the preset axis the label is the preset; on the tier axis it is `"<window_s>s"` |
 | `tier` | integer | 0, 1 or 2 — the tier that answered |
-| `resolution_s` / `resolution` | integer / string | 2/60/300 and `"2s"`/`"60s"`/`"300s"` |
+| `resolution_s` / `resolution` | integer / string | the step **actually served**: `2/60/300` and `"2s"`/`"60s"`/`"300s"`, or `native_resolution_s × fold` when the body was folded to a budget. Never a step the caller has to infer from a timestamp gap |
+| `native_resolution_s` | integer | this tier's own STORED bucket width (2/60/300). Equals `resolution_s` unless a fold widened it |
+| `fold` | integer | how many stored buckets went into each point served; `1` means nothing was folded |
+| `max_bytes` | integer \| null | the echo of `?max_bytes=` — the budget this body was measured against; `null` when none was asked |
+| `budget_met` | boolean \| null | whether the body served fits the budget asked for. `false` is a real outcome: the coarsest fold is served and said, and rows are never cut to make it `true`. `null` when no budget was asked, because then nothing was measured against one |
 | `tier_summary` | string | what that tier is, in words ("1-minute averages, with peaks for …") |
 | `max_fields` | array | the peak columns this response carries — `[]` at tier 0, which stores no peak |
 | `since` / `until` | integer | epoch seconds; **the pair actually served**, both inclusive, and the store's bucket starts are what they filter. When a clamp moved them these are the clamped values and `note` says so |

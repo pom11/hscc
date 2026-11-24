@@ -217,7 +217,7 @@ age floor and outside keep-3.
 | **full `hscc-bootstrap/tests` (396) — LANDING TIP** | `a925447` | p313 | **396 passed, exit 0** (08:30→08:38) |
 
 All legs run in the worker env with `HERMES_HOME` exported at the live profile
-(`/Users/desac/.hermes/profiles/backend-engineer`), from a clean checkout, and
+(`~/.hermes/profiles/backend-engineer`), from a clean checkout, and
 are stamped in `cache/scratch/t_9462260b/gate_<leg>_<sha>.log` with
 `git rev-parse HEAD` + a contains-7864796 ancestry check. The `a925447` pair
 supersedes the `29d5e97` pair (that tip predates the reload-surviving redirect).

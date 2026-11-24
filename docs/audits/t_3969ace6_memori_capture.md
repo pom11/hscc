@@ -15,7 +15,7 @@ The DB is a live file, so I copied it to `/tmp` and queried the copy in read-onl
 mode (no journals created on the live DB):
 
 ```
-cp /Users/desac/.hermes/memori_byodb.db /tmp/memori_byodb_readonly.db
+cp ~/.hermes/memori_byodb.db /tmp/memori_byodb_readonly.db
 ```
 
 Per-table newest timestamps (all via `sqlite3 -readonly /tmp/memori_byodb_readonly.db`):
@@ -65,17 +65,17 @@ entity row.
 ## 2. What ENABLES capture (wiring)
 
 - Capture is enabled by Hermes config `memory.provider: memori_byodb` plus a
-  valid `/Users/desac/.hermes/memori_byodb.json` (the plugin's `_load_config`
+  valid `~/.hermes/memori_byodb.json` (the plugin's `_load_config`
   returns a config only if that file exists and has `entityId`). Current file
   (mtime 2026-08-12 11:47):
   ```json
   { "entityId": "desac_hermes", "projectId": "hermes_cluster",
-    "processId": "hermes_gateway", "dbPath": "/Users/desac/.hermes/memori_byodb.db" }
+    "processId": "hermes_gateway", "dbPath": "~/.hermes/memori_byodb.db" }
   ```
 - It is configured on many profiles (`hscc-orch`, `flightdeck-orch`,
   `ecofire-*-orch`, `grid-orch`, `pom-orch`, `radio-orch`, `soconn-orch`,
   `sphoin-orch`, `powerbi-orch`, `pickolo-orch`, `flosana-orch`,
-  `efsdriver-orch`, …) and in the root `/Users/desac/.hermes/config.yaml`
+  `efsdriver-orch`, …) and in the root `~/.hermes/config.yaml`
   (`memory.provider: memori_byodb`).
 - The trigger is Hermes calling the provider's `sync_turn()` after each
   completed turn: `run_agent.py:901` calls `memory_manager.sync_all(...)`, which
@@ -145,9 +145,9 @@ attempted):
   Error in augmentation LocalAugmentationWrapper: 'list' object has no attribute 'entity'
   File ".../memori/.../_manager.py", line 133, in _process_augmentations
     ctx = await aug.process(ctx, driver)
-  File "/Users/desac/.hermes/plugins/memori_byodb/_client.py", line 44, in process
+  File "~/.hermes/plugins/memori_byodb/_client.py", line 44, in process
     await self.local_aug.process(ctx, driver)
-  File "/Users/desac/.hermes/plugins/memori_byodb/local_augmentation.py", line 91, in process
+  File "~/.hermes/plugins/memori_byodb/local_augmentation.py", line 91, in process
     await aug._schedule_entity_writes(ctx, driver, memories)
   File ".../memori/.../_augmentation.py", line 227, in _schedule_entity_writes
     facts_to_write = memories.entity.facts
@@ -238,7 +238,7 @@ spawned as a separate card. Recommended follow-up:
 
 ```bash
 # Read-only copy of the live DB (never open the live file for write)
-cp /Users/desac/.hermes/memori_byodb.db /tmp/memori_byodb_readonly.db
+cp ~/.hermes/memori_byodb.db /tmp/memori_byodb_readonly.db
 
 # Table inventory
 sqlite3 -readonly /tmp/memori_byodb_readonly.db ".tables"

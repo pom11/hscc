@@ -118,7 +118,7 @@ pytest process per plugin dir, true isolation):
   hscc-project 1351, hscc_daemon 1172, sparkrun-hermes 12, hscc-api 786
   (1 skipped). **ALL GREEN** (exit 0).
 
-`/Users/desac/miniconda3/envs/p313/bin/python` (Python 3.13):
+`~/miniconda3/envs/p313/bin/python` (Python 3.13):
 - hscc-bootstrap 272, hscc-commands 69, hscc-roles 126, hscc-cluster 404
   (14 skipped), hscc-project 1351, hscc_daemon 1169 (3 skipped),
   sparkrun-hermes 12, hscc-api 786 (1 skipped). **ALL GREEN** (exit 0).

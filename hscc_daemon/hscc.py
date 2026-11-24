@@ -417,8 +417,22 @@ def _get_help_text():
                 "HSCC HTTP API server: start stop status (external apps)"),
         *_entry("autodown <cmd>",
                 "Idle autodown/autoup: status enable disable wake cancel"),
+        # F3's defect class on the THIRD surface (t_00502a32): this entry named
+        # `blocked` and `stale` — 2 of the 7 verbs `hscc kanban` dispatches —
+        # and hid the four that stop workers (pause/resume/paused/enforce) from
+        # the one help surface an operator reads before typing anything. The
+        # verb list here is NOT a literal: the dispatcher's own unknown-verb
+        # inventory is the authority, and
+        # hscc_daemon/tests/test_kanban_help_honesty.py::TestPrimaryBannerHonesty
+        # demands this line name every dispatched verb and nothing the
+        # dispatcher refuses (its colon-tail is the inventory position, so a
+        # gloss goes before the colon or in parentheses, never as a bare word).
+        # A new kanban verb is named here in the same change that dispatches
+        # it. What each verb DOES stays out of the banner — `hscc help kanban`,
+        # `hscc kanban --help` and the site copy carry that.
         *_entry("kanban <cmd>",
-                "Board hygiene: blocked (show/recover), stale (list/archive)"),
+                "Board hygiene: blocked stale monitor pause resume paused "
+                "enforce"),
         # merge-queue (MQ1) is dispatched and in COMMAND_HELP; the primary
         # surface must list it like every other live top-level command
         # (F5 surface-honesty rule, t_88d896f3).
@@ -461,6 +475,16 @@ def _get_help_text():
                  "--skip-{skills,roles,daemon,patches,cli} (see `hscc help bootstrap`)"]),
         *_entry("update --check",
                 "Check GitHub releases for a newer version (read-only)"),
+        # clean (t_fc9296a7 + the cache tiers t_701e22fc): dispatched, in
+        # COMMAND_HELP and in TOP_LEVEL_COMMANDS, so the primary `hscc --help`
+        # surface names it too (the F5 surface-honesty rule). The usage is now
+        # too long for the two-column look, so it stands alone and the
+        # description wraps to _TOP_HELP_INDENT (see _entry).
+        *_entry("clean [--apply] [--deep] [--confirm] [--days N] "
+                "[--board <slug>] [--json]",
+                "Archive + remove finished cards' workspaces, then prune "
+                "rebuildable caches (DRY RUN until --apply; --deep needs "
+                "--confirm)"),
     ])
 
     examples = _section("Examples", [
@@ -600,6 +624,12 @@ COMMAND_HELP = {
     # surfaces by hscc_daemon/tests/test_kanban_help_honesty.py, which is what
     # keeps the two surfaces from drifting again. A new kanban verb must be
     # advertised in this entry in the same change that dispatches it.
+    #
+    # The last sentence used to stop at "…on a paused board since" — the same
+    # truncation kanban_cli._PAUSE_HELP ships, inherited by this entry when F3
+    # widened it (t_46d03105's review folded the fix here, t_00502a32): both
+    # surfaces now say "since the pause." Keep them worded alike; the honesty
+    # gate compares what they ADVERTISE, not their prose.
     "kanban": "Board hygiene for autodown.\n"
               "  blocked [--json]: list BLOCKED cards with why; blocked --recover\n"
               "    <id> [--reason <t>]: recover one blocked card to ready\n"
@@ -612,6 +642,7 @@ COMMAND_HELP = {
               "    restores exactly those)\n"
               "  paused: list paused boards and what they hold; enforce: block\n"
               "    cards that became ready or running on a paused board since\n"
+              "    the pause.\n"
               "  Try 'hscc kanban --help' for each verb's full flag list.\n"
               "  Usage: hscc kanban <subcommand> [args]",
     # merge-queue (MQ1): local FIFO of green PRs run by the daemon. Lines
@@ -622,6 +653,34 @@ COMMAND_HELP = {
                    "  pause|resume|enable|disable <project> [--json]\n"
                    "  Rebase -> gates -> force-with-lease push -> squash merge.\n"
                    "  Usage: hscc merge-queue <subcommand> [args]",
+    # clean (cards t_fc9296a7 + t_701e22fc): the disk-hygiene verb over the
+    # engine shipped by t_274530ae. Every authored line <= 76 (the (B) gate
+    # renders at 78 and _handle_help prints one 2-space prefix for the value).
+    "clean": "Archive then remove finished cards' workspaces, then caches.\n"
+             "  DRY RUN by default: prints what would go, changes nothing.\n"
+             "  Usage: hscc clean [--apply] [--deep] [--confirm] [--days N]\n"
+             "                   [--board <slug>] [--json]\n"
+             "  --apply runs the workspace safe set AND the safe cache set:\n"
+             "  uv prune, npm/conda/brew/pip caches, unavailable simulators,\n"
+             "  pytest temp dirs older than a day, the hscc UI-test caches.\n"
+             "  Each tool is probed first, so one that is not installed is a\n"
+             "  skip and not a failure, and each command is killed on its own\n"
+             "  timeout. Each workspace goes to <hermes-home>/kanban/\n"
+             "  workspace-archive/<board>/<id>.tar.gz first and is removed\n"
+             "  only once that archive verifies; one with uncommitted\n"
+             "  changes, unpushed commits, a stash, an unreadable probe or a\n"
+             "  live claim is KEPT and named. --days N (default 7) is the age\n"
+             "  a finished card must pass; --board <slug> narrows the pass.\n"
+             "  --deep alone REPORTS the deep set for free (whole uv cache,\n"
+             "  Xcode DerivedData, simulator caches, the Trash). To run it:\n"
+             "  --deep --apply --confirm — without --confirm this exits 2 and\n"
+             "  names the token. The Trash goes through Finder, never rm.\n"
+             "  Sizes are measured in the plan, so --apply never re-walks;\n"
+             "  that walk is what makes a first dry run take a minute.\n"
+             "  Unfinished cards, the board DBs, comments, attachments,\n"
+             "  ~/.hscc, ~/.hermes and anything under ~/dev are never\n"
+             "  touched. --json prints the engine's dict, no added text.\n"
+             "  See: docs/ops/disk-hygiene.md",
     "cards": "Live per-card worker view (read-only).\n"
              "  monitor [--live] [--interval <s>] [--board <slug>] [--tools]:\n"
              "    one panel per running card streaming its transcript; waiting\n"
@@ -743,7 +802,7 @@ TOP_LEVEL_COMMANDS = (
     "cluster", "template", "profiles", "project", "api", "autodown",
     "kanban", "cards", "orch", "main", "node", "verify", "stats",
     "throughput", "autoscale", "escalate", "start-daemon", "heal-clear",
-    "heal-status", "merge-queue",
+    "heal-status", "merge-queue", "clean",
 )
 
 # ── template group help surface (t_9032f96b) ───────────────────────────────
@@ -2798,11 +2857,326 @@ def _handle_project():
         return exc.code if isinstance(exc.code, int) else 0
 
 
+# ── `hscc clean` — the kanban workspace hygiene (card t_fc9296a7) ──────────
+#: Flags the verb accepts, spelled the way :data:`_NODE_FLAGS` spells them:
+#: switches are presence-only, values take exactly one token. ``--deep`` and
+#: ``--confirm`` are t_701e22fc: the deep set runs only when BOTH are present
+#: with ``--apply``, and the refusal to run it names the missing token.
+_CLEAN_FLAGS = {"switches": ("--apply", "--json", "--deep", "--confirm"),
+                "values": ("--days", "--board")}
+
+_CLEAN_USAGE = ("usage: hscc clean [--apply] [--deep] [--confirm] "
+                "[--days N] [--board <slug>] [--json]")
+
+#: The error for `--deep --apply` without the gesture. It must name the token
+#: the operator did not type — a deep pass that silently refused would be worse
+#: than one that refused loudly.
+_CLEAN_CONFIRM_NEEDED = ("--deep with --apply needs --confirm: the deep set "
+                         "drops the whole uv cache, Xcode DerivedData, the "
+                         "simulator caches and the Trash")
+
+
+def _parse_clean_args(argv):
+    """``(opts, error)`` for `hscc clean`'s argv.
+
+    Hand-rolled like the rest of this file (no argparse — see
+    :func:`_parse_node_args`): a parser that prints its own usage and exits
+    would own a surface the help intercepts above own. No positional is
+    accepted — `hscc clean hscc` is a typo for `--board hscc`, not a board.
+
+    The gate lives HERE rather than in the handler, so the deep refusal is a
+    usage error (exit 2, usage line, named token) that cannot reach
+    :func:`plan_clean` at all: `hscc clean --deep --apply` without `--confirm`
+    mutates nothing because it never gets as far as planning.
+    """
+    opts = {"--apply": False, "--json": False, "--deep": False,
+            "--confirm": False, "--days": None, "--board": None}
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _CLEAN_FLAGS["switches"]:
+            opts[tok] = True
+            i += 1
+            continue
+        if tok in _CLEAN_FLAGS["values"]:
+            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                return opts, f"{tok} needs a value"
+            opts[tok] = argv[i + 1]
+            i += 2
+            continue
+        name, eq, val = tok.partition("=")
+        if eq and name in _CLEAN_FLAGS["values"]:
+            opts[name] = val
+            i += 1
+            continue
+        if tok.startswith("-"):
+            return opts, f"unknown flag: {tok}"
+        return opts, f"unexpected argument: {tok} (a board is --board <slug>)"
+    if opts["--days"] is not None:
+        try:
+            days = int(opts["--days"])
+        except ValueError:
+            return opts, (f"--days needs a whole number of days, "
+                          f"got {opts['--days']!r}")
+        if days < 0:
+            return opts, f"--days cannot be negative, got {days}"
+        opts["--days"] = days
+    if opts["--deep"] and opts["--apply"] and not opts["--confirm"]:
+        return opts, _CLEAN_CONFIRM_NEEDED
+    return opts, None
+
+
+#: Section titles, by tier and by mode. A dry run has to say what would make
+#: the section real; an apply has to say what it already took.
+_CACHE_TITLES = {
+    ("safe", False): "rebuildable caches — safe set (runs with --apply)",
+    ("safe", True): "rebuildable caches — safe set (applied)",
+    ("deep", False): "rebuildable caches — deep set "
+                     "(needs --apply --deep --confirm)",
+    ("deep", True): "rebuildable caches — deep set (applied with "
+                    "--deep --confirm)",
+}
+
+
+def _cache_report_lines(plan, result=None):
+    """The cache tiers + the report-only section: ``(body lines, summary)``.
+
+    The same pure contract as :func:`_clean_report_lines` — it only reshapes
+    dicts the engine returned, so "a dry run prefixes every mutating line with
+    `would`" and "an apply never says `would`" are assertable without a
+    console. The engine keeps the two tiers apart; each section header says in
+    one line what it would take to make that tier happen, and the report-only
+    rows are listed under a header that says they are never touched.
+    """
+    from hscc_daemon.workspace_clean import (KIND_PATH, TIER_DEEP, TIER_SAFE,
+                                             _human_size)
+
+    applying = result is not None
+    source = (result.get("cache") or []) if applying \
+        else (plan.get("cache_actions") or [])
+    entries = [e for e in source if isinstance(e, dict)]
+    report = [e for e in (plan.get("report_only") or []) if isinstance(e, dict)]
+    by_tier = {TIER_SAFE: [], TIER_DEEP: []}
+    for e in entries:
+        by_tier.setdefault(e.get("tier") or TIER_SAFE, []).append(e)
+
+    def shown(entry):
+        """What one cache row is named by: its command, or the directory."""
+        argv = [str(a) for a in (entry.get("argv") or [])]
+        if argv:
+            # argv[0] is the RESOLVED binary path; the report shows its name
+            # (the path would cost a column and the plan already proved it).
+            text = " ".join([Path(argv[0]).name or "?"] + argv[1:])
+            return text if len(text) <= 64 else text[:61] + "..."
+        return str(entry.get("path") or "?")
+
+    def size_of(entry):
+        return _human_size(_clean_int(entry.get("size_bytes")))
+
+    def row(entry):
+        status = str(entry.get("status") or "planned")
+        reason = str(entry.get("reason") or "")
+        if status == "skipped":
+            verb, tail = "skipped", f"  ({reason or 'skipped'})"
+        elif not applying:
+            verb = "would remove" if entry.get("kind") == KIND_PATH \
+                else "would run"
+            tail = ""
+        elif status == "ran":
+            verb, tail = "ran", ""
+        elif status == "failed":
+            verb, tail = "FAILED", f"  ({reason or 'failed'})"
+        elif status == "timed-out":
+            verb, tail = "TIMED OUT", "  (killed on the command timeout)"
+        else:
+            verb, tail = status.upper(), ""
+        return f"   {verb:<12}  {shown(entry)}  {size_of(entry)}{tail}"
+
+    body = []
+    for tier in (TIER_SAFE, TIER_DEEP):
+        rows = by_tier.get(tier) or []
+        if not rows:
+            continue
+        if body:
+            body.append("")
+        body.append(_CACHE_TITLES[(tier, applying)])
+        body += [row(e) for e in rows]
+    if report:
+        if body:
+            body.append("")
+        body.append("report only — never touched by this verb")
+        body += [f"   {'noted':<12}  {str(e.get('path') or '?')}  "
+                 f"{size_of(e)}  ({e.get('note') or 'decide yourself'})"
+                 for e in report]
+
+    if not entries and not report:
+        return body, ""
+    planned = sum(1 for e in entries if e.get("status") == "planned")
+    skipped = sum(1 for e in entries if e.get("status") == "skipped")
+    ran = sum(1 for e in entries if e.get("status") == "ran")
+    bad = sum(1 for e in entries
+              if str(e.get("status")) in ("failed", "timed-out"))
+    if applying:
+        summary = (f"-> caches: {ran} ran, {skipped} skipped, {bad} failed; "
+                   f"~{_human_size(_clean_int((result or {}).get('cache_freed_bytes')))} "
+                   f"freed (plan-time du, an estimate)")
+    else:
+        total = sum(_clean_int(e.get("size_bytes")) for e in entries)
+        summary = (f"-> caches: {planned} would clean, {skipped} skipped; "
+                   f"~{_human_size(total)} in the plan"
+                   + (", deep set included" if plan.get("deep") else ""))
+    return body, summary
+
+
+def _clean_int(value) -> int:
+    """``int(value or 0)`` without the exception dance at every call site."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _clean_report_lines(plan, result=None):
+    """The human report as plain ``(header, body, summary)`` lines.
+
+    Pure on purpose: it only reshapes dicts the engine already returned, so the
+    dry-run contract the operator reads — every mutating line prefixed `would`,
+    every skip naming its reason, the trailing count — is assertable without a
+    console, and the console only ever adds colour to these exact bytes. The
+    size formatter is the ENGINE's (one vocabulary for bytes, not two), reached
+    by a function-local import so `hscc_daemon.workspace_clean` is never
+    imported at module scope.
+    """
+    from hscc_daemon.workspace_clean import _human_size
+
+    applying = result is not None
+    plan_actions = [a for a in (plan.get("actions") or []) if isinstance(a, dict)]
+    by_path = {str(a.get("path") or ""): a for a in plan_actions}
+
+    def card_of(entry):
+        src = by_path.get(str(entry.get("path") or ""), {}) if applying else entry
+        board = str(src.get("board") or entry.get("board") or "default")
+        card = str(src.get("task_id") or entry.get("task_id")
+                   or Path(str(entry.get("path") or "")).name or "?")
+        return f"{board}/{card}"
+
+    def size_of(entry):
+        try:
+            return _human_size(int(entry.get("size_bytes") or 0))
+        except (TypeError, ValueError):
+            return _human_size(0)
+
+    actions = result["archived"] if applying else plan_actions
+    skips = [s for s in (plan.get("skipped") or []) if isinstance(s, dict)]
+    errors = [str(e) for e in (plan.get("errors") or [])]
+    if applying:
+        skips += [s for s in (result.get("skipped") or []) if isinstance(s, dict)]
+        errors += [str(e) for e in (result.get("errors") or [])]
+
+    days = plan.get("days")
+    header = [f"kanban workspaces of finished cards older than {days}d",
+              "MODE: APPLY" if applying
+              else "MODE: DRY RUN (add --apply to clean)"]
+    verb = "archived" if applying else "would archive"
+    body = [f"   {verb:<12}  {card_of(a)}  {size_of(a)}" for a in actions]
+    body += [f"   {'kept':<12}  {card_of(s)}  {size_of(s)}  ({s.get('reason')})"
+             for s in skips]
+    body += [f"   ! {e}" for e in errors]
+    done = int(result.get("removed") or 0) if applying else len(actions)
+    summary = f"-> {done} workspaces, {len(skips)} skipped"
+    if applying:
+        summary += f"; freed {_human_size(int(result.get('freed_bytes') or 0))}"
+    # The cache tiers ride underneath the workspace section, with their own
+    # summary on its own line: the workspace count line keeps its exact shape,
+    # because that is the number the workspace card's contract is pinned to.
+    cache_body, cache_summary = _cache_report_lines(plan, result)
+    body += cache_body
+    if cache_summary:
+        summary += "\n" + cache_summary
+    return header, body, summary
+
+
+def _handle_clean(argv, *, kanban_db=None):
+    """`hscc clean`: archive the workspace of every finished card, then remove it.
+
+    Returns the exit code for main() to sys.exit(): 0 for a pass that reported
+    no error, 1 when the engine reported one (an unreadable board, a workspace
+    that vanished mid-apply, a failed archive), 2 for bad usage. Skips alone are
+    a clean pass — keeping a workspace is the verb working, not failing.
+
+    ``kanban_db`` is the engine's injection seam and this verb never passes it
+    in production: with None the engine resolves hermes exactly like
+    ``kanban_live.collect()`` does. Tests use it for a temp root.
+    """
+    # Invariant D, second line of defence (the shape cmd_heal keeps for direct
+    # callers): a help token ANYWHERE in the raw tail prints the same bytes
+    # main()'s DAEMON_COMMANDS intercept prints — same COMMAND_HELP source —
+    # and returns BEFORE argparse, before the engine import and before
+    # plan_clean. `hscc clean --help` normally never reaches here at all.
+    if _help_token_index(argv) is not None:
+        print("hscc clean")
+        print(f"  {COMMAND_HELP['clean']}")
+        return 0
+
+    # Lazy on purpose: `hscc --help`, `hscc clean --help` and every other
+    # top-level verb must not pay for (or trigger) the engine's imports.
+    from hscc_daemon import workspace_clean
+
+    opts, err = _parse_clean_args(argv)
+    if err:
+        print(_CLEAN_USAGE, file=sys.stderr)
+        print(f"hscc clean: {err}", file=sys.stderr)
+        return 2
+
+    plan = workspace_clean.plan_clean(
+        days=opts["--days"] if opts["--days"] is not None
+        else workspace_clean.DEFAULT_DAYS,
+        boards=None if opts["--board"] is None else [opts["--board"]],
+        kanban_db=kanban_db,
+        deep=opts["--deep"])
+    # `kanban_db` is forwarded so the executor's ROOT AUTHORITY is the same
+    # board authority the plan was derived from. Production passes None and the
+    # engine resolves hermes itself — that is the D2 gate for a plan that
+    # arrived through `--json`, and forwarding changes it for no one: a caller
+    # who can inject a lib already owns the whole board view. Without the
+    # forward an injected temp root is re-checked against the live root and
+    # every apply skips itself as "not under <live root>".
+    result = (workspace_clean.execute(plan, apply=True, kanban_db=kanban_db)
+              if opts["--apply"] else None)
+
+    if opts["--json"]:
+        # The engine's dict VERBATIM: the plan for a dry run, the result for
+        # --apply. No Rich, no ANSI, no added timestamp, nothing renamed —
+        # `sort_keys` only fixes key order so the same plan is byte-stable.
+        payload = result if result is not None else plan
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1 if payload.get("errors") else 0
+
+    header, body, summary = _clean_report_lines(plan, result)
+    console = theme.make_console(highlight=False)
+    console.print(f"[label]{theme.esc(header[0])}[/label]")
+    console.print(f"[label]{theme.esc(header[1])}[/label]")
+    console.print("")
+    for line in body:
+        console.print(theme.esc(line))
+    console.print("")
+    console.print(f"[label]{theme.esc(summary)}[/label]")
+    errors = [str(e) for e in (plan.get("errors") or [])]
+    if result is not None:
+        errors += [str(e) for e in (result.get("errors") or [])]
+    return 1 if errors else 0
+
+
 # Per-command --help support
 DAEMON_COMMANDS = {
     "start", "stop", "status", "install", "uninstall", "plist",
     "log", "check", "watch", "triggers", "notify", "verify", "stats",
     "throughput", "autoscale", "escalate", "bootstrap", "update",
+    # `clean` is a member so `hscc clean --help` / `-h` print COMMAND_HELP and
+    # exit 0 BEFORE the dispatch: the audit's invariant D probes every member
+    # with sandboxed-HOME write diffs and port canaries, and a --help that
+    # reached plan_clean would be a red gate, not a nit.
+    "clean",
 }
 
 
@@ -2937,6 +3311,16 @@ def main():
     # execs the installer; reaching here means a real run.
     if cmd == "bootstrap":
         rc = _handle_bootstrap()
+        sys.exit(rc)
+
+    # 'clean' verb (t_fc9296a7) — the kanban workspace hygiene over the
+    # t_274530ae engine. MUST sit after the DAEMON_COMMANDS help intercept
+    # above (like bootstrap): `hscc clean --help` / `-h` print COMMAND_HELP and
+    # exit 0 there, so a help token can never reach plan_clean. The handler
+    # keeps its own guard for direct callers and imports the engine lazily for
+    # the same reason.
+    if cmd == "clean":
+        rc = _handle_clean(args[1:])
         sys.exit(rc)
 
     # 'verify'
