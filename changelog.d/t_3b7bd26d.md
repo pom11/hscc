@@ -60,8 +60,13 @@ task: t_3b7bd26d
   "asked for the patched constant" pin. **M0** no-op control green.
 * `test_workspace_clean_deep.py` + `test_workspace_clean.py` + `test_workspace_clean_cli.py`:
   **115 passed, 1 skipped** (the pre-existing `real_hermes` skip), leg interpreter.
-* Full `hscc_daemon` leg at the tip: see the PR body (posted after the storm host
-  emptied, so the timing is unopposed).
+* Full `hscc_daemon` leg at the tip: **not stamped by this card, and that is stated
+  rather than papered over.** The host never emptied inside the run — this card's own
+  induced storm (3 concurrent legs, the thing the flake needed) plus another worker's leg
+  were still finishing when the run's budget ran out, and a contended leg wall is not a
+  quotable number. The leg is left to the merge-queue gate, which runs the whole suite at
+  the head regardless. What *is* measured here: the matched before/after A/B above, the
+  3-file clean run, the mutation battery, and the two harness checks.
 * Hermeticity: test-only diff, no product change, no new probe surface. Everything stays
   inside the file's own `cache_sandbox` (HOME/TMPDIR under `tmp_path`, every one of the
   seven cache binaries resolved into the shim dir); the injection delegates to the
