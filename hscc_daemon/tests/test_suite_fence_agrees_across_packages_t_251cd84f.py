@@ -66,9 +66,14 @@ def _discover_copies():
     """
     found = set()
     for dirpath, dirnames, filenames in os.walk(_REPO):
+        # `build`/`dist` are not theoretical: a packaging case materialises
+        # ``hscc-project/build/lib/flightdeck/core/tmux_chat.py`` mid-run (measured —
+        # it appeared as a "fifth predicate" in a full-roster leg run). Those are
+        # gitignored artefacts of a copy this pin already covers, not copies.
         dirnames[:] = [d for d in dirnames
                        if d not in ("tests", ".git", "__pycache__", "archive",
-                                    "node_modules")]
+                                    "node_modules", "build", "dist", ".venv", "venv",
+                                    "site-packages", ".tox", ".eggs", ".pytest_cache")]
         for name in filenames:
             if not name.endswith(".py"):
                 continue
