@@ -80,6 +80,10 @@ DETAILS = (
     # merge queue: read only, writes closed
     "`merge_queue_status`",
     "never enqueues, drops, pauses or",
+    # the per-PR hold: the parking lever is named, and why a pull is not it
+    "`hscc merge-queue hold`",
+    "`hscc merge-queue unhold`",
+    "only a pull: the next empty tick auto-enqueues",
     # autodown: read only, arming is the operator's
     "`autodown_status`",
     "never arms, disarms, "
@@ -630,6 +634,32 @@ def test_the_no_tool_decisions_stay_written_down(decision):
     """
     section = _section_only(orchestrators.main_cluster_control_block())
     assert DECISIONS[decision] in section, f"{decision} is no longer written down"
+
+
+def test_the_per_pr_hold_is_the_named_parking_lever():
+    """Parking one PR is `hold`, and the section says why a pull is not one.
+
+    The symptom this closes (t_662753d6, wording owned by t_c354c61c): PRs
+    "parked" with ``hscc merge-queue remove`` came back on their next push,
+    because auto-enqueue runs on every empty tick and the only existing
+    suppression covers a PR that just failed a red gate on the SAME head. The
+    agent doing the parking has to be told both halves — the verb that holds,
+    and the reason the verb it reached for does not — or it goes back to
+    ``remove`` plus a PR comment and re-pulls by hand.
+
+    Both verbs are written as full ``hscc ...`` code spans, so the dispatch pin
+    above checks them against ``merge_queue_cli.py``: a hold the CLI does not
+    route would redden here and not in prose.
+    """
+    section = _section_only(orchestrators.main_cluster_control_block())
+    for verb in ("`hscc merge-queue hold`", "`hscc merge-queue unhold`"):
+        assert verb in section, f"{verb} is missing from the write-half list"
+    assert "only a pull" in section, "the section stopped saying a pull is not a hold"
+    assert "auto-enqueues" in section, "the re-queue mechanism behind the hold went missing"
+    assert "survives a push" in section, "the hold's own guarantee went missing"
+    assert "project-wide lever" in section, (
+        "the pause/hold scope distinction went missing — a hold is per PR, "
+        "pause halts every queued PR in the project")
 
 
 def test_the_operators_only_actions_are_named():
