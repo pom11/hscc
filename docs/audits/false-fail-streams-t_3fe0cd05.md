@@ -1,7 +1,7 @@
 # False-fail health streams (DGX / gateway / NAS) — root-cause & evidence report
 
 Task t_3fe0cd05. Branch wt/false-fail-streams (off dev). Worktree
-/Users/desac/dev/hscc/.worktrees/t_3fe0cd05.
+~/dev/hscc/.worktrees/t_3fe0cd05.
 
 Observed 2026-09-09: dgx FAIL, gateway FAIL (ok=False job=True vllm=False
 mux=True "all 40 multiplex profile(s) served"), nas FAIL ("NAS probe timed out
@@ -19,13 +19,13 @@ hscc_daemon/health.py's _SPARKRUN_STATUS_SCRIPT still imported it:
     from sparkrun.core.cluster_manager import ClusterManager, query_cluster_status
 Reproduced under sparkrun's own interpreter (/tmp/repro_status_old.py):
     ImportError: cannot import name 'query_cluster_status' from
-    'sparkrun.core.cluster_manager' (/Users/desac/sparkrun/src/sparkrun/core/cluster_manager.py)
+    'sparkrun.core.cluster_manager' (~/sparkrun/src/sparkrun/core/cluster_manager.py)
 So the structured path ALWAYS raised, the check fell back to text-parsing
 `sparkrun status`, and DGX reported ok=False regardless of the operator's
 (real, separate) PATH fix. The daemon log confirmed the structured path was
 failing every tick:
     [WARN] structured sparkrun status unavailable — falling back to
-    `sparkrun status` text-parse (venv_py='/Users/desac/sparkrun/.venv-sparkrun-py313/bin/python')
+    `sparkrun status` text-parse (venv_py='~/sparkrun/.venv-sparkrun-py313/bin/python')
 
 Fix (committed 8a41036): ported _SPARKRUN_STATUS_SCRIPT to the replacement API
 (verified live under sparkrun's interpreter, /tmp/repro_status_new.py):
@@ -133,7 +133,7 @@ delay detection of a stall that never resolves.
 =======================================================================
 Full-suite result
 =======================================================================
-HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh
+HSCC_TEST_PY=~/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh
   ✓ hscc-bootstrap
   ✓ hscc-commands
   ✗ hscc-roles (pytest exit 1)   <-- PRE-EXISTING, see below
@@ -146,7 +146,7 @@ hscc_daemon/tests/ alone: 1053 passed.
 
 The sole failure is hscc-roles/tests/test_generator.py::test_every_hscc_owned_
 worker_profile_has_role_spec: FileNotFoundError:
-/Users/desac/.hermes/profiles/devops-engineer/profiles — a missing profiles
+~/.hermes/profiles/devops-engineer/profiles — a missing profiles
 dir in the devops-engineer profile. PRE-EXISTING: identical failure in the
 prior full-suite run /tmp/full_tests2.log (Sep 9, before this branch's commit).
 Unrelated to the health checks; my commit touches only hscc_daemon/health.py.

@@ -80,9 +80,9 @@ Before (`hscc start`, deployed pre-fix code):
     [INFO] Daemon starting
     OK  hscc_daemon started (PID 82897)
     hermes plugin compat: `hermes_cli.kanban_db.has_spawnable_ready` moved to `hermes_cli.kanban_db_dispatch.has_spawnable_ready`. The old path is kept only for external plugins and is removed on 2026-09-14; update your import.
-    /Users/desac/.hermes/plugins/hscc_daemon/dispatcher_wedge.py:236: HermesPluginCompatWarning: ...
+    ~/.hermes/plugins/hscc_daemon/dispatcher_wedge.py:236: HermesPluginCompatWarning: ...
     hermes plugin compat: `hermes_cli.kanban_db.has_spawnable_review` moved to `hermes_cli.kanban_db_dispatch.has_spawnable_review`. ...
-    /Users/desac/.hermes/plugins/hscc_daemon/dispatcher_wedge.py:238: HermesPluginCompatWarning: ...
+    ~/.hermes/plugins/hscc_daemon/dispatcher_wedge.py:238: HermesPluginCompatWarning: ...
 
 After (deployed post-fix code):
 
@@ -102,7 +102,7 @@ ALL GREEN — hscc-bootstrap, hscc-commands, hscc-roles, hscc-cluster,
 hscc-project, hscc_daemon, sparkrun-hermes, hscc-api (hscc_daemon alone:
 1160 passed, 52.06s).
 
-p313 (`/Users/desac/miniconda3/envs/p313/bin/python`), `scripts/run_tests.sh`:
+p313 (`~/miniconda3/envs/p313/bin/python`), `scripts/run_tests.sh`:
 ALL GREEN — hscc-bootstrap, hscc-commands, hscc-roles, hscc-cluster,
 hscc-project, hscc_daemon, sparkrun-hermes, hscc-api (hscc_daemon alone:
 1157 passed, 3 skipped — the 3 skipped are exactly the new regression tests

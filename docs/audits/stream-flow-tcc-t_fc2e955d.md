@@ -9,7 +9,7 @@ processes.
 gateway LAN IP is referred to as <GATEWAY_IP>.)
 
 ## Decisive evidence (all commands under the daemon's own interpreter,
-~/.hermes/hermes-agent/venv/bin/python, cwd=/Users/desac)
+~/.hermes/hermes-agent/venv/bin/python, cwd=~)
 
 1. Same host, different processes — the endpoint is UP and routable:
      nc -vz <GATEWAY_IP> 8000      -> "Connection ... port 8000 ... succeeded!"

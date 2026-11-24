@@ -35,7 +35,7 @@ so no writer can leave the other half-growing.
   (4 tests): size cap, gzip generations valid + content preserved, retention
   limited to backupCount, and existing-large-file-never-truncated.
 
-Verified: `/Users/desac/miniconda3/envs/p313/bin/python -m pytest -q
+Verified: `~/miniconda3/envs/p313/bin/python -m pytest -q
 hscc_daemon/tests/test_daemon_ops.py` → `35 passed`. Functional smoke:
 writing well past the cap on a temp log yields `daemon.log` ≤ cap plus
 `daemon.log.1.gz` / `daemon.log.2.gz` valid gzip archives.

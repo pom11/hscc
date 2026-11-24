@@ -107,9 +107,9 @@ Interpreter 1 — ~/.hermes/hermes-agent/venv/bin/python (final merged tree):
     hscc-api        786 passed, 1 skipped
     ALL GREEN (exit 0)
 
-Interpreter 2 — /Users/desac/miniconda3/envs/p313/bin/python (merged tree):
+Interpreter 2 — ~/miniconda3/envs/p313/bin/python (merged tree):
 
-  HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python scripts/run_tests.sh
+  HSCC_TEST_PY=~/miniconda3/envs/p313/bin/python scripts/run_tests.sh
     hscc-bootstrap  272 passed
     hscc-commands   69 passed
     hscc-roles      114 passed

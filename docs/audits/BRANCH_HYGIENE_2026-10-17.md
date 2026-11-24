@@ -428,7 +428,7 @@ no force, no rewrites, no tag changes):
 
 Recovery anchors created BEFORE deletion: **65 refs** under
 `refs/hygiene-2026-10-17/<branch>` in the local main checkout
-(`/Users/desac/dev/hscc`), each pinned to the deleted tip recorded in
+(`~/dev/hscc`), each pinned to the deleted tip recorded in
 Appendix A. Restore any single branch with:
 
 ```
