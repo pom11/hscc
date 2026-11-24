@@ -208,21 +208,40 @@ class GuardError(RuntimeError):
 
 # ── pure detection ───────────────────────────────────────────────────────────
 
-def find_in_text(text):
-    """Return [(line_no, matched), ...] for every forbidden occurrence.
+def all_hits(text):
+    """EVERY match on every line — the gate's view (``scan_blob`` builds from this).
 
-    EVERY match on a line, not the first one, and that matters more now than it
-    did with one class: the home class is advisory, so a line-shaped
-    ``first match wins`` rule would let ``/Users/<user>/x`` followed by a real LAN
-    address on the same line report only the home path, and the *blocking* address
-    would walk out of the gate unseen.
-    One regex, one pass, both classes in the same list —
-    ``is_home_occurrence`` says which class a match is, and ``address_hits`` /
-    ``home_hits`` are the per-class views.
+    Not the same function as ``find_in_text``, and the difference is load-bearing
+    now that one class is advisory: with ``first match wins`` a line holding a home
+    path *and* a real LAN address reported only the home path, so the *blocking*
+    address left the gate unseen and the commit passed. Pinned by
+    test_an_address_never_hides_behind_a_home_path_on_the_same_line.
     """
     hits = []
     for i, line in enumerate(text.split("\n"), 1):
         hits.extend((i, m.group(0)) for m in FORBIDDEN.finditer(line))
+    return hits
+
+
+def find_in_text(text):
+    """Return [(line_no, matched_address), ...], at most one hit per line.
+
+    The pre-existing contract, restored deliberately: this builds ``file:line``
+    findings, and ``scripts/ledger_scrub.py`` imports it on the assumption of one
+    hit per line (its own ``test_count_is_per_address_not_per_line`` pins exactly
+    that, and counts every address on the line separately via ``FORBIDDEN.subn``).
+    The guard's gates use ``all_hits``; do not "unify" the two and silently change
+    what the ledger tick records.
+
+    Both classes come back in one list, because the pattern is ONE regex and a
+    caller that wants the whole verdict must not run two searches and merge them.
+    ``is_home_occurrence`` says which class a match is.
+    """
+    hits = []
+    for i, line in enumerate(text.split("\n"), 1):
+        m = FORBIDDEN.search(line)
+        if m:
+            hits.append((i, m.group(0)))
     return hits
 
 
@@ -232,7 +251,7 @@ def is_home_occurrence(matched):
 
 
 def address_hits(text):
-    """The address-only view of ``find_in_text``.
+    """The address-only view of ``all_hits``.
 
     For the places that must reason about an *address* specifically while the home
     class is still advisory: ``report``'s fix text, and the compiled-`.pyc` test,
@@ -240,12 +259,12 @@ def address_hits(text):
     runner lives inside that user's home directory, and is not the thing that test
     is blind to.
     """
-    return [(i, v) for i, v in find_in_text(text) if not is_home_occurrence(v)]
+    return [(i, v) for i, v in all_hits(text) if not is_home_occurrence(v)]
 
 
 def home_hits(text):
-    """The home-path-only view of ``find_in_text``."""
-    return [(i, v) for i, v in find_in_text(text) if is_home_occurrence(v)]
+    """The home-path-only view of ``all_hits``."""
+    return [(i, v) for i, v in all_hits(text) if is_home_occurrence(v)]
 
 
 # ── the home class: advisory first, then blocking (t_3480956c) ───────────────
@@ -396,7 +415,7 @@ def scan_blob(rel, data):
         data = data.decode("utf-8", errors="ignore")
     return [home_offender(rel, line, matched) if is_home_occurrence(matched)
             else f"{rel}:{line}: {matched}"
-            for line, matched in find_in_text(data)]
+            for line, matched in all_hits(data)]
 
 
 def scan_paths(root, rels, read=None):
