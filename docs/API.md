@@ -332,7 +332,12 @@ Without `"confirm": true` the same call returns:
 { "error": { "code": "confirm_required", "message": "this action is destructive and requires \"confirm\": true in the request body to dispatch a card", "speak": "Confirmation required to dispatch a card." } }
 ```
 
-### Orchestrator chat (POST — confirm-gated)
+### Orchestrator chat (job API)
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| POST | `/v1/orchestrator/chat` | Start an orchestrator chat **job**: validate + confirm-gate + resolve the project synchronously, then invoke hermes on a background thread and answer **`202` immediately** with `{job_id, project, status: "queued", elapsed, profile, session, speak}` — never the reply. Three keys are conditional and absent in the ordinary case: `notice` (the resolved orchestrator profile is busy with running kanban work — or its busyness cannot be verified), `session_created` (`{profile, title, session}` — this project's chat session did not exist and was created on first use) and `session_rotation` (`{profile, title, retired_session, retired_title, session, reason}` — the session was retired and recreated because compaction had positive evidence of failing). `400 bad_request` (missing/empty `prompt`, malformed attachment), `400 unknown_project`, `409 confirm_required`. Shipped consumer: iOS `OrchestratorChatJobResponse` (`Models.swift`, `HSCCClient.swift`). | ⚠ confirm |
+| GET | `/v1/orchestrator/chat/{id}` | Poll one chat job. Always `{job_id, project, status, elapsed}`; `+ notice` while the job is still live and a busy notice was set at submission (DROPPED the moment the job turns terminal — a finished job never tells you to poll); `status: "done"` adds `reply`, `profile`, `session`, `speak`; a job carrying an error adds `error: {code, message, speak}` with `code` one of `orchestrator_error` / `orchestrator_unavailable` / `orchestrator_timeout` / `orchestrator_stopped`. `elapsed` is a live counter while `queued`/`running` and is **frozen at the termination instant** for every terminal state, so it always agrees with `status` and `error`. Unknown/expired id → `404 not_found`. Read-only: the orchestrator was already messaged by the POST, so no `confirm`. Shipped consumer: iOS `OrchestratorChatJobStatus` (`Models.swift`, `HSCCClient.swift`). | read |
 
 `POST /v1/orchestrator/chat` talks to a project's **orchestrator directly**,
 bypassing Telegram. This is the conversational endpoint of the API — the one
@@ -348,6 +353,7 @@ like every other mutating endpoint.
 | `project` | string \| null | no | Project name; absent/`null` → the ONE **main orchestrator** (named at bootstrap, default `general`). Unknown project → `400 unknown_project`. |
 | `prompt` | string | yes | What to ask the orchestrator. Missing/empty → `400 bad_request`. |
 | `confirm` | bool | yes | Must be `true`, else `409 confirm_required`. |
+| `image_data` + `image_mime` | string + string | no | An optional screenshot/photo attached to the message, `image_data` base64 and `image_mime` its type. **The two must come together** — one without the other is `400 bad_request`, as is non-base64, an empty image, or one over the decoded-size cap. |
 
 Project → orchestrator resolution follows the C1 convention
 (`hscc-roles/orchestrators.py`): a named project resolves to profile

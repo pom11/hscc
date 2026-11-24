@@ -43,8 +43,6 @@ UNDOCUMENTED_ROUTES = {
     ("POST", "/v1/memory/{node_id}/delete"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/memory/{node_id}/edit"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("GET", "/v1/node-pauses"): "surface: named outside the Endpoint reference only — see docs/DESIGN-api.md; deferred: t_d47d1562",
-    ("POST", "/v1/orchestrator/chat"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
-    ("GET", "/v1/orchestrator/chat/{id}"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/orchestrator/chat/{id}/stop"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/profile/editor/{profile}"): "ios: the shipped iOS client calls this route and the Endpoint reference does not name it — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/profile/export"): "surface: named outside the Endpoint reference only — see docs/audits/confirm-gate-audit-t_c77f243f.md; deferred: t_d47d1562",

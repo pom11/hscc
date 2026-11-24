@@ -70,6 +70,13 @@ SHAPE_UNCHECKED = {
         "answers {jobs, speak}, or {speak} alone when the store is unreadable",
     "GET /v1/mobile/summary":
         "carries no per-board key at all when the board listing is unavailable",
+    # routes_orchestrator._job_dict builds its keys per job state: {job_id,
+    # project, status, elapsed} always; +notice while live; +reply/profile/
+    # session/speak on `done`; +error on any job that carries one. No single
+    # key set is the truth, so pinning one would publish a fiction.
+    "GET /v1/orchestrator/chat/{id}":
+        "key set varies with the job's status -- see the Orchestrator chat "
+        "table; no single top-level key set is the contract",
 }
 
 _REPO_ROOT = Path(api_server.__file__).resolve().parent.parent
