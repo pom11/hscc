@@ -3491,3 +3491,269 @@ def test_which_wait_listed_pr_is_eligible_for_a_base_refresh():
                                      info(_RED_CHECK, state="MERGED"))
     assert not mq._red_on_stale_base({"pr": 1},
                                      info(_RED_CHECK, isDraft=True))
+
+
+# ── wait-list hand-back: red for its own reasons (t_bcc4e414) ───────────────
+#
+# The refresh (above) is the queue's last move. After it there are two kinds of
+# red left in the wait list: a base the branch will not move onto (a conflict —
+# never retried), and a check that is red AGAIN on the current base. Both are
+# verdicts on the PR, and until now the wait list sat on them silently while the
+# card waited for nobody. These cases pin the hand-back and, more importantly,
+# its bound: one hand-back per (PR, base sha), with the entry still waiting.
+
+def _named_red(*names, extra=()):
+    """A rollup of named FAILURE check runs — so a body can be checked for names."""
+    return ([{"__typename": "CheckRun", "name": n, "status": "COMPLETED",
+              "conclusion": "FAILURE"} for n in names] + list(extra))
+
+
+def _handback_recorder(seen):
+    def handback(card, assignee, body):
+        seen.append((card, assignee, body))
+        return True
+    return handback
+
+
+def test_a_conflicted_base_update_is_commented_on_and_handed_back_once(tmp_path):
+    """A conflict is the queue's dead end: it says so, once, and keeps waiting."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}},
+                rollup=_named_red("scripts"), update_results=["conflict"])
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    handed, logged = [], []
+
+    def drain():
+        return mq._drain_waiting("alpha", cfg, state_path=state,
+                                 gh_runner=gh, git_runner=subprocess.run,
+                                 handback=_handback_recorder(handed),
+                                 log=lambda msg, *a, **k: logged.append(msg))
+
+    drain()                       # tick 1: the update is ATTEMPTED, not reported
+    assert gh.updates == [9] and handed == [] and gh.comments == []
+
+    drain()                       # tick 2: the conflict is the author's problem
+    assert len(handed) == 1 and len(gh.comments) == 1, (handed, gh.comments)
+    assert handed[0][0] == "t_pr9" and handed[0][1] == "worker"
+    body = gh.comments[0][-1]
+    assert "cannot be moved onto the current base" in body
+    assert "Failing check(s): scripts" in body        # names what is red
+    assert _origin_sha(pair)[:12] in body             # the base it was tried on
+    assert pair["branch"] in body                     # resolve step: its own ref
+    assert any("handed back to card t_pr9: conflict" in line for line in logged)
+
+    # The bound: three more ticks, still one comment and one board handback.
+    for _ in range(3):
+        drain()
+    assert len(handed) == 1 and len(gh.comments) == 1, (handed, gh.comments)
+    assert gh.updates == [9]                  # a conflict is never retried
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert [e["pr"] for e in ps["waiting"]] == [9] and ps["queue"] == []
+    entry = _waiting(state, "alpha", 9)
+    assert entry["handed_back_main_sha"] == _origin_sha(pair)
+    assert entry["handed_back_at"]
+
+
+def test_a_red_check_on_the_refreshed_base_hands_the_card_back_once(tmp_path):
+    """Red on the base the queue itself moved it onto is the author's verdict."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=_named_red("unit", "lint"))
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    handed, logged = [], []
+
+    def drain():
+        return mq._drain_waiting("alpha", cfg, state_path=state,
+                                 gh_runner=gh, git_runner=subprocess.run,
+                                 handback=_handback_recorder(handed),
+                                 log=lambda msg, *a, **k: logged.append(msg))
+
+    drain()                       # tick 1: refreshed onto the current main
+    assert gh.updates == [9] and handed == []
+    assert not _waiting(state, "alpha", 9).get("handed_back_main_sha")
+
+    drain()                       # tick 2: red again on THAT base
+    assert len(handed) == 1 and len(gh.comments) == 1, (handed, gh.comments)
+    assert handed[0][0] == "t_pr9"
+    body = gh.comments[0][-1]
+    assert "red again on that base" in body
+    assert "Failing check(s): unit, lint" in body
+    assert any("handed back to card t_pr9: red-after-refresh" in line
+               for line in logged), logged
+    assert gh.updates == [9]      # card 1's bound still holds: no second update
+    drain()
+    assert len(handed) == 1       # once per main sha
+
+    # Main moves: the PR gets its one free re-run on the NEW base first (no
+    # blaming the author for a base that may have been broken), and only then a
+    # second hand-back — the bound is per main sha, not per PR.
+    _advance_main(pair["repo"], 2)
+    drain()
+    assert gh.updates == [9, 9] and len(handed) == 1
+    drain()
+    assert len(handed) == 2 and len(gh.comments) == 2
+
+    # And it was never dropped: green now returns it to the FIFO as always.
+    gh.rollup = _GREEN_CHECK
+    assert drain() == [9]
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [9] and ps["waiting"] == []
+
+
+def test_a_green_or_unmovable_waiting_pr_is_never_handed_back(tmp_path):
+    """Green returns to the FIFO; a closed or draft PR is left strictly alone."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"], "headRefOid": pair["head"]}})
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+    handed = []
+
+    def drain():
+        return mq._drain_waiting("alpha", cfg, state_path=state,
+                                 gh_runner=gh, git_runner=subprocess.run,
+                                 handback=_handback_recorder(handed))
+
+    assert drain() == [9]
+    assert handed == [] and gh.comments == [] and gh.updates == []
+
+    # Same red, but the PR is closed: not the queue's to comment on any more.
+    gh.merged = [10]
+    gh.heads[10] = {"headRefName": pair["branch"], "headRefOid": pair["head"]}
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(10, pair["branch"])])
+    gh.rollup = _named_red("scripts")
+    assert drain() == []
+    assert handed == [] and gh.comments == []
+    assert gh.updates == []       # and no refresh burned on a closed PR either
+
+
+def test_a_waiting_entry_with_no_card_is_handed_back_to_its_branch_card(
+        tmp_path, monkeypatch):
+    """`wt/t_x` IS the card: a manually added PR still reaches its author."""
+    pair = _repo_pair(tmp_path)
+    branch = _new_branch(pair["repo"], "wt/t_branch_card")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    cfg["board"] = "alpha"
+    _board_seam(monkeypatch, _board_with_cards(
+        tmp_path, [("t_branch_card", "hand back please", "running")]))
+    gh = FakeGh({12: {"headRefName": "wt/t_branch_card", "headRefOid": branch}},
+                rollup=_named_red("scripts"))
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[{"pr": 12, "card": None, "assignee": None,
+                    "branch": "wt/t_branch_card",
+                    "enqueued_at": mq._now_iso(), "attempts": 0}])
+    handed = []
+
+    def drain():
+        return mq._drain_waiting("alpha", cfg, state_path=state,
+                                 gh_runner=gh, git_runner=subprocess.run,
+                                 handback=_handback_recorder(handed))
+
+    drain()                       # the refresh attempt
+    drain()                       # red on the current base -> hand back
+    assert [h[0] for h in handed] == ["t_branch_card"], handed
+    # The board supplies the assignee the entry never had, so the reassign lands.
+    assert handed[0][1] == "worker", handed
+    assert "wt/t_branch_card" in gh.comments[0][-1]
+
+
+def test_hand_back_through_the_production_default_runner_shape(tmp_path):
+    """No injected git runner and no injected handback: the daemon's own path.
+
+    The drain's base probe runs through `_default_runner`, and the handback
+    resolves to the module-level `default_handback` the daemon gets when `tick`
+    injects nothing — the seam that once broke every production call while the
+    injected runners passed. (conftest fences that handback's board write, so
+    this proves the wiring without touching a live card.)
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    cfg = mq.project_config("alpha", registry_path=registry)
+    gh = FakeGh({9: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=_named_red("scripts"))
+    state = _state(tmp_path)
+    _park(state_path=state, project="alpha",
+          entries=[_waiting_entry(9, pair["branch"])])
+
+    for _ in range(2):
+        assert mq._drain_waiting("alpha", cfg, state_path=state,
+                                 gh_runner=gh) == []
+
+    assert gh.updates == [9] and len(gh.comments) == 1, gh.calls
+    entry = _waiting(state, "alpha", 9)
+    assert entry["handed_back_main_sha"] == _origin_sha(pair)
+    assert entry["handed_back_at"]
+
+
+def test_the_hand_back_rule_and_its_once_per_base_sha_bound():
+    """The predicate table: which red goes back to whom, and when it stops."""
+    def info(rollup, **over):
+        return {"state": "OPEN", "isDraft": False,
+                "statusCheckRollup": rollup, **over}
+
+    sha, other = "a" * 40, "b" * 40
+    # Nothing tried yet on this base: card 1 refreshes, nobody is blamed.
+    assert mq._own_red_reason({"pr": 1}, sha) is None
+    # Tried against THIS base and red: the author's turn.
+    assert mq._own_red_reason({"refreshed_main_sha": sha}, sha) \
+        == "red-after-refresh"
+    # Tried against an OLDER base: that red is stale, so it is card 1's turn.
+    assert mq._own_red_reason({"refreshed_main_sha": other}, sha) is None
+    # A conflict is a wall whatever CI says about the head.
+    assert mq._own_red_reason({"update_conflict": True}, sha) == "conflict"
+    # The bound: at most once per (PR, base sha)...
+    assert mq._own_red_reason({"update_conflict": True,
+                               "handed_back_main_sha": sha}, sha) is None
+    assert mq._own_red_reason({"refreshed_main_sha": sha,
+                               "handed_back_main_sha": sha}, sha) is None
+    # ...and a newer base re-arms it.
+    assert mq._own_red_reason({"update_conflict": True,
+                               "handed_back_main_sha": other}, sha) == "conflict"
+    # No base sha answered: neither pass may act on a guess.
+    assert mq._own_red_reason({"update_conflict": True}, None) is None
+    assert mq._own_red_reason({"refreshed_main_sha": sha}, None) is None
+
+    # Who is even eligible: red/cancelled or conflicted, OPEN and not a draft.
+    assert mq._waiting_own_red({}, info(_RED_CHECK))
+    assert mq._waiting_own_red({}, info(_CANCELLED_CHECK))
+    assert mq._waiting_own_red({"update_conflict": True}, info(_GREEN_CHECK))
+    assert not mq._waiting_own_red({}, info(_GREEN_CHECK))
+    assert not mq._waiting_own_red({}, info(_PENDING_CHECK))
+    assert not mq._waiting_own_red({}, info([]))
+    assert not mq._waiting_own_red({}, info(_RED_CHECK, state="CLOSED"))
+    assert not mq._waiting_own_red({}, info(_RED_CHECK, state="MERGED"))
+    assert not mq._waiting_own_red({}, info(_RED_CHECK, isDraft=True))
+    assert not mq._waiting_own_red({"update_conflict": True},
+                                   info(_RED_CHECK, state="CLOSED"))
+
+    # The card id comes from the branch, the failing names from the rollup.
+    assert mq._card_from_branch("wt/t_1a2b3c") == "t_1a2b3c"
+    assert mq._card_from_branch("  wt/t_x  ") == "t_x"
+    assert mq._card_from_branch("main") is None
+    assert mq._card_from_branch("") is None
+    assert mq._card_from_branch(None) is None
+    assert mq._failing_check_names(info(_named_red("unit", "lint"))) == [
+        "unit", "lint"]
+    assert mq._failing_check_names(info(_named_red(
+        "legacy", extra=[{"context": "ci/legacy", "state": "FAILURE"},
+                         {"__typename": "CheckRun", "name": "ok",
+                          "status": "COMPLETED", "conclusion": "SUCCESS"}]))) \
+        == ["legacy", "ci/legacy"]
+    assert mq._failing_check_names(info([])) == []
+    assert mq._failing_check_names(info(_named_red(
+        *[f"c{i}" for i in range(mq.MAX_HANDBACK_CHECK_NAMES + 3)])))[-1] \
+        == "(+3 more)"
