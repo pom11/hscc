@@ -328,6 +328,7 @@
 <li><code>hscc notify "&lt;title&gt;" "&lt;body&gt;"</code><span class="say">post an alert to the feed (<code>--level</code>, <code>--key</code>); <code>hscc notify list</code> reads it newest first (<code>--since</code>, <code>--limit</code>, <code>--json</code>) and <code>hscc notify ack</code> marks one seen. The feed is what the Needs Me widget shows; hscc sends no push notifications.</span></li>
 <li><code>hscc bootstrap</code><span class="say">the installer, runnable from a repo checkout, a plugin tree or a Homebrew install; it creates the main orchestrator and its board.</span></li>
 <li><code>hscc update --check</code><span class="say">ask GitHub whether a newer release exists. Reads only; it never installs anything.</span></li>
+<li><code>hscc clean</code><span class="say">archive then remove finished cards' workspaces, and prune rebuildable caches. Dry run until <code>--apply</code>; the safe set (package caches, stale pytest dirs) runs there, and the deep set — the whole uv cache, Xcode DerivedData, simulator caches, the Trash — only with <code>--apply --deep --confirm</code>, because deep never runs without an operator asking for it.</span></li>
 </ul>
 </div>
 <!-- COMMANDS:END -->

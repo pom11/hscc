@@ -80,6 +80,9 @@ Utility
                        flags pass through: --yes --dry-run --force --no-backup
       --skip-{skills,roles,daemon,patches,cli} (see `hscc help bootstrap`)
   update --check       Check GitHub releases for a newer version (read-only)
+  clean [--apply] [--deep] [--confirm] [--days N] [--board <slug>] [--json]
+      Archive + remove finished cards' workspaces, then prune rebuildable
+      caches (DRY RUN until --apply; --deep needs --confirm)
 
 Examples
   hscc status                          # is the daemon healthy?
