@@ -57,6 +57,10 @@ import os
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
+# The in-suite fence is ONE predicate, shared with the row registry: see
+# ``doctor_rows.under_pytest`` for why the module-local test is not enough.
+import doctor_rows  # flat sibling, next to this module (hscc-bootstrap/)
+
 CHECK_NAME = "snap firmware-notifier mask (node-recovery)"
 
 #: Verdicts for ONE node. Deliberately narrower than the installer's outcome
@@ -171,7 +175,7 @@ def _default_ssh_factory() -> Callable[[str], Callable[[str, int], Dict[str, Any
     inside a pytest process: a suite that forgot to inject its transport must
     fail loudly rather than ssh to the live fleet.
     """
-    if "pytest" in sys.modules:
+    if doctor_rows.under_pytest():
         def refused_in_suite(_host: str):
             return _refused_transport("production ssh transport refused inside a "
                                       "pytest process — inject ssh_factory")
@@ -191,7 +195,7 @@ def _topology_hosts() -> List[str]:
     Returns [] under pytest: a bare ``check()`` call in the suite must never
     shell out to the live sparkrun CLI.
     """
-    if "pytest" in sys.modules:
+    if doctor_rows.under_pytest():
         return []
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:

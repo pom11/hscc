@@ -80,6 +80,10 @@ import os
 import re
 import sys
 
+# The in-suite fence is ONE predicate, shared with the row registry: see
+# ``doctor_rows.under_pytest`` for why the module-local test is not enough.
+import doctor_rows  # flat sibling, next to this module (hscc-bootstrap/)
+
 #: The row's printed name. Kept in this module so the doctor row, the refusal
 #: and the UNVERIFIABLE fallback can never print three spellings of one check.
 CHECK_NAME = "node pauses (operator overlay)"
@@ -229,7 +233,7 @@ def doctor_check(directory=None) -> dict:
     docstring); ``None`` means the overlay module's own default root, HOME's
     ``~/.hscc``, which is what ``hscc node pause`` writes.
     """
-    if directory is None and "pytest" in sys.modules:
+    if directory is None and doctor_rows.under_pytest():
         return refused_check()
     core = _load_core()
     if core is None:
