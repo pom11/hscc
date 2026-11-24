@@ -23,8 +23,11 @@ mid-flight is recovered to the head of its project's queue on the next tick.
 
 A PR that is not green yet sits in ``waiting``; EVERY tick re-checks that list
 (one cheap ``gh pr view`` per entry) and returns the green ones to the FIFO,
-whether or not the active queue is empty.  A wait-listed PR whose checks are
-``red`` (or ``cancelled``) gets its branch updated onto the current base with
+whether or not the active queue is empty.  That drain is the ONLY door back:
+the claim step never takes an entry out of ``waiting`` itself, because anything
+still there was probed on this same tick and found not green.  A wait-listed
+PR whose checks are ``red`` (or ``cancelled``) gets its branch updated onto
+the current base with
 ``gh pr update-branch``, which re-runs CI on a base that may since have been
 fixed; the entry records the base sha it was refreshed onto, so this happens
 at most once per base commit per PR and cannot loop.  After a push the new
@@ -4170,7 +4173,6 @@ def tick(*, state_path=None, root=None, registry_path=None,
             with _file_lock():
                 doc = load_state(state_path)
                 best = None
-                source = "queue"
                 for idx, name in enumerate(members):
                     cfg = cfgs.get(name)
                     ps = _project_state(doc, name)
@@ -4190,28 +4192,28 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         if best is None or rank < best[0]:
                             best = (rank, name, pos, entry)
                 if best is None:
-                    # The active FIFO is empty: retry one wait-listed PR. They
-                    # are appended on the way in, so this round-robins instead
-                    # of letting one permanently non-green PR starve the rest.
-                    source = "waiting"
-                    for idx, name in enumerate(members):
-                        cfg = cfgs.get(name)
-                        ps = _project_state(doc, name)
-                        if (cfg is None or not effective_enabled(cfg, ps)
-                                or ps.get("paused")):
-                            _note_decline(declined, name, ps, cfg)
-                            continue
-                        for pos, entry in enumerate(ps.get("waiting") or []):
-                            if _hold_of(ps, entry.get("pr")) is not None:
-                                continue
-                            rank = (str(entry.get("enqueued_at") or ""), idx,
-                                    pos)
-                            if best is None or rank < best[0]:
-                                best = (rank, name, pos, entry)
-                if best is not None:
+                    # Nothing is queued, so this repo group is idle for this
+                    # tick. The claim step deliberately does NOT reach into
+                    # `waiting`.
+                    #
+                    # `_drain_waiting` ran above, on THIS tick, and probed every
+                    # waiting entry with the same predicate `process_entry` uses
+                    # (`_pr_ready`), so anything still in the wait list here was
+                    # just proved not green. Reaching for it could only end one
+                    # way: `process_entry` re-reads the PR, calls it not green,
+                    # and bounces the entry straight back — a `checks not green;
+                    # moved to the wait list` pair per tick, forever (PR #710 on
+                    # 2.17.5 burned 16 of them, and the "round-robins to the
+                    # back" this used to claim never happened: the entry keeps
+                    # its `enqueued_at`, so the same oldest PR won every tick).
+                    # The wait list has one door back into the FIFO — a green
+                    # rollup in `_drain_waiting` — plus an explicit
+                    # `hscc merge-queue add`, which is an operator retry.
+                    pass
+                else:
                     _, claim_name, pos, entry = best
                     ps = _project_state(doc, claim_name)
-                    entry = ps[source].pop(pos)
+                    entry = ps["queue"].pop(pos)
                     ps["in_flight"] = entry
                     save_state(doc, state_path)
             # Outside the file lock: a log write must not extend how long the
