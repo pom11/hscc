@@ -47,7 +47,6 @@ UNDOCUMENTED_ROUTES = {
     ("POST", "/v1/profiles/{name}/describe"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/profiles/{name}/rename"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("POST", "/v1/projects/new"): "surface: named outside the Endpoint reference only — see docs/audits/2026-11-23-agent-surface.md; deferred: t_d47d1562",
-    ("GET", "/v1/projects/new/plan"): "surface: the handler docstring is the only prose that names it — see hscc-api/routes_bootstrap.py; deferred: t_d47d1562",
     ("GET", "/v1/projects/{name}/hygiene"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("GET", "/v1/projects/{name}/incidents"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
     ("GET", "/v1/projects/{name}/metrics"): "surface: named outside the Endpoint reference only — see ios-app/Sources/HSCC/HSCCClient.swift; deferred: t_d47d1562",
