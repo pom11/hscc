@@ -1536,7 +1536,7 @@ def _stream_text(stream):
     return stream or ""
 
 
-def _kill_gate_group(proc):
+def _kill_gate_group(proc, *, reap=True):
     """Best-effort: kill the timed-out gate's WHOLE process group, then reap it.
 
     The gate runs `start_new_session=True`, so its pid is also its process-group
@@ -1547,6 +1547,17 @@ def _kill_gate_group(proc):
     `os.killpg` is looked up on the module at call time, which is also what lets
     a test record which group the kill was aimed at without any real process
     being spawned.
+
+    `reap=False` is for the caller that is itself blocked in
+    ``proc.communicate()`` right now (:class:`_GateCancelWatch`).  Two threads
+    must not ``communicate()`` the same `Popen`: each closes the pipe fds in its
+    own teardown, the second one closes a descriptor the first already freed,
+    and the blocked reader surfaces `OSError(9, 'Bad file descriptor')` — which
+    `_run_gate` would report as "could not run gate" for a gate that ran fine.
+    The blocked reader reaps on its own as soon as the group dies: EOF, then
+    `_wait()`, then the exit status.  `reap=True` stays the default because the
+    timeout path calls this *after* `communicate()` has already raised and
+    handed the descriptors back.
 
     Best-effort by design, for two reasons.  A process can die between the kill
     and the reap (the `ESRCH` case), and the group can already be gone; and
@@ -1565,6 +1576,8 @@ def _kill_gate_group(proc):
         proc.kill()
     except Exception:
         pass
+    if not reap:
+        return
     try:
         # Reaps the shell so a killed gate leaves no zombie behind for the
         # daemon's own lifetime.
@@ -1637,7 +1650,11 @@ class _GateCancelWatch:
                 # group without the reason it died for.
                 self.reason = reason
                 self._fired.set()
-                _kill_gate_group(self.proc)
+                # `reap=False`: the tick thread is inside `communicate()` on this
+                # very proc, and it is the one that will read the EOF and collect
+                # the exit status. A second reader here would double-close the
+                # pipes — see _kill_gate_group.
+                _kill_gate_group(self.proc, reap=False)
                 return
 
     def start(self):
