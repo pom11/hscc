@@ -169,13 +169,20 @@ def test_status_still_reports_launchd_running_when_the_probe_answers(
 # --------------------------------------------------------------------------- #
 
 def _drive_stop(monkeypatch, tmp_path, row, live_pid=None):
-    """Run the verb. Returns (stdout, stderr, rc, signals, bootouts, pid_file)."""
+    """Run the verb. Returns (stdout, stderr, rc, signals, bootouts, pid_file).
+
+    `get_pid` is stubbed so "there is a live process" is a premise of the test
+    rather than a property of the machine running it, and the pid FILE is planted
+    to match: `write_stopped` removes a file, so the file being there is what
+    makes "must not write 'stopped' over a live process" an assertion instead of
+    a tautology.
+    """
     pid_file = tmp_path / "api.pid"
+    if live_pid is not None:
+        pid_file.write_text(str(live_pid))
     monkeypatch.setattr(api_cli, "API_PID_FILE", str(pid_file))
     monkeypatch.setattr(api_cli, "API_LOG_FILE", str(tmp_path / "api.log"))
     monkeypatch.setattr(api_cli.daemon_ops, "log", lambda *a, **k: None)
-    # The liveness read is stubbed so "there is a live process" is a premise of
-    # the test, not a property of the machine running it.
     monkeypatch.setattr(api_cli.daemon_ops, "get_pid",
                         lambda pid_file=None: live_pid)
     signals_sent = []

@@ -1222,6 +1222,17 @@ class TestApiStatusNeverPrintsToken:
         return out.getvalue(), err.getvalue(), rc
 
     def test_status_not_running_never_prints_token(self, monkeypatch, tmp_path):
+        # The premise is "the API is genuinely stopped", so the supervisor has to
+        # ANSWER that: launchd was asked and has no unit loaded. Since t_8bf34130
+        # a probe that could not run reports the unknown instead of "not running",
+        # and this test must not depend on that degradation to exist.
+        import hscc_daemon.api_cli as api_cli_mod
+        monkeypatch.setattr(api_cli_mod, "_launchd_matters", lambda: True)
+        monkeypatch.setattr(
+            api_cli_mod, "launchd_status",
+            lambda **kw: {"available": True, "loaded": False, "pid": None,
+                          "state": None,
+                          "note": "Could not find service in domain"})
         out, err, rc = self._run_status(monkeypatch, tmp_path, None, "SUPERSECRETTOKEN")
         assert rc == 0
         assert "not running" in out
