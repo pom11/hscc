@@ -393,6 +393,11 @@ def _project_state(doc, project):
     # retried only when the active queue is empty (or when auto-enqueue sees
     # the PR become green), never in the head slot.
     ps.setdefault("waiting", [])
+    # A per-PR HOLD lives here, in the SAME document as `enabled`/`paused`:
+    # `[{pr, reason, held_at}]`. Project-wide `pause` stops a whole board to park
+    # one PR; a hold is the per-PR lever (t_662753d6). Unlike the red-gate
+    # suppression it is NOT lifted by a head change — only by `unhold`.
+    ps.setdefault("held", [])
     ps.setdefault("in_flight", None)
     ps.setdefault("last", None)
     return ps
@@ -468,6 +473,74 @@ def set_enabled(project, enabled, state=None, path=None):
     with _lock, _file_lock():
         doc = state if state is not None else load_state(path)
         _project_state(doc, project)["enabled"] = bool(enabled)
+        save_state(doc, path)
+        return doc
+
+
+def _hold_of(ps, pr):
+    """The hold record covering ``pr`` in a project state, or ``None``."""
+    try:
+        want = int(pr)
+    except (TypeError, ValueError):
+        return None
+    for hold in (ps or {}).get("held") or []:
+        if isinstance(hold, dict) and int(hold.get("pr") or 0) == want:
+            return hold
+    return None
+
+
+def is_held(project, pr, state=None, path=None):
+    """True when ``pr`` sits on ``project``'s hold list (a read)."""
+    doc = state if state is not None else load_state(path)
+    return _hold_of(_project_state(doc, project), pr) is not None
+
+
+def hold_pr(project, pr, reason=None, state=None, path=None):
+    """Park ``pr`` on ``project`` until an operator ``unhold``s it.
+
+    A hold is a pull that STICKS. :func:`remove_from_queue` takes a PR out of
+    the FIFO and the next empty tick's auto-enqueue puts it straight back: the
+    only existing suppression covers a PR that just failed a RED GATE on the
+    same head SHA, so the push a review request causes is exactly the event that
+    lifts it. Auto-enqueue, the every-tick wait-list drain and the claim all
+    honour a hold REGARDLESS of the head SHA, and skip it before the PR's
+    readiness is probed, so a held PR costs the queue nothing.
+
+    Like ``remove``, it also pulls the PR out of the queue, the wait list and a
+    live claim — which is what stops a gate that is running right now. Nothing
+    here releases a hold: not a push, not green checks, not elapsed time. That
+    is the point; the release is the operator's :func:`unhold_pr`.
+    """
+    pr = int(pr)
+    with _lock, _file_lock():
+        doc = state if state is not None else load_state(path)
+        ps = _project_state(doc, project)
+        ps["queue"] = [e for e in ps["queue"] if int(e.get("pr", 0)) != pr]
+        ps["waiting"] = [e for e in ps["waiting"] if int(e.get("pr", 0)) != pr]
+        if ps.get("in_flight") and int(ps["in_flight"].get("pr", 0)) == pr:
+            ps["in_flight"] = None
+        held = [h for h in ps.get("held") or []
+                if isinstance(h, dict) and int(h.get("pr") or 0) != pr]
+        held.append({"pr": pr,
+                     "reason": " ".join(str(reason or "").split()) or None,
+                     "held_at": _now_iso()})
+        ps["held"] = held
+        save_state(doc, path)
+        return doc
+
+
+def unhold_pr(project, pr, state=None, path=None):
+    """Release a hold — the ONLY way one ends.
+
+    The PR is not put back by this call: it re-enters the queue the ordinary
+    way, by the next tick's auto-enqueue or an explicit ``merge-queue add``.
+    """
+    pr = int(pr)
+    with _lock, _file_lock():
+        doc = state if state is not None else load_state(path)
+        ps = _project_state(doc, project)
+        ps["held"] = [h for h in ps.get("held") or []
+                      if isinstance(h, dict) and int(h.get("pr") or 0) != pr]
         save_state(doc, path)
         return doc
 
@@ -792,6 +865,8 @@ def view(*, registry_path=None, state_path=None, board=None, now=None):
                     entry={"pr": pr, "card": last.get("card"),
                            "branch": last.get("branch")},
                     last=last, now_s=now_s))
+        held = [dict(h) for h in (ps.get("held") or [])
+                if isinstance(h, dict)]
         out[name] = {
             "enabled": enabled,
             "enabled_source": enabled_source(cfg, ps),
@@ -801,6 +876,10 @@ def view(*, registry_path=None, state_path=None, board=None, now=None):
             "repo": (cfg or {}).get("repo"),
             "queue_len": len(queue),
             "waiting_len": len(waiting),
+            # A hold is not a queue row: it is a parked PR with a reason, shown
+            # beside the queue rather than inside it (t_662753d6).
+            "held_len": len(held),
+            "held": held,
             "rows": rows,
             "last": last,
         }
@@ -1755,7 +1834,13 @@ def _auto_enqueue_suppressed(doc, project, cand, cfg, gh_runner=None):
     pick it straight back up: that reruns the gate, comments and reassigns the
     card every minute. Auto-enqueue is suppressed until the PR head changes
     (a worker push) or the operator adds it again explicitly.
+
+    A per-PR HOLD is checked FIRST and is not the same kind of thing: it does
+    not expire when the head moves, and only ``unhold_pr`` lifts it. Checking it
+    here, ahead of the probe, is what keeps a held PR off the network too.
     """
+    if _hold_of(_project_state(doc, project), cand.get("pr")) is not None:
+        return True
     last = _project_state(doc, project).get("last")
     if not isinstance(last, dict) or last.get("result") != "red-gate":
         return False
@@ -2597,7 +2682,10 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
     with _file_lock():
         ps = _project_state(load_state(state_path), project)
         waiting = [dict(entry) for entry in (ps.get("waiting") or [])
-                   if isinstance(entry, dict)]
+                   if isinstance(entry, dict)
+                   # A held PR is not handed back to the FIFO — and is not even
+                   # probed for it (t_662753d6).
+                   and _hold_of(ps, entry.get("pr")) is None]
     if not waiting:
         return []
     base = expected_base(cfg, git_runner) or "main"
@@ -3009,6 +3097,11 @@ def tick(*, state_path=None, root=None, registry_path=None,
                             q = ps["queue"]
                             for cand in found:
                                 pr = int(cand["pr"])
+                                if _hold_of(ps, pr) is not None:
+                                    # Re-checked against the FRESH document: a
+                                    # hold that landed during the network probe
+                                    # wins (t_662753d6).
+                                    continue
                                 if _find_entry(q, pr) is not None:
                                     continue
                                 waiting = _find_entry(ps["waiting"], pr)
@@ -3094,6 +3187,11 @@ def tick(*, state_path=None, root=None, registry_path=None,
                             or ps.get("paused")):
                         continue
                     for pos, entry in enumerate(ps.get("queue") or []):
+                        if _hold_of(ps, entry.get("pr")) is not None:
+                            # A held entry stays put — an explicit `add` can put
+                            # one here — and is never claimed, while the FIFO
+                            # behind it still runs (t_662753d6).
+                            continue
                         rank = (str(entry.get("enqueued_at") or ""), idx, pos)
                         if best is None or rank < best[0]:
                             best = (rank, name, pos, entry)
@@ -3109,6 +3207,8 @@ def tick(*, state_path=None, root=None, registry_path=None,
                                 or ps.get("paused")):
                             continue
                         for pos, entry in enumerate(ps.get("waiting") or []):
+                            if _hold_of(ps, entry.get("pr")) is not None:
+                                continue
                             rank = (str(entry.get("enqueued_at") or ""), idx,
                                     pos)
                             if best is None or rank < best[0]:
@@ -3176,6 +3276,8 @@ def _project_view(ps, cfg, enabled=None):
         "paused": bool(ps.get("paused")),
         "queue": list(ps.get("queue") or []),
         "waiting": list(ps.get("waiting") or []),
+        "held": [dict(h) for h in (ps.get("held") or [])
+                 if isinstance(h, dict)],
         "in_flight": ps.get("in_flight"),
         "last": ps.get("last"),
         "repo": (cfg or {}).get("repo"),
