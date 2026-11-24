@@ -278,6 +278,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/readme-review-t_d90de5b6.md` — README review (root + hscc-cli + install), 2026-09-25. **superseded** by `docs/audits/README_REVIEW_2026-10-15.md`.
 - `docs/audits/audit-ux-pass-2026-09-24.md` — full audit + UX pass epic decomposition.
 - `docs/audits/dead-code-audit-t_58f21007.md` — dead-code & dangling-reference audit.
+- `docs/audits/verdict-api-autodown-status-read_t_85875291.md` — verdict on the question the parent read-surface audit left open: may a server route append to the daemon's log? `GET /v1/autodown/status` shares `hscc autodown status`'s payload builder, so one un-cached GET appended the kanban interlock WARN to `$HSCC_HOME/daemon.log` from the API process. VIOLATION, with the three readings that fail to keep the write, the repo's own-log convention (`api_cli.py`'s `log_file=API_LOG_FILE`, the rename-rotating handler), and the shipped shape — `autodown.silent_read()` around the one borrowed call, kanban leaf only, WARN budget deferred not spent. **live**
 - `docs/audits/confirm-gate-audit-t_c77f243f.md` — confirm-gate audit: iOS client ↔ hscc-api.
 
 ### iOS / Phase-1 reconciliation & screen audits (record)
