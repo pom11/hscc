@@ -189,18 +189,98 @@ def pin_conflict(kanban_db, board, *, env=None):
     return PinConflict(board, pin, with_pin, unpinned, _fences(env))
 
 
+def _warn_route(message):
+    """This module's ONE nameable WARN route — the only call :func:`silent_read` mutes.
+
+    An indirection rather than a bare ``log(...)`` at the call site for the same
+    reason ``autodown._kanban_warn`` is one (PR #723): the seam a borrowed read must
+    not speak through has to be nameable, so a door can borrow exactly this route and
+    nothing else. Deferred import kept: the guard must never become a reason a read
+    cannot open a board.
+    """
+    from hscc_daemon.daemon_ops import log
+    log(message, "WARN")
+
+
+#: Messages a muted read already echoed in THIS process. Separate from ``_WARNED``
+#: on purpose: ``_WARNED`` is the once-per-(pin, board) *file* alarm budget and a
+#: read may not spend it (see :func:`silent_read`), while a ``--live`` monitor
+#: re-enters a muted window every few seconds and must not reprint one line per
+#: tick into the operator's terminal.
+_MUTED_ECHOED: set = set()
+
+
+def _echo_muted_warn(message):
+    """The muted route: the operator's terminal, never the log file.
+
+    Deliberately NOT a silent stub. ``board_pin``'s conflict has no payload
+    anywhere — no door publishes a ``PinConflict`` (``kanban_live.py:404`` names
+    THIS warning as the operator's notice) — so muting the fact as well as the file
+    would turn a loud operator misconfiguration into a silent one. ``stderr`` is not
+    the invariant; the file is (t_88abe739). And unlike ``daemon_ops.log``'s echo
+    this one is not gated on the daemon's pid file (``daemon_ops.py:630``), so a CLI
+    read on a host with a live daemon gets *more* notice than before, not less.
+    """
+    if message in _MUTED_ECHOED:
+        return
+    _MUTED_ECHOED.add(message)
+    try:
+        import sys
+        print(f"[WARN] {message}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 — logging must never break the read
+        pass
+
+
+@contextlib.contextmanager
+def silent_read():
+    """Borrow this module's WARN route for one documented read, then give it back.
+
+    Inside the window :func:`_warn_route` is :func:`_echo_muted_warn`, so the
+    once-per-process pin warning a read emits goes to stderr instead of being
+    appended to ``$HSCC_HOME/daemon.log`` — the door's read creates no file. Used by
+    the documented read doors (``kanban_blocked.list_blocked_tasks``,
+    ``kanban_cli._cmd_stale`` / ``_cmd_monitor``, ``cards_live.Monitor``,
+    ``autodown_cli._cmd_status``), never by a write or a daemon loop: a
+    ``mode="write"`` conflict raises ``BoardPinConflict`` and never reaches
+    :func:`_emit`, so what a write path owns is untouched.
+
+    Restoring the budget is the half that keeps this honest. ``_emit`` adds the key
+    to ``_WARNED`` *before* it logs, so a caller that muted only the route would also
+    silently spend the process's single warning per (pin, board): a long-lived
+    process importing a read door would then never tell its operator about the
+    conflict from a path that does own the file. The read is allowed to be quiet; it
+    is not allowed to spend somebody else's alarm (the rule t_2c218de8's fix shipped
+    with, and the reason ``autodown.silent_read`` restores ``_KANBAN_LOAD`` too).
+
+    Scoped to the ONE call and undone in ``finally``. It mutates module globals, so
+    a process with concurrent logging threads would see the window — the CLI doors
+    this guards are one-shot processes (``--live`` is one long read, and
+    ``_MUTED_ECHOED`` is what keeps that shape from spamming).
+    """
+    global _warn_route
+    real_route = _warn_route
+    saved = set(_WARNED)
+    _warn_route = _echo_muted_warn
+    try:
+        yield
+    finally:
+        _warn_route = real_route
+        _WARNED.clear()
+        _WARNED.update(saved)
+
+
 def _emit(message, warned, key):
-    """Warn once per key. Emission goes through ``daemon_ops.log`` (daemon log
+    """Warn once per key. Emission goes through :func:`_warn_route` (daemon log
     file + stderr echo) — never stdout, which is the machine channel for every
     HSCC CLI (``--json`` is a raw dump there; see ``daemon_ops.log`` docstring
     and the t_18318fd9 JSON-corruption incident). Logging must never break the
-    read, so any failure is swallowed."""
+    read, so any failure is swallowed. A documented read door wraps its call in
+    :func:`silent_read`, which routes the same warning to stderr instead."""
     if key in warned:
         return
     warned.add(key)
     try:
-        from hscc_daemon.daemon_ops import log
-        log(message, "WARN")
+        _warn_route(message)
     except Exception:  # noqa: BLE001
         try:
             import sys
