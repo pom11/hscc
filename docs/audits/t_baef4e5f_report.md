@@ -17,14 +17,14 @@ merged to main + pushed + deployed.
 Same harness as the prior Rich epic cards:
 
 ```
-export HOME=/Users/desac
+export HOME=~
 HSCC_TEST_PY=<interp> bash scripts/run_tests.sh
 ```
 
 | Interpreter | Path | Result |
 |---|---|---|
 | A (hermes venv) | `~/.hermes/hermes-agent/venv/bin/python` | **786 passed, 1 skipped — ALL GREEN** |
-| B (conda p313) | `/Users/desac/miniconda3/envs/p313/bin/python` | **786 passed, 1 skipped — ALL GREEN** |
+| B (conda p313) | `~/miniconda3/envs/p313/bin/python` | **786 passed, 1 skipped — ALL GREEN** |
 
 hscc-roles package alone: **114 passed** under BOTH interpreters (baseline 101
 on main + 13 new no-ANSI / byte-identity regression tests added by this card).
@@ -45,7 +45,7 @@ above. All 8 packages green.
 - **Push:** `git push origin main` → `0c8c8b9..a04b5a3 main -> main` on
   github.com/pom11/hscc. **YES.**
 - **Deploy:** `python3 hscc-bootstrap/install_payload.py` from the primary
-  checkout `/Users/desac/dev/hscc` → all payload entries installed with
+  checkout `~/dev/hscc` → all payload entries installed with
   backups, `missing: []` (hscc-roles included). Verified in the deployed
   runtime `~/.hermes/plugins/hscc-roles/`: `_theme.py` present, 13
   `make_console` usages, only the 3 byte-identical `json.dumps` paths remain

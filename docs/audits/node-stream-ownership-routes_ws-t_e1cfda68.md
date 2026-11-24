@@ -15,7 +15,7 @@ audit.
 Verdict: neither component owns the failing node stream.
 
 - "settlng" is not a real component anywhere in this repo. `git grep -ni settlng` /
-  `grep -rni settlng` across /Users/desac/dev/hscc (excluding worktrees) returns EMPTY.
+  `grep -rni settlng` across ~/dev/hscc (excluding worktrees) returns EMPTY.
   (Strictly the only near-hit is a test helper named `_settle_until_client_gone` in
   hscc_daemon/tests/test_engine_wedge.py:356,377,381 — unrelated test scaffolding, not a
   stream owner.) The name appears to be a corruption of "settling" / "session" from the

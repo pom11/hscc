@@ -130,7 +130,7 @@ nothing running and launched a duplicate. Same mechanism produces the observed
 
 `scripts/run_tests.sh` reports `✗ hscc-roles`: one test,
 `hscc-roles/tests/test_generator.py::test_every_hscc_owned_worker_profile_has_role_spec`,
-fails with `FileNotFoundError: /Users/desac/.hermes/profiles/devops-engineer/
+fails with `FileNotFoundError: ~/.hermes/profiles/devops-engineer/
 profiles`. That is an environment-dependent test scanning a Hermes profiles
 directory that does not exist in this (devops-engineer) profile environment. It
 is unrelated to this change: my commit touches only `hscc_daemon/` (that dir

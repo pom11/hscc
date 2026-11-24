@@ -168,7 +168,7 @@ but NOT a crash bug. Not fixed. **[reasoning]**
 data (longest real strings):
 - projectRow name: `.body.weight(.medium)` — wraps across lines fine at SE width.
 - board+repo HStack: repo has `.lineLimit(1).truncationMode(.middle)` +
-  lineLimit(1). Long repo `/Users/desac/dev/ecofire-powerbi` middle-truncates.
+  lineLimit(1). Long repo `~/dev/ecofire-powerbi` middle-truncates.
   The HStack gives board and repo no compression-priority; at SE width a long
   board + long repo could crowd, but repo truncates. Generally survives. ✅
 - cardRow meta `HSMetaLine([board, status])` (SearchView.swift:243): PLAIN HStack,

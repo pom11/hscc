@@ -14,7 +14,7 @@ per-card results accumulate below.
      `git -C .worktrees/<id> rev-parse --abbrev-ref HEAD`
   3. Worktree workspace, NEVER scratch.
   4. Suite green under BOTH interpreters: ~/.hermes/hermes-agent/venv/bin/python AND
-     /Users/desac/miniconda3/envs/p313/bin/python (run_tests.sh default is hermes venv).
+     ~/miniconda3/envs/p313/bin/python (run_tests.sh default is hermes venv).
      Never assert live config/board in a test. Failures "pre-existing" only after measuring
      same suite on main AND branch under same interpreter.
   5. Never assert a constant's literal value; assert the constant.

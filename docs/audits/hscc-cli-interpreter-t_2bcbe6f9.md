@@ -5,7 +5,7 @@
 `hscc-cli/pyproject.toml` declares `hscc = "hscc_cli:main"`, so pip/uv
 regenerates the console script with the shebang of whatever interpreter it is
 installed INTO. The CLI was being installed into a bare conda p313
-(`/Users/desac/miniconda3/envs/p313`), so `$(which hscc)` carried `#!…/p313/bin/python3.13`.
+(`~/miniconda3/envs/p313`), so `$(which hscc)` carried `#!…/p313/bin/python3.13`.
 
 That is wrong on two independent axes, both confirmed by import probes:
 
@@ -76,7 +76,7 @@ detects the venv from its `pyvenv.cfg` and the console script lands in
 
 ## Verify-by-execution results (on this host)
 
-Shebang: `head -1 $(which hscc)` → `#!/Users/desac/.hermes/hermes-agent/venv/bin/python`. ✓
+Shebang: `head -1 $(which hscc)` → `#!~/.hermes/hermes-agent/venv/bin/python`. ✓
 Idempotency: three consecutive install_cli.py runs → `verified` each time, shebang stable. ✓
 Repair path: artificially set shebang to p313, ran install_cli.py → shebang back on venv. ✓
 
