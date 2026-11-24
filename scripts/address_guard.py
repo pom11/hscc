@@ -97,11 +97,16 @@ _ADDRESS_BRANCH = (
 )
 
 # The home-path branch. No ``\b`` on either side, and it must not have one:
-# ``\b`` before ``/`` requires a word character in front of the slash, so
-# ``"/Users/desac"`` inside quotes or after ``(`` would dodge the match — the same
+# ``\b`` before ``/`` requires a word character in front of the slash, so a quoted
+# ``"/Users/<user>"`` or a path after ``(`` would dodge the match — the same
 # boundary trap that makes the text scan blind inside a `.pyc` (see
 # docs/audits/address-guard-binary-policy-t_3e6d3db7.md).
 _HOME_USER_CHARS = "A-Za-z0-9._-"
+# Deliberately strict, and one consequence is worth knowing before writing prose
+# here: `.` is a user-name character, so a dotted ellipsis after a home root reads
+# as a user named `...` and is reported. The scrub writes the placeholder, not an
+# ellipsis, and this file's own comments must not plant findings either — the
+# pre-commit hook reported three of them on the first commit of this card.
 # Where a path stops being one: whitespace and the delimiters a shell, a Markdown
 # link or a JSON string puts around it. Truncating here is safe — the offence is
 # the ``/Users/<user>`` prefix, and a shorter match never UNDER-reports.
@@ -112,9 +117,9 @@ def _unsanctioned_home_lookahead():
     """Lookaheads that skip a sanctioned fixture user and match every other one.
 
     ``(?!<name>(?!<user chars>))`` rejects the name only when it is the WHOLE
-    user component, so ``/Users/hscc-fixture`` is allowed while
-    ``/Users/hscc-fixture-2`` is not — an allowlist that silently widened to any
-    name *starting with* a fixture would be the exemption-by-prefix this card
+    user component, so the fixture name alone is allowed while the fixture name
+    plus a suffix is not — an allowlist that silently widened to any name
+    *starting with* a fixture would be the exemption-by-prefix this card
     refuses to write.
     """
     return "".join(
@@ -232,7 +237,8 @@ def address_hits(text):
     For the places that must reason about an *address* specifically while the home
     class is still advisory: ``report``'s fix text, and the compiled-`.pyc` test,
     whose blob legitimately carries its own ``co_filename`` — which on a Linux
-    runner lives under ``/home/...`` and is not the thing that test is blind to.
+    runner lives inside that user's home directory, and is not the thing that test
+    is blind to.
     """
     return [(i, v) for i, v in find_in_text(text) if not is_home_occurrence(v)]
 
