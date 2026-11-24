@@ -26,6 +26,7 @@ nodes or a live cluster.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -1213,7 +1214,9 @@ _HISTORY_ENGINE_IDENTITY = ("tier", "ts", "node", "port", "model", "res", "n",
 #: a 400 that names this whole set — `host=` deliberately is NOT in it:
 #: `host_rollup.host` and `engine_rollup.node` are two column names for one
 #: identity, so `node=` stays the single "which machine" filter for both series.
-_HISTORY_QUERY_KEYS = ("node", "metrics", "window", "tier", "since", "until")
+#: `max_bytes` is the wire budget (t_d732d50d); see ``_parse_history_max_bytes``.
+_HISTORY_QUERY_KEYS = ("node", "metrics", "window", "tier", "since", "until",
+                       "max_bytes")
 
 #: The two request axes, stated on the response as `axis` so a client never
 #: infers "which axis was asked" from which keys happen to be non-null.
@@ -1342,6 +1345,110 @@ def _parse_history_metrics(query, mh, tier: int):
             f"{name} is not a metric the recorder stores.",
         )
     return names
+
+
+# --------------------------------------------------------------------------- #
+# The byte budget (t_d732d50d)
+# --------------------------------------------------------------------------- #
+
+def _parse_history_max_bytes(query, tier):
+    """?max_bytes=<int> -> the wire budget in bytes, or None for "no budget".
+
+    WHY A BYTE BUDGET AND NOT A POINT BUDGET. t_25fcf502 measured this route at
+    119,531 B for its NARROWEST possible 7 d read (one node, one metric) against
+    the contract's ≤ 16 KiB-per-surface soft ceiling — 7.3×, so no `node=` /
+    `metrics=` choice fits and the gap is not in the columns. It is also not in
+    the encoding: tier 2's full width is 2,016 buckets and a `ts` alone costs ~11
+    B, so a columnar shape that pays the timestamp axis once still spends ~22 KB
+    on timestamps for ONE node and ONE metric before a single value rides along.
+    A fixed budget over an unbounded axis has to be met by serving fewer
+    BUCKETS, which is what the fold does; the currency of both the ceiling and
+    the fix is bytes, so the route is given the budget in the ceiling's units.
+
+    The budget is the length of the JSON body, which is exactly the number the
+    client's `Content-Length` names: ``_send_json`` serializes this handler's
+    payload dict verbatim, so the number measured here is the number on the wire.
+    A `served_bytes` key is deliberately NOT added — a payload cannot state its
+    own length without the statement changing the length.
+
+    ``max_bytes`` is refused on the 2 s tier: that tier is the recorder's
+    in-memory ring, its size is already bounded by ``size_bound_bytes()``,
+    t_25fcf502 measured it serving ZERO rows from the API process, and folding
+    raw samples would mint the ``*_max`` columns tier 0 does not store (a peak
+    exists only after a roll-up — see ``_history_vocab``).
+    """
+    from api_server import ApiError
+    raw = query.get("max_bytes")
+    if raw is None:
+        return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise ApiError(
+            400, "bad_request",
+            f"max_bytes must be a whole number of bytes (got {raw!r}); it is "
+            "the ceiling the response body must fit, e.g. max_bytes=16384",
+            "max_bytes must be a whole number of bytes.",
+        )
+    if value < 1:
+        raise ApiError(
+            400, "bad_request",
+            f"max_bytes={value} is not a budget: ask for at least 1 byte, or "
+            "omit max_bytes to be served every stored bucket",
+            "max_bytes must be at least 1.",
+        )
+    if tier == 0:
+        raise ApiError(
+            400, "bad_request",
+            "max_bytes is not supported on a 15 m window: tier 0 is the "
+            "recorder's in-memory 2 s ring, already bounded by its own size "
+            "limit, and folding raw samples would invent the *_max columns "
+            "tier 0 does not store. Ask for max_bytes on window=1h, 6h, 24h "
+            "or 7d instead",
+            "max_bytes needs a rolled-up window (1h, 6h, 24h or 7d).",
+        )
+    return value
+
+
+def _history_pick_fold(mh, tier, bucket_s, max_bytes, render):
+    """The finest stored resolution whose rendered body fits `max_bytes`.
+
+    ``render(factor)`` builds the COMPLETE payload for one fold factor — rows
+    folded, projected, `note` and `speak` included — so what is measured is the
+    body the client will be charged for, not an estimate of it.
+
+    The factors come from the recorder's own ladder (``fold_factors``), all
+    wall-clock aligned, finest first, and the first one that fits wins: a caller
+    that asks for 16 KiB and gets the stored 1-minute buckets back must be served
+    at 1 minute, not at the coarser resolution that also happens to fit.
+
+    When NOTHING fits, the coarsest rung is served and ``budget_met`` comes back
+    False. The alternative — cutting rows until the number fits — is truncation,
+    and truncating the tail of a series is what §5.6 forbids: the newest point is
+    the "now" a widget headlines. Too small a budget is reported, never obeyed by
+    lying.
+
+    Returns ``(factor, payload, budget_met)``; with no budget asked, `(1,
+    render(1), None)` — `None` meaning "no budget was asked, so nothing was
+    measured against one", the same not-a-default convention this payload uses
+    for `store.tier0_resident`.
+    """
+    if max_bytes is None:
+        # `None`, not True: nothing was asked, so nothing was measured against a
+        # budget, and this payload does not put a default in a measurement's
+        # place (the defect #417 removed from `store.tier0_resident`).
+        return 1, render(1, None), None
+    factors = mh.fold_factors(bucket_s)
+    for i, factor in enumerate(factors):
+        payload = render(factor)
+        if len(json.dumps(payload).encode("utf-8")) <= max_bytes:
+            return factor, payload, True
+        if i == len(factors) - 1:
+            # The ladder is exhausted and the body is still over budget. Serve
+            # the coarsest answer the fold can make and say so, rather than
+            # dropping rows to hit a number.
+            return factor, payload, False
+    return 1, render(1), False
 
 
 # --------------------------------------------------------------------------- #
@@ -1625,7 +1732,13 @@ def _speak_cluster_history(payload) -> str:
     plural = lambda n, thing: f"{n} {thing}{'s' if n != 1 else ''}"
     span = (f"Last {payload['window']}" if payload["axis"] == AXIS_WINDOW else
             f"Tier {payload['tier']} over {payload['window_s']} s")
-    return (f"{span} at {payload['resolution']} resolution: "
+    # The fold is said out loud for the same reason it is a key: a listener told
+    # "1-minute resolution" about a series served at 15-minute points has been
+    # told something false, and `speak` is the field a voice surface reads.
+    folded = (f" ({payload['fold']} stored buckets folded into each point"
+              f"{'' if payload['budget_met'] else ', still over the byte budget'}"
+              ")" if payload.get("fold", 1) > 1 else "")
+    return (f"{span} at {payload['resolution']} resolution{folded}: "
             f"{plural(counts['hosts'], 'node point')}, "
             f"{plural(counts['engines'], 'engine point')}.")
 
@@ -1671,6 +1784,9 @@ def handle_cluster_history(server, ctx, query, body):
     since, until, span_s = axis["since"], axis["until"], axis["window_s"]
     node = _parse_history_node(query)
     metrics = _parse_history_metrics(query, mh, tier)
+    # Parsed after the tier is known: the budget is refused on the 2 s tier, and
+    # a 400 that names the axis rule must not fire before the axis is decided.
+    max_bytes = _parse_history_max_bytes(query, tier)
 
     host_vocab, engine_vocab = _history_vocab(mh, tier)
     keep_host = keep_engine = None
@@ -1758,34 +1874,95 @@ def handle_cluster_history(server, ctx, query, body):
         host_rows = []
     if not engines_included:
         engine_rows = []
-    host_rows = _history_project(host_rows, _HISTORY_HOST_IDENTITY, keep_host)
-    engine_rows = _history_project(engine_rows, _HISTORY_ENGINE_IDENTITY,
-                                   keep_engine)
 
     store_info["tier0_resident"] = tier0_resident
-    payload["store"] = store_info
-    payload["hosts"] = host_rows
-    payload["engines"] = engine_rows
-    payload["counts"] = {"hosts": len(host_rows), "engines": len(engine_rows)}
-    if error:
-        payload["error"] = error
-    payload["note"] = _history_note(tier, tier0_resident, store_info, error,
-                                    axis["clamp"])
-    payload["speak"] = _speak_cluster_history(payload)
+
+    def render(factor, budget_met=True):
+        """The whole body for ONE fold factor, measured-size and all.
+
+        The fold runs on the recorder's rows BEFORE the ``metrics=`` projection:
+        ``_fold_hosts`` falls back to the plain average when a ``<k>_max`` column
+        is absent, so folding an already-projected row would report an average AS
+        a peak — the exact lie the peak columns exist to prevent.
+
+        ``budget_met`` is what the caller gets back, and the loop that measures
+        the body renders with True first and re-renders with False only when the
+        ladder runs out: the payload on the wire always agrees with its own
+        stated verdict, even though the verdict is only knowable after measuring.
+        """
+        served_hosts = _history_project(
+            mh.fold_rows(host_rows, tier, bucket_s, factor),
+            _HISTORY_HOST_IDENTITY, keep_host)
+        served_engines = _history_project(
+            mh.fold_rows(engine_rows, tier, bucket_s, factor),
+            _HISTORY_ENGINE_IDENTITY, keep_engine)
+        rendered = dict(payload)
+        rendered["store"] = store_info
+        # The four budget keys, stated rather than left to be inferred. `fold` is
+        # 1 and `native_resolution_s` equals `resolution_s` whenever nothing was
+        # folded, so a client has one code to branch on for every response.
+        rendered["max_bytes"] = max_bytes
+        rendered["fold"] = factor
+        rendered["native_resolution_s"] = bucket_s
+        rendered["budget_met"] = budget_met
+        # What was SERVED, per the contract's own rule: a 1-minute tier answered
+        # at 15-minute points must say 900, not 60. `native_resolution_s` above
+        # is the tier's own stored step, so the fold stays derivable both ways.
+        rendered["resolution_s"] = bucket_s * factor
+        rendered["resolution"] = (mh.RES_TIER0 if tier == 0
+                                  else f"{bucket_s * factor}s")
+        rendered["hosts"] = served_hosts
+        rendered["engines"] = served_engines
+        rendered["counts"] = {"hosts": len(served_hosts),
+                              "engines": len(served_engines)}
+        if error:
+            rendered["error"] = error
+        else:
+            rendered.pop("error", None)
+        rendered["note"] = _history_note(tier, tier0_resident, store_info,
+                                         error, axis["clamp"], factor,
+                                         budget_met, bucket_s * factor)
+        rendered["speak"] = _speak_cluster_history(rendered)
+        return rendered
+
+    factor, payload, _met = _history_pick_fold(mh, tier, bucket_s, max_bytes,
+                                               render)
     return 200, payload
 
 
-def _history_note(tier, tier0_resident, store_info, error, clamp="") -> str:
+def _history_note(tier, tier0_resident, store_info, error, clamp="",
+                  factor=1, budget_met=True, served_s=0) -> str:
     """What the payload says about its own emptiness, so a gap explains itself.
 
     The clamp statement rides in the same field: a request whose span the route
     shortened has to say so where a client looks for "why is this answer not what
     I asked for", and a silent shortening is indistinguishable from a fleet that
     was quiet for the rest of the range.
+
+    So does the fold, for the same reason and with the same rule: a series served
+    at 15-minute points is not the series that is stored, and a client that has
+    to learn that by counting timestamps is a client that will draw 5-minute data
+    and label it 15. `budget_met` rides along because a budget the route could
+    not meet is the other half of that sentence, and it is the one case where the
+    honest answer is "it is still too big".
     """
     parts = []
     if clamp:
         parts.append(clamp)
+    if factor > 1:
+        if budget_met:
+            parts.append(
+                f"served folded {factor}:1 — one point per {served_s} s "
+                "instead of the stored buckets, "
+                "so the whole span is present at a coarser step and no tail was "
+                "dropped; peaks are the maximum of the folded buckets, not an "
+                "average")
+        else:
+            parts.append(
+                f"served folded {factor}:1, the coarsest step this route can "
+                "fold to, and the body is STILL over the requested budget: rows "
+                "are never dropped to hit a byte count, so the series is "
+                "complete and too large rather than truncated and small")
     if error:
         parts.append(f"history read failed: {error}")
     elif tier == 0 and not tier0_resident:
