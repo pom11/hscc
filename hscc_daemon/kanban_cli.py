@@ -93,7 +93,8 @@ pause    reclaims every running card (its worker stops, the worktree stays) and
 resume   unblocks EXACTLY the cards pause blocked (each goes to ready or back to
          todo per its parents); cards blocked before the pause stay blocked.
 paused   lists paused boards and what they hold.
-enforce  blocks cards that became ready/running on a paused board since.
+enforce  blocks cards that became ready/running on a paused board since
+         the pause.
 State: ~/.hscc/state/kanban_paused.json.
 """
 
@@ -127,6 +128,9 @@ What the workers on every board are doing: running cards (board,
 worker, run time, heartbeat age), ready cards waiting for a slot,
 per-board counts by status, and the last hour's outcomes. The
 header shows the global kanban.max_in_progress slots in use.
+One compact `mq` line under them covers the local merge queue
+for every enabled project with something in it; the per-PR
+detail is `hscc merge-queue list <proj>`.
 Read-only: never claims, promotes or archives.
 
 Route parity: GET /v1/kanban/running answers this same read

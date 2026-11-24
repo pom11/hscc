@@ -63,11 +63,24 @@ subscription, a board, a config or a registry. The repair belongs to the
 operator's ``hermes kanban notify-unsubscribe`` / ``notify-subscribe`` and to
 the subscribe-side gate; the fix text says so.
 
+Silent, too — and that is the second half of read-only, not a nicety. A log line
+is a file write next to the DBs, so opening everything ``mode=ro`` proves nothing
+if the code path then creates ``$HSCC_HOME/daemon.log``. The one borrowed call
+that can log (``autodown.board_db_paths`` on its unreachable-library path) runs
+inside :func:`_silent_read`, which hands the logger back afterwards — including
+the process's once-per-WARN budget. Pinned by
+``hscc-cluster/tests/test_doctor_tool.py::TestReadOnly::test_the_read_writes_nothing_anywhere``,
+which lives in a DIFFERENT top-level directory from this module: the row's own
+suite is not its whole seam test (t_2c218de8 shipped red on exactly that gap).
+
 Inside a pytest process the row's real inputs are the operator's live boards and
 live session registries, so an uninjected call returns a refusal ERROR naming the
 seams instead (the ``doctor_node_pauses`` / ``doctor_main_only`` fence shape).
-Tests inject fake subscription rows and a fake session registry and therefore
-never touch a gateway, a board or a live registry.
+The fence counts a process that a suite SPAWNED as being inside the suite too —
+see :func:`_under_pytest`, because the door this row feeds runs in one
+(``doctor_tools`` execs ``doctor.py --json`` rather than importing it). Tests
+inject fake subscription rows and a fake session registry and therefore never
+touch a gateway, a board or a live registry.
 """
 
 from __future__ import annotations
@@ -76,6 +89,7 @@ import json
 import os
 import sqlite3
 import sys
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 #: The row's printed name. Kept here (not only in doctor.py) so the verdict and
@@ -123,6 +137,60 @@ _SQLITE_TIMEOUT_S = 2.0
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_HERE)
 _ROLES_DIR = os.path.join(_REPO_ROOT, "hscc-roles")
+
+
+# ── keeping a read silent ───────────────────────────────────────────────────
+
+def _silent(*_args, **_kwargs) -> None:
+    """A logger that writes nothing. Stands in for a borrowed module's logger."""
+
+
+@contextmanager
+def _silent_read(module):
+    """Borrow ``module``'s logger for the duration of one read, then give it back.
+
+    Why this exists: :func:`enumerate_boards` delegates board enumeration to
+    ``hscc_daemon.autodown.board_db_paths``, and when the Hermes library is
+    unreachable that call reports it through ``_note_kanban_unavailable``, which
+    writes ONE WARN through ``daemon_ops.log`` — a file under ``$HSCC_HOME``.
+    For the daemon that is right: the interlock is its own business and it
+    budgets one line per process. For this row it is wrong: ``doctor`` is a
+    read, and
+    ``hscc-cluster/tests/test_doctor_tool.py::TestReadOnly::test_the_read_writes_nothing_anywhere``
+    snapshots a sandbox tree around exactly this door call and asserts that
+    nothing in it changed. The row therefore borrows the logger rather than
+    silencing the module — ``module.log`` is swapped for :func:`_silent`, the one
+    call runs, and the ``finally`` gives the module back what it had.
+
+    Restoring the WARN budget is the half that keeps this honest.
+    ``_note_kanban_unavailable`` sets ``_KANBAN_LOAD["warned"] = True`` *before*
+    it logs, so a caller that muted only the log would also silently spend the
+    process's single WARN: a daemon that imports this row would then never tell
+    its operator about a genuine interlock failure — a fail-open dressed up as a
+    fix. The row's read is allowed to be quiet; it is not allowed to spend
+    somebody else's alarm. So the budget is captured and restored too.
+
+    Nothing becomes invisible. Only the FILE write is muted:
+    ``_note_kanban_unavailable`` records ``ok``/``reason`` in
+    ``_KANBAN_LOAD`` BEFORE it logs, so ``hscc autodown status`` still names why
+    the interlock is unevaluable — the surface that already owns that answer —
+    and this row still reports its own board set as UNCHECKED rather than clean.
+
+    Scoped to the ONE call: the swap is undone in ``finally``, so the daemon's
+    and every other consumer's logging is untouched the moment the read returns.
+    """
+    real_log = getattr(module, "log", None)
+    load = getattr(module, "_KANBAN_LOAD", None)
+    budget = load.get("warned") if isinstance(load, dict) else None
+    if callable(real_log):
+        module.log = _silent
+    try:
+        yield
+    finally:
+        if real_log is not None:
+            module.log = real_log
+        if isinstance(load, dict) and budget is not None:
+            load["warned"] = budget
 
 
 # ── the two declarations this check refuses to duplicate ────────────────────
@@ -181,13 +249,20 @@ def enumerate_boards() -> Dict[str, str]:
     Hermes resolves to the legacy root ``kanban.db``. An empty dict means "could
     not enumerate" (the seam fails closed when Hermes' kanban library is
     unreachable), which :func:`doctor_check` reports instead of calling clean.
+
+    The delegated call runs inside :func:`_silent_read`: its failure path writes
+    a WARN into ``$HSCC_HOME/daemon.log``, and a doctor read writes nothing
+    anywhere — the guard
+    ``hscc-cluster/tests/test_doctor_tool.py::TestReadOnly::test_the_read_writes_nothing_anywhere``
+    snapshots a sandbox tree around the door child and fails on that file.
     """
     try:
         from hscc_daemon import autodown  # noqa: PLC0415
     except Exception:  # noqa: BLE001 - bootstrap-only layout has no daemon sibling
         return {}
     try:
-        paths = autodown.board_db_paths()
+        with _silent_read(autodown):
+            paths = autodown.board_db_paths()
     except Exception:  # noqa: BLE001 - enumeration is Hermes' and may be dark
         return {}
     return {str(slug): str(db) for slug, db in (paths or {}).items()
@@ -400,6 +475,37 @@ def _fix(findings: List[Dict[str, Any]]) -> str:
             "they are the posture this row reports." % (unsub, repoint))
 
 
+def _under_pytest() -> bool:
+    """True when this process is a pytest run — **or a process one spawned**.
+
+    ``"pytest" in sys.modules`` is process-local, and the door this row feeds is
+    a separate interpreter: ``doctor_tools.doctor_findings`` execs
+    ``python3 hscc-bootstrap/doctor.py --json`` instead of importing it (the
+    flat sibling imports only resolve when the script runs as a script). So the
+    row renders in a child that never imported pytest, and the fence alone reads
+    as though it had fired while refusing nothing.
+
+    That is not hypothetical — it is how this row was caught (t_14eae4b5). The
+    door's read-only guard went red the moment the row was registered, because
+    the child took the ambient path: it enumerated and OPENED the operator's
+    boards, and the fail-closed enumeration reached
+    ``autodown._note_kanban_unavailable``, whose once-per-process WARN appended
+    a line to ``$HOME/.hscc/daemon.log`` — a new file inside a HOME the caller
+    had sealed for exactly that assertion. The mute added by t_2c218de8 makes the
+    read quiet; it does not make the read refuse. A suite-spawned door still
+    resolving the operator's boards is the thing this fence exists to forbid, and
+    it is now invisible to a file-diffing guard, so it is pinned by
+    ``test_doctor_orch_subs_fence_reaches_children_t_14eae4b5.py`` instead.
+
+    ``PYTEST_CURRENT_TEST`` is the channel that does cross the spawn: pytest
+    exports it for the duration of each item and every child inherits the
+    environment. It is the same marker the repo already asks of a child rather
+    than inventing a second one (``hscc_daemon/main_cli.py``,
+    ``hscc-api/repl_inject.py``, ``hscc-project/flightdeck/core/tmux_chat.py``).
+    """
+    return "pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
 def doctor_check(hermes_home: Optional[str] = None, *,
                  boards: Optional[Mapping[str, str]] = None,
                  subscriptions: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -422,7 +528,8 @@ def doctor_check(hermes_home: Optional[str] = None, *,
     Hermes' own enumeration — so this row declares ``row_kwargs=("hermes_home",)``
     and nothing else.
 
-    A pytest process that injects nothing gets :func:`refused`: a suite must not
+    A process that injects nothing gets :func:`refused` — a pytest process, or
+    one a pytest process spawned (see :func:`_under_pytest`): a suite must not
     decide its assertions from the operator's live boards, and must not open them.
     Precisely, a *live* read is the ambient board enumeration (no ``boards=`` and
     no ``subscriptions=``) or the ambient lease files (no ``registry=``). Paths a
@@ -433,7 +540,7 @@ def doctor_check(hermes_home: Optional[str] = None, *,
     live_subs = subscriptions is None
     live_registry = registry is None
     ambient_boards = live_boards and live_subs
-    if "pytest" in sys.modules and (ambient_boards or live_registry):
+    if _under_pytest() and (ambient_boards or live_registry):
         return refused()
 
     modes = wake_modes()

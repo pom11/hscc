@@ -128,6 +128,15 @@ what it replaced. (Design rationale stays in `design/`; this directory is the
   `hscc orch waker status|enable|disable` verbs, state + audit schemas, the doctor
   row, and the retirement procedure for the `~/bin/orch-waker` stopgap — including
   the resolved state-file / stream-state collision that once made the built-in inert. **live**
+- `docs/ops/disk-hygiene.md` — `hscc clean`: the kanban workspace hygiene (archive a
+  finished card's workspace, then remove it). The five flags, why the dry run is the
+  default and read-only by construction, the `would` prefix, the engine's closed
+  skip vocabulary (`dirty / unpushed / stashed / unreadable / claim / archive-failed`),
+  what the verb never touches (`~/dev`, `~/.hscc`, hermes config/sessions/memory, the
+  board DBs, comments, attachments, unfinished cards), the archive location under the
+  hermes home and how to restore one with `tar -xzf`, and the standing note that the
+  gateway's weekly `~/bin/clean-mac.sh --apply` crontab line stays until the operator
+  moves it. **live**
 
 ## audit/
 
@@ -161,6 +170,7 @@ docs/audits/`) rather than reading them blind.
 
 - `docs/audits/2026-11-23-agent-surface.md` — agent-surface coverage matrix (t_4c12ff7f): every `hscc` CLI verb × the 26 `hscc-cluster` agent tools × the 12 `hscc-commands` slash commands × the 96 API routes × the bundled skill that documents it, each cell marked MISSING / STALE / INTENTIONALLY CLI-ONLY; per-tool state sources (`serving.json`, `applied_template.json`, `node_pauses.json`, `cluster.json`, daemon state files) and who else writes each; and what `hscc bootstrap` installs from where, with its UPDATE-vs-SKIP semantics measured. Findings F1–F13 + operator decisions D1–D11. **live** — the gate doc for the 2.17.4 tools/skills/profile/doctor/QA cards.
 - `docs/audits/2026-11-23-main-only-surface.md` — the main-only cluster surface, measured against the real Hermes loader: how `plugins.enabled` actually resolves **per home** (no root→profile overlay; the dispatcher injects `HERMES_HOME=<profile dir>`, so 0/52 profile configs enable any plugin and the cluster tools are already absent for workers, project orchs *and* the main orchestrator profile), the six `hscc-cluster` hooks as a 6th surface with the process each one fires in (all six worker-lane, and a disabled plugin keeps neither tools nor hooks), the `_migrate_to_21` grandfather that is one migration away from granting all 52 profiles the full surface, the SOUL/skill text that still promises the tools (`install_soul.py:75-100` → 1 of 53 deployed SOULs), the concrete per-profile YAML, and four hermes-side asks. **live** — the gate doc for the main-only-surface cards (t_e98c6ad4, t_b52e70ba, t_c3a29c37, t_caf98114, t_035b1b0b). (t_1700dfc8)
+- `docs/audits/2026-11-23-sparkrun-passthrough-main-only.md` — LEFT-2 of that audit, measured read-only: how the `sparkrun-hermes` `sparkrun_exec` passthrough registers and for which home (the gate lives inside `register()` via `main_orch.plugin_tools_allowed`, so the per-home `plugins.enabled` tier — not a root overlay — decides, and `profile_name` comes from `HERMES_HOME`), who can call it today (52 scanned configs = root + 51 profiles: enabled in `general` only, plus root-listed-and-inert), why the plugin registers no hooks, and that no worker, dispatcher, hook or gateway-slash path needs the passthrough (slash verbs shell `sparkrun` themselves via `cmdlib`; hooks use their own subprocess). §7 recommends the two atomic cards to cut after operator review: **F1** — `sparkrun_exec` bypasses the `cluster-guard` capacity gate *and* its audit log (`toolset != "hscc-cluster"` early-exits), so `sparkrun stop --all` / `proxy stop` reach the fleet ungated and unlogged; **F2** — four bundled `skills/` dirs in the plugin are inert while `_DESC` points models at them. §9 lists what must NOT be "fixed". **live** — the gate doc for the F1/F2 cards. (t_471788e0)
 - `docs/audits/README_REVIEW_2026-10-15.md` — repo-wide README audit (t_6e1e8443): measurements, per-file verdicts, the R1–R7 target-state spec this docs wave executes from. **live**
 - `docs/audits/CLI_HELP_2026-10-15.md` — CLI help-surface audit: canonical command inventory + REAL EXAMPLE DATA renders (post-F1 forms). The F-lane landed via PR #57; this doc remains the reference for quoted CLI output. **live**
 - `docs/audits/SPARKRUN_041_COMPAT_2026-10-20.md` — sparkrun v0.4.0 → v0.4.1 compat record: deployed topology (fork branch `feat/proxy-least-in-flight-041` @ `1aaa6479`, checkout `~/dev/sparkrun-041-verify`, venv `.venv-sparkrun-041`), live verification, rollback line (`-040` @ `~/dev/sparkrun-live`). **live** — THE current sparkrun topology pointer (supersedes the 0.4.0-era statements in `docs/audits/SPARKRUN_040_COMPAT_2026-10-19.md`)
@@ -219,6 +229,7 @@ docs/audits/`) rather than reading them blind.
 - `docs/audits/backup-retain-atomicity_t_9462260b.md` — backup pile growth + non-atomic backup writes.
 - `docs/audits/drift-guard-test-dir-census-t_69a1c9f2.md` — widening the DIRS drift guard to every `tests/` dir.
 - `docs/audits/run-tests-scripts-leg-t_95d864fc.md` — `run_tests.sh` never ran `scripts/tests`: the fix + evidence.
+- `docs/testing/loadstress-leg.md` — the `loadstress` leg: the stop/sidecar teardown class under bounded CPU pressure, with the measured load and the anti-rot arms.
 - `docs/audits/memory-path-resolution-t_7a16aed0.md` — memory endpoint profile-resolution fix.
 - `docs/audits/t_c95a2137_analyze_access.py` — read-only analysis companion to `docs/audits/2026-10-31-proxy-stalls.md`: reconstructs per-connection structure of the uvicorn access capture from the client ephemeral source port.
 - `docs/audits/t_c95a2137_shape_split.py` — read-only analysis companion: shape split (long-lived vs fresh connections, loopback-holder correlation, response-backlog trace) over the operator capture.
