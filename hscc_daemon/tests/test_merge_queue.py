@@ -1483,6 +1483,7 @@ def test_shared_file_change_falls_back_to_the_full_suite(tmp_path, shared):
 
 
 def test_more_than_three_legs_falls_back_to_the_full_suite(tmp_path):
+    """Case 4a: a diff broader than MAX_LOCAL_TEST_LEGS is not narrowable."""
     _write_leg_roster(tmp_path)
     gates = mq._resolve_gates(
         {"name": "hscc"}, str(tmp_path),
@@ -1491,12 +1492,147 @@ def test_more_than_three_legs_falls_back_to_the_full_suite(tmp_path):
     assert gates[1] == "bash scripts/run_tests.sh"
 
 
-def test_a_diff_outside_every_leg_falls_back_to_the_full_suite(tmp_path):
+# ── the docs-only case: no leg can fail it (t_66c02650) ────────────────────
+#
+# The cases here are the whole contract of :func:`mq._gate_selection`.  Two
+# opposite diffs used to select nothing and therefore run everything: a docs PR
+# and a diff too broad to attribute to a leg.  Separating them is the fix;
+# keeping the *broad* one wide is the safety property, so every case that must
+# stay wide is pinned here and in the kind-level pin below.
+#
+# Measured cost of the old behaviour: PR #725 (one file under docs/audits/)
+# gated all 12 legs, hit `gate timed out after 3600s`, was logged
+# `-> gate-timeout`, returned to the FIFO and re-gated from scratch — while its
+# own GitHub CI was already green.  The timeout cost no attempt, which is why it
+# went unnoticed; the bill was an hour of every PR queued behind it.
+
+def _gate_blob(gates):
+    """Every gate joined, for "this string appears nowhere in the gate"."""
+    return " | ".join(gates)
+
+
+def test_docs_only_diff_runs_the_cheap_doc_gates_and_never_the_roster(tmp_path):
+    """Case 1: docs/** only -> cheap gates, and the pytest roster is NOT invoked."""
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git("docs/audits/2026-11-23-main-only-surface.md"))
+
+    # The address guard stays (it is gate[0] for every diff, docs included)...
+    assert gates[0] == "python3 scripts/address_guard.py --tracked"
+    # ...and these are the two gates a docs change can actually fail.
+    assert any("changelog_fragments.py check" in g for g in gates)
+    assert any("readme_lint.py --strict" in g for g in gates)
+    # The saving, stated as a prohibition: no leg of the roster may appear in
+    # any gate, narrowed or otherwise.  This is the assertion that would catch
+    # a `GATE_DOCS` fall-through to `GATE_FULL` that still read as "passed".
+    assert "run_tests.sh" not in _gate_blob(gates)
+    assert "HSCC_TEST_LEGS" not in _gate_blob(gates)
+
+
+def test_changelog_d_only_diff_runs_the_cheap_doc_gates(tmp_path):
+    """Case 2: changelog.d/** only -> cheap gates (PR #703's shape)."""
     _write_leg_roster(tmp_path)
     gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
-                              _diff_git("docs/readme.md"))
+                              _diff_git("changelog.d/t_66c02650.md",
+                                        "changelog.d/archive/2.17.4/t_a.md"))
+
+    assert len(gates) == 3                      # guard + the two doc gates
+    assert "run_tests.sh" not in _gate_blob(gates)
+
+
+def test_a_root_markdown_file_alone_runs_the_cheap_doc_gates(tmp_path):
+    """The `*.md` arm: a README-only PR touches no leg either."""
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("README.md"))
+
+    assert "run_tests.sh" not in _gate_blob(gates)
+
+
+def test_unknown_top_level_python_dir_is_the_fail_safe_full_roster(tmp_path):
+    """Case 5 — THE FAIL-SAFE: an unknown top-level dir with a .py -> full roster.
+
+    This is the case a docs classifier exists to get wrong.  `newtool/cli.py`
+    selects no leg for exactly the reason a docs path selects no leg: it is
+    outside every directory in the roster.  If the classifier guessed "docs"
+    here, untested code would ride onto main on the strength of a green prose
+    lint — and locally nothing would ever say otherwise, because the cheap
+    gates cannot import it, let alone test it.  GitHub CI is the backstop, not
+    the plan.  So the rule is all-or-nothing: one path that is not
+    documentation, and the diff keeps the whole suite.
+    """
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("newtool/cli.py"))
 
     assert gates[1] == "bash scripts/run_tests.sh"
+
+
+def test_docs_plus_a_new_python_dir_is_not_a_docs_gate(tmp_path):
+    """The all-or-nothing half of the fail-safe: docs *and* code is code."""
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates(
+        {"name": "hscc"}, str(tmp_path),
+        _diff_git("docs/audits/x.md", "newtool/cli.py"))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+def test_markdown_under_a_shared_prefix_is_not_a_docs_gate(tmp_path):
+    """A `.md` under a shared harness prefix keeps the full roster.
+
+    `install/` ships the payload, so `install/README.md` is a shipped file that
+    merely happens to end in `.md`.  The only thing that makes this a full
+    roster is that the :data:`mq.SHARED_GATE_PATHS` veto runs BEFORE the docs
+    classifier — order, not the extension.  This test is what stops a later
+    edit from re-ordering the two and flipping the fail-safe silently.
+    """
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("install/README.md"))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+def test_a_non_docs_diff_outside_every_leg_falls_back_to_the_full_suite(tmp_path):
+    """Outside every leg is necessary but not sufficient — it must be docs too."""
+    _write_leg_roster(tmp_path)
+    gates = mq._resolve_gates({"name": "hscc"}, str(tmp_path),
+                              _diff_git("webapp/index.html"))
+
+    assert gates[1] == "bash scripts/run_tests.sh"
+
+
+@pytest.mark.parametrize("paths,kind", [
+    # 1, 2 + the .md arm: documentation only.
+    (("docs/audits/a.md",), mq.GATE_DOCS),
+    (("changelog.d/t_x.md",), mq.GATE_DOCS),
+    (("README.md", "docs/b.md", "changelog.d/t_y.md"), mq.GATE_DOCS),
+    # 3: one leg directory selects exactly that leg.
+    (("hscc_daemon/merge_queue.py",), mq.GATE_LEGS),
+    (("hscc_daemon/x.py", "hscc_daemon/README.md"), mq.GATE_LEGS),
+    # 4: too many legs, or a shared harness file.
+    (("hscc_daemon/x.py", "hscc-api/x.py", "scripts/x.py",
+      "hscc-bootstrap/x.py"), mq.GATE_FULL),
+    (("hscc_daemon/x.py", "conftest.py"), mq.GATE_FULL),
+    # 5: the fail-safe, and its two neighbours.
+    (("newtool/cli.py",), mq.GATE_FULL),
+    (("docs/a.md", "newtool/cli.py"), mq.GATE_FULL),
+    (("install/README.md",), mq.GATE_FULL),
+    # A .md inside a leg dir selects the LEG, not the doc gates (order step 2).
+    (("hscc-api/README.md",), mq.GATE_LEGS),
+    # An unreadable/empty diff is "unknown", never "empty of code".
+    ((), mq.GATE_FULL),
+])
+def test_gate_selection_kind_is_pinned(paths, kind):
+    """The contract at the decision point itself, not only via gate strings.
+
+    Reading the kind directly is what makes a silent flip impossible: a change
+    that moved `GATE_DOCS` back onto the `GATE_FULL` path would keep producing
+    a *green* gate list, so only asserting the kind catches it at the source.
+    """
+    assert mq._gate_selection(list(paths), LOCAL_LEG_ROSTER)[0] == kind
 
 
 # ── read-only view (kanban monitor + GET /v1/merge-queue) ──────────────────

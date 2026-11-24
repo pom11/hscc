@@ -53,9 +53,16 @@ runs only the test legs whose directories the rebased diff touches, through
 ``HSCC_TEST_LEGS``. A diff that touches a shared harness file (the runner,
 conftest, CI config, changelog tooling, requirements, the install payload) or
 more than :data:`MAX_LOCAL_TEST_LEGS` legs falls back to the whole roster.
-Nothing is lost by that: GitHub CI runs the full suite on the pushed head, and
-:func:`_post_push_ready` refuses to merge unless the PR's checks are green on
-that exact SHA.
+A diff that is *only* documentation -- every changed path under ``docs/`` or
+``changelog.d/``, or a ``.md`` file -- runs no pytest leg at all, because none
+can fail it; it runs :data:`CHEAP_DOC_GATES` (the changelog-fragment check and
+the docs-index lint) next to the address guard instead. The two cases are kept
+apart on purpose: widening is correct for the broad diff and was an hour of
+wasted wall clock for the docs one. Every ambiguity in the classifier falls
+toward the full roster, never away from it (see :func:`_gate_selection`).
+Nothing is lost by any of that: GitHub CI runs the full suite on the pushed
+head, and :func:`_settle_pushed_head` refuses to merge unless the PR's checks
+are green on that exact SHA.
 
 This module is deliberately a plain git + gh implementation: no GitHub org,
 no GitHub merge queue. Tests inject the ``git``/``gh`` runners and use a
@@ -204,6 +211,42 @@ SHARED_GATE_PATHS = (
 #: Above this many legs a narrowed local gate stops being a saving, so the
 #: queue runs the whole roster instead.
 MAX_LOCAL_TEST_LEGS = 3
+
+#: The three shapes a local pytest gate may take, as returned by
+#: :func:`_gate_selection`.  They used to be two shapes -- "some legs" and
+#: "None, so everything" -- and collapsing the third one into the second is
+#: what made a docs-only PR pay for all 12 legs.
+GATE_LEGS = "legs"   # run exactly these legs, in roster order
+GATE_DOCS = "docs"   # no leg can fail this diff; run :data:`CHEAP_DOC_GATES`
+GATE_FULL = "full"   # run the whole roster
+
+#: A changed path under one of these prefixes, or ending in one of these
+#: suffixes, is documentation: it cannot change what any pytest leg asserts.
+#: The list is deliberately short and deliberately NOT derived from the
+#: roster or from the filesystem -- see :func:`_is_docs_only`.
+NON_CODE_PATH_PREFIXES = ("docs/", "changelog.d/")
+NON_CODE_SUFFIXES = (".md",)
+
+#: A gate's shell string runs under a bare ``/bin/sh -c`` (see
+#: :func:`_gate_shell_argv`), so the interpreter has to be named inside the
+#: command.  This is :file:`scripts/run_tests.sh`'s own convention (its line
+#: 23): hermes' venv, then plain ``python3``.  Naming it is not cosmetic --
+#: :file:`scripts/readme_lint.py` imports ``rich``, which this host's system
+#: ``python3`` does not have; under it the lint prints ``CANNOT RUN`` and exits
+#: **2**, which would gate every docs PR red over a missing dependency rather
+#: than over its own prose.
+_DOC_GATE_PY = ('PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"; '
+                '[ -x "$PY" ] || PY=python3; ')
+
+#: What replaces the pytest roster for a diff that cannot change any test
+#: (:func:`_gate_selection` kind :data:`GATE_DOCS`).  These are the checks a
+#: docs change can actually fail.  The address guard is gate[0] of
+#: :data:`DEFAULT_HSCC_GATES` and runs on every diff including this one, so it
+#: is not repeated here -- the docs gate is address guard + these two.
+CHEAP_DOC_GATES = (
+    _DOC_GATE_PY + '"$PY" scripts/changelog_fragments.py check',
+    _DOC_GATE_PY + '"$PY" scripts/readme_lint.py --strict',
+)
 
 #: A leg name that is safe to put in the gate's shell string verbatim
 #: (``.github/scripts`` is a real roster entry, hence the leading-dot arm).
@@ -901,31 +944,79 @@ def _test_leg_roster(worktree):
     return legs or None
 
 
-def _local_test_legs(changed, roster):
-    """Legs a narrowed local gate may run, or ``None`` for the full suite.
+def _is_docs_only(paths):
+    """True when EVERY path in ``paths`` is documentation and nothing else.
 
-    Only a path under a leg's own directory selects that leg. A shared harness
-    path, an unreadable/odd roster, an empty diff, or more than
-    :data:`MAX_LOCAL_TEST_LEGS` distinct legs widen to ``None`` (full suite):
-    under-selection is the failure mode this gate must not have. Paths outside
-    every leg (docs, changelog fragments, app builds) select nothing, so a diff
-    that is *only* those also widens to the full suite rather than running
-    zero legs.
+    All-or-nothing and deliberately narrow, because the cost of being wrong is
+    asymmetric: a classifier that guesses "docs" for a diff carrying code skips
+    the legs that would have caught it, while a classifier that guesses "code"
+    merely spends a few seconds it did not need.  So anything unusual is "not
+    docs" -- an extension-less file, a brand-new top-level directory, a build
+    tree, a shared harness file.  Empty input is False too: an empty diff means
+    we could not read it, not that it is empty of code.
+    """
+    return bool(paths) and all(
+        path.startswith(NON_CODE_PATH_PREFIXES)
+        or path.endswith(NON_CODE_SUFFIXES)
+        for path in paths)
+
+
+def _gate_selection(changed, roster):
+    """Which pytest gates this diff may narrow to: ``(kind, legs)``.
+
+    ``kind`` is :data:`GATE_LEGS` (run ``legs``, in roster order),
+    :data:`GATE_DOCS` (``legs`` empty; no leg can fail this diff, run
+    :data:`CHEAP_DOC_GATES` instead) or :data:`GATE_FULL` (``legs`` empty; run
+    the whole roster).
+
+    Two opposite cases used to share one ``not chosen`` branch.  A diff that
+    touches nothing any leg covers (a docs PR) and a diff too broad to
+    attribute to any leg (a shared harness file, or more than
+    :data:`MAX_LOCAL_TEST_LEGS` legs) both returned "the whole roster".
+    Widening is right for the second and is an hour of wall clock for the
+    first: PR #725 changed one file under ``docs/audits/``, gated all 12 legs,
+    hit ``gate timed out after 3600s``, went back to the FIFO and re-gated from
+    scratch while its own GitHub CI sat green.
+
+    They are separated here, in ONE decision point, because the ORDER is the
+    safety property and a second decision point could get it wrong silently:
+
+    1. an unreadable/odd roster, an unreadable diff, or any
+       :data:`SHARED_GATE_PATHS` path returns :data:`GATE_FULL` *before*
+       anything is allowed to say "docs" -- so ``install/README.md`` is a full
+       roster even though it ends in ``.md``;
+    2. leg selection runs next, so a ``.md`` inside a leg's own directory
+       selects that leg rather than falling through to the doc gates;
+    3. only then can a diff whose paths are ALL documentation
+       (:func:`_is_docs_only`) reach :data:`GATE_DOCS`.  Every other
+       zero-selection case -- a new top-level directory, a build tree --
+       returns :data:`GATE_FULL`.
+
+    Every fall-through goes TOWARD the full suite, never away from it.
+
+    And whichever way this decides, it only ever chooses WHICH legs run
+    locally: it never decides whether a PR may merge.  GitHub CI still runs
+    the full suite on the pushed head and :func:`_settle_pushed_head` refuses
+    to merge until that exact SHA is green, so a narrower local gate can make a
+    merge cheaper, never weaker.  A local gate that cannot run a leg is a
+    speed decision; the checks on the pushed SHA are the verdict.
     """
     if not roster or any(not _LEG_NAME_RE.match(leg) for leg in roster):
-        return None
+        return GATE_FULL, []
     paths = [p.strip().replace("\\", "/") for p in changed if p.strip()]
     if not paths:
-        return None
+        return GATE_FULL, []
     for path in paths:
         if any(path == shared or path.startswith(shared)
                for shared in SHARED_GATE_PATHS):
-            return None
+            return GATE_FULL, []
     chosen = {leg for leg in roster
               if any(path.startswith(leg.rstrip("/") + "/") for path in paths)}
-    if not chosen or len(chosen) > MAX_LOCAL_TEST_LEGS:
-        return None
-    return [leg for leg in roster if leg in chosen]
+    if len(chosen) > MAX_LOCAL_TEST_LEGS:
+        return GATE_FULL, []
+    if not chosen:
+        return (GATE_DOCS, []) if _is_docs_only(paths) else (GATE_FULL, [])
+    return GATE_LEGS, [leg for leg in roster if leg in chosen]
 
 
 def _selected_leg_gate(legs):
@@ -937,22 +1028,28 @@ def _resolve_gates(cfg, worktree, git_runner, base="main"):
     """Gate command list for this PR, including hscc's conditional app builds.
 
     Declared gates are used verbatim. For hscc's built-in defaults the pytest
-    gate is narrowed to the legs the rebased diff touches (see
-    :func:`_local_test_legs`); app build gates still come from that same diff.
+    gate is narrowed to the legs the rebased diff touches, or replaced by the
+    cheap doc gates when no leg can fail (see :func:`_gate_selection`); app
+    build gates still come from that same diff.
     The full suite is not lost with the narrowed local gate: GitHub CI runs it
-    on the pushed head and :func:`_post_push_ready` refuses to merge until that
-    exact SHA is green.
+    on the pushed head and :func:`_settle_pushed_head` refuses to merge until
+    that exact SHA is green.
     """
     declared = cfg.get("gates")
     if declared is not None:
         return [str(g) for g in declared]
     if cfg.get("name") != "hscc":
         return []
-    gates = list(DEFAULT_HSCC_GATES)
+    gates: list[str] = list(DEFAULT_HSCC_GATES)
     changed = _changed_files(worktree, git_runner, base=base)
-    legs = _local_test_legs(changed, _test_leg_roster(worktree))
-    if legs:
+    kind, legs = _gate_selection(changed, _test_leg_roster(worktree))
+    if kind == GATE_LEGS:
         gates[gates.index(RUN_TESTS_GATE)] = _selected_leg_gate(legs)
+    elif kind == GATE_DOCS:
+        # Splice in place of the runner: the docs gate stays in the runner's
+        # slot, so `gates` still reads as address-guard-then-tests.
+        slot = gates.index(RUN_TESTS_GATE)
+        gates[slot:slot + 1] = CHEAP_DOC_GATES
     for prefix, cmd in APP_BUILD_GATES.items():
         if any(f.startswith(prefix) for f in changed):
             gates.append(cmd)
