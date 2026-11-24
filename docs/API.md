@@ -204,6 +204,7 @@ endpoints (confirm-gated, see below).
 | GET | `/v1/fleet/throughput` | vLLM token throughput + per-node queue depth. Returns `{fleet: {nodes_ok, nodes_total, ...}, by_node, ...}`. | read |
 | GET | `/v1/fleet/streams` | Daemon stream health — a map of stream name → status; `ok: true` per stream. Returns `{streams, speak}`. | read |
 | GET | `/v1/autoscale` | Scaling advice from current queue depth (read-only — it only *advises*). | read |
+| GET | `/v1/fleet/usage` | Cost/usage roll-up from the tracked usage store. Returns `{budget, cost_tracked, per_bot, per_project, speak, total}`. When the store cannot be read the answer degrades to `{speak}` — no zeroes are invented for a store that was never read. | read |
 
 ### Project / kanban (read)
 
@@ -215,6 +216,12 @@ endpoints (confirm-gated, see below).
 | GET | `/v1/review/queue` | Cards genuinely awaiting review, newest first. Returns `{queue, count, speak}`. | read |
 | GET | `/v1/review/{card_id}` | **Dry-run** review facts for one card (branch state, merge conflicts, the VERIFY line). Read-only — never merges, never closes. `404` if the card does not resolve to a reviewable branch. | read |
 | GET | `/v1/qa/queue` | The pre-merge QA queue + the manual-QA store. Returns `{queue, manual_qa, speak}`. | read |
+| GET | `/v1/projects` | Registry truth plus each project's board truth. Returns `{count, projects, speak}`. | read |
+| GET | `/v1/kanban/blocked` | Blocked cards across **all** boards, with why. Returns `{boards, count, errors, speak, tasks}` — `errors` carries what could not be read instead of counting an unread board as quiet. | read |
+| GET | `/v1/kanban/stale` | Non-terminal cards across all boards. Returns `{boards, count, errors, older_than, speak, tasks}` — `older_than` states the age window the answer used. | read |
+| GET | `/v1/kanban/running` | `hscc kanban monitor` over HTTP (audit F8) — the same `collect()` pass the CLI renders. Returns `{boards, count, errors, pin_conflicts, speak, tasks}`. | read |
+| GET | `/v1/merge-queue` | The local merge queue's read-only rows, token-gated like every other route. Returns `{count, generated_at, ok, projects, queued, rows, speak}`. | read |
+| GET | `/v1/mobile/summary` | Per-board status counts for the iOS widget / Live Activity, from the same `collect()` pass `hscc kanban monitor` renders, so `done` means done in the last 24 h. `?boards=a,b` narrows to those boards (`404 not_found` if one is not a registered project board). When the board listing is unavailable the answer carries **no** per-board key at all — empty counts would render as "every board is quiet". | read |
 
 ### Profiles (read)
 
@@ -243,6 +250,50 @@ Per-profile lifecycle writes (`POST /v1/profiles/create`,
 `/v1/profiles/{name}/describe`) and the description read
 (`GET /v1/profiles/{name}/describe`) are registered in `hscc-api/routes_profiles.py`;
 every one of them is confirm-gated and is documented there rather than here.
+
+### Daemon & host (read)
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/daemon/status` | `hscc status` over HTTP — the daemon plus every stream it owns. Returns `{daemon_running, pid, speak, state, streams}`. | read |
+| GET | `/v1/daemon/host` | The daemon host machine's **own** metrics (this box, not the fleet). Returns `{arch, cpu, daemon_running, daemon_uptime_seconds, disk, hostname, memory, platform, processes, speak, uptime_seconds}`. | read |
+| GET | `/v1/daemon/history?limit=N` | Timeline of automated daemon actions, read from the recorder's bounded window. Returns `{count, events, exhausted, window_bytes}`. | read |
+| GET | `/v1/triggers` | The trigger rules and their recent firings. Returns `{last_run, recent_events, rules, speak}`. | read |
+| GET | `/v1/escalate` | Pending escalations — read-only, it never acts; the door that acts is `POST /v1/escalate`. Returns `{count, escalations, speak}`. | read |
+
+### Autodown (read)
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/autodown/status` | Read-only report mirroring `hscc autodown status`: whether the fleet is down, why, and what armed or blocked the decision. Returns `{active_cron_cpu_only, active_cron_model, blocked_by, down_since, enabled, fleet_up, force_armed, force_armed_overrides, idle_minutes, kanban_ok, kanban_reason, last_activity_iso, prci_active, prci_ok, prci_reason, prci_signal, reason, speak, state, state_recorded, state_source, wake_source, watchdog_blocked, watchdog_intentional}`. | read |
+
+### Agent surface (read)
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/activity/feed` | The live agent activity feed (the flight recorder). Returns `{count, entries, profiles, running_count, speak}`. | read |
+| GET | `/v1/commands` | The slash commands available to the chat client, as registered by `hscc-commands`. Returns `{commands, speak}`. | read |
+| GET | `/v1/cron/list` | Read-only roster of every scheduled job; each entry maps 1:1 from the on-disk `jobs.json` contract. Returns `{jobs, speak}` — and when the store cannot be read it degrades honestly to `{speak}` rather than fabricating a list. | read |
+| GET | `/v1/alerts?since=&limit=` | The operator alert feed behind `hscc notify`, paged by exclusive ascending id. Returns `{alerts, count, has_more, latest_id, limit, next_since, oldest_id, since, speak}`. | read |
+
+### Templates & profiles (read)
+
+| Method | Path | Description | Mutates |
+|---|---|---|---|
+| GET | `/v1/template/list` | The cluster templates on disk. Returns `{count, speak, templates}`. | read |
+| GET | `/v1/template/status` | Which template is currently applied. Returns `{applied, note, speak}`. | read |
+| GET | `/v1/profile/list` | Browse installed **agent profiles** (the `hscc-roles` surface — a different subject from `/v1/profiles` above). Returns `{count, profiles, speak}`. | read |
+
+> **This reference is curated, not exhaustive — but it is now gated.** Every route
+> `hscc-api/api_server.py` registers (the `routes_*.py` modules append to
+> `api_server.ROUTES`, and `WS_ROUTES` carries the WebSocket upgrade) must appear as a
+> Path cell in this reference **or** in the reasoned register
+> `hscc-api/tests/route_coverage_allowlist.py`; `hscc-api/tests/test_api_reference_route_coverage.py`
+> reddens otherwise. That gate exists because audit F2 could stay "unresolved in the
+> docs" while the code was already right: neither profile route was named here, and
+> nothing caught it. Each register entry points at the file where its route *is* written
+> down and carries the card that owes the row, so the gap has an owner instead of a
+> nickname.
 
 ### Actions (mutating — confirm-gated)
 
