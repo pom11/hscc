@@ -511,17 +511,31 @@ def _scan_git(ws: Path) -> tuple:
     ``.git`` directory) and a worktree (a ``.git`` file) alike. A non-empty
     answer from any probe keeps the whole workspace; so does a probe that
     errors, because unreadable counts as dirty and we never guess that files
-    are disposable. That is the reference script's rule, kept verbatim.
+    are disposable.
+
+    The probes are scoped to what removal actually deletes (t_e56493c0). A
+    clone's object store lives in the workspace, so all three tests apply. A
+    worktree's ``.git`` is a file pointing at the shared common dir, which the
+    removal does not touch: its other branches' unpushed commits and its stash
+    survive in the parent repo, so neither can be lost here and neither is a
+    keep reason. Only ``status`` (dirty files in the workspace itself) is. The
+    repo-wide ``log --branches`` run inside a worktree reads the common dir and
+    would otherwise pin every worktree of a repo with any local-only branch
+    anywhere — 106 of 109 ``unpushed`` keeps on this host were that false
+    positive.
     """
     worktrees: list[str] = []
     for gitpath in _git_entries(ws):
         repo = gitpath.parent
-        if gitpath.is_file():
+        is_worktree = gitpath.is_file()
+        if is_worktree:
             worktrees.append(str(repo))
-        for argv, reason in ( (("status", "--porcelain"), "dirty"),
-                              (("log", "--branches", "--not", "--remotes",
-                                "--oneline"), "unpushed"),
-                              (("stash", "list"), "stashed") ):
+        probes = [(("status", "--porcelain"), "dirty")]
+        if not is_worktree:
+            probes += [(("log", "--branches", "--not", "--remotes",
+                         "--oneline"), "unpushed"),
+                       (("stash", "list"), "stashed")]
+        for argv, reason in probes:
             ok, out = _git(repo, *argv)
             if not ok:
                 return "unreadable", worktrees
