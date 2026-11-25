@@ -1,4 +1,4 @@
-repo=/Users/desac/.hermes/kanban/boards/hscc/workspaces/t_b94a2b39/hscc runner_exists=True repeats=3
+repo=/Users/<operator>/.hermes/kanban/boards/hscc/workspaces/t_b94a2b39/hscc runner_exists=True repeats=3
 TERM   leaked 0/3  mean_orphans=0.0  rc=[143,143,143]
 INT    leaked 0/3  mean_orphans=0.0  rc=[130,130,130]
 HUP    leaked 0/3  mean_orphans=2.0  rc=[-1,-1,-1]
