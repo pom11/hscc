@@ -225,6 +225,15 @@ def test_the_verdict_does_not_come_from_launchctl_text(tmp_path):
     res = pp.doctor_check(plist_path=path, _launchd=probe, _systemd=systemd(),
                           _platform="darwin")
     assert res["ok"] is True and "Standard" in res["detail"]
+    assert seen == [1], "the probe is asked exactly once (no per-key probe storm)"
+
+    # And the other way round, which is the mutation bait: a RED plist with a
+    # launchd that looks perfectly healthy must still be red. A row that read
+    # its verdict out of `launchctl print` would call this fine.
+    red = write_plist(tmp_path / "red.plist", ProcessType="Background")
+    res = pp.doctor_check(plist_path=red, _launchd=launchd(spawn="daemon"),
+                          _systemd=systemd(), _platform="darwin")
+    assert res["ok"] is False and "DEPRIORITISED" in res["detail"]
 
 
 # ── the systemd half (no systemd on this host: injected probes only) ───────
