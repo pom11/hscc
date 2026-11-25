@@ -453,14 +453,22 @@ fi
 # the session DB tool_calls / process-results termination_source (see
 # docs/audits/rc143-suite-reaper-t_6bb29d46.md for the forensics recipe).
 CURRENT_SUITE="(startup)"
-on_sigterm() {
-  echo
-  echo "!! run_tests.sh RECEIVED SIGTERM at $(date '+%Y-%m-%d %H:%M:%S') — elapsed ${SECONDS}s, during suite: $CURRENT_SUITE"
-  echo "   pid=$$ ppid=$PPID; parent: $(ps -o pid=,ppid=,command= -p "$PPID" 2>/dev/null | tr -s ' ')"
-  echo "   This is an EXTERNAL KILL (shell rc=143), NOT a test failure."
-  echo "   Prime suspect: an agent command 'pkill -f run_tests.sh' or a process.kill of"
-  echo "   this suite's process — check the issuing session's transcript before believing"
-  echo "   any 'reaper' theory (docs/audits/rc143-suite-reaper-t_6bb29d46.md)."
+# The one cleanup for the pack's leg-log dir, and the one reaper for the legs in
+# flight. Both live HERE (before the traps) because they are what a dying shell
+# still has to be able to call. t_b94a2b39: `EXIT` alone is not enough — bash
+# runs the EXIT trap for every fatal signal it can still catch, but not for one
+# it cannot (SIGKILL) and not for every one it does not own (measured: SIGQUIT
+# leaked the dir in 3/3 trials against the shipped runner, while an arm shell
+# with only an EXIT trap cleaned up).
+_leg_tmp_cleanup() {
+  # Idempotent: the EXIT trap and a signal handler may both reach it.
+  [ -n "${LEG_TMP:-}" ] || return 0
+  if [ -d "${LEG_TMP}" ]; then
+    rm -rf -- "$LEG_TMP" 2>/dev/null
+  fi
+  LEG_TMP=""
+}
+_kill_live_legs() {
   # With a bounded pack (t_6c2123f9) a kill that only stops the shell leaves the
   # legs in flight: they would keep burning CPU on a host running the fleet
   # control plane and keep the log's write end open. Kill the ones we started,
@@ -476,6 +484,48 @@ on_sigterm() {
       _k=$((_k+1))
     done
   fi
+}
+_on_fatal_signal() {
+  # $1 = signal NAME, $2 = the code to fall back on.
+  #
+  # Two things a bare EXIT trap cannot do for these signals: reap the legs, and
+  # guarantee the cleanup on a signal bash does not route through the exit trap.
+  # So the handler does both, then RE-RAISES with the default disposition — the
+  # exit code a shell reads in `$?` stays exactly `128+N`, which is what the
+  # dispatcher and the queue already parse (rc=143 being explainable is a
+  # standing contract, t_6bb29d46). SIGPIPE is deliberately NOT routed here: it
+  # measured never to leak the dir, and trapping it in a 967-line script that
+  # pipes through `head`/`tr` changes error paths this card has no evidence for.
+  local _sig="$1" _fallback="$2"
+  echo
+  echo "!! run_tests.sh RECEIVED SIG${_sig} at $(date '+%Y-%m-%d %H:%M:%S') — elapsed ${SECONDS}s, during suite: ${CURRENT_SUITE:-unknown}"
+  echo "   pid=$$ ppid=$PPID; parent: $(ps -o pid=,ppid=,command= -p "$PPID" 2>/dev/null | tr -s ' ')"
+  echo "   This is an EXTERNAL KILL, NOT a test failure. Cleaning the leg-log dir"
+  echo "   and the legs in flight, then re-raising SIG${_sig}."
+  _kill_live_legs
+  _leg_tmp_cleanup
+  trap - "$_sig" 2>/dev/null
+  kill -"$_sig" $$ 2>/dev/null
+  # Only reached if the signal was inherited as ignored and the re-raise did
+  # nothing: leave with the code a shell would have reported for it.
+  exit "$_fallback"
+}
+on_sigterm() {
+  echo
+  echo "!! run_tests.sh RECEIVED SIGTERM at $(date '+%Y-%m-%d %H:%M:%S') — elapsed ${SECONDS}s, during suite: $CURRENT_SUITE"
+  echo "   pid=$$ ppid=$PPID; parent: $(ps -o pid=,ppid=,command= -p "$PPID" 2>/dev/null | tr -s ' ')"
+  echo "   This is an EXTERNAL KILL (shell rc=143), NOT a test failure."
+  echo "   Prime suspect: an agent command 'pkill -f run_tests.sh' or a process.kill of"
+  echo "   this suite's process — check the issuing session's transcript before believing"
+  echo "   any 'reaper' theory (docs/audits/rc143-suite-reaper-t_6bb29d46.md)."
+  # With a bounded pack (t_6c2123f9) a kill that only stops the shell leaves the
+  # legs in flight: they would keep burning CPU on a host running the fleet
+  # control plane and keep the log's write end open. Kill the ones we started,
+  # by pid, in the range the cursors describe — never by name (the RULE above).
+  # `set -m` in the pack gives every leg its own process group, so the group kill
+  # reaches the pytest AND the children IT spawned (a leg that shells out to
+  # bootstrap.sh leaves a grandchild behind otherwise).
+  _kill_live_legs
   exit 143
 }
 on_sigint() {
@@ -494,6 +544,12 @@ on_sigint() {
   exit 130
 }
 trap on_sigterm TERM
+# t_b94a2b39: the fatal signals this script did not own. Measured (see
+# docs/audits/leg-tmp-leak_t_b94a2b39.md) — as shipped, SIGQUIT left the pack's
+# /tmp leg-log dir behind in 3/3 trials and SIGQUIT/SIGHUP/SIGPIPE/SIGKILL each
+# orphaned both legs in flight, because only on_sigterm reaped them.
+trap '_on_fatal_signal HUP 129' HUP
+trap '_on_fatal_signal QUIT 131' QUIT
 
 # ━━━ no worker/dispatcher Kanban pin may reach a leg (t_7e143e04) ━──────────
 # Every leg runs with the vars in SUITE_ENV_UNSET REMOVED from its environment.
@@ -681,6 +737,40 @@ if [ "$PAR" -ge 2 ]; then
   unset _chk
 fi
 if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
+  # ── reclaim the dirs a killed pack could not (t_b94a2b39) ─────────────────
+  # A pack killed by SIGKILL runs no code at all, so no trap can clean its log
+  # dir; the litter has to be taken back by the NEXT pack. The one property that
+  # makes this safe on a host where several workers pack at once is AGE: a dir is
+  # only removed once its `mtime` is older than the floor, and `mtime` moves on
+  # every launch (`legs.tsv` append) and every leg completion (`.rc` create). The
+  # merge queue caps one invocation of this script at ~2400 s, so a dir older
+  # than 7200 s — three caps — cannot belong to a run that is still alive. That
+  # bound is the whole safety argument, and it is pinned by
+  # test_the_sweep_floor_is_older_than_any_run_the_queue_can_produce: lowering the
+  # floor below one capped run makes a sibling worker's LIVE pack deletable, which
+  # is the shared-namespace assumption t_34c5a3ed removed. Deliberately absent:
+  # no liveness probe (an age past the cap needs none), no sweep on the serial
+  # path (serial makes no such dir and its stream is pinned to gain no line), and
+  # no `$TMPDIR` (same rule as the mktemp below). `0` disables the sweep entirely.
+  _sweep_floor="${HSCC_LEG_SWEEP_MIN_AGE_SECONDS:-7200}"
+  case "$_sweep_floor" in ''|*[!0-9]*) _sweep_floor=7200 ;; esac
+  if [ "$_sweep_floor" -gt 0 ]; then
+    _sweep_now="$(date +%s)"
+    _swept=0
+    # `-maxdepth 1` never descends, `-type d` (with find's default -P) never
+    # follows a planted symlink, `-user` never touches another account's dir.
+    while IFS= read -r _d; do
+      [ -n "$_d" ] || continue
+      _m="$(stat -f %m "$_d" 2>/dev/null || stat -c %Y "$_d" 2>/dev/null || true)"
+      case "$_m" in ''|*[!0-9]*) continue ;; esac
+      if [ $(( _sweep_now - _m )) -ge "$_sweep_floor" ]; then
+        rm -rf -- "$_d" 2>/dev/null && _swept=$((_swept+1))
+      fi
+    done < <(find /tmp -maxdepth 1 -type d -name 'hscc-legs-*' -user "$(id -un)" 2>/dev/null)
+    if [ "$_swept" -gt 0 ]; then
+      echo "parallel: swept $_swept stale leg-log dir(s) older than ${_sweep_floor}s"
+    fi
+  fi
   # Never $TMPDIR (same reasoning as the sealed HOME above: a second answer to
   # "where does suite scratch live" is how a run stops being reproducible), and
   # never inside the sealed HOME. A tmp dir it cannot make is a reason to run
@@ -690,7 +780,7 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
     LEG_PIDFILE="$LEG_TMP/legs.tsv"
     : > "$LEG_PIDFILE"
     PARALLEL_MODE=1
-    trap 'rm -rf "$LEG_TMP" 2>/dev/null; true' EXIT
+    trap '_leg_tmp_cleanup; true' EXIT
     echo "parallel: ${PAR} legs at a time (HSCC_TEST_PARALLEL=1 for the serial path); leg logs in $LEG_TMP"
   else
     LEG_TMP=""

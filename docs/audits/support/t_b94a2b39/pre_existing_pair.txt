@@ -1,0 +1,19 @@
+# raw capture taken 2026-11-25 before any sweep ran (the pair the parent card documented)
+/tmp/hscc-legs-2MIxna birth=Nov 25 07:25:42 2026 mod=Nov 25 07:25:42 2026 mode=drwx------ uid=501
+/tmp/hscc-legs-AiHLjx birth=Nov 25 07:25:45 2026 mod=Nov 25 07:25:45 2026 mode=drwx------ uid=501
+--- /tmp/hscc-legs-2MIxna/1-hscc-commands.log (17 bytes)
+0000000    7       p   a   s   s   e   d       i   n       0   .   2   s
+0000020   \n                                                            
+0000021
+--- /tmp/hscc-legs-2MIxna/2-sparkrun-hermes.log (17 bytes)
+0000000    7       p   a   s   s   e   d       i   n       0   .   2   s
+0000020   \n                                                            
+0000021
+--- /tmp/hscc-legs-AiHLjx/1-hscc-commands.log (17 bytes)
+0000000    7       p   a   s   s   e   d       i   n       0   .   2   s
+0000020   \n                                                            
+0000021
+--- /tmp/hscc-legs-AiHLjx/2-sparkrun-hermes.log (17 bytes)
+0000000    7       p   a   s   s   e   d       i   n       0   .   2   s
+0000020   \n                                                            
+0000021
