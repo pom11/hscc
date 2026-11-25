@@ -11,6 +11,1120 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.17.8] - 2026-11-25
+
+### Added
+- **Bootstrap installs orchpad, and its Hermes plugin only on orchestrator
+  profiles.** `uv pip install` puts the pinned tag
+  (`orchpad @ git+https://github.com/pom11/orchpad@v0.2.0`) into the Hermes
+  venv, then orchpad's own `orchpad-hermes` console script installs the plugin
+  on the main orchestrator and every `<project>-orch` home. Worker/reviewer
+  homes are never visited, the package step is skipped when the pinned version
+  is already importable, and the plugin installer rewrites only changed files,
+  so a re-run changes nothing. `hscc-bootstrap/install_orchpad.py`, one stage in
+  `bootstrap.sh` after `orch-all`.
+- **Bootstrap enables `orchpad` on each orchestrator profile.** Hermes plugins
+  are opt-in, and a profile reads only its own `config.yaml` (no root→profile
+  inheritance), so installed files alone never load. The installer appends
+  `orchpad` to every orchestrator profile's own `plugins.enabled`, creating the
+  key when absent and preserving every existing entry and its order. The step is
+  idempotent, never touches the root config, and never visits a worker home.
+- **Every profile-creating path now gives its orchestrator the pad.** The
+  install/enable logic lives once in `install_orchpad.ensure_profile(hermes_home,
+  profile, venv_python, apply=True)`: package in the Hermes venv, plugin files,
+  and `orchpad` in that profile's own `plugins.enabled`. `hscc project new`
+  calls it for the `<name>-orch` profile it just created or repaired (step
+  detail reports `orchpad: enabled|already|failed: …`; a failure warns and never
+  fails project creation), and `hscc roles` / `hscc-api` bootstrap /
+  `migrate_main` get it through `ensure_orchestrator` for the main orchestrator
+  and every project orchestrator (`orchpad` is part of the returned dict). The
+  install profile list is still only the main orchestrator plus existing
+  `*-orch` homes; worker/reviewer profiles are refused by the shared function
+  and never visited.
+- **The pin stays in one constant.** Every path reads
+  `install_orchpad.PIN`
+  (`orchpad @ git+https://github.com/pom11/orchpad@v0.2.0`), so the driver's
+  v0.2.0 bump is a one-line change; `main_orch.main_name` remains the only
+  source of the main orchestrator's profile name.
+- **Orchestrator SOULs gain a short "Your pad (orchpad)" section.** The pad is
+  for the orchestrator's own follow-ups, ideas, observations and waiting-on
+  items; real worker work is promoted to a kanban card with `orchpad_promote`;
+  the pad is checked at session start. Workers and the retired legacy role do
+  not get the section.
+- **`hscc doctor` warns when an orchestrator profile is missing the plugin or
+  has not enabled it.** The row reads the profile tree and names every home
+  whose files are missing and every home whose own `plugins.enabled` does not
+  name `orchpad`; it is WARN-only (the pad is an orchestrator convenience,
+  never an install gate).
+- **`scripts/load_burners.sh` gained an opt-in stage trace for signal-stall
+  forensics.** Setting `HSCC_LOAD_BURNERS_TRACE=<path>` appends one line per
+  harness stage — `<pid> <tag> <stage> [detail]`, stages `start`, `in-wait`,
+  `{int,term,hup}-trap`, `cleanup-entry`, `after-term-loop`, `after-sleep`,
+  `after-kill-loop`, `reap-wait <pid>`/`reap-ok <pid>`, `cleanup-exit
+  <status>` — which localized the t_f8e6fe38 SIGINT stall to the stage the
+  parent card's decision table needs: four paired suite-traces show the
+  stalled harness stopping at `in-wait` with ZERO `int-trap` markers while
+  its burners keep running (watcher snapshot), so cleanup never ran and the
+  reap loop is ruled out. Unset ⇒ `lb_trace` returns before any syscall:
+  zero behaviour change for every shipped consumer (23 passed alone with it
+  unset). Marker writes carry `2>/dev/null` *before* the append redirection;
+  markers never touch stdout. The audit
+  `docs/audits/load-burners-sigint-trace-stage_t_5f9fab03.md` records the
+  measurements — including that a bounded-slice wait rewrite was tried and
+  REJECTED (the stalled harness crossed ~105 command boundaries without
+  running the trap: bash 3.2 never delivers that SIGINT to its handler) —
+  and the two next probes. No shipped behaviour changed; the flake itself
+  stays open with carded next steps.
+- **`hscc doctor` now asks whether the INSTALLED daemon job is actually in the
+  Standard scheduling posture.** PR #791 pinned the three plist emitters to emit
+  `ProcessType => Standard`, but an emitter pin says nothing about the file on
+  the node: the fleet ran `Background` until 2026-11-25 and every node keeps
+  that posture until it re-bootstraps, while every merge-queue gate leg pays
+  ~7.6x silently (measured `ps -o pri` 4 vs 20, 4.96 M vs 37.7 M it/s through
+  the real `merge_queue._run_gate`). The new row reads the installed plist with
+  `plistlib` — `launchctl print` has no process-type line, measured: its
+  `jetsam priority = 40` is identical for Standard, Adaptive, Background,
+  Interactive and a keyless job — and corroborates against the loaded job's
+  `spawn type`, which measured able to separate all five postures
+  (`daemon (3)` / `adaptive (6)` / `background (5)` / `interactive (4)`) and is
+  the only way to see a file already fixed but not yet re-bootstrapped. Verdicts
+  `Standard` / `deprioritised` / `over-prioritised` / `unpinned` / `stale
+  bootstrap` / `unreadable` / `skipped`, all WARN and never fatal: a node may
+  legitimately run another posture, and doctor is bootstrap's Stage-1 gate. On
+  Linux it reads the systemd --user unit's `Nice=`/`CPUWeight=` (the comparable
+  knobs; no emitter in this repo writes either, so the fleet posture is
+  systemd's own default) and warns when either gives the daemon less cpu than
+  that. `hscc-bootstrap/doctor_process_posture.py`, one registry entry; no
+  change to `run_doctor()`.
+- **A merge-queue fix card can be parked for an OpenCode pane instead of the
+  cluster.** A red PR with no live card used to cut a dispatchable fix card on
+  `{board}-orch`, so a cluster worker spawned the instant the queue noticed
+  (#786's t_a5080224, #792's t_9f963ee3). The registry's
+  `merge_queue.fix_card` block now takes `park` (default false) and `assignee`
+  (default `{board}-orch`, unchanged). With `park: true` the card is created
+  `blocked` and typed `capability`, its title prefixed `[opencode] `, and its
+  assignee taken from the block (e.g. `coder`); the PR's handback comment names
+  the parked card, and the default handback never unblocks it. Reuse of an
+  existing open fix card, and every default, are unchanged.
+
+### Changed
+- **A test-only diff now gates only the legs that own its tests.** The merge
+  queue's local pytest gate (`hscc_daemon/merge_queue.py::_local_test_legs`)
+  used to treat `changelog.d/*.md` like any other prose change, so a fixed
+  flake or a new pin test still pulled in the `scripts` leg (and a diff whose
+  ordinary selection named more than three legs fell back to the full suite).
+  When EVERY changed path is either `<leg>/tests/**`, `<leg>/**/test_*.py`, a
+  `conftest.py` under a leg's tests dir, or a top-level `changelog.d/*.md`
+  fragment, the gate now selects exactly the legs that own those test files
+  and logs `legs: test-only diff -> <legs>`. Any source path, root
+  `conftest.py`, `SHARED_GATE_PATHS` hit, unowned path, or more than three
+  owning legs keeps the previous behaviour unchanged. GitHub CI still runs the
+  full roster on push to main, so the backstop is untouched.
+- **app-build-checks no longer spends a macOS runner on Python-only PRs.** A
+  cheap ubuntu `changes` job reads the PR diff and decides whether it touches
+  the Apple build inputs — `ios-app/`, `macos-app/`, this workflow, its selector
+  script, or `scripts/release_apps.sh` (read by `carplay_check.sh`) — and the
+  real compile moved to a separate `apple` job that is skipped when nothing
+  Apple-related moved. A push to main always compiles, and an unreadable diff
+  base falls back to compiling. The required check name stays `compile` and is
+  now an ubuntu aggregator: it is green on a legitimate skip and red when the
+  compile failed, was required but did not run, or the selector itself broke —
+  it can never report green because nothing ran. Reason: on 2026-11-25 the macOS
+  pool held 5 running and 10 queued jobs, PRs waited 30+ minutes for a runner,
+  and #792, #802 and #722 all hit the merge queue's 1800 s CI-pending budget
+  while every push and PR compiled for 9-27 minutes.
+* `scripts/address_guard.py`: `HOME_PATHS_ENFORCE` is **True** — an absolute home
+  path in a tracked file, a staged blob or a pre-commit index now fails the gate
+  instead of only being reported. The class shipped advisory in t_3480956c
+  because the tracked tree already carried concrete home paths; that baseline is
+  now measured (198 offenders / 87 files, with the shipping guard over
+  `git ls-files`, not `git grep`) and cleared, so the flip no longer reddens the
+  suite the merge queue runs. `HSCC_ADDRESS_GUARD_HOME_ENFORCE` remains, and it
+  can still only *strengthen*: a falsy value does not mute the class, so nothing
+  that merely exports an environment variable can switch the rule off
+  (`test_cli_blocks_a_home_path_now_that_home_is_enforced`).
+* `_HOME_BRANCH` now requires the user component to start alphanumeric
+  (`_HOME_USER_START`). It removes the two shapes that were findings and never
+  accounts — a prose ellipsis read as a user named `...`, and a `<tmp>/home/` +
+  dotfile fixture string — and it is a *lookahead* on purpose: a lookahead can
+  only shorten a match at a position the engine already reached, so it cannot
+  blind the guard. The left-boundary **lookbehind** the card proposed was
+  measured and **rejected**: over the tracked tree it also drops
+  `hscc-api/tests/test_repl_inject.py:67`, where a home path follows a `\n`
+  escape and so has a word char in front of the slash in the file bytes — a real
+  leak committed that way would pass the hook, the pytest gate and the CI
+  backstop alike. That is the `.pyc` boundary trap one layer up, and the reason
+  this branch already refuses `\b`.
+* The baseline scrub, by audience rather than one blanket string: generic fixture
+  users (`devuser`, `operator`, `u`, `example`, `op`, `x`, `user`, `dev`, `you`,
+  `someone`) → `hscc-fixture`; `spark` → `<ssh_user>`, because `spark` is a real
+  fleet account (the `ssh_user` default at `hscc-model-onboard/scripts/onboard.py:441`)
+  whose path live code reads on a real node, so it could be neither sanctioned nor
+  renamed to a fixture name without falsifying the instruction; prose about the
+  operator's machine → `/Users/<operator>`. `SANCTIONED_HOME_USERS` is
+  unchanged — widening it was considered and refused.
+* `.github/scripts/tests/test_redact_guard_report.py` gains the home-class
+  coverage t_c927b73e left open: the unit mask keeps `file:line` and drops the
+  value, the allowed forms pass byte-identical, and the real workflow command is
+  run end to end in **both** postures — the advisory one being the one that
+  matters, since rc=0 is a green job whose stderr still quoted the path.
+* `test_the_pattern_the_redactor_loads_fits_the_redactors_cap` pins
+  `len(FORBIDDEN.pattern)` (279) against the redactor's `MAX_PATTERN_CHARS`
+  (4096) across the two files, so a future branch cannot silently grow the
+  pattern past the point where `load_pattern()` fails the whole guard job closed.
+* `changelog.d/t_49827b5d.md`: the last concrete operator home path scrubbed to
+  the documented placeholder (the same hunk PR #812 carries; no-op if that lands
+  first).
+- **The merge queue now overlaps the local gate with GitHub CI instead of
+  running them one after the other.** A queued PR used to pay the local gate
+  (~25 minutes) and then GitHub CI (~10-15 minutes) sequentially, so the CI
+  time was dead time on top of the gate. After the rebase the queue now
+  force-pushes the rebased head first (same lease-pinned push and head-lag
+  re-read as before) and runs the project gates while CI runs on that exact
+  SHA. `_settle_pushed_head` remains the only merge authority: nothing merges
+  unless the local gates passed and the PR's checks are green for the same
+  head SHA. A red local gate keeps today's red handling and never waits for
+  CI; a CI red reported while a leg is still running cancels that leg through
+  the existing cancellation path (#749) and is handled as `red-ci`; a head
+  that moves during the gate releases to the wait list exactly as before.
+  The switch is `merge_queue.overlap_ci` in the registry row: absent means
+  overlap for hscc and the sequential order for every other project, and an
+  explicit `false` keeps the old order byte-for-byte. Log lines carry
+  `gate start (overlapping CI on <sha12>)` so the overlap is visible in the
+  queue's own log.
+* `scripts/tests/test_cli_help_surface.py`: the cross-interpreter (A)-arm walks
+  a pinned SAMPLE of surfaces by default instead of the whole 329-probe surface.
+  Measured at the queue gate's background QoS, that arm alone was **334.69 s**
+  of the `scripts` leg's **1009 s** wall against **21 s** of pytest CPU (so ~98 %
+  of the leg is waiting on children, not testing), and the leg's own
+  `[leg-heartbeat]` named the child it was parked on —
+  `first_child=/Users/<operator>/min... 02:56`: the whole leg sitting on
+  `~/miniconda3/envs/p313/bin/python` while it re-launched the CLI 329 times.
+  Re-measured on the same `taskpolicy -b` shape: the case went **334.69 s ->
+  28.73 s** and the whole `scripts` leg **1009.44 s -> 597.59 s** (673 passed,
+  4 skipped both times; the post-pin run carries one more item). What is left
+  of the leg is one thing — the audit walk's own 327.93 s module fixture — and
+  it is carded separately, not smuggled in here.
+  The arm keeps its teeth — every surface with a local (A) line is still walked
+  on every sibling, the sample covers every surface GROUP so an argparse
+  rendering drift cannot hide in the one group nobody sampled (pinned by
+  `test_sibling_sample_stays_broad_and_arms_the_full_walk`), and the
+  anti-vacuity receipt now asserts the work actually REQUESTED instead of a
+  constant the sample could never reach. `HSCC_CLI_HELP_SIBLING_WALK=full`
+  asks for the whole surface exactly as before.
+- **The CLI help-surface audit probes its surface over N isolated `Prober`s
+  instead of one.** `scripts/hscc_cli_help_audit.py` now prefetches every
+  `(argv, width)` render the walk is about to ask, spread across workers that
+  each own their own sandbox `HOME`, their own canary tripwire log and their
+  own sealed api sensor port — the three things `Prober.run` brackets every
+  spawn against, and the reason a thread pool over ONE `Prober` would have
+  raced the (C)/(D) sensors into false findings. The analysis stays serial:
+  the walk consumes the prefetched renders through `Prober.run`'s own cache, so
+  findings land in exactly the serial order and every width and surface is
+  still probed. Bound by `HSCC_CLI_HELP_PROBE_WORKERS` (default 4, cap 8, `1`
+  = the old serial walk and also the fallback for an unparseable value),
+  because the gate may already be running sibling legs concurrently. A worker
+  that cannot be built costs seconds and never a probe — its keys are cache
+  misses the serial walk still pays for — and the report says so in
+  `probe_workers` / `probes_prefetched` / `probe_prefetch_misses` /
+  `probe_fan_errors`.
+* **Merge queue: opt-in batch gating.** The registry's `merge_queue.batch_size`
+  now takes the first N queued PRs as one FIFO batch (default 1 keeps the old
+  one-PR path unchanged). Each member is rebased in order onto a local-only
+  `mq/batch-<epoch>` branch, the project gates run ONCE on that combined tree
+  (their diff is the union of the members' diffs, so the selected legs are the
+  union too), and only then does every PR go through the ordinary per-PR
+  rebase/push/lease/CI/exact-SHA merge path with the local gates skipped. A
+  stack conflict drops just that PR on the normal conflict handback; a red
+  combined gate falls back to gating the members one by one via
+  `batch red -> singles`, so the culprit is named and gets the usual red
+  handling while the others still merge. The batch is one in-flight record
+  listing its PRs, and restart recovery reclaims its orphaned gate group and
+  releases every member back to the FIFO in order.
+- **The merge queue's CI-pending budget is now configurable and defaults to
+  one hour instead of 30 minutes.** GitHub's macOS runners are regularly
+  backlogged for 30+ minutes, so the old fixed `CI_PENDING_TIMEOUT_S = 1800`
+  released good PRs to the wait list only to re-claim and re-gate them later.
+  A project can set `merge_queue.ci_pending_timeout_s` (int seconds) in its
+  registry row; an invalid value falls back to the 3600 s default with a WARN
+  line. The expiry logs now print the project's configured budget, and a
+  pending (QUEUED/IN_PROGRESS, not red) head that outlives it logs
+  `CI still running after Ns (runner backlog)` so an operator can tell a
+  backlogged runner from a hung job.
+- **Audit §5.1 now records the live plugin tier and the 2026-11-25 denominator.** The
+  main-only-surface audit still said `0 / 51` profile configs carried a `plugins` key and
+  that the 51 clean configs were one `_migrate_to_21` away from the whole cluster surface.
+  Re-measured 2026-11-25: **52 / 52** configs carry an explicit key — 51 hooks-only
+  `[hscc-cluster]`, `<main>` (`general`) all three — written by bootstrap's post-2.17.4
+  tier sweep (`t_e98c6ad4`) on 2026-11-23 17:52, not by the migration. §5.1 names the
+  writer and why the shape is compliant (register-time gate, not config alone), §5.2
+  re-runs the production gate against it, and the directory count is corrected again to
+  **54** because a real profile was created 2026-11-25 (`.deleted` remains excluded).
+* hscc-roles: the main orchestrator's own prompt now names the per-PR hold. The
+  "controlling the cluster" section listed the merge queue's write half as
+  `add`/`remove`/`pause`/`resume`/`enable`/`disable` — the verbs of the world
+  before the hold existed — so the one agent that parks PRs was told about the
+  verb that does **not** hold and not about the one that does. It now lists
+  `hscc merge-queue hold` and `hscc merge-queue unhold` beside the rest of the
+  D8 CLI-only group, with the reason the hold exists stated once: a remove is
+  **only a pull**, and the next empty tick auto-enqueues the PR again (which is
+  how a PR "parked" with a remove plus a PR comment was back in the queue on its
+  next push). A hold survives a push, a green check and elapsed time, only an
+  unhold releases it, and `hscc merge-queue pause` stays the project-wide lever
+  that halts every other queued PR with it. No new agent tool and no route —
+  `hold`/`unhold` stay CLI-only with their group, as the hscc and hscc-cluster
+  skills already say.
+
+### Fixed
+- **The launchd probe fence reached only the process that imported pytest.**
+  `hscc_daemon/api_cli.py::launchd_status` gated the live `launchctl print` of the
+  OPERATOR's gui domain with `_run_probe is None and "pytest" in sys.modules`. Measured
+  with a fake `launchctl` planted first on a probe child's `PATH` (so the measurement
+  never came near the real service manager): a marked child of a pytest item exec'd it
+  once with `["launchctl", "print", "gui/<uid>/com.hscc.api"]` and reported
+  `{'available': True, 'loaded': True, 'pid': 42424, 'state': 'running', 'refused': None}`
+  — the refusal shape `_refused_launchd_status` exists to hand out never fired for the
+  process doing the read. The site now asks `hscc_daemon.suite_fence.under_pytest()` and
+  the refusal names the seam as before, widened to "(or a child one spawned)".
+- **Three marker-only copies now carry both halves.** `hscc_daemon/main_cli.py`,
+  `hscc-api/repl_inject.py` and `hscc-project/flightdeck/core/tmux_chat.py` each gated
+  their tmux/ps/exec seams on `PYTEST_CURRENT_TEST` alone. That is the half that crosses
+  a spawn, so the child case was covered; the hole was every phase OUTSIDE an item.
+  Measured on pytest 9.1.1: the marker is **unset while a module is being imported** and
+  set only from session-fixture setup through item teardown — so a live `tmux`/`ps`/
+  `execvp` reached from collection, a plugin hook or an atexit path answered "no suite"
+  and exec'd against the operator's server and process table.
+- **Ruling, per site (a sweep was not taken).** `main_cli` is in the daemon package, so
+  its private copy is gone and the site delegates to `suite_fence` (t_fdbc24f9: one
+  predicate per package). `repl_inject` and `tmux_chat` are separate plugin payloads
+  deployed standalone into `~/.hermes/plugins` and cannot import the daemon's predicate:
+  a cross-plugin import would put a failable dependency on a line that must never fail
+  (and `tmux_chat` already shows what a runtime sibling lookup costs for the pane
+  matcher — right for a matcher, wrong for a fence). Those two keep their own copies,
+  each stdlib-only and unable to fail. Widening cost nothing a test owns: every guard
+  next to these predicates fires only for the ORIGINAL seam with the DEFAULT binary, so
+  an injected runner or a fake `TMUX_BIN` keeps its path — and the legs are green
+  unchanged.
+- **Duplication is checked, not tolerated.** New
+  `hscc_daemon/tests/test_suite_fence_agrees_across_packages_t_251cd84f.py` compares
+  every copy against the EXPECTED answer for all four signal combinations (a bare "both
+  agree" lets two copies that are both wrong pass), pins one marker spelling
+  behaviourally on the row only the marker can answer, and DISCOVERS the roster from the
+  tree — a fourth copy that nobody pinned is a failure, not drift waiting to happen.
+* the `hscc_daemon` autouse seal (`conftest.py::_isolate_hscc`) now also redirects the remaining `$HOME`-rooted service paths to the per-test tmp dir: `install.PLIST_DIR` / `PLIST_FILE`, `install.SYSTEMD_USER_DIR` / `SYSTEMD_UNIT_FILE` / `LEGACY_SYSTEMD_UNIT_FILE`, and `api_launchd.API_PLIST_PATH`. They were reachable only through per-test patches, and `_install_launchd` / `_uninstall_launchd` plus `install_api_plist` / `uninstall_api_plist` write and bare-`os.remove` those files, so one forgetful case could rewrite or delete the operator's live daemon/API supervisor units with no subprocess for any fence to see.
+* `event_driven.py`'s `_open_kqueue` return annotation is now quoted: the seal above imports that module, and on Linux (where `select` has no `kqueue`) Python 3.13 evaluates the annotation at class-definition time and fails the IMPORT before the polling fallback can run. The `scripts` leg caught it only through the cross-leg child, which collects `hscc_daemon/tests` on Linux; `test_cross_leg_collection.py` now pins an import with `select.kqueue` removed.
+* the fixture guard-asserts the new values every case (a case that patches its own path cannot notice the seal vanishing), and `test_cli_no_ansi.py`'s install cases no longer patch the plist paths themselves — the seal is load-bearing there. `test_plist_seal_install_api_t_2f09d480.py` exercises the real write/remove paths with no path patch, and the no-live-leak sandbox already plants both plist names, so removing either seal entry turns that arm red.
+- **`test_the_per_leg_logs_do_not_pile_up_in_tmp` failed because a *sibling worker*
+  was alive, not because the leg littered.** It snapshotted
+  `set(Path("/tmp").glob("hscc-legs-*"))` before the pack and asserted the set was
+  unchanged after — a verdict on a global namespace the test does not own. A pack's
+  log dir lives for the whole run, and this fleet runs several `scripts/run_tests.sh`
+  on one Mac (measured mid-fix: `run_tests.sh` processes from the merge queue, two
+  worker shells and a container leg all live at once), so a sibling's dir is born
+  between the two snapshots whenever the windows overlap. Reproduced by inducing the
+  overlap — a fake sibling creating a `hscc-legs-*` dir every 0.2 s: the old assert
+  died on `AssertionError: tmp litter` at `scripts/tests:458` while the line ABOVE it,
+  the one about the directory the run actually caused, passed. That is the shape of
+  the bug: the assertion that could see real litter was never the one that failed, and
+  the run had littered nothing.
+  **Ruling:** the claim is asserted about the directory the runner *names* in its own
+  banner, because that is the only directory the run can be blamed for. Two pins keep
+  the scoping from hiding litter — exactly one `mktemp -d /tmp/hscc-legs-` creation
+  site in the runner (so nothing can make a dir it did not advertise) and exactly one
+  banner per run — and the per-leg logs (`0-<leg>.log`, `<n>.rc`, `legs.tsv`) are all
+  written *inside* that dir, so one `not exists()` is the whole `N files per run`
+  claim rather than a fraction of it. Teeth proven by mutation, not by reading: drop
+  the runner's cleanup trap and the test goes red on `left behind: /tmp/hscc-legs-…`;
+  add a second unadvertised creation site and it goes red on the site pin. A gate
+  whose red can be caused by a neighbour's liveness is a gate someone re-runs until
+  green, which is the real cost this was paying.
+* the `hscc_daemon` test suite no longer has a path from which a test can delete the operator's real launchd jobs: `conftest.py::_isolate_hscc` now redirects `event_driven.PLIST_DIR` (and that module's `HSCC_DIR` / `STATE_DIR`) to the per-test tmp dir, because `~/Library/LaunchAgents` sits outside the `~/.hscc` tree its `expanduser` rewrite covers and the module's constants were in neither list. `LaunchdJobGenerator.uninstall_job` does a bare `os.remove(<PLIST_DIR>/<label>.plist)` for every periodic stream, so a single case that forgot to patch would have de-Registered the operator's `com.nousresearch.hscc-periodic.*.plist` jobs with no subprocess for any fence to see.
+* the launchd directory is now a measured arm of the no-live-leak guard: `test_no_live_hscc_leak.py` plants the plist set the code would touch in a sandboxed `HOME`, runs the event-driven CLI cases there, and byte-diffs that directory too — the seal is load-bearing (those cases no longer patch any path of their own) instead of assumed.
+* `hscc_daemon/event_driven.py` can be imported on a host without kqueue again. `KqueueWatcher._open_kqueue`'s return annotation `Optional[select.kqueue]` is an expression, and on CPython < 3.14 it is evaluated when the `def` runs — i.e. while the class body executes — so on any host where that BSD symbol is absent (every Linux DGX node, every ubuntu CI runner) the module raised `AttributeError: module 'select' has no attribute 'kqueue'` at import, before the polling fallback that module promises could ever run. Writing the annotation as a string literal keeps it readable and restores the documented degradation. This surfaced when the seal above put `event_driven` on the import path of the ubuntu `scripts` leg, where 24 cases in `test_plugin_manifest_drift.py` errored at setup; the defect itself predates that card.
+- **`hscc project new --github` could not create a remote.** The `gh repo
+  create` argv carried `--private` only under `--private` and nothing
+  otherwise, so every public run failed with ``--public``, ``--private``, or
+  ``--internal`` required when not running interactively``. The command now
+  always passes exactly one visibility flag, `--public` by default. A
+  freshly-initialized empty repo (HEAD has no commit) also failed because
+  `--push` has nothing to push: the remote is now created without `--push`
+  and the step reports `github created, nothing to push` instead of failing.
+* `scripts/tests/test_leg_heartbeat.py`: the `>= 2 heartbeat lines` assertions
+  no longer race a fixed 3 s wall-clock window. The leg the watcher is attached
+  to used to be `sleep 3` at a 1 s cadence, but a heartbeat tick is `sleep 1`
+  *plus* the `date`/`ps`/`pgrep` forks that build the line — CPU work, which is
+  exactly what a throttled scheduler stretches. That is how #734 read
+  `expected >=2 heartbeat lines in 3s at 1s cadence: got [1]` inside the queue
+  gate. The leg now runs to a ceiling and the TEST ends it once the log holds
+  the two lines, so the cadence is asserted on the watcher's output rather than
+  on winning the CPU; a slow scheduler takes longer, never fewer lines. The
+  leg's process group is terminated either way, so no `sleep` outlives the test.
+- **The merge queue stopped re-claiming a wait-listed PR on every tick.** With
+  the FIFO empty, the claim step reached into `waiting` and popped its oldest
+  entry with no readiness check of its own, so a PR whose checks were still
+  pending or red went to `process_entry`, was called not green, and was bounced
+  straight back — one `checks not green; moved to the wait list` / `-> waiting`
+  pair per tick, forever (PR #710 burned 16 of them on 2.17.5). The entry kept
+  its `enqueued_at`, so the round-robin that path documented never happened
+  either: the same oldest PR won every tick, and when it expired on its 24 h
+  budget the next-oldest inherited the churn. The wait list now has exactly one
+  door back into the FIFO — `_drain_waiting`, which already runs every tick and
+  admits a green rollup and nothing else — plus an explicit
+  `hscc merge-queue add`, which stays an operator retry.
+* runner: **a packed leg whose name is a path now runs at all.** The leg log was
+  built by splicing the leg name into a filename (`$LEG_TMP/$P_NEXT-$d.log`), and
+  `.github/scripts` is the one roster leg whose name is nested, so its log path was
+  `…/1-.github/scripts.log` — a file inside a directory that was never created. The
+  redirect failed in the child before `env` was execed, so pytest never started, the
+  wrapper recorded no `.rc`, and the leg read red off `wait`'s status: `elapsed=0s
+  rc=1`, an empty block, and no `FAILED` line for anyone to capture. **It was red on
+  every packed run, at every parallelism, on every host** — one of the three reds that
+  kept `HSCC_TEST_PARALLEL`'s default at 1 was never a concurrency problem at all.
+  Eleven of twelve leg names are one flat component, which is why the 24 tests that
+  shipped with the pack could not see it. `/` is now flattened in the log filename;
+  roster order stays in the index prefix and the leg's real name stays in the
+  heartbeat TSV and the summary rows.
+* test harness: **the `hscc-api` watchdog leg's `('Z', '<defunct>')` setup error was a
+  race inside the fixture, not a side effect of leg packing** — and the two mechanisms
+  the parent card named (`t_6c2123f9`: the runner's deferred reaping, and `set -m`)
+  cannot produce it. The pid in that message is the sandbox API parent the `sidecar`
+  fixture spawned itself, so it is a direct child of the pytest process and only that
+  process's teardown can reap it; no runner tick touches it. In `mode="stop"` the
+  parent is instructed to call `shutdown()` and `raise SystemExit(0)` the moment it is
+  ready, and the fixture then asserted that same pid was still alive — a demand that
+  the fixture, not the scenario, win the scheduler. Measured on one node id, serial,
+  `HSCC_TEST_PARALLEL` unset: **0 red in 25 runs at ordinary priority, 8 red in 30
+  under twelve bounded burners**, every one `('Z', '<defunct>')`, and **0 red in 25**
+  for the `serve` arm under the same load — so the variable is CPU pressure, and the
+  arm. The pack was one more source of pressure, not a new mechanism.
+  The platform half of the self-check now runs against a marker-bearing canary the
+  harness starts and holds itself, so it still reddens on a clipped `ps` column, and
+  the liveness assertion stays where it is a real precondition (`serve`,
+  `no_watchdog`, `stop_on_file` — that one gates its stop on a sentinel the harness
+  writes later). In `stop` the harness asks its own `Popen`, the authority on its own
+  child and immune to pid recycling, that the parent is either still running or exited
+  `0`. The posture that measured 8/30 measures **0/30** after.
+  `docs/audits/packed-roster-reds_t_4fc35c1f.md`.
+* runner: **the leg-log hygiene test stopped asserting on the whole host's
+  `/tmp`.** It snapshotted `/tmp/hscc-legs-*` before the pack and demanded the
+  same set afterwards, but that namespace is host-global: any other packed run on
+  the box — a second queue gate, a worker running its own suite — creates and
+  `rm -rf`s a dir inside the window, and a sibling run is indistinguishable from a
+  leak. Measured here: **3 serial copies of the test green, 6 launched at once red
+  2** (`AssertionError: tmp litter`), and the red is the diff the queue handed back
+  for this PR's gate — one dir present at `before` that vanished plus one absent at
+  `before` that appeared. `HSCC_LEG_TMP_ROOT` now moves the pack's log ROOT, so the
+  check runs in a namespace the run owns and the private root must be empty
+  afterwards — which still catches a dir the run never names, the leak the global
+  glob was written for. The default stays the literal `/tmp` and `$TMPDIR` is still
+  never consulted (a new test pins it). **6/6 green under the load that reddened
+  2/6.**
+- The kanban dispatcher's `active_pr` respawn guard now resolves a card whose PR GitHub reports MERGED instead of holding it forever: `hermes_cli/kanban_pr_acceptance.pr_merge_state()` reads `pullRequest{state mergedAt mergeCommit{oid}}` as the card's assignee profile (any failure -> `UNKNOWN`), and the dispatcher completes the card — or blocks it `needs_input` when completion is refused — behind a 15-minute per-URL cache. `OPEN`/`CLOSED`/`UNKNOWN` keep holding exactly as before, dry runs never probe, a new terminal `active_pr_resolved` guard reason makes a failed resolution unre-spawnable, and the per-tick `respawn_guarded` event is deduped. `describe_suppression()` now also names the skipped unassigned/nonspawnable/per-profile-capped buckets, so a "dispatcher stuck" warning always says what held the tick back.
+- **The kanban-orchestrator template shipped its first dangling `references/`
+  link.** The playbook folded in `t_8875c6fc` cites
+  `references/pitfalls-card-writes.md`, but that file existed only in the live
+  `hscc-orch` profile. `orch_sync.py` installs the whole skill directory with
+  `shutil.copytree(..., symlinks=True)`, so every new orchestrator profile
+  would point at a file that is not there. The template now vendors the file
+  verbatim from
+  `~/.hermes/profiles/hscc-orch/skills/devops/kanban-orchestrator/references/`
+  (`cmp` clean), and `SKILL.md` is left untouched: only this one of the seven
+  live-only references is cited by the template, so the other six stay out.
+  No `version:` bump — the template and live copy are equal at `3.1.0`.
+* `hscc event-driven uninstall` and `hscc event-driven status` are now fenced the
+  way `hscc api`'s supervisor reads and writes are: `event_driven.py` imports
+  `hscc_daemon.suite_fence` (it never did) and both exec sites — the
+  `launchctl bootout gui/<uid> com.nousresearch.hscc-periodic.<stream>` in
+  `LaunchdJobGenerator.uninstall_job` and the `launchctl list <label>` in
+  `status()` — go through one module function `_launchctl(argv, timeout)` that
+  answers a visible refusal instead of forking under `under_pytest()`. Before this,
+  the only thing between a test and the operator's live periodic jobs was the
+  convention that each case requested the opt-in `fake_subprocess` fixture and
+  redirected `PLIST_DIR`; a new case that forgot it unloaded the operator's
+  scheduled checks. The same exec was also reachable from
+  `EventDrivenDaemon._cleanup_stale_launchd()`, which runs on every daemon start.
+  The fence sits in production, not in a conftest autouse, because that is what
+  makes it reach a fresh interpreter a suite item spawned (t_251cd84f's finding)
+  and every other test dir in the repo; the escape hatch is unchanged — a case
+  installs its own runner with `monkeypatch.setattr(ed, "_launchctl", ...)` and the
+  pre-existing cases needed no edits. A refused probe is no longer folded into
+  `loaded: False`: the status row carries `loaded_error` and the human view prints
+  `unknown` rather than the same `no` an actually unloaded job gets. The operator's
+  two commands are unchanged — outside a suite the guard is false and the same
+  `subprocess.run` runs.
+- **A packed run could not execute the `.github/scripts` leg at all.** The pack
+  built each leg's log path by concatenating the leg NAME into a filename
+  (`logf="$LEG_TMP/$P_NEXT-$d.log"`), and the roster holds one leg whose name
+  contains a slash. For that leg the redirect target's parent did not exist, so
+  the leg's own `> "$logf"` failed, the subshell died before pytest was spawned,
+  no `.rc` was written, and the pack reported `rc=1 elapsed=0s` with an empty log
+  — any pack containing `.github/scripts` was red whatever the code did, i.e. a
+  real roster leg was silently ungated in the bounded-concurrency posture. Fixed
+  by flattening `/` where a leg name becomes a file NAME; the name stays
+  unflattened everywhere a human reads it (`parallel: done leg=`, `legs.tsv`, the
+  `━━━ <leg> ━━━` digest). Slash-free names are byte-identical to before, and the
+  `$P_NEXT-` index prefix keeps the mapped names collision-proof.
+- **Four more `hscc api` presentation cases were asking the operator's live
+  launchd whether an API was running, and passing anyway.** The residual
+  t_db4d8a74 left in its own file — `test_status_running_no_ansi`,
+  `test_status_stale_pid_no_ansi`, `test_status_no_ansi_with_qr`,
+  `test_no_raw_markup_leak` in `hscc_daemon/tests/test_api_cli_no_ansi.py` —
+  drove `status`/`stop` with no seam injected, so `_launchd_matters()` opened on
+  the real `~/Library/LaunchAgents/com.hscc.api.plist`, the t_8bf34130 fence
+  refused, and the cases rendered the refusal instead of the screen they name.
+  They were green only because their assertions never read a supervisor row:
+  `assert "stale PID file" in out` is satisfied by the refusal line too ("stale
+  PID file; state unknown (supervisor not consulted)"), and the markup sweep
+  discarded the rc its `stop` failed closed with. Each now declares the posture
+  through the seam the refusal names, pins that the seam was consulted, and pins
+  the supervisor row that must be ABSENT. `test_api_multibind.py`'s two status
+  cases already had a posture — `sys.platform` pinned to "linux", so the gate
+  declines — but it was implicit and unwatched, so it is declared now: a probe
+  that must be called zero times, answering the supervised row if it ever is.
+  The fence is untouched; a suite that forgets the seam still sees the refusal.
+* the `hscc-roles` census guard
+  `test_every_hscc_owned_worker_profile_has_role_spec` can fail again. The leg's
+  HOME seal (t_d24a05ea) had made its own `if not os.path.isdir(PROFILES_DIR):
+  return` the only branch anyone ever took, so the backstop for an orphaned live
+  worker profile (the `marketing` incident) passed while auditing zero profiles —
+  hiding `roles/marketing.yaml` kept the leg green. It now resolves the root the
+  seal moved and audits THAT, goes red instead of guessing when the emptiness is
+  not the seal's doing, and where a host truly has no profiles dir it audits a
+  planted census instead of returning. Three pinned siblings carry the bite into
+  every environment: the predicate's four-arm truth table, the guard going red
+  with the planted orphan named, and a real spec-hide turning its own profile
+  into an orphan.
+- **`merge-queue remove` during a live gate wedged the repo's queue and
+  the daemon never said why.** Removing the PR that held the in-flight
+  claim nulled `in_flight` while its gate was still running, so the ledger
+  reported an idle repo that was not idle, and the post-gate path recorded a
+  `last` row for a PR that was no longer anywhere in the queue. On
+  2026-11-23 that left the `hscc` repo unable to claim its one eligible
+  green PR for 30+ ticks, with `21:41:28 INFO … PR #696 -> red-gate` as the
+  last merge-queue line the daemon ever wrote. A removal that lands on a
+  live claim is now a *deferred* removal: the claim is kept, marked
+  `cancel_requested` and stamped `stage=cancelling`, and the running
+  processing settles it at its next checkpoint — the same way `pause` and
+  `disable` already did. The tick's dead-run recovery no longer resurrects
+  such a tombstone, so an operator's removal cannot be silently undone by a
+  restart. Four legibility gaps closed with it: a raise in one repo's
+  wait-list drain or project config is named with its traceback and costs
+  that repo one tick instead of taking the whole tick (and every other repo)
+  down silently; a raise that does escape the tick is logged by the daemon
+  entry point that used to swallow it into the stream file; a tick that
+  declines to claim a queued PR says so at `DEBUG`, naming the PR and the
+  condition (repo busy with another PR, paused, disabled, no registry
+  entry); and a claim live in another process no longer lets a second PR be
+  claimed against the same repo.
+- **`hscc api status` let a stale PID file outrank launchd's own answer, and printed
+  "not running" for an API that was running.** The state line in `_handle_status`
+  came from `elif os.path.exists(API_PID_FILE):` — a branch ABOVE the two that read
+  the supervisor row — so a file naming a dead pid decided the verdict before
+  launchd was ever consulted. Measured with a canned answered row
+  `{available: True, loaded: True, pid: 42424, state: 'running'}` plus an `api.pid`
+  naming a dead pid: the panel's headline was `stale PID file (not running)` while
+  two lines below it printed `Supervisor: launchd com.hscc.api loaded, pid 42424,
+  state running`, at rc 0 — a clean read of a false verdict. The unit writes no
+  `api.pid`, so a stale file is precisely what a machine serving the API under
+  launchd (plus some older or crashed `hscc api start`) leaves behind: the file
+  proves only that the process *it* recorded is gone, never that the API is down.
+  Same false-verdict class the launchd pairing (t_d2245e7e) exists to kill, and once
+  the in-suite probe fence (t_251cd84f) lands it stops being a rare operator case and
+  becomes a screen any suite case that plants a pid file cannot falsify.
+  **Ruling:** an answered supervisor row that says the unit is loaded owns the state
+  line; the stale file becomes a row beneath it, still visible, never the headline.
+  The file keeps the verdict where the supervisor answered that no unit is loaded and
+  where there is no supervisor to ask at all — the plain `hscc api start` case the
+  branch was written for, which is why the fix is a precedence question, not a
+  deletion. The refusal variant of the same combination (fence fired + stale file)
+  composes instead of overwriting: `stale PID file; state unknown (supervisor not
+  consulted)` — the dead pid is our own read and stays reported, but it does not buy
+  back the verdict the probe declined (t_8bf34130's ruling, unchanged). `hscc api
+  stop` reads the same pid source and already gives launchd's pid precedence; that is
+  now pinned rather than assumed, so the pair cannot drift apart again.
+- **A gate case failed on its neighbours instead of on the code under test.**
+  `test_the_per_leg_logs_do_not_pile_up_in_tmp` asserted
+  `set(Path("/tmp").glob("hscc-legs-*")) == before` — a before/after comparison
+  across the WHOLE shared namespace that every parallel `scripts/run_tests.sh`
+  pack writes into. Any third party creating or removing one of those dirs
+  inside the case's ~0.4 s window failed it, and on the gate host another pack
+  is almost always live: the gate's own second leg runs cases that spawn packs
+  (its stub legs are named `hscc-commands` / `sparkrun-hermes`), a second PR's
+  gate or a dispatched worker's local run can be live in the same second, and a
+  pack killed by a timeout leaves its dir behind for hours. It redded PR #792's
+  `scripts` leg on exactly that: one extra dir in EACH set, which is churn, not
+  a leak — the run's own dir had already been proven gone by the assert above
+  it. The case now reads its OWN log dir while its pack is still in flight, the
+  only moment a path under `/tmp` is attributable to that run, and does it over
+  two runs in a row so a genuine pile-up still bites.
+- **A pack killed by a signal the runner did not own left its `/tmp/hscc-legs-*`
+  log dir behind, and `SIGKILL` leaves it no other way.** The runner had exactly
+  one cleanup — the `EXIT` trap — and measured against the shipped script
+  (`docs/audits/support/t_b94a2b39/signal_matrix_before.txt`: stub-interpreter
+  pack, 3 legs, `HSCC_TEST_PARALLEL=2`, killed once legs were live, 3 trials per
+  signal) `TERM`/`INT` came away clean, as the parent card expected, but **`QUIT`
+  leaked the dir in 3/3 trials** and `QUIT`/`HUP`/`PIPE`/`KILL` each **orphaned
+  both legs in flight**, because only `on_sigterm` reaped them. The leaked shape
+  matches what t_34c5a3ed found on the host: `legs.tsv` with its launch rows and
+  every `0-<leg>.log` at 0 bytes.
+  **Ruling:** two halves, because the leak has a half no trap can reach.
+  (1) `HUP`/`QUIT` now go through one handler that reaps the legs by pid, removes
+  `$LEG_TMP` and then **re-raises with the default disposition**, so the code a
+  shell reads in `$?` stays `128+N` — 129/131/141 are pinned, because a red gate's
+  readers parse them (t_6bb29d46's rc=143 contract). `SIGPIPE` is deliberately
+  left out: 0/4 dir leaks, and trapping it in a 967-line script that pipes through
+  `head`/`tr` changes error paths this card has no evidence about. (2) `SIGKILL`
+  runs *no* handler, so the litter is reclaimed by the next pack: a bounded sweep
+  before `mktemp` removes own-uid `hscc-legs-*` dirs whose `mtime` is older than
+  `HSCC_LEG_SWEEP_MIN_AGE_SECONDS` (default 7200 s), skipping symlinks and other
+  accounts. Age is the whole safety argument — `mtime` moves on every launch and
+  every leg completion, and the merge queue caps one invocation at ~2400 s, so a
+  dir three caps old cannot belong to a live run — which is why this is a sweep and
+  not a guess about who owns the namespace (the assumption t_34c5a3ed removed).
+  `0` disables it; the serial path does not sweep, and its stream is pinned to gain
+  no line. The first version used `find /tmp`, which sweeps nothing on macOS —
+  `/tmp` is itself a symlink and `find` does not descend into it; caught by test,
+  not by reading. The second version swept nothing on the **Linux** runner, for the
+  sibling reason: it compared a candidate's `stat` owner against `id -u`, and where
+  `/tmp` is a mount whose owner is not the mounter `stat` reports the mount's uid for
+  a dir the calling account created itself, so every candidate read as "another
+  account". `stat`'s flag pairs make that worse than it looks — GNU `stat -f %u` and
+  BSD `stat -c %u` both **exit 0** and answer with prose (a filesystem-info block, a
+  full listing), so the `stat -f … || stat -c …` fallback chain never falls back, and
+  a silent `continue` made a sweep that deleted nothing indistinguishable from one
+  that deleted correctly. Both the owner and the stat format are now probed once per
+  pack (`scripts/leg_tmp_sweep_owner.sh`): make a dir in the namespace, ask the
+  filesystem who owns it, sweep that. The two positive sweep tests are the gate on
+  this — the reclaim assertions went red while the "must not delete" guards stayed
+  green, which is the asymmetry `test_the_sweep_never_compares_a_candidate_against_id_u`
+  and friends now hold down.
+* `scripts/run_tests.sh`: a red gate leg now names its failing tests. Both pytest
+  invocations (the serial leg and the parallel pack's copy of the same command)
+  ran `-q -rs`. `-rs` was deliberate and stays — it prints every skip REASON
+  instead of a bare count (GAP-D-1, t_b82ad0fe) — but nothing ever added its
+  counterpart `-rf`, so pytest suppressed the `FAILED <node id>` lines of its own
+  short summary. A red leg therefore handed the reader a dot band and a
+  `FAILURES` section and left them to reconstruct which node ids failed by hand.
+  That cost is measured, not assumed: t_00d9581d reconstructs failing node ids
+  from the dot stream three separate times in one card, and its mutation battery
+  had to add `-rf` to its *own* pytest command while recording the runner's `-rs`
+  as "suppresses `FAILED` lines (known trap)".
+  Proved on one failing test through the shipped runner (`HSCC_TEST_LEGS=
+  memori_byodb`, rc 1 both times): before, the leg log held **zero** `FAILED`
+  lines; after, it held `FAILED memori_byodb/tests/test_zz_rf_proof.py::
+  test_deliberately_fails_for_rf_proof`.
+  The flag also had to go into `docs/audits/support/t_572b4856/alone_sweep.sh`,
+  which runs one file at a time and is required to mirror the runner's pytest
+  flags flag-for-flag: `test_alone_argv_matches_the_runner_argv` compares the two
+  sides and went red on the leg-only edit — the guard catching a real drift, not
+  a brittle one. The alone side names its failing node ids now too.
+- **Three `hscc api` presentation cases were asking the operator's live launchd
+  whether an API was running.** `hscc_daemon/tests/test_api_cli_no_ansi.py`'s
+  status/stop cases declared no supervisor posture, so the verbs asked the host:
+  `_launchd_matters()` opens on the real
+  `~/Library/LaunchAgents/com.hscc.api.plist`, and on any box where the unit was
+  ever installed — a workstation, and the box the merge-queue gate runs on — it
+  opened inside those cases. The t_8bf34130 fence then refused to answer inside a
+  pytest process, `status` printed "state unknown (supervisor not consulted)"
+  where the case asserts "not running", and `stop` answered fail-closed with rc 1
+  where it asserts its normal report: `3 failed` on every gate leg on such a box,
+  identical on a pristine `origin/main`, so nobody's diff and permanently red.
+  Each case now declares the posture it draws through the seam the refusal itself
+  names — `launchd_status(_run_probe=...)` — and pins the two ambient inputs that
+  decide whether the seam is consulted at all (`sys.platform`,
+  `api_launchd.API_PLIST_PATH`). The fence is untouched: a suite that forgets the
+  seam still gets the visible refusal, still pinned where it is pinned.
+* `hscc api stop`'s launchd WRITE is now fenced the way its READ is: `_launchctl_run`
+  asks `hscc_daemon.suite_fence.under_pytest()` and answers a visible refusal instead
+  of forking, so a test that injects only `launchd_status(_run_probe=...)` answering
+  `loaded: True` can no longer exec a real `launchctl bootout gui/<uid>/com.hscc.api`
+  against the operator's running unit. The fence sits in production, not in
+  `hscc_daemon/tests/conftest.py`, because that is what makes it reach a fresh
+  interpreter a suite item spawned (t_251cd84f's finding) and every other test dir in
+  the repo; the escape hatch is unchanged — a case installs its own runner with
+  `monkeypatch.setattr(api_cli, "_launchctl_run", ...)`, and the three files that
+  already did that needed no edits. A refused bootout is `error: could not run
+  launchctl: ... refused inside a pytest process ...` on stderr with exit 1, and
+  leaves the pid file alone. The operator's `hscc api stop` is unchanged.
+* `hscc_daemon/workspace_clean.py`: the workspace keep-verdict is scoped to what
+  removal actually deletes. A worktree's `.git` is a file into the shared common
+  dir, so the repo-wide `log --branches --not --remotes` and `stash list` probes
+  read every branch in the parent repo — any one local-only branch marked all of
+  its worktrees `unpushed` and pinned them forever (106 of 109 `unpushed` keeps
+  on this host were that false positive). Worktrees are now kept only for
+  `status --porcelain` (dirty) and unreadable probes; full clones keep all three
+  tests unchanged, because their object store is the workspace being removed.
+- **Two merge-queue review lessons were readable only by the orchestrator
+  profile.** They lived in the live `hscc-orch` copy of the
+  `kanban-orchestrator` skill, so no worker or reviewer profile ever saw
+  them, and both have already produced a wrong verdict on this board: a lane
+  accused of pushing on its own PR because of a stale `gh pr view` read, and a
+  new doctor row judged by the wrong test. The template now vendors
+  `references/reviewing-queue-gated-prs.md` from
+  `~/.hermes/profiles/hscc-orch/skills/devops/kanban-orchestrator/references/`,
+  following the `pitfalls-card-writes.md` precedent (#796). Unlike that one,
+  the template cited this reference nowhere, so `SKILL.md` gains the pointer
+  line naming both discriminators; `version:` stays `3.1.0`, per the
+  precedent. Two absolute personal paths present in the live copy were
+  scrubbed — one to `$HOME`, one to the guard's documented placeholder — and
+  the section that was history-about-the-previous-draft rather than a rule was
+  retitled to state the rule.
+
+### Security
+- **A committed macOS machine hostname is now a forbidden identifier, detected
+  by shape.** `scripts/address_guard.py`'s single `FORBIDDEN` pattern gains a
+  hostname branch: a possessive-name LocalHostName (`<name>s-Mac-Studio`,
+  `…-MacBook-Pro`, `…-Mac-mini`, `…-Mac-Pro`, `…-iMac`, optional `.local` tail)
+  trips the same detector the pytest gate, `.githooks/pre-commit` and the CI
+  backstop share. The rule is a shape, not an enumerated allow-deny: no real
+  hostname is written into the control, and a fixture uses a reserved `.invalid`
+  name assembled at runtime. The branch rides inside `FORBIDDEN` so
+  `.github/scripts/redact_guard_report.py` masks it from public job logs. Landed
+  advisory-first behind `HOSTNAMES_ENFORCE`, then flipped to blocking after the
+  three known occurrences were scrubbed (`host:` header → `macOS`; kanban
+  claimer → `<host>.local`); `--tracked` then measures zero hostname offenders.
+- **The operator's absolute home path is gone from code, scripts and tests.**
+  `pom11/hscc` is public, so a concrete `/Users/<operator>` path names the
+  machine and account it was written on. Functional code now derives the value
+  at runtime (`Path.home()` / `os.path.expanduser`), shell uses
+  `${VAR:-$HOME/...}`, and fixtures use the sanctioned `/Users/hscc-fixture`
+  user — so the suites run the same on any host.
+- `hscc-bootstrap/enable_plugins.py` no longer ships a default
+  `out_of_tree_repos` list naming private projects. The env-var shape is kept;
+  an install that needs out-of-tree worktrees sets
+  `HSCC_OUT_OF_TREE_WORKTREE_REPOS` explicitly.
+- A tracked-tree grep for the operator's home path over the non-docs tree
+  returns rc 1 (no output), and the pre-existing `/Users/*` fixtures are
+  untouched.
+
+### Verified
+- `hscc_daemon/tests/test_api_cli_launchd_fence_reaches_children_t_251cd84f.py`: 4 cases,
+  both halves in one file, child loaded by `import` (not `runpy`). The probe child reports
+  WHICH BRANCH it took — the argv the live seam (`_launchctl_run`) was called with, plus a
+  log line the planted fake binary writes when it really execs, on a per-tag exec log so a
+  control cannot leave proof for the marked half. Marked child: refused, seam at 0, fake
+  never exec'd. Unmarked child: the fake really execs and its canned `print` output parses
+  to a pid and a state, so the zeros guard the operator's own `hscc api status`. The
+  four-combination case spies the shared predicate and DELEGATES to it, so a broken
+  predicate cannot hide behind the spy, and pins that the site asked it at all.
+- `hscc_daemon/tests/test_main_cli_tmux_fence_t_251cd84f.py`: 3 cases. Four combinations at
+  the guard (starting from the marker-unset row, the one the copy left open) with
+  `subprocess.run` replaced before the call, plus a marked/unmarked child pair against a
+  planted `tmux` on `PATH` with `TMUX_TMPDIR` planted empty so the socket resolution
+  cannot look at `/tmp` either.
+- `hscc-api/tests/test_repl_inject_fence_reaches_beyond_the_marker_t_251cd84f.py` and
+  `hscc-project/tests/test_tmux_chat_fence_reaches_beyond_the_marker_t_251cd84f.py`: 6
+  cases each (3 parametrised signal rows + a plain-run control + the marked/unmarked child
+  pair) against the ORIGINAL seam, with a planted fake `ps`. The marker is cleared in the
+  test BODY, because pytest re-exports `PYTEST_CURRENT_TEST` for the call phase after
+  fixtures run.
+- Red-before, run against the parent branch's modules in the same tree: **api_cli guard 3
+  of 4 fail** (the marked child took the live supervisor probe; the marked child exec'd
+  `launchctl`; the site never asked `suite_fence`), **main_cli guard 1 of 3** ("the
+  original seam execed with pytest=True marker=False"), **cross-package pin 2 fail**
+  ("`hscc-api/repl_inject.py` said False, expected True — the suite process itself,
+  OUTSIDE an item"), **hscc-api and hscc-project guards 1 each** ("DID NOT RAISE
+  `InjectError`" / "DID NOT RAISE `RuntimeError`" on the marker-unset row). Every control
+  (plain run, unmarked child) passes both ways by construction — that is what makes the
+  refusals evidence rather than a dead branch.
+- Nothing here execs a real `launchctl`, `tmux` or the operator's `ps`: each guard replaces
+  the module's own seam before calling it, and every binary a child can find is planted by
+  the file that spawns it.
+- `hscc-bootstrap/tests/test_install_orchpad_t_2d87d94d.py`: 18 cases — the
+  tag pin, main+project-orch targeting with workers left untouched, the
+  second-apply no-op (one pip call, zero rewrites), per-profile enable (existing
+  entries/order kept, key created when absent, root and worker configs
+  untouched), enable idempotency (no rewrite, no new backup), report-mode
+  enable state without writes, report mode touching nothing (and still seeing a
+  plugin without the package), package-install failure, per-profile plugin
+  failure, the venv console-script preference, the single-profile repair path
+  (installs + enables, re-run reports `already`, worker/reviewer names refused,
+  installer failure becomes a token, a home with no venv names the fix, and a
+  corrupt config is not reported as enabled), and the stored main name coming
+  from `main_orch`.
+- `hscc-project/tests/test_project_orchpad_t_2d87d94d.py`: 6 cases — `project
+  new` calls the installer for the new `<name>-orch`, the step detail carries
+  `orchpad: enabled`, an existing profile is repaired rather than recreated,
+  installer failure stays a warning while the project succeeds, only the
+  project orchestrator is offered (no worker homes), and the dry-run plan text
+  mentions orchpad.
+- `hscc-roles/tests/test_orchestrator_orchpad_t_2d87d94d.py`: 5 cases — the
+  main orchestrator, a project orchestrator, worker/reviewer homes untouched,
+  a re-run reports `already` with no config rewrite or second pip call, and a
+  failed install is reported in the result instead of raised.
+- `hscc-bootstrap/tests/test_doctor_orchpad_t_2d87d94d.py`: 12 cases — green
+  coverage, missing project/main profiles, installed-but-not-enabled, absent
+  main home, the empty-install skip, a profile-scoped HERMES_HOME walking up to
+  its siblings, an unresolvable identity warning, the pytest fence, the registry
+  entry, the registry refusal seam, and a fix string free of live paths.
+- `hscc-roles/tests/test_orchpad_soul_t_2d87d94d.py`: 5 cases — the section in
+  main/project SOULs exactly once, a custom main name, workers/retired excluded,
+  and one shared text block.
+- `.github/scripts/tests/test_app_build_checks_workflow.py`: 22 cases, 42
+  passed together with the sibling workflow pin. The selector is executed
+  against throwaway git repositories (including the branch-behind-main shape
+  where a two-dot diff would compile forever); the `compile` verdict step is
+  extracted from the YAML and run over the (changes, apps, apple) truth table,
+  so green-on-skip and green-on-failure both have a failing case.
+- Induced the overlap instead of waiting for it: a fake sibling creating a
+  `hscc-legs-*` dir every 0.2 s turned the old test red on demand —
+  `AssertionError: tmp litter` at `scripts/tests/test_run_tests_leg_parallelism.py:458`,
+  `1 failed, 23 deselected` — while the assert one line ABOVE it, the one about the
+  directory the run itself caused, passed. That pairing is the proof the red was a
+  neighbour's liveness and not litter. The rewritten test is green against the same
+  churn (`1 passed`, with 10 sibling dirs created mid-run).
+- Teeth by mutation, each red with its own message: delete the runner's
+  `trap 'rm -rf "$LEG_TMP" …' EXIT` → `AssertionError: left behind: /tmp/hscc-legs-…`;
+  add a second unadvertised `mktemp -d /tmp/hscc-legs-` site → red on the creation-site
+  pin. `run_tests.sh` restored clean (`git status --porcelain` empty after both).
+- Definition of done measured on the fleet, not simulated: two `scripts/tests`
+  suites alive at once, in two worktrees at the same commit (the real sibling shape
+  — shared `/tmp`, separate trees), reported `1 failed, 733 passed, 4 skipped`
+  **each** at ~186 s, and in both the sole failure was
+  `test_load_burners.py::test_signal_to_the_harness_takes_every_burner_with_it[2-130]`
+  — which passes alone (`1 passed in 0.63s`), is not on this diff, and is carded
+  separately (t_f8e6fe38). The test under fix passed in both concurrent suites.
+  Serial run of this card's own command on the branch: **734 passed, 4 skipped in
+  160.6 s**, rc 0.
+- `/tmp` left as found: the 2 pre-existing dirs the card documented are untouched,
+  every dir this work caused was removed, and the obvious `rm -rf /tmp/hscc-legs-*`
+  shortcut was refused on purpose — a live sibling pack was watched creating and
+  cleaning its own dir during verification, which is the whole reason this test may
+  not judge that namespace.
+* the autouse seal is pinned from inside the fixture, reading the production attributes back: the fixture guard-asserts `event_driven.PLIST_DIR` / `HSCC_DIR` / `STATE_DIR` on every case, because a case that patches its own path stays green forever once the seal is deleted and `monkeypatch.setattr(..., raising=False)` would create a misspelled attribute rather than fail. Nothing here touches the real `~/Library/LaunchAgents`; the real path is compared as a string only.
+* those negative arms are bounded to the launchd directory (`!=` the real `~/Library/LaunchAgents`, and not *inside* it) rather than testing for `$HOME` as a substring. `tmp_path` is built under `TMPDIR`, and `TMPDIR` may legitimately sit under `$HOME` — Hermes exports it at its profile scratch dir, and a clean-env spawn (cron, CI, ssh) sets no temp var at all — so a substring arm errored on every case in the package on that runner. `test_event_driven_plist_seal_t_35d9f6ea.py` now pins the posture itself with a sandboxed child run whose `TMPDIR` is inside its `HOME`, so the leg covers it whatever the parent runner's temp dir happens to be.
+- `hscc_daemon/tests/test_merge_queue_overlap_ci.py`: 6 cases. Pins the push
+  before the first gate command (origin already carries the rebased head while
+  the leg runs), the merge refusal while CI is pending on the pushed SHA and
+  the merge on a later tick without re-gating, local red handing back without
+  a CI read, CI red cancelling a running leg through `cancel_check`, the
+  explicit `overlap_ci: false` order (origin still at the pre-rebase head while
+  the gate runs), and a foreign head push during the gate releasing to the
+  wait list.
+- `hscc_daemon/tests/test_merge_queue.py` + the new file: **198 passed** in
+  the foreground. Nothing here runs a real gate suite, a real `gh`, or touches
+  a live queue: every case builds a throwaway bare origin + clone under
+  `tmp_path` and injects the runners.
+* runner: `scripts/tests/test_run_tests_leg_parallelism.py` — **26 tests**, green. The
+  new one packs `.github/scripts` with a flat-named leg and requires the leg's block to
+  be NON-EMPTY, because the runner prints the `━━━ <leg> ━━━` header whether or not the
+  log opened: a header with nothing under it is this defect, and a green stub cannot
+  produce one. Verified to bite — with the fix reverted it reproduces `✗
+  .github/scripts (pytest exit 1)` exactly.
+* test harness: `hscc-api/tests/test_gateway_serve_watchdog.py` — **19 passed, 1
+  xfailed** unchanged from before the fix at the file level (the flake is invisible in a
+  single quiet run, which is the point), plus the repeat evidence above: 30 runs of the
+  racing node under the same burner load, red 8 → green 0.
+* runner: **the full twelve-leg roster is GREEN packed**, which is the bar the
+  parent card set for moving the default and had not been met. `HSCC_TEST_PARALLEL=2`
+  on the committed tree with both fixes: **12/12 legs green, `LEGEXIT=0`, 713 s wall
+  against 1396 s of summed leg work = 1.96×**, on this host at load 3.5. The `pack=`
+  column is the recycling trace that buys it: `sparkrun-hermes` `elapsed=4s pack=241s`
+  — launched into the slot `hscc-bootstrap` (237 s) vacated, finished 4 s later, 163 s
+  before the pack ended; same shape for `memori_byodb` (4 s) and `hscc-project` (7 s).
+  Those are the legs the pre-recycling loop left queued behind a multi-minute
+  neighbour, which is exactly why that loop measured **1.0x**.
+* runner: the narrowed `hscc_daemon scripts` gate at p=2 is **derived, not measured**
+  (~340 s packed vs 579 s serial from this run's per-leg durations). Stated as derived
+  because nobody has timed that gate packed, and the card asks for a measured number.
+* runner: `scripts` measured **green packed** twice — 699 passed, 4 skipped in 246.22 s
+  beside `.github/scripts`, and again inside the full roster at 248 s. The `1 failed of
+  702` the parent card recorded did not reproduce and its failure line is still
+  un-captured; recorded as unresolved rather than absorbed.
+* New pin file `hscc_daemon/tests/test_event_driven_launchctl_fence_t_5fd62226.py`
+  (10 cases): the hazard reproduced in-suite with the fork itself spied on for both
+  sites and for the daemon-start path, the same hazard in a suite-spawned child
+  (planted fake `launchctl` exec log EMPTY — the arm a conftest fixture cannot
+  cover), the unmarked-child CONTROL that really execs 12 `list` + 6 `bootout`
+  through that fake and still reports loaded/Uninstalled, the installed-runner
+  escape hatch with the argv and per-command timeout pinned, the silent-not-loaded
+  trap, and the four-row `suite_fence` predicate matrix with a call count on the
+  shared predicate.
+* Measured by mutation, not by eye (7 plants, each restored byte-identically):
+  deleting the guard reddens 6 cases including the spawned-child one; swapping
+  `suite_fence.under_pytest()` for a private `"pytest" in sys.modules` copy reddens
+  exactly the child arm and the matrix; silencing `loaded_error` reddens 2; lying
+  in the `unknown` cell reddens the human-view pin alone; not logging the refusal
+  reddens 3; rewording `REFUSAL` reddens the phrase pin; widening the bootout
+  timeout reddens the escape-hatch case. A harness pitfall surfaced and was fixed:
+  a plant that preserves the source's byte length inside the same second leaves a
+  mutated `__pycache__/*.pyc` CPython still accepts, which read as a red baseline on
+  a clean tree.
+* Hermetic by construction: no case here can reach the real service manager or the
+  operator's `~/Library/LaunchAgents` — every child redirects `PLIST_DIR` and
+  `HSCC_DIR` under its own planted HOME and leads its `PATH` with the file's own
+  `/bin/sh` fake `launchctl`; no real job was ever queried or unloaded.
+- The survey this card came from was a grep, and grep over-called: with a plugin
+  that attributes every supervisor question to the case that asked it, the five
+  surveyed files at the pre-fix revision read `records=225 unsheamed=4
+  declared=3 never_asked=218` on a box with the unit installed and
+  `launchctl print gui/$UID/com.hscc.api` answering `state = running` — and all
+  four unsheamed ones are in `test_api_cli_no_ansi.py`. `test_autodown_cli.py`
+  mentions `cmd_api` only in a comment (its real-CLI cases run `autodown <sub>
+  --help` in a sandboxed HOME), `test_cli_h_shortflag.py` replaces `cmd_api`
+  with a recorder, and `test_api_cli_detach_stdio.py` runs `start`/`start --help`
+  only — `start` never consults the supervisor. All three need no posture; the
+  measurement is in the card's comment thread.
+- Same plugin, same posture, at this head: `225 passed`,
+  `records=225 unsheamed=0 declared=9 never_asked=216` — the two changed files
+  contribute the nine declared cases and zero refusals.
+- Both changed files (20 cases) green in all three postures the card demands:
+  `20 passed` on the live box (unit loaded, `state = running`), `20 passed` with
+  `HOME` at a throwaway directory whose `Library/LaunchAgents` is empty (so
+  "no unit installed" is a fact of the run, not of the host), and `20 passed`
+  with `HSCC_LAUNCHD_PROBE=1` forcing the question while the live unit sits
+  loaded.
+- Full `hscc_daemon` leg, gate-shaped (`HSCC_TEST_LEGS=hscc_daemon
+  bash scripts/run_tests.sh`, so `-m "not loadstress"` applies and the runner
+  seals HOME), measured at `fe1f702c`: `5394 passed, 1 skipped, 9 deselected in
+  355.29s`, exit 0, ALL GREEN. This diff adds no cases — the two changed files
+  still collect their same 13 + 7 — so the total is main's, not this lane's, and
+  the only commit after that sha is this fragment's own wording.
+- Four mutation plants on the new pins, each self-proved by the run that went
+  red and each leaving the file byte-identical: a canned answer that says the
+  unit is loaded and running bites all four `status` cases (never aimed at a
+  `stop` case — `_stop_launchd` reaches the unfenced `_launchctl_run`, which
+  would bootout a live unit); a fabricated probe record that satisfies the count
+  pin while the seam is never injected bites on the absent-refusal-row pin;
+  dropping the `sys.platform` pin bites the multibind case; and forcing
+  `_launchd_matters` True through the never-asked probe bites on both of its
+  pins.
+- `hscc_cli_help_audit.audit()` wall at the gate's background QoS
+  (`taskpolicy -b`, `origin/main@d524886c`, load ~5 with sibling legs sharing
+  the box): **329.84 s serial → 135.00 s at 4 workers (2.44x)**, measured in
+  one window on one tree by flipping only `HSCC_CLI_HELP_PROBE_WORKERS`.
+- The report is identical between the two postures apart from the fan
+  accounting and the kernel-assigned sealed ports: `surface_paths` 179,
+  `probes` 349, `findings` 20, `examples_total` 77, `a_counts` equal, all
+  20 finding details equal. The prefetch plan is provably the walk's own ask —
+  945 unique `(argv, width)` keys, both directions equal — and the same
+  179/349/1011/945 numbers hold at `origin/main`, at this head, and at the
+  parent card's base `c3d686dc`.
+- `scripts/tests/test_cli_help_surface.py`: **40 cases** (34 pre-existing + 6
+  new fan-out pins), green in 2.00 s for the new ones (they stub the spawn, so
+  the fan-out is proven without paying for a walk).
+* measured at f5a68d8a before the change, with `roles/marketing.yaml` moved out
+  of the way: the guard's own node id under bare pytest `1 passed`, and
+  `role_soul_check.spec_coverage()` from inside the sealed session
+  `vacuous=True, scanned=0, PROFILES_DIR=/private/tmp/hscc-roles-leg-home-XXXX/…`.
+  After it, the same mutation fails with
+  `no role spec …: marketing [census root: …/.hermes/profiles]`. The live host
+  census itself answers 26 worker profiles, `missing=[]`.
+* mutation sweep on the new pins, whole file per mutant, 8/8 killed at
+  `83b7fedf`: the worker-marker arm dropped, the `## Role:`
+  arm dropped, an allow-list added, `_census_roots` answering `[]`, the guard's
+  census loop iterating nothing, the emptiness attribution removed, and the
+  planted CI arm weakened (that last one only under a forged empty `HOME`,
+  which is also the arm proving a CI-like host stays green — no false red).
+* sibling scan across all 12 legs for a guard that early-returns on an ambient
+  path: this was the only one reading `PROFILES_DIR`. The nearest relative is
+  `test_hermes_cli_import_isolation`'s skip when no agent tree resolves, which
+  the roster-wide `HERMES_AGENT_PATH` declaration covers.
+- `hscc-bootstrap/tests/test_doctor_process_posture_t_8b17cb40.py`: 30 cases.
+  Every posture rendered against a real `plistlib.dump` artefact (not a grep
+  fixture), the stale-bootstrap case, the "launchd names a different plist than
+  the conventional one" isolation in both directions, absent/unreadable/no-
+  launchctl skips, the systemd knobs through the seam (there is no systemd on
+  this host, and the test says so), and the fence: a red plist planted under a
+  redirected HOME is neither read nor written by the refusal, guarded against
+  the real path first because the conftest seal redirects `expanduser` too.
+- Registry pins updated: row order, the registered-minus-declared seam set, the
+  no-per-row-root list (this row's writers resolve from HOME — `install.py`,
+  `daemon_install.py`, `launchd-setup.sh` all honour no `HSCC_DIR`), and the
+  `CHECK_NAME` equality with doctor.py's fallback constant.
+- Reproduced before being fixed, on the box the queue gates on. Same case, same
+  tree: **1 failed** with a second pack churning `/tmp/hscc-legs-*`
+  concurrently, **3 passed** of 3 without one — only the neighbour added. The
+  failure rendered exactly as the queue's did, one extra dir in each set, and
+  `/tmp` on that host was already carrying two dirs left behind by packs killed
+  at 07:25 while a `hscc_daemon` pack was in flight.
+- After: **5 passed** of 5 under the same live churn, and **24 passed** for the
+  whole `scripts/tests/test_run_tests_leg_parallelism.py` with the churn still
+  running.
+- Red-before is the measured table, not a theory: `QUIT` 3/3 leaked dirs, `KILL`
+  3/3, `TERM`/`INT` 0/3 — and an arm shell holding *only* an `EXIT` trap cleaned up
+  under every catchable signal, which is what pins `SIGKILL` as the one death no
+  handler can beat (`docs/audits/support/t_b94a2b39/exit_trap_signal_arm.sh`).
+  Green-after: the same matrix under the new traps, plus
+  `scripts/tests/test_run_tests_leg_tmp_lifecycle.py` (11 passed) — which keeps the
+  `SIGKILL` leak asserted as a *shipped fact* so nobody "fixes" it by deleting the
+  sweep. Teeth: replace the sweep's age test with `if true` and
+  `test_a_pack_still_running_is_never_swept` goes red with *"the sweep deleted a
+  leg-log dir that is still in use"* while `test_the_sweep_is_not_on_the_serial_path`
+  stays green; `test_the_sweep_is_off_when_its_floor_says_off` is the same mutant
+  from the other side (floor `0` ⇒ the dir survives). In the wild, the sweep
+  reclaimed the two dirs this card inherited (`hscc-legs-2MIxna`, `hscc-legs-AiHLjx`,
+  both ~7 h old) on the first packed run after the change; their bytes are preserved
+  in `docs/audits/support/t_b94a2b39/pre_existing_pair.txt`, and that capture is also
+  how §1 of the audit shows the pair was *stub* residue, not a gate run — each log
+  held one line, `7 passed in 0.2s`, which is the test stub's own output and `0.2` is
+  its default sleep.
+* hscc-roles: the two pins that guard this section's vocabulary are green with
+  the new verbs in it. `hscc-roles/tests/test_main_orch_cluster_control.py` —
+  **95 passed** on `origin/main` (`86207849`), **96** here (+1:
+  `test_the_per_pr_hold_is_the_named_parking_lever`), plus three new `DETAILS`
+  clauses checked against the **rendered** SOUL. The section's backtick
+  vocabulary stays a pinned surface rather than an escape hatch: both verbs are
+  written as full `hscc ...` code spans, so
+  `test_every_named_cli_verb_is_dispatched_by_the_cli` reads them out of
+  `hscc_daemon/merge_queue_cli.py` — a hold the CLI does not route reddens the
+  pin, and nothing was added to `NON_TOOL_TOKENS` to make the edit pass.
+  Whole leg: `hscc-roles/tests/` — **534 passed** on `origin/main`, **535**
+  here (hermes venv, one pytest process per leg). The merged tree also re-ran
+  `hscc_daemon/tests/test_merge_queue.py` — **160 passed** — because this branch
+  carries the per-PR-hold lane whose CLI the pin reads, and its EOF test block
+  had to be kept alongside the landed stale-base block.
+- **The `TestCallersPipeReachesEof` CI flake is closed on `main` by `#738`
+  (`3d2e3bb6`, test-side only), and the class was re-measured under load rather
+  than only re-read.** Both failures (the old `:434`/`:479`) were
+  `assert proc.poll() is not None`: the caller's exit was *peeked* at after the
+  double-forked grandchild had already written its report, while the caller
+  still had `save_pid()` file I/O, its panel and a full interpreter teardown in
+  front of it. `#738` replaced the peek with a `waitpid`, and replaced the
+  premise's "nothing arrived for 4 s" with a positive signal — the stray writes
+  a marker to fd 1 in both postures, so bytes on the test's own read end prove a
+  writer is attached, and a zero-timeout `select` then reads `data`/`eof`/
+  `empty` as a state. No assertion was relaxed and every ceiling kept its
+  previous value. Re-run on `21da34a8`: **20 consecutive passes of the file
+  under 7 burners on 14 cores**, 1-min load rising 6.7 → 36.4 →
+  **120 passed, 0 failed** (6 cases per pass, including both formerly red
+  tests). `#705` is not revived: it rewrites
+  `hscc-api/tests/test_api_server_stop_signal.py`, a different file that has
+  never produced these two failures. No code change in this card — the
+  verification is the deliverable.
+- **`hscc_daemon/tests/test_api_cli_stop_unavailable_supervisor_row_t_cf8416dd.py`:
+  3 cases, green in 0.62 s on the interpreter the queue gates with
+  (`~/.hermes/hermes-agent/venv/bin/python`).** `_handle_stop` has two "nothing to
+  stop" rows and they make *different claims about the supervisor*: the launchd-aware
+  one may state `launchd: unit not loaded` only because launchd actually answered,
+  while the plain one is what a host with no `launchctl` at all prints, where
+  `launchd_status` read `rc None` — "the supervisor could not be asked", never a
+  statement about the unit. Nothing in the suite could tell them apart: the only
+  assertion of the row anywhere was `test_api_cli_no_ansi.py`'s
+  `assert "HSCC API is not running" in out`, and the launchd-aware row CONTAINS that
+  string as a prefix, so it is satisfied by the wrong branch. Collapsing the
+  `if sup.get("available")` guard was therefore invisible, and its result is the same
+  false-verdict class t_8bf34130 exists to kill — a launchd verdict from a run that
+  never asked launchd. The new file pins the pair from both sides, every case
+  DECLARING its posture through the seam (`launchd_status(_run_probe=...)`, never a
+  leg-wide default — the refusal fence is the feature) and pinning the seam's
+  `launchctl print` call count so a case cannot pass by the verb having stopped
+  asking: (1) launchctl unaskable (`rc None`) and no pid file -> the plain row, and
+  `"unit not loaded"`/`"launchd"` absent from the output; (2) the control half, so
+  the pin may not be met by amnesia — `launchctl print`'s real rc 113 could-not-find
+  answer (the value pinned at probe level in `test_api_cli_launchd.py`) must still
+  earn the verdict row; (3) the other road to `available: False`, a non-macOS host,
+  where the row must still be the plain one AND `probe.calls == []` pins that not one
+  doomed `launchctl` is forked. All canned answers are read-side, so
+  `_stop_launchd`'s `launchctl bootout` (unfenced until t_e1c7c925) is never reached,
+  and `_launchctl_run` is recorded rather than execed.
+- **Measured, at base `origin/main@6c025066`, that the gap is real and that this file
+  is the only thing that closes it.** Seven plants into `hscc_daemon/api_cli.py` all
+  BIT (plain row renamed; the `available` guard collapsed; guard inverted; branch
+  bodies swapped; `rc None` parsed as `available: True`; the verb's `sup =
+  launchd_status() if _launchd_matters() else {...}` replaced by the hardcoded row;
+  `_launchd_matters` widened past the platform test), each with `api_cli.py`
+  byte-identical after restore (sha256-verified per plant). A four-arm control then
+  separated the plant from the base's own reds: (A) pristine `origin/main` is already
+  3 red in `test_api_cli_no_ansi.py` — the unsheamed cases #792 exists to fix, not
+  this card's — so the naive one-arm control there is confounded; (B) `origin/main` +
+  #792 = 238 passed; (C) the same tree with the plain row renamed and this file
+  ABSENT = **238 passed, the plant invisible**, i.e. #792 does not retire the premise;
+  (D) plus this file = 241 passed clean, and under the same plant exactly 2 red, both
+  in this file and in no other. Anchoring note for the next worker: the `sup =
+  launchd_status() if _launchd_matters() else {...}` pair is byte-identical in
+  `_handle_status`, so a plant anchored on it alone edits the wrong verb and proves
+  nothing — it needs the `# RULING (t_8bf34130)` comment that only `_handle_stop`
+  carries.
+* `scripts/tests/test_run_tests_reporting_flags.py` (new): pins the leg's pytest
+  argument set on the **argv pytest is actually handed**, not on a substring of
+  `run_tests.sh` — a text match stays green while the flag is unreachable and
+  goes red on a comment reword. Each test executes the shipped runner against the
+  `HSCC_TEST_PY` stub interpreter seam the runner already offers (the same seam
+  `test_run_tests_leg_parallelism.py` uses) and reads back one argument per line,
+  so `-m` + `not loadstress` cannot blur into one token. Six cases: the serial
+  leg's exact argv, both reporting flags present, the flags surviving forwarded
+  operator argv (which still lands last and still wins), the pack's argv pinned
+  both directly and by equality with the serial leg — the drift the comment at
+  that call site already forbids — and one end-to-end case asserting a red leg's
+  log contains `FAILED `. Red before the change as designed: **5 failed, 1
+  passed**, the one pass being the serial-vs-pack equality (both sites were
+  missing the flag, so they agreed); green after: **6 passed**.
+- Same sha, same file, both ambient postures (`hscc_daemon/tests/test_api_cli_no_ansi.py`,
+  13 cases): pre-fix — live API + loaded unit `3 failed, 10 passed`; unit never
+  installed (throwaway HOME with no LaunchAgents entry) `13 passed`, i.e. green by
+  accident, which is the same ambient read in the other direction. Post-fix —
+  `13 passed` on the live box, `13 passed` with the unit never installed, and
+  `13 passed` with `HSCC_LAUNCHD_PROBE=1` forcing the question while the live unit
+  sits loaded. Ground truth recorded with the run: the real plist present and
+  `launchctl print gui/$UID/com.hscc.api` answering `state = running`.
+- Full `hscc_daemon` leg, every tally labelled with its sha, its posture and its
+  deselection, so no two numbers can be read as contradicting each other. At this
+  PR head, gate-shaped (`HSCC_TEST_LEGS=hscc_daemon bash scripts/run_tests.sh`, so
+  `-m "not loadstress"` applies), under the posture that was red — operator's real
+  HOME, live API, loaded unit: `5372 passed, 1 skipped, 9 deselected in 333.74s`,
+  exit 0, ALL GREEN (5382 collected). On the pre-merge head `70e16390` (base
+  `c3643b07`), same invocation: `5368 passed, 1 skipped, 9 deselected`; same tree,
+  same posture, nothing deselected: `5376 passed, 2 skipped` of 5378 collected.
+  Those two reconcile — 5378 minus the 9 deselected = 5369 run, and those 9 split
+  8 passed + 1 skipped; the +4 at this head are the tests main brought in.
+- Mutation probes on the pins, re-run at this revision, measured tree confirmed as
+  the worktree's own `hscc_daemon/api_cli.py` (not the deployed plugin copy), file
+  byte-identical after every plant: removing the seam injection from the status case
+  bites (1 failed); answering "unit loaded" instead of "no such job" bites (1
+  failed) — the reason that case also asserts there is NO supervisor row, since
+  launchd's own "state = not running" contains the phrase it already asserts; and a
+  plant that fakes the call record so the count pin is satisfied by a lie while the
+  verb never consults the seam bites too (1 failed, on `rc == 0`).
+- The file's own claims are measured, not asserted: a plugin attributes every
+  supervisor question to the case that asked it (`SEAM_JSON` attribution). It
+  confirms the three lifecycle cases inject the seam in every posture and that four
+  others do not — which is exactly what the module docstring now says, and what it
+  previously over-claimed. It also confirms the canned answer carries launchd's real
+  value for an unloaded job (rc 113, `Bad request.` plus a could-not-find-service
+  line, measured against a throwaway label), matching the value
+  `test_api_cli_launchd.py` already pins; `launchd_status` reads any `rc!=0` as
+  available-and-not-loaded, so the correction changes no verdict.
+- The five entries that reach the verbs without declaring a posture are left as
+  their own cards, green today and latent rather than red: four other files
+  (`test_api_cli_detach_stdio.py`, `test_api_multibind.py`, `test_autodown_cli.py`,
+  `test_cli_h_shortflag.py`) plus the four unsheamed cases in this file itself, all
+  five listed on t_6c4c17fc. A separately measured gap in `_handle_stop`'s
+  `available=False` row — renaming it reddens 0 of 238 cases — is t_cf8416dd.
+* New pin file `hscc_daemon/tests/test_api_cli_stop_bootout_fence_t_e1c7c925.py`
+  (7 cases): the hazard reproduced in-suite with the fork itself spied on, the same
+  hazard in a suite-spawned child (the arm a conftest fixture cannot cover), the
+  unmarked-child CONTROL proving the operator path still boots the unit out through a
+  planted fake `launchctl` — never the real one — the installed-runner escape hatch,
+  the fail-OPEN wording trap (`_stop_launchd` reads "could not find"/"not found" as
+  "already unloaded" and returns 0), and the four-row `suite_fence` predicate matrix
+  with a call count on the shared predicate.
+* Hermetic by construction: no case here can reach the real service manager — the
+  in-suite cases assert `subprocess.run` was never entered, and every child's `PATH`
+  leads with this file's own fake `launchctl`.
+
+### Docs
+* `docs/audits/load-burners-sigint-trace-stage_t_5f9fab03.md`: records what the
+  host can and cannot answer about the stalled `load_burners.sh` harness's signal
+  state. The card's lldb readout is not runnable here (SIP on, Developer mode
+  disabled, no sudo: `task_for_pid` is refused for `/bin/sh` and for a third-party
+  `python3` alike, and `/bin/bash` is stripped of `sigstate` anyway), and
+  `sysctl KERN_PROC_PID`'s `p_sigmask`/`p_siglist` read zero against a child with
+  a provably blocked-and-sent SIGINT — so the mask/pending numbers the card asked
+  for do not exist on this XNU. What does exist (`p_sigignore`/`p_sigcatch`)
+  answered the question instead: both live stalled harnesses read `ignored INT=1 /
+  caught INT=0` while TERM/HUP were caught, and a fresh INT was also ignored while
+  QUIT killed them — the SIGINT was discarded as ignored, never delivered to any
+  handler. The same harness shape traps INT fine when the launcher resets the
+  disposition to `SIG_DFL` first, so the loss is inherited, not a wait/trap shape.
+- **The sparkrun passthrough audit's `file:line` anchors were re-pointed after
+  `main` moved.** `enable_plugins.py`'s `HSCC_PLUGINS` is at `:56` (was `:49`)
+  and the cluster-guard hook entries at `:1414-1423` (was `:1354-1367`); the
+  guard's own `sparkrun status` shell-out spans `cluster-guard.py:54-62` (was
+  `:54-59`). No finding changed — F1 (the passthrough bypasses the cluster
+  guard's capacity gate and audit log) and F2 (the bundled `skills/` dirs are
+  inert) stand as written, and no fix is implemented here. Re-verified the
+  doc's §8 gate legs on the same pass: 5 / 18 / 16 / 13 / 30 passed, RC=0 each.
 ## [2.17.7] - 2026-11-25
 
 ### Added
