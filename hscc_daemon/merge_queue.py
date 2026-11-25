@@ -148,8 +148,13 @@ CI_PENDING_STAGE = "ci-pending"
 
 #: How long a pushed head may keep the claim while CI stays silent.  Past this
 #: the entry goes back to the wait list (which every tick rechecks), never
-#: terminal: a CI that never reported is not a verdict about the code.
-CI_PENDING_TIMEOUT_S = 1800
+#: terminal: a CI that never reported is not a verdict about the code.  A
+#: project overrides it with ``ci_pending_timeout_s`` in its registry
+#: ``merge_queue`` block (seconds).  The default is deliberately generous:
+#: GitHub's macOS runners are regularly backlogged for 30+ minutes, and a
+#: shorter budget only re-claims and re-gates the same PR.
+CI_PENDING_TIMEOUT_S = 3600
+CI_PENDING_TIMEOUT_KEY = "ci_pending_timeout_s"
 
 #: How long an entry may stay in the wait list before the queue drops it.  The
 #: wait list re-reads every waiting PR on every tick and, since cards 1 and 2,
@@ -3841,11 +3846,36 @@ def _retry_or_drop(doc, state_path, project, entry, error):
     return {"pr": entry.get("pr"), "result": result, "error": error}
 
 
-def _ci_pending_expired(since_iso):
+def ci_pending_budget_s(cfg, log=None):
+    """Seconds a pushed head may hold the claim while CI stays silent.
+
+    ``ci_pending_timeout_s`` in the registry's ``merge_queue`` block overrides
+    the default.  A value that is not a positive number — a typo, ``0``, a
+    ``"30m"`` string, a YAML ``true`` — falls back to the default with a WARN
+    line rather than releasing every pushed head on one bad registry line.
+    """
+    raw = (cfg or {}).get(CI_PENDING_TIMEOUT_KEY)
+    if raw is None or isinstance(raw, bool):
+        return CI_PENDING_TIMEOUT_S
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = 0
+    if value > 0:
+        return value
+    if log is not None:
+        log(f"merge-queue {(cfg or {}).get('name') or '?'}: ignoring invalid "
+            f"merge_queue.{CI_PENDING_TIMEOUT_KEY}={raw!r}; using "
+            f"{CI_PENDING_TIMEOUT_S}s", "WARN")
+    return CI_PENDING_TIMEOUT_S
+
+
+def _ci_pending_expired(since_iso, budget_s=None):
     """True when a held pushed head has outlived the CI-pending budget."""
     since = _epoch(since_iso)
+    budget = CI_PENDING_TIMEOUT_S if budget_s is None else budget_s
     return (since is not None
-            and time.time() - since >= max(1, int(CI_PENDING_TIMEOUT_S)))
+            and time.time() - since >= max(1, int(budget)))
 
 
 def _hold_ci_pending(state_path, project, entry, *, head_sha, base, since,
@@ -3930,11 +3960,12 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
     """
     pr = entry["pr"]
     since = ci_since or _now_iso()
+    budget_s = ci_pending_budget_s(cfg, log)
     if not isinstance(info, dict):
-        if _ci_pending_expired(since):
+        if _ci_pending_expired(since, budget_s):
             _requeue_waiting(state_path, project, entry)
             log(f"merge-queue {project}: PR #{pr} CI still unknown after "
-                f"{CI_PENDING_TIMEOUT_S}s and gh pr view failed; released to "
+                f"{budget_s}s and gh pr view failed; released to "
                 "the wait list", "WARN")
             return {"pr": pr, "result": "ci-timeout",
                     "error": "gh pr view failed"}
@@ -3965,13 +3996,13 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             # caught up (or has stopped answering).  Nothing here says anyone
             # else pushed, and the claim carries a gate that already passed, so
             # hold it — the next tick looks again, and `since` bounds the hold.
-            if _ci_pending_expired(since):
+            if _ci_pending_expired(since, budget_s):
                 _requeue_waiting(state_path, project, entry)
                 log(f"merge-queue {project}: PR #{pr} still reported the "
-                    f"pre-push head after {CI_PENDING_TIMEOUT_S}s; released to "
+                    f"pre-push head after {budget_s}s; released to "
                     "the wait list", "WARN")
                 return {"pr": pr, "result": "ci-timeout",
-                        "timeout_s": CI_PENDING_TIMEOUT_S}
+                        "timeout_s": budget_s}
             log(f"merge-queue {project}: PR #{pr} head read still reports the "
                 f"pre-push head {(pre_push_sha or '?')[:12]} after "
                 f"{max(1, int(HEAD_READ_POLL_ATTEMPTS))} re-read(s); holding "
@@ -4006,13 +4037,16 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
 
     if verdict == "pending" or not _pr_ready(info, required_checks=required):
         if verdict == "pending":
-            if _ci_pending_expired(since):
+            if _ci_pending_expired(since, budget_s):
                 _requeue_waiting(state_path, project, entry)
-                log(f"merge-queue {project}: PR #{pr} CI pending for "
-                    f"{CI_PENDING_TIMEOUT_S}s; released to the wait list",
+                # Pending here is the checks' own answer (QUEUED/IN_PROGRESS,
+                # not red), so name the runner backlog: a real hang and a
+                # backlogged macOS runner look identical without it.
+                log(f"merge-queue {project}: PR #{pr} CI still running after "
+                    f"{budget_s}s (runner backlog); released to the wait list",
                     "WARN")
                 return {"pr": pr, "result": "ci-timeout",
-                        "timeout_s": CI_PENDING_TIMEOUT_S}
+                        "timeout_s": budget_s}
             _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
                              base=base, since=since, log=log,
                              pre_push_sha=pre_push_sha)
@@ -4021,13 +4055,13 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             # Checks are green but GitHub has not recomputed mergeability yet:
             # "not decided" is still not "not ready", so keep the claim rather
             # than parking a validated, pushed head in the wait list.
-            if _ci_pending_expired(since):
+            if _ci_pending_expired(since, budget_s):
                 _requeue_waiting(state_path, project, entry)
                 log(f"merge-queue {project}: PR #{pr} mergeable still UNKNOWN "
-                    f"after {CI_PENDING_TIMEOUT_S}s; released to the wait list",
+                    f"after {budget_s}s; released to the wait list",
                     "WARN")
                 return {"pr": pr, "result": "ci-timeout",
-                        "timeout_s": CI_PENDING_TIMEOUT_S}
+                        "timeout_s": budget_s}
             _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
                              base=base, since=since, log=log,
                              pre_push_sha=pre_push_sha)
