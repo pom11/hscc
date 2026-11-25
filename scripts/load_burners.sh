@@ -35,10 +35,15 @@
 #     full 30 s of a foreground `sleep`), so a hung command would otherwise
 #     run past the timeout and keep its burners. `wait` is interruptible, so
 #     the trap fires on time and cleanup runs — with ONE measured exception
-#     (t_5f9fab03, docs/audits/load-burners-sigint-trace-stage_t_5f9fab03.md):
-#     bash 3.2 can LOSE a SIGINT delivered in a narrow startup race — the
-#     handler never runs, so no trap shape, wait shape, or timeout recovers
-#     the harness; see the audit before touching the wait/trap structure.
+#     (t_5f9fab03, docs/audits/load-burners-sigint-trace-stage_t_5f9fab03.md,
+#     resolved by t_8bb39d12,
+#     docs/audits/load-burners-signal-owner_t_8bb39d12.md): bash 3.2 cannot
+#     TRAP a signal it inherited as SIG_IGN, and `cmd &` in a non-interactive
+#     shell hands exactly that down (POSIX async-command rule). It is not a
+#     race — under such a launcher the SIGINT is lost every single time — so
+#     no trap shape, wait shape or timeout recovers it; the guard below
+#     restores the disposition instead. See both audits before touching the
+#     wait/trap structure.
 #
 # Burner argv carries a unique tag (`$0` of each `sh -c`, overridable with
 # HSCC_LOAD_BURNER_TAG) so a guard can pgrep for survivors without matching
@@ -166,6 +171,58 @@ trap cleanup EXIT
 trap 'lb_trace int-trap; exit 130' INT
 trap 'lb_trace term-trap; exit 143' TERM
 trap 'lb_trace hup-trap; exit 129' HUP
+
+# ── the harness must be able to TAKE its own SIGINT ─────────────────────────
+# `cmd &` in any non-interactive shell hands the command SIGINT as SIG_IGN
+# (POSIX, sh spec "Asynchronous Command"; measured, with the kernel-side
+# signature: docs/audits/load-burners-signal-owner_t_8bb39d12.md) and an
+# ignore survives fork + execve. A shell may NOT trap a signal it inherited
+# ignored: bash 3.2 refuses the trap above silently — `trap -p INT` stays
+# empty, and the kernel then discards every SIGINT addressed to this script.
+# cleanup() never runs, the burners orphan, and the t_71ed3b1c incident is
+# back, recreated by nothing but the way the process was started. That is not
+# hypothetical: scripts/run_tests.sh's pack mode starts every leg with
+# `( … ) &`, so every harness that leg spawns is born deaf, and
+# `test_signal_to_the_harness_takes_every_burner_with_it[2-130]` fails 100 %
+# (not "occasionally") under it.
+#
+# The harness owns the no-orphan guarantee, so the harness owns this: put
+# SIGINT back to SIG_DFL and re-exec this same script once, before any child
+# exists (exec preserves the pid, so $! bookkeeping, the session and the
+# output contract are untouched). Detection is `trap -p INT`, which costs no
+# process and is exact on bash 3.2; a shell without it falls through to asking
+# python3 — already a dependency of new_group below — and a host with neither
+# gets today's behaviour rather than a new failure mode. HSCC_LOAD_BURNERS_TRACE
+# gains a `sigint-reset` marker so the path is observable, never required.
+#
+# TERM and HUP are deliberately left as inherited. `nohup` ignores HUP and a
+# caller that ignores TERM is choosing deliberately, whereas the async-rule
+# INT ignore silently voids a trap this file installs; and with TERM/HUP
+# ignored the harness survives (its watchdog still fires) instead of orphaning,
+# so the no-orphan invariant holds either way. Set
+# HSCC_LOAD_BURNERS_KEEP_SIGINT=1 to keep an inherited ignore as the caller's
+# choice.
+case ${HSCC_LOAD_BURNERS_KEEP_SIGINT:-} in
+    ''|0)
+        case $(trap -p INT 2>/dev/null) in
+            *int-trap*) : ;;                    # the trap took: nothing to do
+            *)  # refused (inherited ignore) or unanswerable in this shell
+                if [ -z "${_HSCC_LB_SIGINT_RESET:-}" ] \
+                   && command -v python3 >/dev/null 2>&1 \
+                   && python3 -c 'import signal, sys; sys.exit(0 if signal.getsignal(signal.SIGINT) is signal.SIG_IGN else 1)'
+                then
+                    lb_trace sigint-reset
+                    _HSCC_LB_SIGINT_RESET=1
+                    export _HSCC_LB_SIGINT_RESET
+                    exec python3 -c 'import os, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+os.execv("/bin/sh", ["/bin/sh"] + sys.argv[1:])' \
+                        "$0" "$BURNERS" "$LIMIT" -- "$@"
+                fi
+                ;;
+        esac
+        ;;
+esac
 lb_trace start
 
 # ── own the groups ──────────────────────────────────────────────────────────
