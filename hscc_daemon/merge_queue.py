@@ -122,6 +122,18 @@ MAX_FAILURE_LINE_CHARS = 300
 MERGEABLE_POLL_ATTEMPTS = 3
 MERGEABLE_POLL_DELAY_S = 5.0
 
+#: The same read-after-write lag exists for ``headRefOid`` itself: for a few
+#: seconds after a push ``gh pr view`` still answers the head from BEFORE it.
+#: The queue pushes heads constantly (its own force-push before a merge), so
+#: this one is expensive — measured 2026-11-25 on 2.17.5, the daemon read the
+#: pre-push head of its OWN push twice (#742 at 00:53:49Z, #761 at 00:09:56Z)
+#: and called it "a worker pushed over us", releasing a claim whose ~75-minute
+#: gate had already passed.  A lagging read is re-polled a bounded number of
+#: times and then HELD, never released; see ``_settle_pushed_head``.
+#: Read at CALL time so a test can retune/zero the delay.
+HEAD_READ_POLL_ATTEMPTS = 5
+HEAD_READ_POLL_DELAY_S = 3.0
+
 #: The in-flight stage of a PR whose head the queue pushed and whose CI has not
 #: answered yet.  The claim is HELD here (no re-rebase, no re-gate) and
 #: re-read on every tick until the checks are green or red.
@@ -2253,6 +2265,9 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
 
     # The force-push moved the head, so the pre-push readiness answer is stale:
     # re-read the PR itself and merge only this exact SHA while it is green.
+    # The head GitHub reported BEFORE the push goes along too: for a few seconds
+    # after a push `gh pr view` still answers THAT sha, and reading it as "a
+    # worker pushed over us" is what released finished gates (#742, #761).
     after = pr_view_settled(cfg["repo"], entry["pr"], runner=gh_runner)
     cancel = _cancel_reason(state_path, project, entry, cfg)
     if cancel:
@@ -2260,7 +2275,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     return _settle_pushed_head(
         project, cfg, entry, after, head_sha, base=base,
         state_path=state_path, cwd=worktree, git_runner=git_runner,
-        gh_runner=gh_runner, handback=handback, log=log)
+        gh_runner=gh_runner, handback=handback, log=log,
+        pre_push_sha=str(info.get("headRefOid") or ""))
 
 
 def _requeue_waiting(state_path, project, entry):
@@ -3045,18 +3061,72 @@ def _ci_pending_expired(since_iso):
 
 
 def _hold_ci_pending(state_path, project, entry, *, head_sha, base, since,
-                     log):
+                     log, pre_push_sha=None):
     """Keep the claim at ``ci-pending`` and record what it is waiting on."""
-    _update_flight(state_path, project, entry["pr"],
-                   stage=CI_PENDING_STAGE,
-                   pushed_sha=head_sha, ci_base=base, ci_since=since)
+    fields = {"stage": CI_PENDING_STAGE, "pushed_sha": head_sha,
+              "ci_base": base, "ci_since": since}
+    if pre_push_sha:
+        # What GitHub called the head when this claim was pushed: a LATER tick
+        # that reads that sha again is the same read lag (see
+        # ``HEAD_READ_POLL_ATTEMPTS``), not a foreign push, and must hold too.
+        fields["pre_push_sha"] = pre_push_sha
+    _update_flight(state_path, project, entry["pr"], **fields)
     log(f"merge-queue {project}: PR #{entry['pr']} pushed "
         f"{(head_sha or '?')[:12]}; CI pending, holding the claim", "INFO")
 
 
+def _pushed_head_read_state(info, head_sha, pre_push_sha):
+    """Classify one head read against the SHA the queue pushed.
+
+    ``"ours"``    the read agrees with our push -> settle it normally.
+    ``"stale"``   GitHub is still serving the head from BEFORE our push: a
+                  read-after-write lag, not evidence about anyone else.
+    ``"moved"``   some THIRD sha (or no head at all) -> somebody really did
+                  push over the claim and the SHA we validated is gone.
+    """
+    reported = str((info or {}).get("headRefOid") or "")
+    if reported and reported == head_sha:
+        return "ours"
+    if pre_push_sha and reported == pre_push_sha:
+        return "stale"
+    return "moved"
+
+
+def _await_settled_head(project, cfg, pr, info, head_sha, *, pre_push_sha,
+                        gh_runner, log):
+    """Bounded re-poll of a head read that still shows the PRE-push SHA.
+
+    Returns ``(info, state)`` for the read the caller should decide on, with
+    the state from ``_pushed_head_read_state``.  A read that is not the
+    pre-push sha is returned untouched — there is nothing to wait for, and a
+    third sha will not be polled away.  A re-read that ``gh`` could not answer
+    proves nothing about who pushed, so it keeps the last usable answer and
+    the caller's bounded ``ci_since`` budget stays the backstop.
+    """
+    state = _pushed_head_read_state(info, head_sha, pre_push_sha)
+    if state != "stale":
+        return info, state
+    attempts = max(1, int(HEAD_READ_POLL_ATTEMPTS))
+    delay = max(0.0, float(HEAD_READ_POLL_DELAY_S))
+    latest = info
+    for attempt in range(1, attempts + 1):
+        if delay:
+            time.sleep(delay)
+        again = pr_view_settled(cfg["repo"], pr, runner=gh_runner)
+        if not isinstance(again, dict):
+            continue
+        latest = again
+        state = _pushed_head_read_state(again, head_sha, pre_push_sha)
+        if state != "stale":
+            log(f"merge-queue {project}: PR #{pr} head read caught up with "
+                f"the push after {attempt} re-read(s)", "INFO")
+            return latest, state
+    return latest, state
+
+
 def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
                         state_path, cwd, git_runner, gh_runner, handback,
-                        log, ci_since=None):
+                        log, ci_since=None, pre_push_sha=None):
     """Decide one look at a head the queue pushed.
 
     Green (and still the PR head) -> merge that exact SHA.  Pending -> hold the
@@ -3064,6 +3134,11 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
     the card back, because the local gates passed and CI is a real verdict.
     Called both right after the force-push and on every later tick while the
     claim is parked, so a pushed PR is never re-gated from scratch for CI.
+
+    ``pre_push_sha`` is what ``gh pr view`` called the head when this head was
+    pushed (the SHA the lease was taken against).  GitHub keeps answering it for
+    a few seconds after the push, so a head read of THAT sha is re-polled rather
+    than taken as a foreign push — only a third sha releases the claim.
     """
     pr = entry["pr"]
     since = ci_since or _now_iso()
@@ -3076,7 +3151,8 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             return {"pr": pr, "result": "ci-timeout",
                     "error": "gh pr view failed"}
         _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
-                         base=base, since=since, log=log)
+                         base=base, since=since, log=log,
+                         pre_push_sha=pre_push_sha)
         return {"pr": pr, "result": CI_PENDING_STAGE,
                 "error": "gh pr view failed"}
 
@@ -3089,12 +3165,40 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
         return {"pr": pr, "result": "already-merged"}
 
     if str(info.get("headRefOid") or "") != head_sha:
-        # A worker (or anyone) pushed over the queue's head while it waited:
-        # the queue can no longer merge the SHA it validated.
-        _requeue_waiting(state_path, project, entry)
-        log(f"merge-queue {project}: PR #{pr} head moved from the pushed "
-            f"{(head_sha or '?')[:12]}; released to the wait list", "WARN")
-        return {"pr": pr, "result": "waiting"}
+        # Either GitHub has not finished serving our own push, or someone moved
+        # the branch off the SHA we validated.  Those two read the same for a
+        # few seconds and are NOT the same decision: releasing on the first one
+        # threw away a finished gate twice on 2.17.5 (#742, #761).
+        info, head_state = _await_settled_head(
+            project, cfg, pr, info, head_sha, pre_push_sha=pre_push_sha,
+            gh_runner=gh_runner, log=log)
+        if head_state == "stale":
+            # Still the sha we pushed FROM after every re-read: GitHub has not
+            # caught up (or has stopped answering).  Nothing here says anyone
+            # else pushed, and the claim carries a gate that already passed, so
+            # hold it — the next tick looks again, and `since` bounds the hold.
+            if _ci_pending_expired(since):
+                _requeue_waiting(state_path, project, entry)
+                log(f"merge-queue {project}: PR #{pr} still reported the "
+                    f"pre-push head after {CI_PENDING_TIMEOUT_S}s; released to "
+                    "the wait list", "WARN")
+                return {"pr": pr, "result": "ci-timeout",
+                        "timeout_s": CI_PENDING_TIMEOUT_S}
+            log(f"merge-queue {project}: PR #{pr} head read still reports the "
+                f"pre-push head {(pre_push_sha or '?')[:12]} after "
+                f"{max(1, int(HEAD_READ_POLL_ATTEMPTS))} re-read(s); holding "
+                "the claim", "WARN")
+            _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
+                             base=base, since=since, log=log,
+                             pre_push_sha=pre_push_sha)
+            return {"pr": pr, "result": CI_PENDING_STAGE, "stale_head": True}
+        if head_state == "moved":
+            # A worker (or anyone) pushed over the queue's head while it waited:
+            # the queue can no longer merge the SHA it validated.
+            _requeue_waiting(state_path, project, entry)
+            log(f"merge-queue {project}: PR #{pr} head moved from the pushed "
+                f"{(head_sha or '?')[:12]}; released to the wait list", "WARN")
+            return {"pr": pr, "result": "waiting"}
 
     required = _required_for_info(cfg, base, info, git_runner, gh_runner)
     verdict = _checks_verdict(info, required_checks=required)
@@ -3121,7 +3225,8 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
                 return {"pr": pr, "result": "ci-timeout",
                         "timeout_s": CI_PENDING_TIMEOUT_S}
             _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
-                             base=base, since=since, log=log)
+                             base=base, since=since, log=log,
+                             pre_push_sha=pre_push_sha)
             return {"pr": pr, "result": CI_PENDING_STAGE}
         if _mergeable_unknown(info):
             # Checks are green but GitHub has not recomputed mergeability yet:
@@ -3135,7 +3240,8 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
                 return {"pr": pr, "result": "ci-timeout",
                         "timeout_s": CI_PENDING_TIMEOUT_S}
             _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
-                             base=base, since=since, log=log)
+                             base=base, since=since, log=log,
+                             pre_push_sha=pre_push_sha)
             return {"pr": pr, "result": CI_PENDING_STAGE}
         # Checks are green but the PR itself is not mergeable now (draft,
         # review requested changes, ...): not a CI verdict, park it.
@@ -3192,7 +3298,8 @@ def _resume_ci_pending(project, cfg, entry, *, state_path, git_runner=None,
         project, cfg, entry, info, head_sha, base=base,
         state_path=state_path, cwd=cfg["repo"], git_runner=git_runner,
         gh_runner=gh_runner, handback=handback, log=log,
-        ci_since=entry.get("ci_since"))
+        ci_since=entry.get("ci_since"),
+        pre_push_sha=str(entry.get("pre_push_sha") or ""))
 
 
 # ── tick ────────────────────────────────────────────────────────────────────
