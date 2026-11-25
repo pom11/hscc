@@ -1,0 +1,57 @@
+..F....                                                                  [100%]
+=================================== FAILURES ===================================
+_________ test_signal_to_the_harness_takes_every_burner_with_it[2-130] _________
+
+sig = <Signals.SIGINT: 2>, status = 130
+
+    @pytest.mark.parametrize("sig,status", [
+        (signal.SIGTERM, 128 + signal.SIGTERM),
+        (signal.SIGINT, 128 + signal.SIGINT),
+        (signal.SIGHUP, 128 + signal.SIGHUP),
+    ])
+    def test_signal_to_the_harness_takes_every_burner_with_it(sig, status):
+        with _running(2, 60, ["sleep", "60"]) as (proc, tag):
+            assert _burners_of(tag, 2), "no burners to prove the trap against"
+            proc.send_signal(sig)
+>           assert proc.wait(timeout=10) == status
+                   ^^^^^^^^^^^^^^^^^^^^^
+
+scripts/tests/test_load_burners.py:110: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/<operator>/.local/share/uv/python/cpython-3.14-macos-aarch64-none/lib/python3.14/subprocess.py:1279: in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: 143 args: ['/bin/sh', '/Users/<operator>/.hermes/kanban/board...>
+timeout = 10
+
+    def _wait(self, timeout):
+        """Internal implementation of wait() on POSIX."""
+        if self.returncode is not None:
+            return self.returncode
+    
+        if timeout is not None:
+            endtime = _time() + timeout
+            # Enter a busy loop if we have a timeout.  This busy loop was
+            # cribbed from Lib/threading.py in Thread.wait() at r71065.
+            delay = 0.0005 # 500 us -> initial delay of 1 ms
+            while True:
+                if self._waitpid_lock.acquire(False):
+                    try:
+                        if self.returncode is not None:
+                            break  # Another thread waited.
+                        (pid, sts) = self._try_wait(os.WNOHANG)
+                        assert pid == self.pid or pid == 0
+                        if pid == self.pid:
+                            self._handle_exitstatus(sts)
+                            break
+                    finally:
+                        self._waitpid_lock.release()
+                remaining = self._remaining_time(endtime)
+                if remaining <= 0:
+>                   raise TimeoutExpired(self.args, timeout)
+E                   subprocess.TimeoutExpired: Command '['/bin/sh', '/Users/<operator>/.hermes/kanban/boards/hscc/workspaces/t_8bb39d12/hscc/scripts/load_burners.sh', '2', '60', '--', 'sleep', '60']' timed out after 10 seconds
+
+/Users/<operator>/.local/share/uv/python/cpython-3.14-macos-aarch64-none/lib/python3.14/subprocess.py:2076: TimeoutExpired
+1 failed, 6 passed in 14.09s
