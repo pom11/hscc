@@ -985,7 +985,26 @@ else
   while [ "$P_REAPED" -lt "$P_N" ]; do
     while [ "$P_NEXT" -lt "$P_N" ] && [ "$P_LIVE" -lt "$PAR" ]; do
       d="${LEGS[$P_NEXT]}"
-      logf="$LEG_TMP/$P_NEXT-$d.log"
+      # A leg NAME is not a file name. The roster contains `.github/scripts`, and
+      # the plain concatenation this line used to be (`$P_NEXT-$d.log`) asked bash
+      # for `$LEG_TMP/1-.github/scripts.log` — whose parent does not exist. The
+      # leg's OWN `> "$logf"` then failed, the subshell died before pytest was
+      # spawned, no `.rc` was written, and the pack reported the leg it never ran
+      # as `rc=1 elapsed=0s` with an empty log: a roster leg silently ungated in
+      # exactly the posture a gate is supposed to be fast in (t_692814f5).
+      #
+      # Chosen answer: FLATTEN `/` when the name becomes a file name. Over
+      # `mkdir -p`-ing `$LEG_TMP/1-.github/` (which would nest a per-leg tree under
+      # the dir the banner advertises, so `ls` of a dir a reader was just told
+      # about shows a mix of files and directories) and over index-only names
+      # (which would throw away the one thing that makes a redirected pack
+      # debuggable — opening `3-sparkrun-hermes.log` and knowing what is in it).
+      # Only `/` changes, so every slash-free leg keeps the file name it has always
+      # had, and the `$P_NEXT-` prefix makes the mapping collision-proof for the
+      # legs that do map. The unflattened name stays authoritative everywhere a
+      # HUMAN reads it — `P_NAME` (the `parallel: done leg=` line), `legs.tsv`, and
+      # the `━━━ <leg> ━━━` digest block the queue anchors on.
+      logf="$LEG_TMP/$P_NEXT-${d//\//-}.log"
       P_NAME[$P_NEXT]="$d"
       P_LOG[$P_NEXT]="$logf"
       P_T0S[$P_NEXT]="$(date +%s)"
