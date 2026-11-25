@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,10 @@ done
 echo "start $leg $$" >> "$STUB_TRACE"
 sleep "$secs"
 echo "end $leg $$" >> "$STUB_TRACE"
+# Per-run tag, stamped into the leg's own log so a test can tell THIS run's
+# output from a foreign run's without owning the /tmp namespace (see the hygiene
+# pin, which needs exactly that).
+[ -n "${STUB_TAG:-}" ] && echo "stubtag $STUB_TAG $leg"
 if [ "$rc" -ne 0 ]; then
   echo "F"
   echo "FAILED $leg/tests/test_stub.py::test_${leg//-/_}_breaks - assert 1 == 2"
@@ -85,7 +90,8 @@ def _plan(spec):
     return " ".join(f"{leg}:{secs}:{rc}" for leg, secs, rc in spec)
 
 
-def _run(tmp_path, *, plan, parallel=None, heartbeat=0, extra_argv=(), legs=THREE):
+def _run(tmp_path, *, plan, parallel=None, heartbeat=0, extra_argv=(), legs=THREE,
+         stub_tag=None):
     """Execute the shipped runner against the stub, output REDIRECTED to a file.
 
     Redirected, never captured: a watcher that outlives a leg holds the file's
@@ -109,6 +115,8 @@ def _run(tmp_path, *, plan, parallel=None, heartbeat=0, extra_argv=(), legs=THRE
         "STUB_PLAN": plan,
         "HSCC_LEG_HEARTBEAT_SECONDS": str(heartbeat),
     })
+    if stub_tag is not None:
+        env["STUB_TAG"] = stub_tag
     if parallel is None:
         env.pop("HSCC_TEST_PARALLEL", None)
     else:
@@ -571,13 +579,50 @@ def test_sigterm_names_the_live_legs_and_leaves_none_behind(tmp_path, parallel):
 
 
 def test_the_per_leg_logs_do_not_pile_up_in_tmp(tmp_path):
-    """A gate runs on a shared host; N files per run must not be left behind."""
-    before = set(Path("/tmp").glob("hscc-legs-*"))
-    r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]), parallel=2)
+    """A gate runs on a shared host; N files per run must not be left behind.
+
+    The runner announces the ONE dir it made and `trap`s `rm -rf` on EXIT, so the
+    two things that can go wrong are: the announced dir survives (the trap did not
+    fire — asserted below), and the runner made a SECOND dir it never announced and
+    cleaned only the first (asserted below by CONTENT).
+
+    Both assertions are keyed to THIS run on purpose. A previous version snapshotted
+    `set(Path('/tmp').glob('hscc-legs-*'))` before and demanded set equality after,
+    and that is red under foreign churn in BOTH directions: on this shared box a
+    neighbour's packed run can appear inside the window or vanish from it, and
+    neither has anything to do with this runner. Measured at 53c4cc82 — the pin
+    failed there as `assert set() == {PosixPath('/tmp/hscc-legs-vIfWxd')}`, i.e.
+    this run leaked nothing and a foreign dir disappeared mid-window.
+
+    The flip made that pin hot rather than merely unlucky: pre-flip an UNSET run
+    created no `hscc-legs-*` dir at all, so the ambient set of creators was
+    effectively empty; post-flip every unset run on this box — the queue's gate,
+    every sibling worker's roster, every copy of this file — creates one. So the
+    test now identifies its own litter instead of owning the namespace: the stub
+    stamps a per-run tag into each leg log, which a foreign run cannot echo.
+    """
+    tag = f"tag{uuid.uuid4().hex[:12]}"
+    r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]), parallel=2,
+             stub_tag=tag)
     m = re.search(r"leg logs in (/tmp/hscc-legs-\S+)", r["log"])
     assert m, r["log"]
+    # One dir announced, and the tag really did reach the leg logs (without that
+    # the survivor scan below would pass vacuously on a stub that ignored STUB_TAG).
+    assert len(re.findall(r"^parallel: .*leg logs in ", r["log"], re.M)) == 1, r["log"]
+    assert any(tag in line for line in r["log"].splitlines()), (
+        f"the stub did not stamp its tag, so nothing below can identify this run:"
+        f"\n{r['log']}")
     assert not Path(m.group(1)).exists(), f"left behind: {m.group(1)}"
-    assert set(Path("/tmp").glob("hscc-legs-*")) == before, "tmp litter"
+    survivors = []
+    for d in Path("/tmp").glob("hscc-legs-*"):
+        try:
+            if any(tag in f.read_text(errors="replace") for f in d.glob("*.log")):
+                survivors.append(str(d))
+        except OSError:  # a FOREIGN dir removed between the glob and the read
+            continue
+    assert not survivors, (
+        f"this run's tag {tag} survived in {survivors} — a dir was created and "
+        f"never announced, so no trap was armed for it")
 
 
 def test_a_leg_whose_name_is_a_path_still_runs(tmp_path):
