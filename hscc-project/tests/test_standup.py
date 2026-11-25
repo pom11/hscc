@@ -202,19 +202,19 @@ def test_shared_board_splits_cards_by_workspace_path(monkeypatch):
         registry,
         "load_registry",
         lambda path: [
-            _project(name="flightdeck", repo="/Users/desac/dev/flightdeck"),
-            _project(name="hscc", repo="/Users/desac/dev/hscc"),
-            _project(name="sphoin", repo="/Users/desac/dev/sphoin_engine"),
+            _project(name="flightdeck", repo="/Users/hscc-fixture/dev/flightdeck"),
+            _project(name="hscc", repo="/Users/hscc-fixture/dev/hscc"),
+            _project(name="sphoin", repo="/Users/hscc-fixture/dev/sphoin_engine"),
         ],
     )
     # All THREE cards share one board; their workspace_paths name their project.
     cards = [
         _hcard("a", status="review", board="default",
-               workspace_path="/Users/desac/dev/flightdeck"),
+               workspace_path="/Users/hscc-fixture/dev/flightdeck"),
         _hcard("b", status="review", board="default",
-               workspace_path="/Users/desac/dev/hscc/.worktrees/t_b"),
+               workspace_path="/Users/hscc-fixture/dev/hscc/.worktrees/t_b"),
         _hcard("c", status="review", board="default",
-               workspace_path="/Users/desac/dev/sphoin_engine/.worktrees/t_c"),
+               workspace_path="/Users/hscc-fixture/dev/sphoin_engine/.worktrees/t_c"),
     ]
     monkeypatch.setattr(kanban, "list_cards", lambda **kw: cards)
     _install_git(monkeypatch, branch_exists=True, is_merged=False, commits_ahead=1)

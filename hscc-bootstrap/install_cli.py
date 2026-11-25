@@ -9,7 +9,7 @@ wrong shebang that silently degrades those verbs:
 
     HermesRuntimeUnavailable: cannot import the Hermes runtime
     (No module named 'hermes_cli'). The `hscc` CLI runs under
-    /Users/desac/miniconda3/envs/p313/bin/python3.13
+    ~/miniconda3/envs/p313/bin/python3.13
 
 The durable fix is to install ``hscc-cli`` INTO the Hermes venv as part of
 bootstrap. ``hscc-cli/pyproject.toml`` declares ``hscc = "hscc_cli:main"``, so

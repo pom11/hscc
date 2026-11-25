@@ -1109,6 +1109,37 @@ def test_cluster_orchestrator_preserves_lower_operator_threshold_tokens(tmp_path
 # excluded deliberately — they are created dynamically by orchestrators.py, not
 # from a roles/*.yaml spec, and carry the gateway operational block, not the
 # worker one.
+#
+# WHY IT HAS A NON-VACUOUS MODE NOW (t_738d9557). This case used to open with
+# `if not os.path.isdir(rolelib.PROFILES_DIR): return`, written for the
+# "HERMES_HOME points at a profile dir" run mode. The leg's HOME seal
+# (t_d24a05ea) made that the ONLY run mode: under the seal PROFILES_DIR is a
+# throwaway `/private/tmp/hscc-roles-leg-home-XXXX/.hermes/profiles` that never
+# exists, so the guard returned before reading a single profile and could no
+# longer fail in a leg or in CI. Measured at f5a68d8a with `roles/marketing.yaml`
+# moved away: the guard's own node id through bare pytest -> `1 passed`; through
+# `scripts/run_tests.sh` -> `1 passed, 532 deselected`; and
+# `role_soul_check.spec_coverage()` from inside the session ->
+# `vacuous=True, scanned=0`. A backstop that cannot go red is not a backstop.
+# So vacuity is now handled in three steps, none of them a silent return:
+# resolve the root the seal moved and audit THAT; refuse to guess when the
+# emptiness is not the seal's doing; and where no root exists anywhere (a fresh
+# CI runner) audit a planted census so the predicate is still exercised.
+#
+# THE ONE OPERATOR PATH THIS DELIBERATELY READS, and why that is not the seal's
+# class. The seal exists because PRODUCT CODE resolved `~` defaults at import and
+# because PROFILES_DIR is a WRITE target (t_d39c720e, t_4b70e8d4). This census is
+# read-only — `listdir` plus `SOUL.md` — and makes no claim about the repo through
+# the host tree; the repo-side pins are the planted cases below. Its green-here /
+# red-there asymmetry is also inverted by construction: the fault it hunts (an
+# orphaned live profile) can only exist on a host that HAS profiles, so a census
+# that never looks at the host is not hermetic, it is blind. When it reddens on a
+# workstation the fix is the one the guard has always pointed at — author the spec
+# with `hscc.py create <name> "…"` via the author, or delete a retired profile —
+# never an allow-list here.
+
+
+_WORKER_SIGNATURE = "your own git worktree"  # worker ops block; orchestrators lack it
 
 
 def _spec_names():
@@ -1120,31 +1151,266 @@ def _spec_names():
     return names
 
 
-def test_every_hscc_owned_worker_profile_has_role_spec():
-    """A profile whose SOUL carries the hscc-generated worker signature MUST
-    have a roles/<name>.yaml spec, so a hand-made profile is caught."""
-    worker_marker = "your own git worktree"  # worker ops block; orchestrators lack it
-    spec_names = _spec_names()
+def _is_under(path, root):
+    return path == root or path.startswith(root + os.sep)
+
+
+def _worker_profiles_without_spec(profiles_dir, spec_names=None):
+    """The census: worker-signature profile dirs under ``profiles_dir`` with no spec.
+
+    The guard's predicate verbatim, given a root argument (t_738d9557) so the guard
+    can audit a root it RESOLVES and a test can audit a root it PLANTS without a
+    second implementation drifting away from the one that guards the fleet. The
+    predicate itself is unchanged: `## Role:` + the worker ops block + a name absent
+    from the spec set. Do not widen it (orchestrator-family SOULs carry the gateway
+    block instead of this one and are minted dynamically by orchestrators.py) and
+    never allow-list a name — that is precisely the silence this assert exists to
+    prevent.
+
+    No `isdir()` guard in here, deliberately: a census that answers `[]` for a root
+    it could not open is exactly how the guard became unkillable. The caller must
+    know the root exists.
+    """
+    if spec_names is None:
+        spec_names = _spec_names()
     missing = []
-    # PROFILES_DIR may not exist (e.g. when HERMES_HOME points at a profile dir
-    # rather than the global ~/.hermes); then there are no profiles to check and
-    # the invariant holds vacuously — don't crash on listdir.
-    if not os.path.isdir(rolelib.PROFILES_DIR):
-        return
-    for name in sorted(os.listdir(rolelib.PROFILES_DIR)):
-        pdir = os.path.join(rolelib.PROFILES_DIR, name)
+    for name in sorted(os.listdir(profiles_dir)):
+        pdir = os.path.join(profiles_dir, name)
         if not os.path.isdir(pdir):
             continue
         soul = os.path.join(pdir, "SOUL.md")
         if not os.path.isfile(soul):
             continue
         text = open(soul, encoding="utf-8").read()
-        if "## Role:" in text and worker_marker in text and name not in spec_names:
+        if ("## Role:" in text and _WORKER_SIGNATURE in text
+                and name not in spec_names):
             missing.append(name)
-    assert not missing, (
-        "HSCC-owned worker profile(s) with no role spec (`hscc-roles generate` "
-        "will skip them): " + ", ".join(missing)
+    return missing
+
+
+def _host_profiles_root(leg_seal):
+    """The profiles root of THIS machine, i.e. the path the leg's seal moved.
+
+    `PRE_SEAL_HOME` is the login home captured by the leg's conftest before it
+    sealed. A host whose hermes root is not `<login home>/.hermes` is not
+    reachable from inside a sealed leg — that host is covered by the unsealed
+    census surface (`hscc.py list`, `doctor`), which prints
+    `VACUOUS … NOT an all-clear` rather than pretending (t_00d9581d).
+    """
+    return os.path.join(leg_seal["pre_seal_home"], ".hermes", "profiles")
+
+
+def _census_roots(leg_seal):
+    """Every profiles root this census can actually open, most authoritative first.
+
+    ``rolelib.PROFILES_DIR`` is the root the product code writes and the one an
+    unsealed run sees. When the leg's HOME seal has hidden it — the normal case for
+    this leg — the root to audit is the login home's ``.hermes/profiles``, i.e. the
+    path the seal moved (t_738d9557). The result is empty only when this machine
+    genuinely has no profiles dir anywhere.
+    """
+    sealed = rolelib.PROFILES_DIR
+    if os.path.isdir(sealed):
+        return [sealed]
+    home, login = leg_seal["home"], leg_seal["pre_seal_home"]
+    assert os.environ.get("HOME") == home and not _is_under(home, login), (
+        f"the census found no profiles dir at {sealed!r} and HOME is not this leg's "
+        f"sealed home (HOME={os.environ.get('HOME')!r}, login home={login!r}), so "
+        "the emptiness cannot be attributed to the seal — the guard has no root and "
+        "cannot tell 'nothing to check' from 'the backstop went blind' (t_738d9557)."
     )
+    host = _host_profiles_root(leg_seal)
+    return [host] if os.path.isdir(host) else []
+
+
+def _plant_profile(profiles_dir, name, *, role_header=True, worker=True):
+    """Write ``<profiles_dir>/<name>/SOUL.md`` carrying (or not) the signature.
+
+    Only the two tokens the predicate reads are shaped here: the `## Role:` header
+    and the worker ops block. Nothing else — a plant that carried a real composed
+    SOUL would let the census pass for reasons the predicate does not test.
+    """
+    pdir = os.path.join(str(profiles_dir), name)
+    os.makedirs(pdir, exist_ok=True)
+    lines = ["# Hermes runtime environment", ""]
+    if role_header:
+        lines += [f"## Role: {name}", "", "You are a specialist on a fleet.", ""]
+    if worker:
+        lines += ["## How you manage work",
+                  "- You work in your own git worktree and commit there."]
+    else:
+        lines += ["## Authority", "- You hold the cluster surface on the gateway node."]
+    with open(os.path.join(pdir, "SOUL.md"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return pdir
+
+
+# The profile every planted census leaves WITHOUT a spec. Not `test_*`-shaped and
+# not a real role name: it has to be a name no `roles/*.yaml` can ever claim, or a
+# future spec would silence the pin it exists to make (mutation-probing rule: a
+# planted offender must be attributable).
+PLANTED_ORPHAN = "hscc-probe-no-spec"
+PLANTED_ORCH_FAMILY = "hscc-probe-orch-family"
+PLANTED_NO_HEADER = "hscc-probe-no-role-header"
+
+
+def _planted_census(tmp_path):
+    """A profiles tree that exercises every arm of the predicate at once.
+
+    Returns ``(root, expected_missing)``. Four planted dirs, four verdicts, so a
+    mutant cannot satisfy the case by flagging everything or nothing:
+
+      ``<first real spec name>``  worker signature + a spec that EXISTS -> clean
+      ``PLANTED_ORPHAN``          worker signature, no spec             -> CAUGHT
+      ``PLANTED_ORCH_FAMILY``     `## Role:` but the gateway block      -> clean
+      ``PLANTED_NO_HEADER``       worker block but no `## Role:`        -> clean
+
+    The covered name is taken from the repo's own specs, so the first row is pinned
+    against the real spec set rather than a name invented here.
+    """
+    covered = sorted(n for n in _spec_names() if n)
+    assert covered, "roles/ has no specs at all — nothing to plant a census against"
+    root = os.path.join(str(tmp_path), "planted-profiles")
+    os.makedirs(root, exist_ok=True)
+    _plant_profile(root, covered[0], role_header=True, worker=True)
+    _plant_profile(root, PLANTED_ORPHAN, role_header=True, worker=True)
+    _plant_profile(root, PLANTED_ORCH_FAMILY, role_header=True, worker=False)
+    _plant_profile(root, PLANTED_NO_HEADER, role_header=False, worker=True)
+    return root, [PLANTED_ORPHAN]
+
+
+def test_every_hscc_owned_worker_profile_has_role_spec(leg_seal, tmp_path):
+    """A profile whose SOUL carries the hscc-generated worker signature MUST
+    have a roles/<name>.yaml spec, so a hand-made profile is caught.
+
+    Never vacuous-then-silent (t_738d9557): see the block comment above this
+    function for the three ways a census with no visible root is still answered.
+    """
+    roots = _census_roots(leg_seal)
+    for root in roots:
+        missing = _worker_profiles_without_spec(root)
+        assert not missing, (
+            "HSCC-owned worker profile(s) with no role spec (`hscc-roles generate` "
+            "will skip them): " + ", ".join(missing)
+            + f"   [census root: {root} — author the spec with `hscc.py create "
+              "<name> \"…\"`, or remove the profile if the role was retired]"
+        )
+    if not roots:
+        # Tripwire on the emptiness claim itself, because that claim is what this
+        # card was filed against: a census that says "nothing to check" while a
+        # profiles dir sits right there is the t_738d9557 failure mode, and it is
+        # one refactor of `_census_roots` away from returning here again.
+        for candidate in (rolelib.PROFILES_DIR, _host_profiles_root(leg_seal)):
+            assert not os.path.isdir(candidate), (
+                f"the census declared itself vacuous but {candidate} exists — "
+                "'nothing to audit' and 'the backstop cannot see the tree' are "
+                "different facts and this case may not confuse them (t_738d9557)."
+            )
+        # This host has no profiles dir at all (a fresh CI runner). The census is
+        # vacuous, so it says so AND exercises itself on a tree it CAN see: a guard
+        # whose predicate no longer bites must not read green here either.
+        root, expected = _planted_census(tmp_path)
+        assert _worker_profiles_without_spec(root) == expected, (
+            "no profiles root exists on this host, so the host census audited "
+            "nothing, AND the predicate failed to catch a planted orphan — the "
+            "backstop is dead code, which is the state t_738d9557 was filed for."
+        )
+
+
+def test_the_census_judges_a_planted_tree_on_every_arm(tmp_path):
+    """The predicate's truth table, run where the leg always can see the tree.
+
+    t_738d9557's other half: the host census only exists on a host with profiles, so
+    this is the case that proves the guard bites in EVERY environment, including the
+    sealed leg on a CI runner with no `~/.hermes` at all. All four planted arms must
+    land on their own verdict — catching only the orphan, and never widening to the
+    orchestrator-family or header-less shapes.
+    """
+    root, expected = _planted_census(tmp_path)
+    assert _worker_profiles_without_spec(root) == expected
+
+
+def test_the_guard_goes_red_when_its_census_root_holds_an_orphan(tmp_path, monkeypatch,
+                                                                leg_seal):
+    """The guard itself, not just its predicate: an orphan in the root is a FAILURE.
+
+    Pointing PROFILES_DIR at a census that contains an orphan must turn this very
+    case red, naming the profile. Without it, the assert could be replaced by a
+    `return` and the leg would not notice — which is what happened once already.
+    """
+    root, expected = _planted_census(tmp_path)
+    monkeypatch.setattr(rolelib, "PROFILES_DIR", root)
+    with pytest.raises(AssertionError) as exc:
+        test_every_hscc_owned_worker_profile_has_role_spec(leg_seal, tmp_path)
+    assert expected[0] in str(exc.value), (
+        f"the guard went red for some reason other than the planted orphan: {exc.value}"
+    )
+    assert root in str(exc.value), (
+        "the failure must name the census root it judged, or a red cannot be "
+        "attributed to the tree that caused it"
+    )
+
+
+def test_the_census_refuses_an_emptiness_it_cannot_attribute(monkeypatch):
+    """`_census_roots` may answer "no roots" only when the seal explains it.
+
+    Two states, both of which would otherwise let the guard call itself vacuous and
+    pass while a tree exists: HOME moved by something other than the leg's seal, and
+    a "sealed" home that sits inside the login home (the t_d39c720e shape — hermes
+    resolves such a home straight back to the live root, so it seals nothing). The
+    assertion is what turns the seal's word into a checked claim.
+    """
+    monkeypatch.setattr(rolelib, "PROFILES_DIR", "/definitely/not/here/profiles")
+    sealed = {"home": "/var/tmp/hscc-sealed-a", "pre_seal_home": "/var/tmp/hscc-login"}
+    monkeypatch.setenv("HOME", "/var/tmp/hscc-someone-else")
+    with pytest.raises(AssertionError) as exc:
+        _census_roots(sealed)
+    assert "attributed to the seal" in str(exc.value)
+    # A seal dir inside the login root is not a seal: same refusal, other reason.
+    nested = "/var/tmp/hscc-login/nested/cache"
+    monkeypatch.setenv("HOME", nested)
+    sealed = {"home": nested, "pre_seal_home": "/var/tmp/hscc-login"}
+    with pytest.raises(AssertionError) as exc:
+        _census_roots(sealed)
+    assert "attributed to the seal" in str(exc.value)
+
+
+def test_hiding_a_role_spec_reddens_the_census_that_covers_it(tmp_path, monkeypatch):
+    """`mv roles/<name>.yaml` must turn the census red — measured, not assumed.
+
+    The census derives its expectations from `roles/`, so a hidden spec is only
+    visible if the profile that needed it still exists: plant one and hide its spec
+    for real (ROLES_DIR re-points at a copy with the file deleted, so
+    `rolelib.list_spec_files()` — which `_spec_names()` reads per call — stops
+    seeing it). The paired arm puts the spec back and demands green, which is what
+    makes the red attributable to the hide rather than to the plant.
+    """
+    specs = sorted(n for n in _spec_names() if n)
+    assert specs, "roles/ is empty — nothing to hide"
+    victim = "marketing" if "marketing" in specs else specs[0]
+    roles_copy = os.path.join(str(tmp_path), "roles-without-victim")
+    os.makedirs(roles_copy, exist_ok=True)
+    hidden = False
+    for fname in os.listdir(rolelib.ROLES_DIR):
+        src = os.path.join(rolelib.ROLES_DIR, fname)
+        if not os.path.isfile(src):
+            continue
+        if os.path.splitext(fname)[0] == victim:
+            hidden = True
+            continue          # the hide: this one is not copied
+        with open(src, "rb") as fh, open(os.path.join(roles_copy, fname), "wb") as out:
+            out.write(fh.read())
+    assert hidden, f"roles/{victim}.yaml is not a file in {rolelib.ROLES_DIR}"
+    monkeypatch.setattr(rolelib, "ROLES_DIR", roles_copy)
+    assert victim not in _spec_names(), (
+        "the spec was not actually hidden, so this pin would measure nothing"
+    )
+    root = os.path.join(str(tmp_path), "profiles")
+    os.makedirs(root, exist_ok=True)
+    _plant_profile(root, victim, role_header=True, worker=True)
+    assert _worker_profiles_without_spec(root) == [victim]
+    monkeypatch.undo()        # spec back -> the plant alone must be clean
+    assert _worker_profiles_without_spec(root) == []
 
 
 def test_live_orchestrator_endpoint_uses_pool_when_uniform(tmp_path, monkeypatch):

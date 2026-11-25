@@ -259,7 +259,7 @@ def test_lint_cards_is_discovered_by_cli():
 # CRITICAL main-tree check — a card that would run in a repo's MAIN TREE
 # --------------------------------------------------------------------------- #
 
-REPO = "/Users/desac/dev/flightdeck"
+REPO = "/Users/hscc-fixture/dev/flightdeck"
 
 
 def _project(repo=REPO):

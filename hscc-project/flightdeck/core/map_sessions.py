@@ -171,6 +171,7 @@ def _repo_path_patterns(projects) -> list[tuple[str, re.Pattern]]:
     """
     pats: list[tuple[str, re.Pattern]] = []
     seen: set[tuple[str, str]] = set()
+    home = os.path.expanduser("~").rstrip("/")
     for proj in projects:
         name = proj.name
         repo = getattr(proj, "repo", None) or ""
@@ -178,13 +179,13 @@ def _repo_path_patterns(projects) -> list[tuple[str, re.Pattern]]:
             continue
         base = os.path.basename(repo.rstrip("/"))
         forms = {os.path.realpath(os.path.expanduser(repo)).rstrip("/")}
-        for pre in ("/dev/", "~/dev/", "/tmp/", "/Volumes/NAS/", "/Users/desac/dev/"):
+        for pre in ("/dev/", "~/dev/", "/tmp/", "/Volumes/NAS/", home + "/dev/"):
             forms.add((pre + base).rstrip("/"))
         if name == "hscc":
             # The HSCC daemon works out of ~/.hermes/plugins (its own runtime
             # home), so hscc development shows up there and not under a repo
             # path. Match it explicitly or those sessions fall to unknown.
-            forms.update({"~/.hermes/plugins", "/Users/desac/.hermes/plugins"})
+            forms.update({"~/.hermes/plugins", home + "/.hermes/plugins"})
         for form in sorted(forms):
             key = (name, form)
             if not form or key in seen:

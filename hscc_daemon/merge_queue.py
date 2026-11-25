@@ -215,6 +215,17 @@ GATE_CANCEL_POLL_S = 30
 #: watcher must not outlive the leg it watches.
 _CANCEL_THREAD_PREFIX = "mq-gate-cancel"
 
+#: How often an overlapping local gate asks GitHub whether the pushed head's
+#: checks have gone red (see :class:`_OverlapCiWatch`).  Each poll is one
+#: ``gh pr view``, so this deliberately matches the gate's own cancellation
+#: cadence: a red CI is caught within one poll without turning a long gate into
+#: hundreds of API reads.  Read at CALL time, so a test can retune it.
+OVERLAP_CI_POLL_S = 30
+
+#: Project whose queue overlaps its local gate with GitHub CI when its registry
+#: row does not say either way.  Every other project keeps the sequential order.
+OVERLAP_CI_DEFAULT_PROJECT = "hscc"
+
 #: The PR URL shape workers leave in a card comment (same shape Hermes'
 #: respawn guard recognises). Owner/repo are captured too: auto-enqueue must
 #: only accept a URL from the project's OWN origin remote.
@@ -676,6 +687,21 @@ def _config_from_row(row):
     return cfg
 
 
+def _overlap_ci_enabled(cfg):
+    """True when this entry's local gate should overlap GitHub CI.
+
+    ``merge_queue.overlap_ci`` is the switch; absent, hscc's own queue overlaps
+    by default and every other project keeps the sequential order.  Strings are
+    accepted so a hand-written registry cannot turn "false" into True.
+    """
+    raw = cfg.get("overlap_ci")
+    if raw is None:
+        return str(cfg.get("name") or "") == OVERLAP_CI_DEFAULT_PROJECT
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(raw)
+
+
 def _git_checkout(repo):
     """The expanded ``repo`` path when it is a git work-tree root, else None.
 
@@ -1099,18 +1125,71 @@ def _test_leg_roster(worktree):
     return legs or None
 
 
-def _local_test_legs(changed, roster):
+#: A top-level changelog fragment (``changelog.d/*.md``). The one non-test
+#: file a test-only diff may carry; the archived tree is not a fragment.
+_CHANGELOG_FRAGMENT_RE = re.compile(r"^changelog\.d/[^/]+\.md$")
+
+
+def _is_test_file(path, leg):
+    """Whether ``path`` is a test file owned by ``leg``.
+
+    ``<leg>/tests/**`` is the suite layout this repo uses (a conftest under
+    that tree included), and ``<leg>/**/test_*.py`` covers a test that sits
+    beside the module it pins. Anything else — a source file, a leg-root
+    conftest, a fixture with another name — is not a test-only path.
+    """
+    root = leg.rstrip("/") + "/"
+    if not path.startswith(root):
+        return False
+    rel = path[len(root):]
+    if rel.startswith("tests/"):
+        return True
+    parts = rel.split("/")
+    if parts[-1] == "conftest.py" and "tests" in parts[:-1]:
+        return True
+    return parts[-1].startswith("test_") and parts[-1].endswith(".py")
+
+
+def _test_only_legs(paths, roster):
+    """Legs that own a wholly test-only diff, or ``None`` for today's rule.
+
+    Test-only means every path is a test file owned by a roster leg or a
+    top-level changelog fragment. A fragment selects no leg: it is data the
+    ``scripts`` leg parses, not a test this PR can break, so a test-only diff
+    skips that leg and any cross-leg expansion entirely. A diff with no owned
+    test file, a path no leg owns, or more than :data:`MAX_LOCAL_TEST_LEGS`
+    owning legs returns ``None`` so the caller keeps the ordinary rule: under-
+    selection is the failure mode this gate must not have.
+    """
+    chosen = set()
+    for path in paths:
+        if _CHANGELOG_FRAGMENT_RE.match(path):
+            continue
+        owners = [leg for leg in roster if _is_test_file(path, leg)]
+        if not owners:
+            return None
+        chosen.update(owners)
+    if not chosen or len(chosen) > MAX_LOCAL_TEST_LEGS:
+        return None
+    return [leg for leg in roster if leg in chosen]
+
+
+def _local_test_legs(changed, roster, log=None):
     """Legs a narrowed local gate may run, or ``None`` for the full suite.
 
-    A path under a leg's own directory selects that leg. Repo prose and the
-    Apple client trees select :data:`SCRIPTS_LEG`, mirroring
-    ``.github/scripts/leg_select.py`` — ``scripts/tests`` is their only Python
-    reader (it parses ``changelog.d/`` and ``CHANGELOG.md``, lints the README
-    and docs index, and reads/executes the app publishers). A shared harness
-    path, an unreadable/odd roster, a roster without :data:`SCRIPTS_LEG` for
-    such a path, an empty diff, a path no rule claims, or more than
-    :data:`MAX_LOCAL_TEST_LEGS` distinct legs widen to ``None`` (full suite):
-    under-selection is the failure mode this gate must not have.
+    A wholly test-only diff selects exactly the legs that own those test files
+    (plus the changelog fragments it carries, which select nothing); GitHub CI
+    still runs the full roster on every push to main, so the backstop is
+    unchanged. Any other diff keeps the ordinary rule: a path under a leg's
+    own directory selects that leg. Repo prose and the Apple client trees
+    select :data:`SCRIPTS_LEG`, mirroring ``.github/scripts/leg_select.py`` —
+    ``scripts/tests`` is their only Python reader (it parses ``changelog.d/``
+    and ``CHANGELOG.md``, lints the README and docs index, and reads/executes
+    the app publishers). A shared harness path, an unreadable/odd roster, a
+    roster without :data:`SCRIPTS_LEG` for such a path, an empty diff, a path
+    no rule claims, or more than :data:`MAX_LOCAL_TEST_LEGS` distinct legs
+    widen to ``None`` (full suite): under-selection is the failure mode this
+    gate must not have.
     """
     if not roster or any(not _LEG_NAME_RE.match(leg) for leg in roster):
         return None
@@ -1121,6 +1200,11 @@ def _local_test_legs(changed, roster):
         if any(path == shared or path.startswith(shared)
                for shared in SHARED_GATE_PATHS):
             return None
+    test_only = _test_only_legs(paths, roster)
+    if test_only is not None:
+        if log is not None:
+            log("legs: test-only diff -> %s" % " ".join(test_only), "INFO")
+        return test_only
     chosen = set()
     for path in paths:
         claimed = {leg for leg in roster
@@ -1143,11 +1227,12 @@ def _selected_leg_gate(legs):
     return 'HSCC_TEST_LEGS="%s" %s' % (" ".join(legs), RUN_TESTS_GATE)
 
 
-def _resolve_gates(cfg, worktree, git_runner, base="main"):
+def _resolve_gates(cfg, worktree, git_runner, base="main", log=None):
     """Gate command list for this PR, including hscc's conditional app builds.
 
     Declared gates are used verbatim. For hscc's built-in defaults the pytest
-    gate is narrowed to the legs the rebased diff touches (see
+    gate is narrowed to the legs the rebased diff touches (a wholly test-only
+    diff to exactly the legs that own its tests; see
     :func:`_local_test_legs`); app build gates still come from that same diff.
     The full suite is not lost with the narrowed local gate: GitHub CI runs it
     on the pushed head and :func:`_post_push_ready` refuses to merge until that
@@ -1160,7 +1245,7 @@ def _resolve_gates(cfg, worktree, git_runner, base="main"):
         return []
     gates = list(DEFAULT_HSCC_GATES)
     changed = _changed_files(worktree, git_runner, base=base)
-    legs = _local_test_legs(changed, _test_leg_roster(worktree))
+    legs = _local_test_legs(changed, _test_leg_roster(worktree), log=log)
     if legs:
         gates[gates.index(RUN_TESTS_GATE)] = _selected_leg_gate(legs)
     for prefix, cmd in APP_BUILD_GATES.items():
@@ -1868,6 +1953,59 @@ class _GateCancelWatch:
             # Bounded for the same reason _GateLiveness bounds its join: a
             # watcher stuck on the file lock may not hang the tick.
             thread.join(timeout=max(5.0, self.poll_s + 5.0))
+
+
+class _OverlapCiWatch:
+    """Ask GitHub whether CI on the pushed head has gone RED beside a gate.
+
+    When overlap is on, ``process_entry`` pushes the rebased head BEFORE the
+    local gate, so GitHub's checks are already running on that exact SHA.  The
+    existing cancellation watcher (:class:`_GateCancelWatch`) polls this beside
+    the running leg, and a red answer cancels the leg through the same path a
+    removed claim takes (#749) instead of spending the rest of the budget on a
+    head CI has already rejected.
+
+    Only red is a verdict here.  Pending is "not yet", green leaves the merge
+    answer to ``_settle_pushed_head`` (the exact-SHA authority), and a reported
+    head that is not ours is the caller's release path — never this watcher's.
+    A failed read answers "proceed", exactly like ``_GateCancelWatch``: a flaky
+    ``gh`` must not kill a gate.
+    """
+
+    RED = "ci-red"
+
+    def __init__(self, cfg, pr, head_sha, required, *, gh_runner=None,
+                 poll_s=None):
+        self.cfg = cfg
+        self.pr = pr
+        self.head_sha = head_sha
+        self.required = required
+        self.gh_runner = gh_runner
+        self.poll_s = OVERLAP_CI_POLL_S if poll_s is None else poll_s
+        self._next = 0.0
+        self.red = False
+
+    def check(self):
+        if self.red:
+            return self.RED
+        now = time.monotonic()
+        if now < self._next:
+            return None
+        # Stamped before the read: a slow gh is one poll, never a burst.
+        self._next = now + self.poll_s
+        try:
+            info = pr_view_settled(self.cfg["repo"], self.pr,
+                                   runner=self.gh_runner)
+        except Exception:
+            return None
+        if not isinstance(info, dict):
+            return None
+        if str(info.get("headRefOid") or "") != self.head_sha:
+            return None
+        if _checks_verdict(info, required_checks=self.required) == "red":
+            self.red = True
+            return self.RED
+        return None
 
 
 def _run_gate(command, worktree, timeout_s, cancel_check=None,
@@ -2621,8 +2759,13 @@ def _stop_cancelled(state_path, project, entry, reason):
 
 def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                   root=None, git_runner=None, gh_runner=None,
-                  handback=None, log=None):
-    """Process one claimed PR entry. Returns a small result dict."""
+                  handback=None, log=None, pre_gated=False):
+    """Process one claimed PR entry. Returns a small result dict.
+
+    ``pre_gated`` is set by the batch path after the combined tree already ran
+    the union of every member's gates: the per-PR rebase/push/CI/merge below
+    still runs, only the local gate legs are skipped.
+    """
     doc = doc if doc is not None else load_state(state_path)
     ps = _project_state(doc, project)
     git_runner = git_runner or _default_runner
@@ -2707,17 +2850,51 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     if cancel:
         return _stop_cancelled(state_path, project, entry, cancel)
 
-    gates = _resolve_gates(cfg, worktree, git_runner, base=base)
+    gates = ([] if pre_gated
+             else _resolve_gates(cfg, worktree, git_runner, base=base,
+                                 log=log))
     _update_flight(state_path, project, entry["pr"],
                    stage="gating" if gates else "merging")
     timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
+    overlap = _overlap_ci_enabled(cfg)
+    pushed_sha = ""
+    pushed_at = None
+    overlap_watch = None
+    if overlap:
+        # Push the rebased head FIRST so GitHub CI runs on the exact SHA the
+        # local gate is judging.  Same lease-pinned force-push and same head
+        # re-read as the sequential order used after the gate; both answering
+        # green for this SHA is still required, and `_settle_pushed_head` below
+        # remains the only merge authority.
+        err = _push_branch(worktree, info, git_runner)
+        if err:
+            return _retry_or_drop(doc, state_path, project, entry, err)
+        sha = _git(["rev-parse", "HEAD"], worktree, git_runner)
+        pushed_sha = (sha.stdout or "").strip() if sha is not None else ""
+        if not pushed_sha:
+            return _retry_or_drop(doc, state_path, project, entry,
+                                  "could not read the pushed head SHA")
+        pushed_at = _now_iso()
+        overlap_watch = _OverlapCiWatch(
+            cfg, entry["pr"], pushed_sha, required, gh_runner=gh_runner)
+
+    def _gate_cancel_check():
+        # The ledger answer comes first, exactly as before: remove/pause/disable
+        # must keep winning over a CI red.
+        reason = _cancel_reason(state_path, project, entry, cfg)
+        if reason or overlap_watch is None:
+            return reason
+        return overlap_watch.check()
+
     for command in gates:
+        overlap_note = (f" (overlapping CI on {pushed_sha[:12]})"
+                        if pushed_sha else "")
         # Name the leg BEFORE it runs. It can hold the whole queue for its
         # entire budget, and until now the first line the log ever got about it
         # was the verdict at the far end — the measured 65 minutes of silence
         # was exactly one such leg (t_8c461597).
-        log(f"merge-queue {project}: PR #{entry['pr']} gate start: {command} "
-            f"(budget {timeout_s}s)", "INFO")
+        log(f"merge-queue {project}: PR #{entry['pr']} gate start{overlap_note}: "
+            f"{command} (budget {timeout_s}s)", "INFO")
         # One gate leg can hold the entire DEFAULT_GATE_TIMEOUT_S budget, so the
         # stream is heartbeated from around the call, not after it: the wrapper
         # starts the heartbeat immediately before the leg and stops it in a
@@ -2748,8 +2925,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             with _GateLiveness(project, entry["pr"], command):
                 verdict, output = _run_gate(
                     command, worktree, timeout_s,
-                    cancel_check=lambda: _cancel_reason(state_path, project,
-                                                        entry, cfg),
+                    cancel_check=_gate_cancel_check,
                     on_start=_record_gate_pgid)
         finally:
             if gate_pgids:
@@ -2759,6 +2935,29 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                 except Exception:
                     pass
         if verdict == "cancelled":
+            if overlap_watch is not None and overlap_watch.red:
+                # CI rejected the pushed head while the local gate was still
+                # running.  The gate was stopped through the same path a
+                # removed claim takes (#749); the verdict is CI's, so hand the
+                # card back exactly as the post-gate red-CI path does and do
+                # not spend the rest of the budget waiting for the gate.
+                body = (
+                    f"Merge queue: CI is red on the pushed head "
+                    f"{pushed_sha[:12]}.\n\n"
+                    "The local gate was still running when GitHub reported the "
+                    "PR's own checks red on that head, so it was cancelled. "
+                    "The repository's checks are a real verdict on this code.\n\n"
+                    f"{resolve_instructions(entry.get('branch'), base)}\n")
+                _finish(None, project, state_path, None, "red-ci", entry,
+                        head_sha=pushed_sha, log=log)
+                _handback(entry, cfg, body, handback, gh_runner, log=log,
+                          reason="CI red", state_path=state_path,
+                          project=project)
+                log(f"merge-queue {project}: PR #{entry['pr']} CI red on "
+                    f"pushed head {pushed_sha[:12]}; local gate cancelled",
+                    "WARN")
+                return {"pr": entry["pr"], "result": "red-ci",
+                        "head_sha": pushed_sha}
             # The entry left the queue while the leg ran. Resolve it through the
             # same `_stop_cancelled` a checkpoint uses — drop on `removed`,
             # requeue on `paused`/`disabled` — and stop there.  Not a `red-gate`,
@@ -2816,7 +3015,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                     f"{output}\n\n"
                     f"{resolve_instructions(info.get('headRefName'), base)}\n")
             _finish(doc, project, state_path, ps, "red-gate", entry,
-                    gate=command, head_sha=info.get("headRefOid"), log=log)
+                    gate=command, head_sha=pushed_sha or info.get("headRefOid"),
+                    log=log)
             _handback(entry, cfg, body, handback, gh_runner, log=log,
                       reason="gate failed", state_path=state_path,
                       project=project)
@@ -2832,16 +3032,20 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     if cancel:
         return _stop_cancelled(state_path, project, entry, cancel)
 
-    _update_flight(state_path, project, entry["pr"], stage="merging")
-    err = _push_branch(worktree, info, git_runner)
-    if err:
-        return _retry_or_drop(doc, state_path, project, entry, err)
+    if not overlap:
+        _update_flight(state_path, project, entry["pr"], stage="merging")
+        err = _push_branch(worktree, info, git_runner)
+        if err:
+            return _retry_or_drop(doc, state_path, project, entry, err)
 
-    sha = _git(["rev-parse", "HEAD"], worktree, git_runner)
-    head_sha = (sha.stdout or "").strip() if sha is not None else ""
-    if not head_sha:
-        return _retry_or_drop(doc, state_path, project, entry,
-                              "could not read the pushed head SHA")
+        sha = _git(["rev-parse", "HEAD"], worktree, git_runner)
+        pushed_sha = (sha.stdout or "").strip() if sha is not None else ""
+        if not pushed_sha:
+            return _retry_or_drop(doc, state_path, project, entry,
+                                  "could not read the pushed head SHA")
+        pushed_at = None
+
+    head_sha = pushed_sha
 
     # The force-push moved the head, so the pre-push readiness answer is stale:
     # re-read the PR itself and merge only this exact SHA while it is green.
@@ -2856,6 +3060,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         project, cfg, entry, after, head_sha, base=base,
         state_path=state_path, cwd=worktree, git_runner=git_runner,
         gh_runner=gh_runner, handback=handback, log=log,
+        ci_since=pushed_at,
         pre_push_sha=str(info.get("headRefOid") or ""))
 
 
@@ -3886,6 +4091,347 @@ def _resume_ci_pending(project, cfg, entry, *, state_path, git_runner=None,
         pre_push_sha=str(entry.get("pre_push_sha") or ""))
 
 
+# ── opt-in batch gating ────────────────────────────────────────────────────
+#
+# ``merge_queue.batch_size`` is 1 (today's one-PR path) unless the operator
+# opts in. A batch exists only while the combined tree is built and gated: its
+# members live in ONE in-flight record (``{"batch": true, "prs": [...]}``) so a
+# daemon restart can reclaim an orphaned gate group and release the whole batch
+# back to the FIFO. The per-PR rebase/push/CI/merge phase then runs through the
+# ordinary single path with its local gate legs skipped, so the existing
+# exact-SHA merge authority does not move.
+
+def _batch_size(cfg):
+    """``merge_queue.batch_size`` clamped to at least 1 (1 = today's path)."""
+    try:
+        size = int((cfg or {}).get("batch_size") or 1)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, size)
+
+
+def _is_batch(flight):
+    return isinstance(flight, dict) and flight.get("batch") is True
+
+
+def _batch_members(flight):
+    prs = (flight or {}).get("prs")
+    if not isinstance(prs, list):
+        return []
+    return [e for e in prs if isinstance(e, dict) and e.get("pr") is not None]
+
+
+def _update_batch(state_path, project, **fields):
+    """Stamp the batch record (fresh read, same lock discipline as a claim)."""
+    with _file_lock():
+        doc = load_state(state_path)
+        flight = _project_state(doc, project).get("in_flight")
+        if _is_batch(flight):
+            flight.update(fields)
+            save_state(doc, state_path)
+
+
+def _take_batch_member(state_path, project, pr, *, return_to=None):
+    """Remove one member from the batch record, optionally returning it.
+
+    ``return_to="queue"`` puts it back at the head (FIFO order); ``"waiting"``
+    appends it to the wait list. The record clears when its last member leaves.
+    """
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        members = _batch_members(flight)
+        entry = next((e for e in members if _entry_pr(e) == int(pr)), None)
+        if not _is_batch(flight) or entry is None:
+            return None
+        keep = [e for e in members if e is not entry]
+        if keep:
+            flight["prs"] = keep
+            flight["pr"] = keep[0]["pr"]
+        else:
+            ps["in_flight"] = None
+        if return_to == "waiting":
+            if (_find_entry(ps["waiting"], pr) is None
+                    and _find_entry(ps["queue"], pr) is None):
+                ps["waiting"].append(entry)
+        elif return_to == "queue":
+            if (_find_entry(ps["queue"], pr) is None
+                    and _find_entry(ps["waiting"], pr) is None):
+                ps["queue"].insert(0, entry)
+        save_state(doc, state_path)
+        return entry
+
+
+def _finish_batch_member(project, state_path, result, entry, **fields):
+    """Record a terminal verdict for one member while the batch holds the rest."""
+    pr = int(entry.get("pr") or 0)
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        members = _batch_members(flight)
+        target = next((e for e in members if _entry_pr(e) == pr), None)
+        if not _is_batch(flight) or target is None:
+            return False
+        keep = [e for e in members if e is not target]
+        if keep:
+            flight["prs"] = keep
+            flight["pr"] = keep[0]["pr"]
+        else:
+            ps["in_flight"] = None
+        ps["last"] = _last_record(result, entry, **fields)
+        save_state(doc, state_path)
+    return True
+
+
+def _release_batch(state_path, project, *, entries=None, waiting=False):
+    """Put every (remaining) member back in FIFO order at the queue head."""
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        members = list(entries) if entries is not None else _batch_members(flight)
+        if _is_batch(flight):
+            ps["in_flight"] = None
+        if waiting:
+            for entry in members:
+                pr = _entry_pr(entry)
+                if pr is None:
+                    continue
+                if (_find_entry(ps["waiting"], pr) is not None
+                        or _find_entry(ps["queue"], pr) is not None):
+                    continue
+                ps["waiting"].append(entry)
+        else:
+            # Reversed insertion keeps the batch's FIFO order at the head.
+            for entry in reversed(members):
+                pr = _entry_pr(entry)
+                if pr is None:
+                    continue
+                if (_find_entry(ps["queue"], pr) is not None
+                        or _find_entry(ps["waiting"], pr) is not None):
+                    continue
+                ps["queue"].insert(0, entry)
+        save_state(doc, state_path)
+        return members
+
+
+def _claim_entry(state_path, project, entry):
+    """Promote one released entry to the ordinary single in-flight claim."""
+    pr = _entry_pr(entry)
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        for source in ("queue", "waiting"):
+            found = _find_entry(ps[source], pr)
+            if found is not None:
+                ps[source].remove(found)
+                ps["in_flight"] = found
+                save_state(doc, state_path)
+                return found
+    return None
+
+
+def _process_batch(project, cfg, batch, *, state_path, root=None,
+                   git_runner=None, gh_runner=None, handback=None, log=None):
+    """Build + gate a combined tree once, then merge each member in order.
+
+    A terminal/refused member leaves before any git work. A member whose stack
+    rebase conflicts is handed back on the normal single-PR conflict path and
+    the rest continue. A red combined gate falls back to gating the members one
+    by one so the culprit is named and gets the normal red handling.
+    """
+    git_runner = git_runner or _default_runner
+    gh_runner = gh_runner or _default_runner
+    handback = handback or default_handback
+    log = log or (lambda *a, **k: None)
+    base = expected_base(cfg, git_runner) or "main"
+    outcomes = []
+    members = _batch_members(batch)
+
+    def _single(entry, pre_gated):
+        claimed = _claim_entry(state_path, project, entry)
+        if claimed is None:
+            return {"pr": entry.get("pr"), "result": "removed"}
+        return process_entry(
+            project, cfg, claimed, state_path=state_path, root=root,
+            git_runner=git_runner, gh_runner=gh_runner, handback=handback,
+            log=log, pre_gated=pre_gated)
+
+    # 1. Drop what can never be in this batch (terminal, wrong base, fork).
+    infos = {}
+    stackable = []
+    for entry in members:
+        info = pr_view_settled(cfg["repo"], entry["pr"], runner=gh_runner)
+        if isinstance(info, dict):
+            infos[_entry_pr(entry)] = info
+            if info.get("headRefName"):
+                entry["branch"] = info["headRefName"]
+            state = str(info.get("state") or "").upper()
+            if state in ("MERGED", "CLOSED"):
+                result = "already-" + state.lower()
+                _finish_batch_member(project, state_path, result, entry,
+                                     sha=info.get("headRefOid"))
+                outcomes.append({"pr": entry["pr"], "result": result})
+                continue
+            reason = refusal_reason(info, base)
+            if reason:
+                body = ("Merge queue: refusing this PR.\n\n"
+                        f"{reason}\n\n"
+                        "It stays out of the queue until it is retargeted "
+                        "(base branch) or re-opened from a branch in this "
+                        "repo.\n")
+                _comment_pr(cfg["repo"], entry["pr"], body, gh_runner, log=log)
+                _finish_batch_member(project, state_path, "refused", entry,
+                                     error=reason)
+                outcomes.append({"pr": entry["pr"], "result": "refused",
+                                 "error": reason})
+                continue
+        stackable.append(entry)
+
+    # Not enough left to be a batch: the ordinary single path decides.
+    if len(stackable) < 2:
+        for entry in stackable:
+            outcomes.append(_single(entry, False))
+        return outcomes
+
+    try:
+        worktree = ensure_worktree(cfg, root=root, git_runner=git_runner,
+                                   base=base)
+    except Exception as exc:
+        log(f"merge-queue {project}: batch worktree failed: {exc}", "WARN")
+        _release_batch(state_path, project, entries=stackable)
+        return outcomes + [{"pr": e["pr"], "result": "retry",
+                            "error": str(exc)} for e in stackable]
+
+    branch = f"mq/batch-{int(time.time())}"
+    _update_batch(state_path, project, stage="rebasing", branch=branch)
+    start = _git(["checkout", "--detach", "--force", f"origin/{base}"],
+                 worktree, git_runner)
+    if start is None or start.returncode != 0:
+        err = f"git checkout origin/{base} failed"
+        _release_batch(state_path, project, entries=stackable)
+        return outcomes + [{"pr": e["pr"], "result": "retry", "error": err}
+                           for e in stackable]
+    _git(["checkout", "-B", branch], worktree, git_runner)
+
+    # 2. Rebase each member, in FIFO order, onto the growing combined branch.
+    kept = []
+    for entry in stackable:
+        info = infos.get(_entry_pr(entry)) or {}
+        err = _prepare_head(worktree, info, git_runner)
+        if err:
+            _take_batch_member(state_path, project, entry["pr"],
+                               return_to="queue")
+            outcomes.append({"pr": entry["pr"], "result": "retry",
+                             "error": err})
+            continue
+        proc = _git(["rebase", branch], worktree, git_runner,
+                    timeout=DEFAULT_GATE_TIMEOUT_S)
+        if proc is None or proc.returncode != 0:
+            conflicted = _conflicted_files(worktree, git_runner)
+            _git(["rebase", "--abort"], worktree, git_runner)
+            names = (", ".join(conflicted) if conflicted
+                     else "(files not reported)")
+            output = _tail(((proc.stdout or "") + (proc.stderr or ""))
+                           if proc else "", 20)
+            body = (f"Merge queue: rebase onto origin/{base} conflicted.\n\n"
+                    f"Conflicted files: {names}\n\n"
+                    f"{resolve_instructions(info.get('headRefName'), base)}\n"
+                    f"{output}")
+            if _finish_batch_member(project, state_path, "conflict", entry,
+                                    conflicted=conflicted):
+                _handback(entry, cfg, body, handback, gh_runner, log=log,
+                          reason="rebase conflict", state_path=state_path,
+                          project=project)
+            log(f"merge-queue {project}: PR #{entry['pr']} conflict in "
+                f"{names}", "WARN")
+            outcomes.append({"pr": entry["pr"], "result": "conflict",
+                             "conflicted": conflicted})
+            continue
+        _git(["checkout", "-B", branch], worktree, git_runner)
+        kept.append(entry)
+
+    if not kept:
+        return outcomes
+
+    # 3. One gate run on the combined tree; the diff is the union of the
+    # members' diffs, so _resolve_gates selects the union of their legs.
+    gates = _resolve_gates(cfg, worktree, git_runner, base=base, log=log)
+    label = " ".join(f"#{e['pr']}" for e in kept)
+    log(f"merge-queue {project}: batch start: {label} legs="
+        + (" | ".join(gates) if gates else "none"), "INFO")
+    _update_batch(state_path, project,
+                  stage="gating" if gates else "merging")
+    timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
+    pseudo = {"pr": kept[0]["pr"]}
+    for command in gates:
+        log(f"merge-queue {project}: batch gate start: {command} "
+            f"(budget {timeout_s}s)", "INFO")
+        gate_pgids = []
+
+        def _record(pid):
+            gate_pgids.append(int(pid))
+            _update_batch(state_path, project, pgid=int(pid), gate=command)
+
+        try:
+            with _GateLiveness(project, pseudo["pr"], command):
+                verdict, output = _run_gate(
+                    command, worktree, timeout_s,
+                    cancel_check=lambda: _cancel_reason(
+                        state_path, project, pseudo, cfg),
+                    on_start=_record)
+        finally:
+            if gate_pgids:
+                try:
+                    _update_batch(state_path, project, pgid=None)
+                except Exception:
+                    pass
+        if verdict == "cancelled":
+            reason = (_cancel_reason(state_path, project, pseudo, cfg)
+                      or "removed")
+            _release_batch(state_path, project, entries=kept)
+            return outcomes + [{"pr": e["pr"], "result": reason}
+                               for e in kept]
+        if verdict == "timeout":
+            _release_batch(state_path, project, entries=kept, waiting=True)
+            body = (
+                "Merge queue: the batch gate ran out of its time budget.\n\n"
+                f"Gate: {command}\n"
+                f"Budget: {timeout_s}s (exceeded)\n\n"
+                "This is NOT a test failure. Every PR in the batch is back in "
+                "the wait list and will be looked at again on a later tick.\n"
+                f"{output}")
+            _handback(kept[0], cfg, body, handback, gh_runner, log=log,
+                      create=False, state_path=state_path, project=project)
+            log(f"merge-queue {project}: batch gate timed out after "
+                f"{timeout_s}s: {command} (not a test failure)", "WARN")
+            return outcomes + [{"pr": e["pr"], "result": "gate-timeout",
+                                "gate": command, "timeout_s": timeout_s}
+                               for e in kept]
+        if verdict != "pass":
+            # Cheap bisect: the ordinary single path names the culprit and
+            # gives it the normal red handling; the rest still proceed.
+            log(f"merge-queue {project}: batch red -> singles", "WARN")
+            _release_batch(state_path, project, entries=kept)
+            for entry in kept:
+                outcomes.append(_single(entry, False))
+            return outcomes
+
+    # 4. Green: per-PR rebase onto the then-current base, push, CI, merge.
+    log(f"merge-queue {project}: batch green", "INFO")
+    _release_batch(state_path, project, entries=kept)
+    for entry in kept:
+        outcome = _single(entry, True)
+        outcomes.append(outcome)
+        if outcome.get("result") == CI_PENDING_STAGE:
+            # That PR now owns the single in-flight slot; the rest stay queued
+            # for a later tick (or batch).
+            break
+    return outcomes
+
+
 # ── tick ────────────────────────────────────────────────────────────────────
 
 def _repo_groups(projects, names):
@@ -3998,6 +4544,18 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 # The recorded group belongs to the run that just died; the
                 # re-gated leg records its own.
                 flight.pop("pgid", None)
+                if _is_batch(flight):
+                    # A batch is ONE claim: release every member back to the
+                    # FIFO in its original order (nothing is half-merged yet).
+                    ps["in_flight"] = None
+                    for member in reversed(_batch_members(flight)):
+                        if not any(
+                                int(e.get("pr", 0))
+                                == int(member.get("pr", 0))
+                                for e in ps["queue"]):
+                            ps["queue"].insert(0, member)
+                    recovered.append(name)
+                    continue
                 ps["in_flight"] = None
                 if not any(int(e.get("pr", 0)) == int(flight.get("pr", 0))
                            for e in ps["queue"]):
@@ -4167,6 +4725,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
             # earlier save and this claim is not lost. Re-reading enabled and
             # paused also makes a pause/disable raced in during discovery win.
             declined = []
+            batch = None
             with _file_lock():
                 doc = load_state(state_path)
                 best = None
@@ -4211,8 +4770,29 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 if best is not None:
                     _, claim_name, pos, entry = best
                     ps = _project_state(doc, claim_name)
-                    entry = ps[source].pop(pos)
-                    ps["in_flight"] = entry
+                    cfg = cfgs.get(claim_name) or {}
+                    size = _batch_size(cfg)
+                    if source == "queue" and pos == 0 and size > 1:
+                        # Opt-in batch: claim the first N eligible FIFO entries
+                        # as ONE in-flight record. A held entry at the head
+                        # keeps the ordinary single-claim path.
+                        candidates = list(ps["queue"][:size])
+                        if (len(candidates) >= 2
+                                and not any(
+                                    _hold_of(ps, e.get("pr")) is not None
+                                    for e in candidates)):
+                            del ps["queue"][:len(candidates)]
+                            batch = {
+                                "batch": True,
+                                "stage": "claimed",
+                                "pr": candidates[0]["pr"],
+                                "prs": candidates,
+                                "started_at": _now_iso(),
+                            }
+                            ps["in_flight"] = batch
+                    if batch is None:
+                        entry = ps[source].pop(pos)
+                        ps["in_flight"] = entry
                     save_state(doc, state_path)
             # Outside the file lock: a log write must not extend how long the
             # CLI waits on the ledger (same rule as `_update_flight`'s stamp).
@@ -4225,7 +4805,8 @@ def tick(*, state_path=None, root=None, registry_path=None,
             # tick may spend the whole gate budget before it returns, and the
             # stream must not sit dark across it.  "claimed" until process_entry
             # reports a real stage of its own.
-            _stream_stamp(project=claim_name, pr=entry["pr"], stage="claimed")
+            _stream_stamp(project=claim_name,
+                          pr=(batch or entry)["pr"], stage="claimed")
 
             cfg = cfgs[claim_name]
             # One lock per repo path: two project names on the same checkout
@@ -4233,20 +4814,48 @@ def tick(*, state_path=None, root=None, registry_path=None,
             lock_root = os.path.dirname(os.path.abspath(state_path))
             with _repo_lock(cfg["repo"], root=lock_root):
                 try:
-                    outcome = process_entry(
-                        claim_name, cfg, entry, doc=doc,
-                        state_path=state_path, root=root,
-                        git_runner=git_runner, gh_runner=gh_runner,
-                        handback=handback, log=log)
+                    if batch is not None:
+                        outcomes = _process_batch(
+                            claim_name, cfg, batch, state_path=state_path,
+                            root=root, git_runner=git_runner,
+                            gh_runner=gh_runner, handback=handback, log=log)
+                    else:
+                        outcomes = [process_entry(
+                            claim_name, cfg, entry, doc=doc,
+                            state_path=state_path, root=root,
+                            git_runner=git_runner, gh_runner=gh_runner,
+                            handback=handback, log=log)]
                 except Exception as exc:
                     error = (f"{type(exc).__name__}: {exc}\n"
                              f"{traceback.format_exc()}")
-                    log(f"merge-queue {claim_name}: PR #{entry['pr']} "
-                        f"raised:\n{error}", "ERROR")
-                    outcome = _retry_or_drop(
-                        doc, state_path, claim_name, entry, error)
-            result["processed"].append({"project": claim_name, **outcome})
-            _outcome_line(log, claim_name, entry, outcome)
+                    log(f"merge-queue {claim_name}: "
+                        f"{(batch or entry)['pr']} raised:\n{error}", "ERROR")
+                    if batch is not None:
+                        # Never strand a half-claimed batch: every member the
+                        # record still holds goes back to its FIFO position and
+                        # the next tick retries. Members already merged/conflicted
+                        # before the raise are no longer in the record.
+                        fresh = _project_state(load_state(state_path),
+                                               claim_name).get("in_flight")
+                        if _is_batch(fresh):
+                            members_left = _release_batch(state_path,
+                                                          claim_name)
+                            outcomes = [{"pr": e["pr"], "result": "error",
+                                         "error": _capped_error(error)}
+                                        for e in members_left]
+                        elif isinstance(fresh, dict) and fresh.get("pr"):
+                            # The batch already reached its per-PR phase.
+                            outcomes = [_retry_or_drop(
+                                None, state_path, claim_name, fresh, error)]
+                        else:
+                            outcomes = []
+                    else:
+                        outcomes = [_retry_or_drop(
+                            doc, state_path, claim_name, entry, error)]
+            for outcome in outcomes:
+                result["processed"].append({"project": claim_name, **outcome})
+                _outcome_line(log, claim_name, {"pr": outcome.get("pr")},
+                              outcome)
             doc = load_state(state_path)
             for name in members:
                 ps = _project_state(doc, name)
