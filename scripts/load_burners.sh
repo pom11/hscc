@@ -88,8 +88,30 @@ kill_group() {
     kill "-$sig" "-$pid" 2>/dev/null || kill "-$sig" "$pid" 2>/dev/null || true
 }
 
+# ── opt-in stage trace (t_5f9fab03) ─────────────────────────────────────────
+# HSCC_LOAD_BURNERS_TRACE=<path>: append one line per harness stage,
+# "<pid> <tag> <stage> [detail]". Unset ⇒ lb_trace returns before any syscall:
+# zero behaviour change for every shipped consumer (loadstress_leg.py,
+# run_tests.sh, test_load_burners.py, test_loadstress_leg.py). It exists
+# because the sibling-suite SIGINT stall
+# (docs/audits/load-burners-signal-sibling-liveness_t_f8e6fe38.md) cannot be
+# told apart from outside: "the INT trap never ran" and "a reap is blocking"
+# look identical to pgrep and to the test — only the harness itself knows
+# which stage it reached.
+#
+# The `2>/dev/null` comes BEFORE the append redirection on purpose: bash
+# applies redirections left to right, so a broken trace path reports onto the
+# already-redirected stderr and can never print what the harness contract
+# forbids. Markers never touch stdout.
+lb_trace() {
+    [ -n "${HSCC_LOAD_BURNERS_TRACE:-}" ] || return 0
+    printf '%s %s %s %s\n' "$$" "$TAG" "$1" "${2:-}" \
+        2>/dev/null >>"$HSCC_LOAD_BURNERS_TRACE" || true
+}
+
 cleanup() {
     status=$?
+    lb_trace cleanup-entry
     # A signal arriving during cleanup must not re-enter and kill half the
     # groups; the first pass owns all of them.
     [ "$CLEANED" -eq 1 ] && return
@@ -106,32 +128,41 @@ cleanup() {
     for pid in $BURNER_PIDS; do
         kill_group TERM "$pid"
     done
+    lb_trace after-term-loop
 
     # Bounded grace, then the guarantee. TERM is what lets a well-behaved
     # burner/test clean up; KILL is what makes "no survivor" true regardless.
     sleep 0.2
+    lb_trace after-sleep
     kill_group KILL "$WATCHDOG_PID"
     kill_group KILL "$COMMAND_PID"
     for pid in $BURNER_PIDS; do
         kill_group KILL "$pid"
     done
+    lb_trace after-kill-loop
 
     # Reap them here, with stderr quiet: otherwise bash announces every killed
     # background job on stderr, which reads like the harness went wrong when it
     # is exactly the guarantee working.
     for pid in $COMMAND_PID $WATCHDOG_PID $BURNER_PIDS; do
-        [ -n "$pid" ] && wait "$pid" 2>/dev/null
+        if [ -n "$pid" ]; then
+            lb_trace reap-wait "$pid"
+            wait "$pid" 2>/dev/null
+            lb_trace reap-ok "$pid"
+        fi
     done
 
     [ -e "$TIMEOUT_MARK" ] && status=124
     rm -f "$TIMEOUT_MARK"
+    lb_trace cleanup-exit "$status"
     exit "$status"
 }
 
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'lb_trace int-trap; exit 130' INT
+trap 'lb_trace term-trap; exit 143' TERM
+trap 'lb_trace hup-trap; exit 129' HUP
+lb_trace start
 
 # ── own the groups ──────────────────────────────────────────────────────────
 # NOT `set -m`: job control is unreliable in a non-interactive shell on Linux
@@ -177,6 +208,7 @@ WATCHDOG_PID=$!
 new_group "$@" &
 COMMAND_PID=$!
 
+lb_trace in-wait "$COMMAND_PID"
 wait "$COMMAND_PID"
 status=$?
 exit "$status"
