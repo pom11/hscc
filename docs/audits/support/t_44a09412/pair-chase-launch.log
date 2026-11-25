@@ -1,0 +1,6 @@
+launch Wed Nov 25 17:20:31 EET 2026
+suiteA pid=89305 suiteB pid=89306
+suites done Wed Nov 25 17:23:36 EET 2026
+post-run survivors: [none]
+1 failed, 738 passed, 4 skipped in 182.11s (0:03:02)
+1 failed, 738 passed, 4 skipped in 184.76s (0:03:04)
