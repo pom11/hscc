@@ -229,7 +229,13 @@ def _isolate_hscc(tmp_path, monkeypatch):
       (b) Patch every module-level ``~/.hscc``-rooted constant (each module
           computes its own copy at IMPORT time, so they are already baked in
           before this fixture runs and must be overwritten explicitly). See
-          ``_module_attrs()`` — the enumerated audit in the card.
+          ``_module_attrs()`` — the enumerated audit in the card. The same
+          list also carries the ``$HOME``-rooted constants that live OUTSIDE
+          ``~/.hscc`` and therefore escape (a) by construction — today
+          ``event_driven.PLIST_DIR`` = ``~/Library/LaunchAgents`` (t_35d9f6ea,
+          see the seal pin below), because that module's ``uninstall_job``
+          REMOVES ``<PLIST_DIR>/<label>.plist`` and would otherwise delete
+          the operator's live periodic jobs.
       (c) Redirect ``state.STATE_DIR`` to the tmp state dir too, so the common
           ``state.write_state`` funnel can never reach ``~/.hscc/state``.
 
@@ -261,6 +267,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
     def _module_attrs():
         from hscc_daemon import (
             autodown, cli as hscc_cli, daemon_ops, daemon_singleton, desktop,
+            event_driven,
             health,
             heal_breaker, heal_lease,
             hscc, lifecycle, node_pauses,
@@ -471,10 +478,71 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # monkeypatch when they exercise the nonspawnable path.
             (dispatcher_wedge, "_assignee_is_nonspawnable",
              lambda assignee: False),
+            # event_driven.py (t_35d9f6ea) — the launchd/kqueue event-driven
+            # surface. Its three $HOME-rooted constants are import-time
+            # literals, so the (a) expanduser redirect cannot reach them:
+            # (a) only rewrites paths under ``~/.hscc`` and delegates
+            # everything else to the real expanduser, and
+            # ``~/Library/LaunchAgents`` is not under it.
+            #
+            # This one is not a litter risk, it is a DELETION risk.
+            # ``LaunchdJobGenerator.uninstall_job`` does
+            # ``os.remove(os.path.join(PLIST_DIR, f"{label}.plist"))`` for
+            # every stream in PERIODIC_STREAMS, so a test that reaches it
+            # without patching PLIST_DIR removes the operator's live
+            # ``com.nousresearch.hscc-periodic.*.plist`` — de-Registering
+            # their periodic cluster checks — with NO subprocess involved,
+            # i.e. invisible to the launchctl exec fence (t_5fd62226) and to
+            # every fork spy. ``install_job``/``cmd_install_event_driven``
+            # additionally ``os.makedirs(PLIST_DIR)`` + write into it.
+            #
+            # The values mirror the real layout under the per-test tmp dir
+            # (tmp_path stands in for $HOME), which is also exactly what
+            # test_event_driven_cli_no_ansi.py used to patch per-test — so
+            # the seal replaces that patching instead of layering under it.
+            (event_driven, "HSCC_DIR", base),
+            (event_driven, "STATE_DIR", p("state")),
+            (event_driven, "PLIST_DIR",
+             os.path.join(str(tmp_path), "Library", "LaunchAgents")),
         ]
 
     for mod, attr, val in _module_attrs():
         monkeypatch.setattr(mod, attr, val, raising=False)
+
+    # ── Seal pin (t_35d9f6ea) ────────────────────────────────────────────
+    # Read the patched attributes BACK and guard-assert them. Why an assert
+    # here rather than only in a test: the whole point of this seal is that a
+    # test which FORGETS to patch is still safe, so no test can be the thing
+    # that notices the seal vanished — a test that patches its own path stays
+    # green forever with the seal deleted. And `monkeypatch.setattr(...,
+    # raising=False)` would happily CREATE a misspelled attribute instead of
+    # redirecting the real one, so only reading the production name under its
+    # real spelling proves the redirect happened.
+    #
+    # Measured against, never against the operator's live directory: nothing
+    # here creates, reads or removes anything under the real
+    # ~/Library/LaunchAgents. The negative arm compares path STRINGS.
+    from hscc_daemon import event_driven as _ed
+    _real_home = _real_expanduser("~")
+    _real_plist_dir = os.path.join(_real_home, "Library", "LaunchAgents")
+    assert _ed.PLIST_DIR == os.path.join(str(tmp_path), "Library",
+                                         "LaunchAgents"), (
+        "the autouse seal no longer redirects event_driven.PLIST_DIR — it is "
+        f"{_ed.PLIST_DIR!r}, i.e. a path outside this test's tmp dir. "
+        "event_driven.LaunchdJobGenerator.uninstall_job os.remove()s "
+        "<PLIST_DIR>/<label>.plist, so an unsealed value deletes the "
+        "OPERATOR'S live com.nousresearch.hscc-periodic.*.plist files with no "
+        "subprocess involved and no fence can see it. Re-add the entry in "
+        "_module_attrs() above; the sandboxed proof is "
+        "test_no_live_hscc_leak.py."
+    )
+    assert _real_plist_dir != _ed.PLIST_DIR and _real_home not in _ed.PLIST_DIR
+    assert _ed.HSCC_DIR == base, (
+        f"the autouse seal no longer redirects event_driven.HSCC_DIR "
+        f"({_ed.HSCC_DIR!r}); _event_log appends to <HSCC_DIR>/daemon.log")
+    assert _ed.STATE_DIR == os.path.join(base, "state"), (
+        f"the autouse seal no longer redirects event_driven.STATE_DIR "
+        f"({_ed.STATE_DIR!r}); the kqueue watcher makedirs it")
 
     # NOT neutered here, deliberately. desktop._notify_macos / _notify_linux
     # shell out to osascript / notify-send, so a test that reaches a real
