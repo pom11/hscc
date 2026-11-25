@@ -46,6 +46,7 @@ CHECK_NAMES = [
     "main wakeups (daemon-owned schedule)",
     "worker budget hook ([budget] note)",
     "node pauses (operator overlay)",
+    "daemon scheduling posture (launchd ProcessType=Standard)",
 ]
 
 FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["192.0.2.1"]}])
@@ -92,7 +93,7 @@ def test_registry_exists_and_covers_the_feature_rows():
                     "kanban_enforce", "main_board", "main_wakeups",
                     "budget_hook", "node_pauses",
                     "node_pause_expiry", "main_only_surface",
-                    "orch_wake_subs"], \
+                    "orch_wake_subs", "process_posture"], \
         "registry order is row order"
 
 
@@ -133,7 +134,8 @@ def test_registry_seam_names_match_the_run_doctor_signature():
                                      "_node_pauses_check",
                                      "_node_pause_expiry_check",
                                      "_main_only_surface_check",
-                                     "_orch_wake_subs_check"}
+                                     "_orch_wake_subs_check",
+                                     "_process_posture_check"}
     assert "_main_board_check" not in declared, \
         "a new row must not add a keyword to run_doctor()'s signature"
 
@@ -434,7 +436,8 @@ def test_the_daemon_state_rows_declare_no_root_context():
     config, the ``orch_waker``/``kanban_enforce``/``node_pause_expiry`` stream
     stamps through ``state.STATE_DIR``, the paused-policy document through
     ``kanban_pause.STATE_PATH``, the node-pause overlay and the expiry stamp's
-    root through their own modules' HOME-derived constants — and none of
+    root through their own modules' HOME-derived constants, and the installed
+    daemon plist through ``~/Library/LaunchAgents`` (t_8b17cb40) — and none of
     them reads ``HSCC_DIR``. A root taken from that variable is therefore not a
     relocation of this state; it is a read of a directory nothing writes to, and
     the row reported absence as a fact about a live host (a pid file at that root
@@ -448,7 +451,7 @@ def test_the_daemon_state_rows_declare_no_root_context():
     """
     by_key = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}
     for key in ("orch_waker", "kanban_enforce", "node_pauses",
-                "node_pause_expiry"):
+                "node_pause_expiry", "process_posture"):
         assert by_key[key].row_kwargs == (), (
             f"the {key} row must declare no per-row context: a handed root "
             "splits the reader from writers that resolve from HOME (t_be690204)")
