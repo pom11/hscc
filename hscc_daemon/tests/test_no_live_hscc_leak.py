@@ -51,6 +51,27 @@ def _plant(ws, hscc_rel, content):
     return target
 
 
+def _plant_at(target, content):
+    """Same as `_plant` but for a path given relative to the sandbox HOME
+    itself (t_35d9f6ea: ~/Library/LaunchAgents is not under ~/.hscc)."""
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w") as f:
+        f.write(content)
+    return target
+
+
+# A minimal but VALID launchd plist carrying the marker the manifest diff
+# proves survived (t_35d9f6ea). Content matters: a byte-level manifest diff
+# catches an overwrite as well as a removal.
+_PLANTED_PLIST = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    '<plist version="1.0">\n<dict>\n'
+    '\t<key>planted</key><true/>\n'
+    '</dict>\n</plist>\n')
+
+
 def test_suite_never_writes_live_hscc(tmp_path):
     """Run the daemon/lifecycle/trigger/autodown tests in a sandboxed HOME
     with realistic ~/.hscc planted; assert NOTHING under it changes."""
@@ -110,7 +131,46 @@ def test_suite_never_writes_live_hscc(tmp_path):
     _plant(ws, "profiles/worker-246/config.yaml",
            "model:\n  provider: custom\n  base_url: http://192.0.2.11:8000/v1\n")
 
+    # ── ~/Library/LaunchAgents (t_35d9f6ea) ─────────────────────────────
+    # The launchd plist directory sits OUTSIDE ~/.hscc, so the autouse
+    # fixture's ``os.path.expanduser`` rewrite — which only redirects paths
+    # under ~/.hscc — cannot reach it. Those paths are reachable at all only
+    # through the fixture's explicit constant list, and one of those constants
+    # is a DELETE target: event_driven.LaunchdJobGenerator.uninstall_job does
+    # ``os.remove(<PLIST_DIR>/<label>.plist)`` for every stream, no subprocess
+    # involved. A test that forgets to patch would therefore silently
+    # de-Register the operator's periodic cluster checks. Plant the real set
+    # of files the code would touch, derived from the production constants so
+    # a renamed label cannot shrink the coverage unnoticed.
+    from hscc_daemon import event_driven as _ed
+
+    planted_plists = [
+        f"{_ed.PERIODIC_LABEL_PREFIX}.{stream}.plist"
+        for stream in _ed.PERIODIC_STREAMS
+    ]
+    assert len(planted_plists) >= 4, (
+        "event_driven.PERIODIC_STREAMS shrank — the planted launchd set is "
+        "no longer a faithful mirror of what uninstall_all_periodic removes")
+    for fn in planted_plists:
+        _plant_at(os.path.join(ws, "Library", "LaunchAgents", fn),
+                  _PLANTED_PLIST)
+    # The two other $HOME-rooted plist surfaces in this package, sealed by
+    # t_2f09d480: install.py writes/removes com.hermes.hscc_daemon.plist,
+    # api_launchd.py writes/removes com.hscc.api.plist. Planting them turns
+    # the planted tree into the whole directory a forgetful test could damage,
+    # and test_plist_seal_install_api_t_2f09d480.py drives both paths here
+    # without patching them.
+    from hscc_daemon import api_launchd as _api_launchd
+    from hscc_daemon import install as _install
+
+    for fn in (os.path.basename(_install.PLIST_FILE),
+               os.path.basename(_api_launchd.API_PLIST_PATH)):
+        _plant_at(os.path.join(ws, "Library", "LaunchAgents", fn),
+                  _PLANTED_PLIST)
+
     before = _manifest(os.path.join(ws, ".hscc"))
+    before_plists = _manifest(os.path.join(ws, "Library", "LaunchAgents"))
+    assert before_plists, "the launchd plant did not land"
 
     # Run the test files most likely to leak (the historical writers) plus the
     # whole package — those tests exercise cycle(), pipeline_watchdog(),
@@ -147,6 +207,26 @@ def test_suite_never_writes_live_hscc(tmp_path):
         # ``AUTODOWN_FILE`` seal were ever dropped, the planted tree is what
         # catches the rewrite of the operator's own state.
         "test_autodown_cli_paused_wake.py",
+        # t_35d9f6ea: the event-driven CLI is the code that makedirs, writes
+        # AND os.removes launchd plists, and it no longer patches any path of
+        # its own — it runs entirely on the autouse seal. This sandbox is what
+        # proves that: if the seal ever stops redirecting
+        # ``event_driven.PLIST_DIR``, the planted
+        # ``com.nousresearch.hscc-periodic.*.plist`` files above go missing
+        # (uninstall) or the planted tree gains a new one (install), and the
+        # manifest diff below fails. No fence or fork-spy can catch that class
+        # of leak — it is a bare ``os.remove``.
+        "test_event_driven_cli_no_ansi.py",
+        # t_2f09d480: install.py and api_launchd.py WRITE and bare-``os.remove``
+        # their launchd plists (and install.py's systemd units). This file
+        # patches no path of its own, so it is the sandboxed proof that both
+        # new seal entries are load-bearing: with either entry removed, the
+        # planted com.hermes.hscc_daemon.plist / com.hscc.api.plist is
+        # rewritten or deleted and the manifest diff below goes red.
+        # Only the write/remove class: its seal-constant cases self-assert the
+        # tmp redirect, which is the fixture pin's job, not this sandbox's.
+        "test_plist_seal_install_api_t_2f09d480.py"
+        "::TestWriteRemoveLandsInsideTheSeal",
     ]
     paths = [os.path.join(tests_dir, t) for t in targets]
 
@@ -176,5 +256,28 @@ def test_suite_never_writes_live_hscc(tmp_path):
             f"  {p}: before={before.get(p)} after={after.get(p)}"
             for p in sorted(set(before) | set(after))
             if before.get(p) != after.get(p)
+        )
+    )
+
+    # ~/Library/LaunchAgents (t_35d9f6ea): the same promise one directory
+    # up. This is the ONLY place the launchd seal is *measured* rather than
+    # assumed — a per-test ``monkeypatch.setattr`` in the test file itself
+    # would keep the tests green while the seal was gone, so the load-bearing
+    # proof has to be a planted file under the path the code would use.
+    after_plists = _manifest(os.path.join(ws, "Library", "LaunchAgents"))
+    assert before_plists == after_plists, (
+        "TEST SUITE WROTE TO LIVE ~/Library/LaunchAgents! Planted launchd "
+        "plists changed.\nA test reached "
+        "hscc_daemon/event_driven.py (LaunchdJobGenerator.install_job / "
+        "uninstall_job, cmd_install_event_driven) or an equally unsealed "
+        "plist path without the autouse seal redirecting it. See "
+        "conftest.py._isolate_hscc._module_attrs() (the event_driven block) "
+        "— uninstall_job os.remove()s <PLIST_DIR>/<label>.plist, which on the "
+        "real host de-Registers the operator's periodic cluster checks.\n"
+        "changed files:\n"
+        + "\n".join(
+            f"  {p}: before={before_plists.get(p)} after={after_plists.get(p)}"
+            for p in sorted(set(before_plists) | set(after_plists))
+            if before_plists.get(p) != after_plists.get(p)
         )
     )

@@ -237,7 +237,13 @@ class KqueueWatcher:
         except OSError:
             pass
 
-    def _open_kqueue(self) -> Optional[select.kqueue]:
+    # Quoted: this module is imported by the daemon tests' autouse conftest,
+    # which the Linux `scripts` leg now reaches through the cross-leg test.
+    # On a host without `select.kqueue` (Linux) an unquoted annotation is
+    # evaluated at class-definition time and makes the IMPORT fail before the
+    # fallback can run — Python 3.13 evaluates annotations eagerly; 3.14 does
+    # not, which is why this only showed up in CI.
+    def _open_kqueue(self) -> Optional["select.kqueue"]:
         """Attempt to create a kqueue object and its file descriptor."""
         try:
             kq = select.kqueue()
