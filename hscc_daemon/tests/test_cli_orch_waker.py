@@ -109,14 +109,14 @@ class TestWakerDispatch:
 
     def test_enable_disable_route(self, monkeypatch):
         eng = StubEngine(result={"verb": "waker enable", "enabled": True,
-                                 "config": "/home/u/.hscc/config.json",
+                                 "config": "/home/hscc-fixture/.hscc/config.json",
                                  "note": "tick resumes on the next daemon tick (~30s)"})
         _with_engine(monkeypatch, eng)
         rc, out = _main(monkeypatch, ["orch", "waker", "enable"])
         assert rc == 0, out
         assert eng.calls == [["waker", "enable"]]
         assert "orch-waker enabled" in out
-        assert "/home/u/.hscc/config.json" in out
+        assert "/home/hscc-fixture/.hscc/config.json" in out
 
     def test_disable_receipt_line(self, monkeypatch):
         eng = StubEngine(result={"verb": "waker disable", "enabled": False,

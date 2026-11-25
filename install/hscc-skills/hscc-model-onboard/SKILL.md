@@ -165,7 +165,7 @@ Spark (notably `mods/exp-w4a16` for NVFP4 `lm_head`).
 
 The cluster runs **offline** (`HF_HUB_OFFLINE=1`). Weights live on NAS at
 `/mnt/nas/hub/<repo>/` and are rsynced to each node's
-`/home/spark/.cache/huggingface/hub/<repo>/`. sparkrun's own "distribution" step
+`/home/<ssh_user>/.cache/huggingface/hub/<repo>/`. sparkrun's own "distribution" step
 does an **online** `hf download` into node-local cache — pre-populating from NAS
 turns that into an instant cache-hit and avoids a ~22 GB internet pull per node.
 See `references/nas-cache.md`.

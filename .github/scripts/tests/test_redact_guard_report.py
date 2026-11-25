@@ -1584,3 +1584,107 @@ def test_child_invocation_drops_cwd_from_its_own_sys_path():
         "sys.path sanitised after the imports it is supposed to protect"
     assert 'import sys' == child.strip().splitlines()[0], \
         "child must import only `sys` before sanitising (sys is a builtin)"
+
+
+# ── the home class inside the redactor (the gap t_c927b73e left open) ────────
+#
+# Every assertion above is address-shaped. The home class rides inside the SAME
+# `FORBIDDEN`, so masking works mechanically — but "mechanically" is what a
+# green suite says right before a second pattern appears. These are the proofs
+# the redactor itself never made.
+
+_GSPEC = importlib.util.spec_from_file_location("guard_under_test_home", GUARD)
+assert _GSPEC is not None and _GSPEC.loader is not None
+guard_mod = importlib.util.module_from_spec(_GSPEC)
+_GSPEC.loader.exec_module(guard_mod)
+
+# Assembled, or this tracked test file would be its own offence.
+_REAL_HOME_USER = "hscc" + "-realuser"
+_REAL_HOME = f"/Users/{_REAL_HOME_USER}/.hermes/gateway.sock"
+_REAL_HOME_LINUX = f"/home/{_REAL_HOME_USER}/.ssh/id_ed25519"
+
+
+def test_redactor_masks_a_home_path_and_keeps_the_file_line():
+    """The unit proof: the value goes, the pointer stays.
+
+    A redactor that dropped the whole line would be green here and useless — the
+    file:line is the only reason the job log is worth reading.
+    """
+    pattern = guard_mod.FORBIDDEN
+    line = f"  docs/a.md:1: {_REAL_HOME}"
+    out = redactor.redact(line, pattern)
+    assert _REAL_HOME_USER not in out, f"home path reached the public log: {out!r}"
+    assert "docs/a.md:1" in out, f"the pointer was masked too, so the log is mute: {out!r}"
+
+
+def test_redactor_masks_a_home_path_under_either_root():
+    pattern = guard_mod.FORBIDDEN
+    for planted in (_REAL_HOME, _REAL_HOME_LINUX):
+        user = planted.split("/")[2]
+        out = redactor.redact(f"  d.md:7: {planted}", pattern)
+        assert user not in out, f"{planted!r} survived the redactor: {out!r}"
+        assert "d.md:7" in out
+
+
+def test_redactor_leaves_the_allowed_forms_byte_identical():
+    """Anti-vacuity the OTHER way: a redactor that blanked everything would pass
+    every mask test above while making the log unreadable."""
+    pattern = guard_mod.FORBIDDEN
+    for clean in (f"  docs/a.md:1: /Users/<operator>/.hermes/x",
+                  f"  docs/a.md:2: /Users/{guard_mod.FIXTURE_HOME_USER}/x",
+                  "  docs/a.md:3: /home/runner/work/_temp",
+                  "  docs/a.md:4: 10.0.0.x and 100.64.0.1"):
+        assert redactor.redact(clean, pattern) == clean, (
+            f"a documented placeholder was rewritten — the scrub now has nowhere "
+            f"to scrub to that the log can show: {clean!r}")
+
+
+def test_home_path_never_reaches_the_job_log_in_either_posture(throwaway):
+    """End to end through the real workflow command, BOTH postures.
+
+    The enforced leg is the shipped posture. The advisory leg is reproduced with a
+    guard copy whose constant is False — deliberately not by an env var, because
+    `HSCC_ADDRESS_GUARD_HOME_ENFORCE` can only strengthen the rule. Advisory is
+    the important one: rc=0 is a GREEN job whose stderr still quoted the value,
+    so the redactor was the only thing between the leak and a public log.
+    """
+    (throwaway / "docs" / "note.md").write_text(
+        f"# note\n\ninterpreter: {_REAL_HOME}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=throwaway, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "note"], cwd=throwaway, check=True)
+
+    rc, printed = _run_job_leg(throwaway)                     # enforced (shipped)
+    assert rc == 1, f"home paths must block now: rc={rc}"
+    assert _REAL_HOME_USER not in printed, "a PUBLIC job log carried the home path"
+    assert "docs/note.md:3" in printed, printed
+
+    advisory_guard = throwaway / "scripts" / "address_guard_advisory.py"
+    advisory_guard.write_text(
+        GUARD.read_text(encoding="utf-8").replace(
+            "HOME_PATHS_ENFORCE = True", "HOME_PATHS_ENFORCE = False"),
+        encoding="utf-8")
+    rc, printed = _run_job_leg(throwaway, guard=advisory_guard)   # advisory
+    assert rc == 0, f"the flipped-off copy should be advisory: rc={rc}"
+    assert "docs/note.md:3" in printed, "the advisory report lost its pointer"
+    assert _REAL_HOME_USER not in printed, (
+        "an ADVISORY green job leaked the operator home path into a public log")
+
+
+def test_the_pattern_the_redactor_loads_fits_the_redactors_cap():
+    """The cross-file pin the two files never had.
+
+    `load_pattern()` fail-closes with rc=3 when the pattern text exceeds
+    `MAX_PATTERN_CHARS`. Nothing in the guard imports that cap, so a branch that
+    grew `FORBIDDEN` past it would make EVERY guard job fail closed — a breakage
+    that only shows up in CI, on somebody else's PR.
+    """
+    text = guard_mod.FORBIDDEN.pattern
+    cap = redactor.MAX_PATTERN_CHARS
+    assert len(text) <= cap, (
+        f"FORBIDDEN is {len(text)} chars, over the redactor's cap of {cap}: "
+        "load_pattern() would exit 3 on every guard job")
+    # generous headroom today; a guard that quietly creeps to the cap is a guard
+    # nobody can extend for the next offender class.
+    assert len(text) < cap // 2, (
+        f"FORBIDDEN has grown to {len(text)} of {cap} chars — the cap is now a "
+        "real constraint on the next class, say so before adding one")

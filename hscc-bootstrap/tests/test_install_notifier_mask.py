@@ -320,7 +320,7 @@ def test_partially_masked_node_is_red_not_green():
 
 def test_foreign_mask_link_is_refused_not_replaced():
     tp = FakeTransport(state=[state_lines(service="masked",
-                                          svc_link="/home/u/my-own.target")])
+                                          svc_link="/home/hscc-fixture/my-own.target")])
     r = nm.mask_node(NODE, ssh_cmd=tp)
     assert r["outcome"] == nm.DRIFT, r["message"]
     assert tp.commands("install") == [], "a foreign override must not be overwritten"
@@ -637,10 +637,10 @@ def test_unmask_sends_the_uninstall_script_and_reports():
 
 
 def test_unmask_refuses_a_foreign_mask_link():
-    tp = FakeTransport(state=[masked_state(svc_link="/home/u/own")],
+    tp = FakeTransport(state=[masked_state(svc_link="/home/hscc-fixture/own")],
                        uninstall=[{"ok": False, "code": nm.RC_DRIFT, "stdout":
                                    "HSCC_CODE: DRIFT_FOREIGN\n"
-                                   "HSCC_MSG: points at '/home/u/own', not /dev/null\n"
+                                   "HSCC_MSG: points at '/home/hscc-fixture/own', not /dev/null\n"
                                    f"HSCC_RC: {nm.RC_DRIFT}\n"}])
     r = nm.unmask_node(NODE, ssh_cmd=tp)
     assert r["outcome"] == nm.DRIFT
