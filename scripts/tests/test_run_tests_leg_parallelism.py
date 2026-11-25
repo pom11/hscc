@@ -155,32 +155,38 @@ def test_the_pack_never_exceeds_the_bound(tmp_path, parallel, expected_peak):
         f"bound={parallel}\nlog={r['log']!r}")
 
 
-#: The three tokens a packed stream legitimately carries that differ per run and
-#: say nothing about its SHAPE: the two mktemp dirs the banners name, and the two
-#: counters on a completion line. Folded narrowly — each pattern is anchored to the
-#: line that owns it, so the fold cannot swallow a real difference (pytest's own
-#: `7 passed in 0.5s`, the leg banners, the summary rows and every FAILED line all
-#: survive untouched, and a dropped or duplicated block is still caught).
+#: The two mktemp dirs a packed banner names, and the completion line's shape.
+#: Folded narrowly — each pattern is anchored to the line that owns it, so the fold
+#: cannot swallow a real difference (pytest's own `7 passed in 0.5s`, the leg
+#: banners, the summary rows and every FAILED line all survive untouched, and a
+#: dropped or duplicated block is still caught). The completion lines fold to one
+#: token because they are LIVE progress: they are printed as each leg is reaped, so
+#: their ORDER is the scheduler's, not the stream's, and two runs of one plan with
+#: equal-length legs legitimately order them differently — measured, which is how
+#: this pin reddened the real `scripts` leg on t_97013930's own roster run before it
+#: was corrected. What those lines still carry that matters — which legs completed
+#: with which rc — is compared separately by `_completions`, so folding the order
+#: cannot hide a leg that never finished or an rc that moved.
 _NONCES = (
     (re.compile(r"/tmp/hscc-legs-\w+"), "<LEG-TMP>"),
     (re.compile(r"/tmp/hscc-suite-home-\w+"), "<SEAL-TMP>"),
-    (re.compile(r"^parallel: done leg=(\S+) elapsed=\d+s rc=(\d+) pack=\d+s$", re.M),
-     r"parallel: done leg=\1 rc=\2 <TIMING>"),
 )
+_DONE_RE = re.compile(r"^parallel: done leg=(\S+) elapsed=\d+s rc=(\d+) pack=\d+s$",
+                      re.M)
 
 
 def _fold_stream(log):
-    """The stream a READER sees, with the per-run nonces and counters folded.
-
-    Byte-identity pins below compare this. "Identical" is the claim being pinned;
-    including a mktemp nonce or a duration in it would only make the pin flaky —
-    and both folds are anchored to their own line, so neither can hide a block that
-    arrived twice, a block that never arrived, or a FAILED line that lost its
-    line-start.
-    """
+    """The stream a READER sees, with per-run nonces folded and live completion
+    lines reduced to one token each (count preserved, so a lost line still shows)."""
     for pat, repl in _NONCES:
         log = pat.sub(repl, log)
-    return log
+    return _DONE_RE.sub("<DONE>", log)
+
+
+def _completions(log):
+    """`(leg, rc)` pairs from the completion lines, sorted — the part of a live
+    completion line that is a fact about the run rather than about the scheduler."""
+    return sorted((m[1], m[2]) for m in _DONE_RE.finditer(log))
 
 
 def test_the_default_is_a_pack_of_two_and_is_the_explicit_two_stream_exactly(tmp_path):
@@ -211,6 +217,10 @@ def test_the_default_is_a_pack_of_two_and_is_the_explicit_two_stream_exactly(tmp
             f"{name} is its own stream shape — the readers were measured against "
             f"the packed one, not a third:\n  {name}: {r['log']!r}\n  two:   "
             f"{two['log']!r}")
+        assert _completions(r["log"]) == _completions(two["log"]), (
+            f"{name} completed a different set of legs with different rc(s) than "
+            f"the explicit-2 run:\n  {name}: {_completions(r['log'])}\n  two:   "
+            f"{_completions(two['log'])}")
     peak, _ = _in_flight(unset["trace"])
     assert peak == 2, f"the default must PACK (want peak 2): {unset['trace']}"
     assert re.search(r"^parallel: 2 legs at a time", unset["log"], re.M), unset["log"]
