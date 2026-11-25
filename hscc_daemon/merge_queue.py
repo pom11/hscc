@@ -72,6 +72,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -2098,21 +2099,50 @@ def _ensure_fix_card(entry, cfg, body, reason=None, *, state_path=None,
     return new_card, assignee
 
 
-def default_handback(card, assignee, message):
+def _accepts_kwarg(fn, name):
+    """Does ``fn`` take keyword ``name``? Explicit ``<name>_capable`` wins.
+
+    Every handback fake is written against the original three positional
+    arguments, so the board is handed only to a callable that says it can take
+    it — a ``TypeError`` swallowed by the handback's own ``except`` would lose
+    the comment silently.
+    """
+    flag = getattr(fn, f"{name}_capable", None)
+    if flag is not None:
+        return bool(flag)
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    for param in params.values():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == name and param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY):
+            return True
+    return False
+
+
+def default_handback(card, assignee, message, *, board=None):
     """Comment + reassign (+ unblock) through the sanctioned hermes CLI.
 
     Mirrors ``escalate_watcher._default_reassign``: the daemon never writes a
-    board directly for a handback. Returns True when the comment landed.
+    board directly for a handback. ``board`` names the project's board
+    explicitly — the same one the fix card was created on — because the
+    daemon's current hermes board is not necessarily that board. Returns True
+    when the comment landed.
     """
     if not card:
         return False
     hermes = _hermes_cli()
     if not hermes:
         return False
+    prefix = ["--board", str(board)] if board else []
 
     def run(args):
         try:
-            return subprocess.run([hermes, "kanban", *args],
+            return subprocess.run([hermes, "kanban", *prefix, *args],
                                   capture_output=True, text=True,
                                   timeout=60)
         except Exception:
@@ -2385,7 +2415,10 @@ def _handback(entry, cfg, body, handback, gh_runner, log=None, *,
             log(f"merge-queue: PR #{entry.get('pr')} card hand-back failed: "
                 f"{type(exc).__name__}: {exc}", "WARN")
     try:
-        handback(card, assignee, body)
+        if _accepts_kwarg(handback, "board"):
+            handback(card, assignee, body, board=(cfg or {}).get("board"))
+        else:
+            handback(card, assignee, body)
     except Exception:
         pass
 

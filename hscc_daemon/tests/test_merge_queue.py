@@ -5385,6 +5385,46 @@ def test_a_gate_timeout_never_creates_a_fix_card(tmp_path, monkeypatch):
     assert handed[0][0] == "t_done"
 
 
+def test_a_board_aware_handback_is_told_the_projects_board(tmp_path,
+                                                           monkeypatch):
+    """The fix card lives on the project's board, so the comment must too."""
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner({"t_open": {"status": "running",
+                                           "assignee": "worker"}})
+    seen = []
+
+    def handback(card, assignee, body, *, board=None):
+        seen.append((card, board))
+        return True
+
+    mq._handback({"pr": 18, "card": "t_open"},
+                 {"name": "alpha", "repo": "/tmp/project", "board": "alpha"},
+                 _QUEUE_RED_BODY, handback, _gh_comment_ok,
+                 state_path=str(tmp_path / "state.json"), project="alpha",
+                 reason="gate failed", kanban_runner=runner)
+
+    assert seen == [("t_open", "alpha")]
+
+
+def test_default_handback_addresses_every_verb_on_the_named_board(monkeypatch):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    monkeypatch.setattr(mq.subprocess, "run", run)
+
+    assert mq.default_handback("t_x", "worker", "msg", board="alpha") is True
+    assert calls[0] == ["/bin/hermes", "kanban", "--board", "alpha",
+                        "comment", "t_x", "msg"]
+    assert calls[1] == ["/bin/hermes", "kanban", "--board", "alpha",
+                        "reassign", "t_x", "worker", "--reclaim"]
+    assert calls[2] == ["/bin/hermes", "kanban", "--board", "alpha",
+                        "unblock", "t_x"]
+
+
 def test_an_unreadable_board_does_not_cut_a_duplicate(tmp_path, monkeypatch):
     """A transient show error is not proof the card is gone."""
     monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")

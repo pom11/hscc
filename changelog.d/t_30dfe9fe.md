@@ -13,7 +13,9 @@ task: t_30dfe9fe
   PR and the reason (`PR #N red in merge queue: gate failed`), and the body
   carries the queue's full failure evidence — gate tail, conflicted files,
   resolve instructions — followed by the rule "fix on the PR branch, push, then
-  `hscc merge-queue add <project> <N>`; no hand-merge".
+  `hscc merge-queue add <project> <N>`; no hand-merge". Comment, reassign and
+  unblock also name that board explicitly (`--board <board>`), so the fix
+  card's first comment cannot land on whatever board the daemon last used.
 - **One open fix card per PR, reused across a dropped entry.** The created id
   is written onto the queue entry and into a per-project `fix_cards` map keyed
   by PR, so a second failure of the same PR — even after the red gate dropped
@@ -28,14 +30,16 @@ kind: Verified
 order: 1
 task: t_30dfe9fe
 
-- `hscc_daemon/tests/test_merge_queue.py`: **181 -> 187 cases**, green in one
-  foreground run (57.37 s) on the interpreter the queue itself gates with
-  (`~/.hermes/hermes-agent/venv/bin/python`). The six new cases pin: no card
+- `hscc_daemon/tests/test_merge_queue.py`: **181 -> 189 cases**, green in one
+  foreground run (52.80 s) on the interpreter the queue itself gates with
+  (`~/.hermes/hermes-agent/venv/bin/python`). The eight new cases pin: no card
   creates one (title, evidence body, assignee, priority, recorded id), a
   `done` card creates one and falls back to its assignee, an open card is
   comment-only, a second failure reuses the created card through the by-PR
-  map, a gate timeout creates none, and an unreadable board does not cut a
-  duplicate.
+  map even when the re-added entry still names the done card, a gate timeout
+  creates none, an unreadable board does not cut a duplicate, a board-aware
+  handback is told the project's board, and `default_handback` prefixes every
+  verb with `--board` when it has one.
 - Real-CLI smoke against a throwaway `HERMES_HOME` (never the live board):
   `hermes kanban --board default create "PR #999 red in merge queue: gate
   failed" --body-file … --assignee worker --priority 2 --json` returned
@@ -44,8 +48,9 @@ task: t_30dfe9fe
   `no such task: …`. The module's `_ensure_fix_card` was then run end to end
   against that temp home: it created `t_6fdd11d3`, recorded it in the project
   map, and the second call reused the same id with no second create.
-- The suite's autouse board-handback fence now also stubs `_hermes_cli`, so the
-  new probe/create route cannot reach the operator's boards from any test —
-  not only from the ones that inject a `handback=`.
+- The suite's autouse board-handback fence now stubs the single `_hermes_cli`
+  seam that both the real handback and the new probe/create route go through,
+  so neither can reach the operator's boards from a test — not only from the
+  ones that inject a `handback=`.
 - `python3 scripts/changelog_fragments.py check` → pointer block intact.
   `python3 scripts/address_guard.py --tracked` clean.
