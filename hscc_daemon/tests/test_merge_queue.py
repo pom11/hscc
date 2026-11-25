@@ -5349,19 +5349,22 @@ def test_a_second_red_handback_reuses_the_created_fix_card(tmp_path,
                                                            monkeypatch):
     """At most one open fix card per PR, even across a re-added entry."""
     monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
-    runner = _FakeKanbanRunner()
+    runner = _FakeKanbanRunner({"t_done": {"status": "done",
+                                           "assignee": "worker"}})
     first = {"pr": 15, "card": None, "assignee": "worker", "branch": "wt/t_card"}
     handed = []
 
     _red_handback(tmp_path, first, runner, handed)
     assert [c[4] for c in runner.calls] == ["create"], runner.calls
 
-    # The red gate dropped the entry; the operator re-adds the PR with no card.
-    second = {"pr": 15, "card": None, "assignee": None,
+    # The red gate dropped the entry; the operator re-adds the PR naming the
+    # ORIGINAL (still done) card. The open fix card from the map must win.
+    second = {"pr": 15, "card": "t_done", "assignee": None,
               "branch": "wt/t_card"}
     _red_handback(tmp_path, second, runner, handed)
 
-    assert [c[4] for c in runner.calls] == ["create", "show"], runner.calls
+    assert [c[4] for c in runner.calls] == ["create", "show", "show"], \
+        runner.calls
     assert handed[-1][0] == "t_fix_1" and handed[-1][1] == "worker"
     assert second["card"] == "t_fix_1"
     state = mq.load_state(str(tmp_path / "merge-queue-state.json"))

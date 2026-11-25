@@ -1952,7 +1952,7 @@ def _fix_card_reason(body):
 
 def _fix_card_body(body, project, pr, branch=None):
     """The queue's failure body plus the one rule a fix card's worker must know."""
-    where = f" on branch `{branch}`" if branch else ""
+    where = f" (`{branch}`)" if branch else ""
     return (f"{(body or '').rstrip()}\n\n"
             "---\n"
             f"Fix on the PR branch{where}, push, then "
@@ -2036,17 +2036,22 @@ def _ensure_fix_card(entry, cfg, body, reason=None, *, state_path=None,
         return card, assignee
 
     remembered, remembered_who = _remembered_fix_card(state_path, project, pr)
-    candidate = card or remembered
+    candidates = []
+    for candidate in (card, remembered):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
     card_assignee = None
-    if candidate:
-        exists, status, card_assignee = _card_on_board(candidate, board,
-                                                       runner=runner)
+    for candidate in candidates:
+        exists, status, who = _card_on_board(candidate, board, runner=runner)
+        if who and not card_assignee:
+            card_assignee = who
         if exists is not False and status not in CLOSED_CARD_STATUSES:
-            resolved = assignee or card_assignee or remembered_who
+            resolved = assignee or who or remembered_who
             if candidate != card:
                 # Reused from the by-PR map after the entry was dropped: put it
                 # back on the entry (and the ledger) so every later hand-back
-                # reaches it directly.
+                # reaches it directly. It may also be the live fix card while
+                # the entry still names the ORIGINAL card, which is done.
                 _remember_fix_card(entry, cfg, candidate, resolved,
                                    state_path=state_path, project=project)
             return candidate, resolved
