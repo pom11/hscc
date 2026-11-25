@@ -11,6 +11,223 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.17.7] - 2026-11-25
+
+### Added
+* **`scripts/run_tests.sh` now prints the wall time of every leg on its summary
+  row** — `✓ hscc_daemon (315s)`, `✗ hscc-api (pytest exit 1, 456s)`. The runner
+  already started a per-leg clock for the heartbeat and threw the value away, so
+  the roster's cost was never readable from anything the runner, the queue or a
+  worker emitted: the local gate existed only as one ~75 min block, and the
+  per-leg table in `docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md` had
+  to be reconstructed by hand from twelve separate `HSCC_TEST_LEGS=<leg>` runs.
+  The red row keeps the `✗ ` anchor `merge_queue._LEG_FAILURE_RES` matches on,
+  so a leg that goes red still leads the handback digest — now with its cost.
+
+### Changed
+* the daemon's launchd job is emitted with `ProcessType => Standard` by all
+  three installers (`hscc_daemon/com.hermes.hscc_daemon.plist.template`,
+  `hscc_daemon/install.py`, `hscc-project/flightdeck/commands/daemon_install.py`),
+  per the operator decision of 2026-11-25. `Background` throttled everything the
+  daemon spawns — every merge-queue gate included — and `install.py` had drifted
+  to `Interactive`, a third posture, for the same key
+* the merge-queue gate no longer wraps its legs in `taskpolicy -c utility`
+  (`GATE_QOS_POLICY_CLASS`/`TASKPOLICY_PATH`/`_gate_qos_prefix` removed). Measured
+  against real launchd it could not lift a Background job (a clamped child stayed
+  at `ps -o pri` 4) and is a no-op under Standard (the job's children already sit
+  in the utility band), so it was a dead mechanism dressed as a fix
+
+### Fixed
+- **A red PR whose card was already `done` was handed back to nobody.** Hermes
+  closes a card as soon as its PR opens, so `default_handback`'s comment +
+  reassign + unblock all landed on a terminal card and no worker was ever
+  dispatched — #734 and #767 sat stranded on 2026-11-25 until an operator
+  carded them by hand. The queue's handback now checks the card on the
+  project's board through the sanctioned `hermes kanban show` CLI; when there
+  is no card, or its status is `done`/`archived`, it creates a fix card with
+  `hermes kanban create` on that board (priority 2, the entry's assignee, else
+  the previous card's assignee, else `<board>-orch`). The card title names the
+  PR and the reason (`PR #N red in merge queue: gate failed`), and the body
+  carries the queue's full failure evidence — gate tail, conflicted files,
+  resolve instructions — followed by the rule "fix on the PR branch, push, then
+  `hscc merge-queue add <project> <N>`; no hand-merge". Comment, reassign and
+  unblock also name that board explicitly (`--board <board>`), so the fix
+  card's first comment cannot land on whatever board the daemon last used.
+- **One open fix card per PR, reused across a dropped entry.** The created id
+  is written onto the queue entry and into a per-project `fix_cards` map keyed
+  by PR, so a second failure of the same PR — even after the red gate dropped
+  its entry and an operator re-added it — comments on the existing fix card
+  instead of cutting a duplicate. A card that is still open (`running`,
+  `ready`, `blocked`, ...) keeps today's comment-only behaviour. A `show` that
+  fails transiently is not treated as "no such card", so a board hiccup cannot
+  produce a duplicate; a gate timeout never creates a fix card because it is
+  not a verdict about the code.
+- **A daemon restart no longer orphans a running merge-queue gate.** The gate
+  runs in its own session, so `launchctl bootout/bootstrap` reparented
+  `scripts/run_tests.sh` (and its pytest child) to launchd while the new daemon
+  started a second gate in the same worktree. The gate's pgid is now recorded
+  in the `in_flight` ledger when the leg starts and cleared when it ends; the
+  first tick after a restart TERMs then KILLs a still-live recorded group that
+  is not the daemon's own, logs both steps, and only then re-gates.
+  `hscc_daemon/tests/test_merge_queue.py`: 181 -> **185** cases.
+- **The daemon could inherit a BLOCKED stop signal and never be stoppable.**
+  `signal.signal()` installs a disposition, not the thread's signal mask, and
+  a mask survives fork/exec, so a daemon started by a process running with
+  SIGINT/SIGTERM blocked installed its handlers, received the stop signal,
+  and never dispatched it — the stop stayed pending and the only exit left was
+  SIGKILL. The API path already clears the mask (`t_7c2eb604`); the daemon
+  entry paths did not. `util.unblock_stop_signals()` now does the clear in
+  `cli.cmd_start`'s forked child, `EventDrivenDaemon.start`, and
+  `daemon_ops.run_daemon_loop` (the `start-daemon` entry), so a daemon is
+  stoppable regardless of how its spawner left the mask.
+- Regression cases spawn real children that block the signal before the
+  handler is installed, then assert the handler is dispatched, and pin the
+  mask-clear ordering at each handler-install site.
+- **`test_tmux_chat.py` leaked a global discovery mock into later test files.**
+  `_fake_discovery()` patched `session_discovery.list_project_sessions` with a
+  bare `mock.patch.object(...).start()` and never stopped it, so any test file
+  collected later in the same pytest process — notably `test_chat_seed.py` —
+  saw the pom world and 4 seed cases seeded `20261013_abc` instead of their own
+  fixture id. The patch now goes through `monkeypatch` and is torn down with
+  the test; a regression case proves the seam is restored.
+- **Every `proxy: true` family now resolves to the ONE sparkrun gateway port, so
+  a second proxy family no longer sends its consumers to a port nothing listens
+  on** (`hscc-cluster/template_intent.py`, `hscc-cluster/cluster_template.py`).
+  sparkrun keeps one gateway per cache dir — its state file has no port in it and
+  its liveness check is port-agnostic — so the distinct `proxy_port`
+  `template_intent.resolve` minted per proxy family (a counter bumped at both the
+  explicit-`nodes:` and the resolved mint sites) could only ever be refused: the
+  second `proxy start` returned `loaded=False` and `_proxy_front_for_target` /
+  `_routing_target_endpoint` wrote `http://localhost:<refused port>/v1` into
+  consumer configs, on 8 of the 23 shipped templates. `proxy_port` is now the
+  gateway's address for every family that declares a proxy (still `None` for one
+  that does not — that marker is what tells a family's consumers to fall back to a
+  concrete endpoint), and apply's Step 4 starts the gateway **once per apply**
+  instead of once per family. The per-family `~/.hscc/proxies/<family>` dirs stay
+  per-family (hscc's own bookkeeping, they carry no port and imply no gateway),
+  the `proxies/` step now reports one gateway with the families it serves, and the
+  preview/config rows name the shared gateway once instead of repeating a
+  per-family port that would read as N gateways. `family-<name>` targets keep
+  working unchanged — every consumer of any proxy family lands on the live gateway
+  (pinned in `hscc-cluster/tests/test_one_proxy_per_cluster_t_6283c79f.py`, whose
+  hazard pin this flips, including the written `config.yaml`). The
+  `proxies/` step's own `status` honesty is a sibling card, not this one.
+
+### Verified
+- `hscc_daemon/tests/test_merge_queue.py`: **181 -> 189 cases**, green in one
+  foreground run (52.80 s) on the interpreter the queue itself gates with
+  (`~/.hermes/hermes-agent/venv/bin/python`). The eight new cases pin: no card
+  creates one (title, evidence body, assignee, priority, recorded id), a
+  `done` card creates one and falls back to its assignee, an open card is
+  comment-only, a second failure reuses the created card through the by-PR
+  map even when the re-added entry still names the done card, a gate timeout
+  creates none, an unreadable board does not cut a duplicate, a board-aware
+  handback is told the project's board, and `default_handback` prefixes every
+  verb with `--board` when it has one.
+- Real-CLI smoke against a throwaway `HERMES_HOME` (never the live board):
+  `hermes kanban --board default create "PR #999 red in merge queue: gate
+  failed" --body-file … --assignee worker --priority 2 --json` returned
+  `{"id": "t_783bc20b", …}`, `show <id> --json` answered the `{"task": {…,
+  "status": "ready"}}` shape the parser expects, and a missing id answers
+  `no such task: …`. The module's `_ensure_fix_card` was then run end to end
+  against that temp home: it created `t_6fdd11d3`, recorded it in the project
+  map, and the second call reused the same id with no second create.
+- The suite's autouse board-handback fence now stubs the single `_hermes_cli`
+  seam that both the real handback and the new probe/create route go through,
+  so neither can reach the operator's boards from a test — not only from the
+  ones that inject a `handback=`.
+- `python3 scripts/changelog_fragments.py check` → pointer block intact.
+  `python3 scripts/address_guard.py --tracked` clean.
+* pointer truth measured over the 38 inherited entries at `9f083f91` by reading
+  each `see` file for the route's display path: 17 verbatim / 12 last-word-only /
+  9 prefix-only. Re-measured after the fix: 37 of 37 remaining pointers contain
+  their route's display path verbatim (the 38th, the chat-job cancel, left the
+  register for a row instead).
+* coverage measured with the gate's own parser (`_documented`/`_rows`/`_uncovered`
+  of `test_api_reference_route_coverage.py`), not by subtraction: at `9f083f91`
+  98 registered routes (97 HTTP + 1 WS), 60 named by a Path cell, register 38 all
+  `surface`, uncovered 0, overlap 0. At `41489410`: same 98 registered, 61 named,
+  register 37 all `surface`, uncovered 0, overlap 0, ghost rows 0,
+  `SHAPE_CHECKED` 21, `SHAPE_UNCHECKED` 4.
+* `hscc-api/tests/test_api_reference_route_coverage.py` 9 passed at both
+  `e9d2b8a2` and `41489410`; `scripts/readme_lint.py` findings: 0;
+  `scripts/changelog_fragments.py check` rc 0.
+* full `hscc-api` leg at `7df182c9`: 1 failed, 1417 passed, 1 skipped, 1 xfailed in
+  461 s. The failure is
+  `test_gateway_serve_watchdog.py::test_watchdog_buries_its_child_when_the_parent_is_sigkilled[none]`
+  — the arm that takes the reparenting-poll fallback, i.e. the one whose documented
+  `_DEFAULT_POLL_S` blind spot makes it the arm a loaded host can lose. Measured, not
+  assumed: it passes 3/3 in isolation on this head AND 3/3 in isolation on the base
+  `9f083f91`, and the three-dot diff is `docs/API.md` + register data + this fragment,
+  none of which that test reads. Not re-run until green.
+- `hscc_daemon/tests/test_daemon_entry_signal_mask_t_81e00872.py`: 8 cases.
+  Four drive the real entry points in children that block the stop signal
+  first (`cli.cmd_start`'s double fork with only the daemon loop stubbed, and
+  `EventDrivenDaemon.start` with only the watcher/poller seams stubbed), two
+  drive `util.unblock_stop_signals` directly, and two pin that each install
+  site clears the mask AFTER installing both handlers.
+- Red-before with `unblock_stop_signals` made a no-op: 6 failed / 2 passed —
+  every behavioural case timed out with the handler never dispatched; the two
+  ordering pins stayed green by construction because they stub the helper.
+  Restored: 8 passed.
+- Neighbouring suites green in the same run: the new file plus
+  `test_cli.py`, `test_daemon_ops.py`, `test_daemon_singleton.py`,
+  `test_event_driven_cli_no_ansi.py`, `test_util.py` and
+  `test_api_cli_stop_sidecar.py` 208 passed; `test_cli_no_ansi.py`,
+  `test_unified_cli.py` and `test_api_cli_detach_stdio.py` 120 passed.
+- Smoke: `hscc start --help` and `hscc start-daemon --help` both print their
+  usage and exit 0 under a throwaway HOME.
+* launchd `ProcessType` is the whole lever, measured with throwaway probe jobs
+  bootstrapped into this host's `gui/<uid>` domain (fixed 40M-iteration CPU loop
+  per arm, `ps -o pri` + `qos_class_self()`): Background plain pri 4 /
+  qos 0x09 / 5.5 M it/s; Background + `taskpolicy -c utility` pri 4 /
+  5.6 M it/s (the elevation does not take); Standard plain pri 20 / qos
+  0x11 UTILITY / 39.1 M it/s; Standard + `taskpolicy -c utility` pri 20 /
+  41.9 M it/s (no-op). That is ~7x between the postures and 0x from the clamp
+* `taskpolicy -c` accepts only `utility`, `background`, `maintenance` —
+  `-c default`/`-c standard`/`-c interactive` all answer "Could not parse ...
+  as a QoS clamp" — so no clamp can ask for a band above utility
+- `hscc-project/tests/test_tmux_chat.py hscc-project/tests/test_chat_seed.py`
+  in one process: **4 failed / 28 passed -> 33 passed**.
+* The four priority claims above are each a real chain of `exec`s read back with
+  `ps -o pri`, not a reading of the plist: plain 20, `taskpolicy -b` 4, `-b`
+  followed by the gate's own `-c utility` 4, and `-b` followed by a self-`-B`
+  4 with exit status 0. The live-gate numbers are sampled from outside the gate
+  (its stdout goes to a pipe and is only tailed), by polling which leg's pytest
+  is alive and reading the queue's in-flight stream.
+
+### Docs
+* the route-coverage register's `see <file>` pointers now actually name their
+  route: 21 of the 38 entries this lane inherited did not (measured at `9f083f91`
+  — 17 verbatim, 12 carrying only the route's last word on an unrelated line, 9 a
+  pure prefix match). The gate's own entry check reads
+  `literal = display.split("{")[0].rstrip("/")`, so `/v1/projects/{name}/incidents`
+  was "verified" by the string `/v1/projects` — which `HSCCClient.swift` spells for
+  a different route. Each of the 21 now points at a file containing its route's
+  display path verbatim, preferring the handler's own module over an audit that
+  only listed the path. No entry was added or removed by this fix.
+* `POST /v1/orchestrator/chat/{id}/stop` is named in `docs/API.md`'s Endpoint
+  reference, in the Orchestrator chat section that already documents the other two
+  doors of that job API. Its payload is read from handler source
+  (`hscc-api/routes_orchestrator.py:2237-2280`), not from a call — `confirm: true`
+  really cancels a live turn. No `SHAPE_CHECKED` entry: the answer is the poll's
+  job snapshot, whose conditional keys are already recorded in `SHAPE_UNCHECKED`.
+* **The merge-queue gate's per-leg cost is now measured, and the ~3x tax is
+  located.** `scripts/run_tests.sh` runs twelve legs serially and prints no
+  per-leg duration, so the queue's ~75 min local gate has never been readable
+  as anything but a whole. Measured on the control-plane Mac Studio (14 cores),
+  one leg per runner invocation on `origin/main`: `hscc_daemon` 315 s,
+  `hscc-bootstrap` 232 s, `hscc-cluster` 53 s, `hscc-roles` 11 s, and five legs
+  at 7 s or less — 621 s for the seven legs measured at ordinary scheduler
+  priority (`ps -o pri` 20). The same suite inside the live gate runs at pri 4:
+  the `scripts` leg alone was observed at 1362 s, and a two-leg narrowed gate
+  past 1871 s. The gap is the `com.hermes.hscc_daemon` launchd job's
+  `ProcessType => Background` role, and the elevation the gate asks for today
+  does not reach it: `taskpolicy -c utility` leaves a `-b`-throttled child at
+  pri 4, `taskpolicy` accepts no `default` clamp on this macOS, and `taskpolicy
+  -B -p <pid>` — the documented way out of `PRIO_DARWIN_BG` — exits 0 without
+  moving the priority. Recorded in `docs/audits/` with every A/B, so the next
+  gate-speed card starts from the measurement instead of re-deriving it.
 ## [2.17.6] - 2026-11-25
 
 ### Added
