@@ -75,8 +75,20 @@ _PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
     <true/>
     <key>ExitTimeOut</key>
     <integer>10</integer>
+    <!-- Process type: Standard, NOT Background (t_ae87b783, operator decision
+         2026-11-25).  Background applies a launchd job role to the whole job
+         subtree and throttles everything the daemon spawns: measured in a
+         throwaway probe job on this host, a Background child ran at
+         `ps -o pri` 4 / 5.5 M it/s vs 20 / 39-42 M it/s under Standard — a ~7x
+         tax that made every merge-queue gate pay ~75 min for a 22 min suite
+         (docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md), and no
+         user-space `taskpolicy` clamp can lift it (a `-c utility` child of a
+         Background job measured pri 4 as well).  Keep this in step with
+         hscc_daemon/com.hermes.hscc_daemon.plist.template and
+         hscc_daemon/install.py; the three are pinned by
+         hscc_daemon/tests/test_daemon_process_type_standard_t_ae87b783.py. -->
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Standard</string>
 </dict>
 </plist>
 """

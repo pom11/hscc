@@ -65,8 +65,23 @@ PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
     </array>
     <key>ExitTimeOut</key>
     <integer>10</integer>
+    <!-- Process type: Standard, NOT Background and NOT the Interactive this
+         emitter used to carry (t_ae87b783, operator decision 2026-11-25).
+         Background applies a launchd job role to the whole job subtree and
+         throttles everything the daemon spawns: measured in a throwaway probe
+         job on this host, a Background child ran at `ps -o pri` 4 / 5.5 M it/s
+         vs 20 / 39-42 M it/s under Standard — the ~7x tax that turned a 22 min
+         suite into a ~75 min gate
+         (docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md), unlift-able
+         from user space (`taskpolicy -c` parses only
+         utility/background/maintenance).  `Interactive` asked for the opposite
+         over-reach — foreground scheduling for a headless supervisor.  Standard
+         is the one posture the fleet runs, in this emitter, in
+         com.hermes.hscc_daemon.plist.template and in
+         hscc-project/flightdeck/commands/daemon_install.py; all three are pinned
+         by tests/test_daemon_process_type_standard_t_ae87b783.py. -->
     <key>ProcessType</key>
-    <string>Interactive</string>
+    <string>Standard</string>
     <key>ThrottleInterval</key>
     <integer>30</integer>
 </dict>

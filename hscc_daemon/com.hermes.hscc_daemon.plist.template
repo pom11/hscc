@@ -74,8 +74,20 @@
     <key>ExitTimeOut</key>
     <integer>10</integer>
 
-    <!-- Process type: background daemon -->
+    <!-- Process type: Standard, NOT Background (t_ae87b783, operator decision
+         2026-11-25).  Background is a launchd job role that the OS applies to
+         the whole job subtree: measured in a throwaway probe job on this host,
+         a child of a Background job ran at `ps -o pri` 4 and 5.5 M it/s against
+         20 and 39-42 M it/s under Standard — a ~7x tax on everything the daemon
+         spawns, including every merge-queue gate leg (a 1323 s roster ran ~75
+         min in the gate; docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md).
+         Nothing in user space can lift it back: `taskpolicy -c` parses only
+         utility/background/maintenance and a `taskpolicy -c utility` child of a
+         Background job measured pri 4 too.  Standard is the posture the fleet
+         runs on; changing this key back costs every gate 3-7x silently, and
+         hscc_daemon/tests/test_daemon_process_type_standard_t_ae87b783.py fails
+         if a bootstrap ever does it. -->
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Standard</string>
 </dict>
 </plist>

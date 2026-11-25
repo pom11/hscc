@@ -640,14 +640,20 @@ def test_run_gate_returns_a_tri_state_verdict_not_a_bool(tmp_path,
     assert "BOOM" in output, output
 
 
-# ── gate process handling: QoS, the orphan, and the evidence ───────────────
+# ── gate process handling: scheduling posture, the orphan, and the evidence ──
 #
-# Three measured failures of the same ~15 lines, all fixed inside _run_gate:
+# Three measured failures of the same ~15 lines, two of them still open inside
+# _run_gate and one fixed where it actually lives:
 #   1. the gate inherited the daemon launchd job's `ProcessType => Background`
-#      and every one of the 12 pytest legs was scheduled as background work —
-#      measured 3.34x slower on ONE leg in the SAME worktree (144.9 s vs
-#      484.7 s warm), which is what exhausted a budget the suite itself fits
-#      into with 39% to spare;
+#      and every one of the 12 pytest legs was scheduled as background work.
+#      The fix is NOT here: it is `ProcessType => Standard` in the three plist
+#      emitters (test_daemon_process_type_standard_t_ae87b783.py pins them).  The
+#      `taskpolicy -c utility` prefix this file used to build in front of the leg
+#      was measured against real launchd and moved nothing — a clamped child of a
+#      Background job stayed at `ps -o pri` 4 and paid the full ~7x, and under
+#      Standard the job's children already sit in the utility band, so the clamp
+#      was a no-op.  It is gone; the block above `LIVENESS_STAMP_S` in
+#      merge_queue.py carries the table;
 #   2. the timeout killed the `sh` but not the process group, so the gate's
 #      pytest outlived its own budget and the next attempt ran against it;
 #   3. `TimeoutExpired.stdout` arrives as `bytes` and was discarded by an
@@ -672,45 +678,60 @@ def _gate_argv(monkeypatch, *, popem, command="bash scripts/run_tests.sh",
     return calls
 
 
-def test_run_gate_builds_the_qos_mechanism_into_its_argv(tmp_path,
-                                                         monkeypatch):
-    """The QoS fix must be visible in the argv, not in a stopwatch.
+def test_run_gate_builds_a_bare_shell_argv_with_no_qos_clamp(tmp_path,
+                                                             monkeypatch):
+    """The gate is the operator's shell string and nothing in front of it.
 
-    Asserted on the constructed argv because a wall-clock assertion on a shared
-    host measures whatever else is running, and would then be deleted the first
-    time it flaked — taking the guard with it.
+    Asserted on the constructed argv rather than on a stopwatch, because a
+    wall-clock assertion on a shared host measures whatever else is running and
+    would be deleted the first time it flaked — taking the guard with it.
+
+    "Nothing in front of it" is now itself the invariant.  A `taskpolicy -c
+    utility` prefix used to sit here, added to lift the leg out of the launchd
+    job's background posture; measured against real launchd it did not move that
+    posture at all (pri 4 either way) and under `Standard` it is a no-op, so it
+    bought 0x and read as protection.  See the block above `LIVENESS_STAMP_S` in
+    merge_queue.py.
     """
     command = "sh -c 'sleep 999'"
     calls = _gate_argv(monkeypatch, popem=_exit_popem(0), command=command)
 
     assert len(calls) == 1, calls
     argv, kwargs = calls[0][0], calls[0][1]
-    # The operator's gate string arrives as ONE argument to a shell, whatever
-    # sits in front of it.  This is the invariant the QoS prefix must not break.
-    assert argv[-3:] == [mq.GATE_SHELL, "-c", command], argv
-    if mq._gate_qos_prefix():
-        prefix = list(mq._gate_qos_prefix())
-        assert argv[:len(prefix)] == prefix, argv
-        assert "taskpolicy" in argv[0], argv
-        assert mq.GATE_QOS_POLICY_CLASS in argv, argv
-    else:
-        # Fail-safe host (no taskpolicy): the gate keeps its pre-fix behaviour.
-        # Prefixing a program that does not exist would exit 127 and record
-        # `red-gate` against a PR whose code was never compiled.
-        assert argv == [mq.GATE_SHELL, "-c", command], argv
+    # The operator's gate string arrives as ONE argument to a shell — the
+    # invariant the removed QoS prefix had to not break, and still does not.
+    assert argv == [mq.GATE_SHELL, "-c", command], argv
+    # No scheduling-policy program is exec'd ahead of the shell: the leg runs at
+    # the daemon's own posture, which the plist pins to Standard.
+    assert not [a for a in argv if "taskpolicy" in a], argv
     # NOT shell=True: with a list argv, POSIX `shell=True` runs
-    # `/bin/sh -c argv[0] argv[1] ...`, so the QoS program alone would be the
-    # command and `-c utility /bin/sh -c <gate>` would become the shell's $0/$1/
-    # $2 — a bare `taskpolicy`, exit 64, `red-gate` on every PR.  See
-    # :func:`test_the_gate_argv_actually_runs_the_operators_command`, which execs
-    # the argv for real rather than trusting its shape.
+    # `/bin/sh -c argv[0] argv[1] ...`, so only the first element would be the
+    # command and the rest would become the shell's $0/$1/$2 — which is exactly
+    # how the old prefix ended up exec'd bare, exit 64, `red-gate` on every PR.
+    # See :func:`test_the_gate_argv_actually_runs_the_operators_command`, which
+    # execs the argv for real rather than trusting its shape.
     assert kwargs.get("shell") is False, kwargs
     # The gate string survives as exactly ONE argv element — never split across
-    # several, which is what silently swallowed it before.  (It is also the LAST
-    # element; `argv.index("-c")` would find taskpolicy's own `-c`, not the
-    # shell's, so it is not a way to locate the shell here.)
+    # several, which is what silently swallowed it before.
     assert argv[-1] == command, argv
     assert argv.count(command) == 1, argv
+
+
+def test_the_gate_argv_no_longer_carries_the_removed_qos_machinery():
+    """Re-adding a `taskpolicy` clamp must be a deliberate, measured decision.
+
+    The three module attributes this asserts on are the machinery the gate used
+    to build its prefix from.  They are gone because the mechanism was measured
+    inert (real launchd, throwaway probe jobs, 2026-11-25: a clamped child of a
+    Background job kept `ps -o pri` 4 and the full ~7x; under Standard the
+    children already sit in the utility band at pri 20), and because
+    `taskpolicy -c` parses only `utility`, `background` and `maintenance` — there
+    is no clamp that means "standard".  If someone wants a prefix back, the
+    honest path is a new measurement that moves `ps -o pri`, not a re-typing of
+    these names.
+    """
+    for gone in ("GATE_QOS_POLICY_CLASS", "TASKPOLICY_PATH", "_gate_qos_prefix"):
+        assert not hasattr(mq, gone), gone
 
 
 def test_the_gate_argv_actually_runs_the_operators_command(tmp_path):
@@ -737,22 +758,6 @@ def test_the_gate_argv_actually_runs_the_operators_command(tmp_path):
     # A shell ran the WHOLE string: two commands, a `&&` and a quoted format
     # argument all survived the argv construction intact.
     assert "alpha beta gamma" in output, output
-
-
-def test_the_qos_prefix_names_a_program_that_can_actually_be_executed():
-    """A prefix pointing at nothing would exit 127 and read as a red gate."""
-    prefix = list(mq._gate_qos_prefix())
-    if not prefix:
-        # Fail-safe host (no taskpolicy, or non-macOS): nothing to exec, which
-        # is exactly why the gate is left alone rather than prefixed.
-        assert prefix == []
-        return
-    program = prefix[0]
-    assert os.path.isabs(program), program
-    assert os.path.exists(program) and os.access(program, os.X_OK), program
-    # `-c <class>` is taskpolicy's own contract; if the flag or the class name
-    # drifts, the tool prints its usage and exits 64 — a red gate, not a no-op.
-    assert prefix[1:] == ["-c", mq.GATE_QOS_POLICY_CLASS], prefix
 
 
 def test_run_gate_starts_its_gate_in_its_own_session(tmp_path, monkeypatch):
@@ -800,24 +805,23 @@ def test_an_unconfigured_timeout_s_still_gates_on_the_3600s_default(tmp_path,
     assert len(budgets) == 2 and budgets[1] is None, budgets
 
 
-def test_gate_qos_prefix_fails_safe_without_taskpolicy(monkeypatch):
-    """A host without the tool gets no prefix — a false red costs more."""
-    monkeypatch.setattr(mq, "_GATE_QOS_PREFIX_CACHE", None)
-    monkeypatch.setattr(mq, "TASKPOLICY_PATH", "/nonexistent/taskpolicy")
+def test_the_gate_argv_is_platform_independent():
+    """No host gets a special program in front of the gate any more.
 
-    assert mq._gate_qos_prefix() == ()
+    The removed prefix was darwin-only and cached for the life of the process,
+    so its answer depended on the platform and on whether `/usr/sbin/taskpolicy`
+    happened to exist — three states to reason about for a mechanism measured to
+    change nothing.  This asserts the argv is the same three elements on the
+    host running the test, and (by reading the function's own source) that no
+    platform branch has crept back in to make the answer host-dependent again.
+    """
+    import inspect
 
-
-def test_gate_qos_prefix_asks_for_the_measured_class(monkeypatch):
-    """Positive arm: with the tool present the gate does ask for elevation."""
-    monkeypatch.setattr(mq, "_GATE_QOS_PREFIX_CACHE", None)
-    monkeypatch.setattr(mq, "TASKPOLICY_PATH", __file__)  # any real file
-
-    prefix = mq._gate_qos_prefix()
-    assert prefix[0] == __file__, prefix
-    assert "-c" in prefix and mq.GATE_QOS_POLICY_CLASS in prefix, prefix
-    # The prefix is a prefix, never a shell rewrite of the gate itself.
-    assert all(" " not in part or part == prefix[0] for part in prefix), prefix
+    assert mq._gate_shell_argv("true") == [mq.GATE_SHELL, "-c", "true"]
+    src = inspect.getsource(mq._gate_shell_argv)
+    assert "sys.platform" not in src, src
+    # Everything after the docstring is code, and no code may name a policy tool.
+    assert "taskpolicy" not in src[src.rindex('"""') + 3:], src
 
 
 def test_gate_timeout_kills_the_whole_process_group_and_still_requeues(
