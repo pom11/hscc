@@ -500,6 +500,116 @@ def _a_table_timeout(py: str, n_probes_hint: int = A_TABLE_MIN_PROBES) -> int:
 _A_RECEIPT_RE = None
 
 
+# ── the sibling arm walks a SAMPLE, not the whole surface (t_49827b5d) ──────
+#
+# WHAT THIS COST AND WHY IT MOVED. `test_a_table_identical_under_sibling_
+# interpreters` asked every sibling interpreter to walk the WHOLE surface:
+# `--a-table '*'` -> A_TABLE_MIN_PROBES (329) CLI subprocesses, launched serially
+# by the sibling. Measured in the 2.17.5 queue gate (PR #767, 02:46Z) and
+# reproduced here at background QoS: **334.69 s** of the leg's 1009 s, with the
+# leg's `[leg-heartbeat]` naming exactly this child —
+# `first_child=/Users/desac/min... 02:56`, i.e. the whole leg parked on
+# `~/miniconda3/envs/p313/bin/python` while it re-launched the CLI 329 times.
+# That is 33 % of the leg spent re-proving, on a second CPython, a property the
+# sibling cannot vary except through argparse's own rendering.
+#
+# WHAT THE CHECK IS FOR. GATE-313 was: CPython 3.13's argparse widened the help
+# column by 2 chars, so an (A) detail became rendering-dependent and drifted on
+# ONE interpreter only. That class is global (it comes from argparse's help
+# formatter, not from a specific verb), so the arm does not need all 329
+# surfaces to keep its teeth — it needs surfaces from every group, so a drift
+# cannot hide in the one group sampled. The sample is therefore GROUP-BREADTH
+# first, stride-filled to a floor, and the receipt is recalibrated to the work
+# REQUESTED: `>= len(requested)`, never `>= 329` — so the arm still fails if the
+# sibling answers without walking what it was asked to walk.
+#
+# WHAT IS NOT WEAKENED. The full 329-probe walk is one environment variable
+# away (`HSCC_CLI_HELP_SIBLING_WALK=full`) and stays the shape used by a deep
+# run; the local full-surface walk (`report`, the audit itself) still walks every
+# surface at full strength on the leg interpreter, so the (A) table this arm
+# compares against is never sampled. A drift on an unsampled surface is then
+# caught by the local pass on the interpreter that has it — which is the half
+# that actually broke in GATE-313.
+SIBLING_WALK_ENV = "HSCC_CLI_HELP_SIBLING_WALK"
+SIBLING_SAMPLE_FLOOR = 24
+
+
+def _walkable_surface_names() -> list:
+    """Every surface name the (A)-only pass would walk, in walk order.
+
+    Derived from the SAME `build_surface()` / `invocations_for()` the pass
+    consumes (the audit's own single source of truth), so a sampled name can
+    never be a name the sibling would silently not find, and a surface that
+    disappears shrinks the sample rather than lying about it. The `api start`
+    exclusion is the pass's own (:func:`a_table`), not a new one.
+    """
+    paths, _fd = audit_mod.build_surface()
+    out: list = []
+    for _group, argv, _style, kind in paths:
+        for inv, _flag in audit_mod.invocations_for(argv, kind):
+            if inv[:2] == ["api", "start"]:
+                continue
+            name = audit_mod._norm(inv)
+            if name not in out:
+                out.append(name)
+    return out
+
+
+def _sibling_sample() -> list:
+    """The surfaces the sibling arm walks by default: breadth first, then stride.
+
+    Group breadth is the property (an argparse rendering change is not
+    per-verb), so every `hscc <group>` gets its first surface, then the rest of
+    the floor is filled by a stride across the whole list so the sample is not
+    six near-identical `cluster` verbs.
+    """
+    names = _walkable_surface_names()
+    if len(names) <= SIBLING_SAMPLE_FLOOR:
+        return names
+    picked: list = []
+    seen_groups: set = set()
+    for n in names:
+        key = " ".join(n.split()[:2])
+        if key in seen_groups:
+            continue
+        seen_groups.add(key)
+        picked.append(n)
+    room = SIBLING_SAMPLE_FLOOR - len(picked)
+    if room > 0:
+        step = max(1, len(names) // room)
+        for i in range(0, len(names), step):
+            if len(picked) >= SIBLING_SAMPLE_FLOOR:
+                break
+            if names[i] not in picked:
+                picked.append(names[i])
+    return picked
+
+
+def _sibling_walk_request(report) -> tuple:
+    """(surfaces_to_walk_or_None_for_whole_surface, min_receipt_probes, mode).
+
+    Every surface with a local (A) line is ALWAYS walked — the sample only
+    stands in for the "prove you also find nothing here" bulk, never for a real
+    finding. ``None`` means the whole surface (`'*'`), which is also the only
+    case the A_TABLE_MIN_PROBES receipt floor describes.
+
+    The probe floor is the work REQUESTED because each surface costs exactly one
+    probe in this pass (`A_TABLE_WIDTHS` picks one authoritative width), so
+    `len(want)` is a real floor rather than a guess — and unlike the old
+    constant it is a floor the sample walk can actually meet.
+    """
+    found = sorted(report["a_counts"])
+    whole = ([])          # empty list == `'*'` == the whole surface, see below
+    if os.environ.get(SIBLING_WALK_ENV, "").strip().lower() == "full":
+        return (found or whole), (len(found) if found else A_TABLE_MIN_PROBES), "full"
+    sample = [s for s in _sibling_sample() if s not in found]
+    want = sorted(set(found) | set(sample))
+    if not want:                          # no surface enumerated at all: never
+        return whole, A_TABLE_MIN_PROBES, "full"   # vacuous-sample, walk all
+    return want, len(want), "sample"
+
+
+
 def _parse_a_receipt(stderr: str) -> dict:
     import re as _re
     global _A_RECEIPT_RE
@@ -540,7 +650,7 @@ def test_a_table_identical_under_sibling_interpreters(report):
     surfacing as a bare ``subprocess.TimeoutExpired`` traceback with no
     number in it, which is what made three separate cards re-diagnose this
     from scratch."""
-    surfaces = sorted(report["a_counts"])
+    surfaces, min_probes, mode = _sibling_walk_request(report)
     siblings = _sibling_interpreters()
     if not siblings:
         dropped = "; ".join(f"{p}: {w}" for p, w in sorted(SIBLING_DROPPED.items()))
@@ -548,7 +658,7 @@ def test_a_table_identical_under_sibling_interpreters(report):
                     " on PATH"
                     + (f" (dropped -> {dropped})" if dropped else ""))
     for py in siblings:
-        budget = _a_table_timeout(py)
+        budget = _a_table_timeout(py, n_probes_hint=min_probes)
         try:
             table, failed, receipt = _sibling_a_table(py, surfaces,
                                                       timeout=budget)
@@ -558,7 +668,9 @@ def test_a_table_identical_under_sibling_interpreters(report):
                 f" calibrated budget of {budget}s (median CLI --help probe"
                 f" measured just before the walk; see the measurement block"
                 f" beside A_TABLE_TIMEOUT_SECS). This pass launches"
-                f" ~{A_TABLE_MIN_PROBES} CLI subprocesses; a timeout here"
+                f" ~{min_probes} CLI subprocesses ({mode} walk —"
+                f" {SIBLING_WALK_ENV}=full asks for all"
+                f" {A_TABLE_MIN_PROBES}); a timeout here"
                 f" means the box is starved or the pass is wedged, NOT that"
                 f" the (A) table drifted.\n  stdout tail:"
                 f" {(e.stdout or '')[-300:]!r}\n  stderr tail:"
@@ -569,11 +681,14 @@ def test_a_table_identical_under_sibling_interpreters(report):
             # The walk must have actually happened. Without this the sibling
             # could answer `{}` in 0.1 s and the equality below would pass
             # while having compared nothing (t_28b0e521 requirement: never
-            # green merely because the box happened to be free).
-            assert _receipt_probes(receipt) >= A_TABLE_MIN_PROBES, (
-                f"sibling {py} reported only {receipt!r} for the (A)-only"
-                f" walk — a healthy whole-surface pass launches >="
-                f" {A_TABLE_MIN_PROBES} CLI probes. The sibling answered"
+            # green merely because the box happened to be free). The floor is
+            # the work REQUESTED, so it travels with the mode instead of being
+            # a constant the sample could never reach (t_49827b5d).
+            assert _receipt_probes(receipt) >= min_probes, (
+                f"sibling {py} reported only {receipt!r} for a {mode} (A)-only"
+                f" walk of {len(surfaces) or 'all'} surface(s) — the pass was"
+                f" asked for >={min_probes} probes and cannot buy its way into"
+                f" the budget by doing less work. The sibling answered"
                 f" without walking the surface, so the table equality below"
                 f" would be vacuous.")
             assert table == report["a_counts"], (
@@ -744,6 +859,60 @@ def test_capable_python_probe_ignores_the_running_interpreter(monkeypatch):
     # The running interpreter can import the audit deps (the suite runs there),
     # so this is the exact shape CI hit: capable, but not a sibling.
     assert _capable_python_on_path() is None
+
+
+def test_sibling_sample_stays_broad_and_arms_the_full_walk(monkeypatch):
+    """The SAMPLE may be cheap, it may not be narrow or vacuous.
+
+    Three properties the sampling decision depends on, each pinned without a
+    subprocess (the sample is derived from `build_surface()`, not from a probe):
+
+      * every surface GROUP on the CLI contributes at least one sampled surface
+        — the drift class this arm guards (GATE-313: argparse's help column) is
+        a formatter property, so it shows up wherever there is help text, and a
+        sample drawn from two groups would be a way to un-gate it quietly;
+      * the sample is a real fraction of the surface, i.e. the code is still
+        choosing, not returning everything (which would silently restore the
+        334 s walk) or nothing (which would assert nothing);
+      * `HSCC_CLI_HELP_SIBLING_WALK=full` really does ask for the whole surface
+        and restores the A_TABLE_MIN_PROBES receipt floor, so the deep run is a
+        variable away and is not a second, drifting implementation.
+    """
+    names = _walkable_surface_names()
+    # HEALTH FLOOR, not a restatement of MIN_PROBES: MIN_PROBES (331) counts
+    # probe INVOCATIONS, this list is deduped by surface NAME (a `hscc help X`
+    # invocation is reachable from two paths), and `a_table` restricts its walk
+    # by name too. MEASURED at this commit: 314 distinct names for the 331
+    # invocations. If the enumeration collapses, a sample drawn off it is
+    # vacuous — the same reason the audit pins MIN_SURFACE_PATHS.
+    assert len(names) >= 300, (
+        f"the (A)-only walkable surface shrank to {len(names)} distinct names "
+        f"(measured 314 at this commit, off the audit's {MIN_PROBES} "
+        f"invocations) — a sample off a broken enumeration proves nothing")
+    sample = _sibling_sample()
+    all_groups = {" ".join(n.split()[:2]) for n in names}
+    sample_groups = {" ".join(n.split()[:2]) for n in sample}
+    assert sample_groups == all_groups, (
+        "the sibling sample no longer covers every surface group, so an "
+        f"argparse rendering drift could hide in: {sorted(all_groups - sample_groups)}")
+    assert SIBLING_SAMPLE_FLOOR <= len(sample) < len(names) // 4, (
+        f"sample is {len(sample)} of {len(names)} surfaces — it must stay a "
+        f"bounded SAMPLE (the whole walk is what this card removed)")
+
+    monkeypatch.delenv(SIBLING_WALK_ENV, raising=False)
+    want, floor, mode = _sibling_walk_request({"a_counts": {}})
+    assert mode == "sample" and floor == len(want) and want, (
+        "the sample floor must be the work REQUESTED, so a sibling that "
+        "walks nothing still fails the receipt")
+    monkeypatch.setenv(SIBLING_WALK_ENV, "full")
+    want, floor, mode = _sibling_walk_request({"a_counts": {}})
+    assert mode == "full" and not want and floor == A_TABLE_MIN_PROBES, (
+        "HSCC_CLI_HELP_SIBLING_WALK=full must request the WHOLE surface "
+        f"(empty request list == `*`), got {mode!r}/{want!r}/{floor}")
+    # A real (A) line is never left to the sample.
+    victim = names[0]
+    want, floor, _mode = _sibling_walk_request({"a_counts": {victim: ["x"]}})
+    assert victim in want and floor >= 1
 
 
 def test_sibling_gate_still_runs_a_real_sibling():
