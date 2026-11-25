@@ -499,10 +499,16 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # every fork spy. ``install_job``/``cmd_install_event_driven``
             # additionally ``os.makedirs(PLIST_DIR)`` + write into it.
             #
-            # The values mirror the real layout under the per-test tmp dir
-            # (tmp_path stands in for $HOME), which is also exactly what
-            # test_event_driven_cli_no_ansi.py used to patch per-test — so
-            # the seal replaces that patching instead of layering under it.
+            # The values sit under the per-test tmp dir (tmp_path stands in
+            # for $HOME). ``HSCC_DIR``/``STATE_DIR`` are byte-identical to what
+            # test_event_driven_cli_no_ansi.py's old per-test helper patched;
+            # ``PLIST_DIR`` deliberately differs from that helper, which used
+            # ``<tmp>/LaunchAgents``: the seal mirrors the REAL layout
+            # (``<tmp>/Library/LaunchAgents``) because that is where a plist
+            # actually lands, and it is the shape the sandbox guard in
+            # test_no_live_hscc_leak.py plants and byte-diffs. Either way the
+            # seal replaces that per-test patching rather than layering under
+            # it.
             (event_driven, "HSCC_DIR", base),
             (event_driven, "STATE_DIR", p("state")),
             (event_driven, "PLIST_DIR",
@@ -569,7 +575,27 @@ def _isolate_hscc(tmp_path, monkeypatch):
         "_module_attrs() above; the sandboxed proof is "
         "test_no_live_hscc_leak.py."
     )
-    assert _real_plist_dir != _ed.PLIST_DIR and _real_home not in _ed.PLIST_DIR
+    # The negative arms are BOUNDED TO THE LAUNCHD DIR, never to $HOME
+    # textually. pytest's tmp_path lives under TMPDIR, and TMPDIR may
+    # legitimately sit under $HOME: Hermes exports TMPDIR/TMP/TEMP at the
+    # profile scratch dir (hermes_constants.apply_scratch_tmp_env, called from
+    # hermes_bootstrap), and that dir is inside the home. A
+    # ``_real_home not in PLIST_DIR`` substring arm therefore goes red on
+    # EVERY case in this package (this fixture is autouse -- the blast radius
+    # is the whole leg, not one file) on exactly the clean-env spawns (cron,
+    # CI, ssh without TMPDIR) that the seal exists to cover. Measured: with
+    # HOME=<sbx> TMPDIR=<sbx>/tmp the substring arm errored 5/5 cases at this
+    # line, while the two exact-path arms below pass there and still catch a
+    # seal aimed at the real launchd dir (mutation: PLIST_DIR pointed back at
+    # expanduser("~/Library/LaunchAgents")). test_event_driven_plist_seal_
+    # t_35d9f6ea.py::test_plist_dir_is_not_the_operators_launchagents states
+    # the same rule; the fixture must not contradict it.
+    assert _ed.PLIST_DIR != _real_plist_dir, (
+        f"the seal points event_driven.PLIST_DIR at the operator's real "
+        f"launchd dir ({_ed.PLIST_DIR!r})")
+    assert not _ed.PLIST_DIR.startswith(_real_plist_dir + os.sep), (
+        f"the seal points event_driven.PLIST_DIR inside the operator's real "
+        f"launchd dir ({_ed.PLIST_DIR!r})")
     assert _ed.HSCC_DIR == base, (
         f"the autouse seal no longer redirects event_driven.HSCC_DIR "
         f"({_ed.HSCC_DIR!r}); _event_log appends to <HSCC_DIR>/daemon.log")

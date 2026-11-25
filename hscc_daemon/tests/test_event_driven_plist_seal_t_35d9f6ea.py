@@ -30,6 +30,10 @@ operator's own directory is never the target.
 
 Nothing in this file creates, reads or removes anything under the real
 ~/Library/LaunchAgents; the real path is compared as a STRING only.
+
+One case (``TestPostureTmpPathUnderHome``) spawns a CHILD pytest with
+``TMPDIR`` inside a sandboxed ``$HOME``, because the seal's own negative arms
+must not assume the runner's TMPDIR is outside the home — see that class.
 """
 
 import os
@@ -73,7 +77,14 @@ class TestSealRedirectsEventDrivenPaths:
     def test_sealed_plist_dir_has_never_been_written(self, tmp_path):
         """The seal target is a fresh path: importing the module and running
         the suite created nothing in it. A pre-existing dir here would mean
-        some code path makedirs()d the launchd dir during the run."""
+        some code path makedirs()d the launchd dir during the run.
+
+        Scope, stated so nobody over-counts it: this is a LITTER arm, not a
+        second proof of the redirect. An unsealed-but-untouched path passes it
+        too (measured: it stayed green under the mutation that dropped the
+        PLIST_DIR seal entry). The equality arms above, and the sandboxed
+        before/after diff in test_no_live_hscc_leak.py, are what carry the
+        redirect claim."""
         assert not os.path.exists(ed.PLIST_DIR)
 
     def test_hscc_and_state_dirs_are_sealed(self, tmp_path):
@@ -82,6 +93,78 @@ class TestSealRedirectsEventDrivenPaths:
         real_hscc = os.path.join(_real_home(), ".hscc")
         assert ed.HSCC_DIR != real_hscc
         assert ed.STATE_DIR != os.path.join(real_hscc, "state")
+
+
+class TestPostureTmpPathUnderHome:
+    """The seal must hold on the posture the leg usually does NOT run.
+
+    pytest builds ``tmp_path`` under TMPDIR, and TMPDIR may legitimately sit
+    INSIDE ``$HOME``: Hermes exports TMPDIR/TMP/TEMP at its profile scratch dir
+    (``hermes_constants.apply_scratch_tmp_env``, called from hermes_bootstrap),
+    which lives under the home, and a clean-env spawn (cron, CI, ssh without
+    TMPDIR) has no temp var at all. In that posture the seal's target contains
+    the ``$HOME`` string as a substring, so a negative arm written as
+    ``_real_home not in PLIST_DIR`` errors — and because ``_isolate_hscc`` is
+    autouse, it errors on EVERY case in the package, not just this file
+    (measured at head 1f15862b: 5 errors in 0.07s, whole-package blast radius).
+
+    A child run is the only way to cover this from inside the suite: the parent
+    runner's TMPDIR is whatever the operator/CI happens to have set, so the
+    posture cannot be chosen by a case. It costs one interpreter start and makes
+    a reintroduced substring arm go red on the leg instead of surfacing weeks
+    later on a clean-env spawn.
+
+    ``HOME`` is a fresh empty sandbox, so the child can reach neither the
+    operator's ``~/.hscc`` nor the operator's ``~/Library/LaunchAgents`` — this
+    case is safety-positive, not just a posture probe.
+
+    The child selects only the other classes (``-k``) — otherwise it would
+    re-enter this case and recurse.
+    """
+
+    def test_seal_pin_survives_tmp_path_under_home(self, tmp_path):
+        import re
+        import subprocess
+        import sys
+
+        home = os.path.join(str(tmp_path), "homeB")
+        tmpdir = os.path.join(home, "tmp")   # <-- TMPDIR INSIDE HOME
+        os.makedirs(tmpdir, exist_ok=True)
+
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(os.path.dirname(tests_dir))
+        env = dict(os.environ)
+        env["HOME"] = home
+        for key in ("TMPDIR", "TMP", "TEMP"):
+            env[key] = tmpdir
+        env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", __file__,
+             "-k", "not TestPostureTmpPathUnderHome",
+             "-p", "no:cacheprovider"],
+            env=env, cwd=tests_dir, capture_output=True, text=True,
+            timeout=300,
+        )
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 0, (
+            "the seal pin does NOT survive a runner whose TMPDIR sits under "
+            f"$HOME (rc={proc.returncode}; a child error here means an "
+            "autouse-fixture assert depends on the TMPDIR-vs-HOME text):"
+            f"\n{out}")
+        # The child must really have run the seal cases — rc 0 with nothing
+        # collected (pytest rc 5) would be a silent pass.
+        counts = {word: int(n)
+                  for n, word in re.findall(r"(\d+) (passed|failed|error)",
+                                            out)}
+        assert counts.get("passed", 0) >= 5, (
+            f"child did not run the seal cases: {out}")
+        assert not counts.get("failed") and not counts.get("error"), out
+
+        # Posture actually achieved: the child's tmp root was under its HOME,
+        # so the substring arm would have fired there. Asserted from the
+        # sandbox we built, never by reading the operator's home.
+        assert os.path.commonpath([home, tmpdir]) == home
 
 
 class TestTheRemovalPathLandsInsideTheSeal:
