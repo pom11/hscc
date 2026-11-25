@@ -918,21 +918,35 @@ def test_an_identity_offender_never_carries_the_name_it_matched():
     assert got.startswith("docs/audit.md:7: ")
     assert address_guard.IDENTITY_PLACEHOLDER in got
     assert address_guard.is_identity_offender(got)
-    assert address_guard.advisory([got]) == [got]           # the shipped posture
-    assert address_guard.blocking([got]) == []
+    # The shipped posture since t_d42e6d48 flipped the class: it BLOCKS. The
+    # constant-off half is re-pinned in `test_the_identity_knob_may_only_strengthen`,
+    # so the two subsets are shown to be that constant's servants, not two rules.
+    assert address_guard.blocking([got]) == [got]
+    assert address_guard.advisory([got]) == []
     if _LIVE_NAME:
         assert _LIVE_NAME not in got, "the offender echoed the name it found"
 
 
 def test_the_identity_knob_may_only_strengthen(monkeypatch):
-    """Advisory at landing, and provably turnable-on — the `HOME_PATHS_ENFORCE` habit.
+    """The constant is the switch; the env knob may only push it ON.
 
-    The falsy-env half is the one that matters: a variable exported in CI must never
-    be able to mute a class, so `identity_enforced()` ORs the knob and never ANDs it.
+    The half that matters is the last one: `identity_enforced()` ORs the knob and
+    never ANDs it, so a variable exported in CI can mute nothing. Before that, the
+    flip itself is re-pinned from both directions — the shipped constant blocks with
+    no env set (t_d42e6d48), and only patching the constant back to False returns the
+    class to advisory. A posture that could not be re-derived from the constant would
+    be a hard-coded accident rather than a rule someone can read and change.
     """
     planted = address_guard.identity_offender("a.md", 1)
+    assert address_guard.blocking([planted]) == [planted], (
+        "the shipped posture is not blocking: the flip did not take")
+    assert address_guard.advisory([planted]) == []
+
+    monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", False)
     assert address_guard.advisory([planted]) == [planted]
-    assert address_guard.blocking([planted]) == []
+    assert address_guard.blocking([planted]) == [], (
+        "the class blocked while the constant says advisory — the constant is not "
+        "the switch, so the flip is not reversible and not auditable")
 
     monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
     assert address_guard.blocking([planted]) == [planted], (
@@ -950,19 +964,29 @@ def test_the_identity_knob_may_only_strengthen(monkeypatch):
 
 def test_report_explains_an_identity_finding_without_echoing_the_name(monkeypatch):
     """The fix for a name is not `10.0.0.x`, and the header must say which posture
-    fired — the same reason the home class has its own text (t_34de41c3)."""
+    fired — the same reason the home class has its own text (t_34de41c3).
+
+    The two halves swapped when t_d42e6d48 flipped the class: the UNPATCHED report is
+    now the blocking one and the ADVISORY wording belongs to the patched-off case.
+    Leaving the old order alone would have left a passing pin on a posture nothing
+    ships, which is the same as having no pin on the shipped one.
+    """
     planted = address_guard.identity_offender("docs/x.md", 3)
 
-    adv = address_guard.report([planted])
-    assert "docs/x.md:3" in adv and "OPERATOR IDENTITY" in adv
-    assert address_guard.IDENTITY_PLACEHOLDER in adv
-    assert "ADVISORY" in adv, "advisory must be stated, not left to the exit code"
-    assert "the commit is blocked" not in adv
-
-    monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
+    # enforced — the shipped posture since t_d42e6d48.
     hard = address_guard.report([planted])
+    assert "docs/x.md:3" in hard and "OPERATOR IDENTITY" in hard
+    assert address_guard.IDENTITY_PLACEHOLDER in hard
     assert "the commit is blocked" in hard and "ADVISORY" not in hard, (
         "an enforced finding must not be described as advisory")
+
+    # advisory — reachable only by editing the constant, so the wording stays
+    # exercised rather than rotting into a lie.
+    monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", False)
+    adv = address_guard.report([planted])
+    assert "ADVISORY" in adv, "advisory must be stated, not left to the exit code"
+    assert "the commit is blocked" not in adv
+    monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
 
     mixed = address_guard.report([planted, "b.md:1: " + REAL_LAN])
     assert "b.md:1" in mixed and "10.0.0.x" in mixed, mixed
@@ -971,9 +995,19 @@ def test_report_explains_an_identity_finding_without_echoing_the_name(monkeypatc
         " the identity section is the only thing telling the reader what to do with"
         " the name — and its fix is not `10.0.0.x`")
 
+    # The mixed case is now the COMMON case: two enforced path classes can sit in one
+    # report, the home header wins the title, and the name still has to be explained
+    # in its own section or the reader scrubs a person to `10.0.0.x`.
+    both = address_guard.report(
+        [planted, address_guard.home_offender("c.md", 9, _home("/Users", rest="/x"))])
+    assert "OPERATOR HOME PATH" in both, both
+    assert "docs/x.md:3" in both and "Scrub the name" in both, (
+        "a home path sharing the report silenced the identity fix")
+
     if _LIVE_NAME:
-        assert _LIVE_NAME not in adv and _LIVE_NAME not in hard, (
-            "the report echoed the name — a public job log would carry it")
+        for text in (adv, hard, mixed, both):
+            assert _LIVE_NAME not in text, (
+                "the report echoed the name — a public job log would carry it")
 
 
 def test_the_shipped_identity_branch_is_the_one_the_pattern_uses():
@@ -1009,9 +1043,12 @@ def test_an_address_never_hides_behind_a_name_on_the_same_line(monkeypatch):
     """The advisory-interaction hazard, re-pinned for the third class (both orders).
 
     With first-match-wins, an address sitting after a name on one line would have been
-    reported as identity-only — identity is advisory, so the BLOCKING address left the
-    gate unseen and the commit passed. `all_hits` is what stops that, and this is the
-    test that would have caught it.
+    reported as identity-only — identity was advisory then, so the BLOCKING address left
+    the gate unseen and the commit passed. `all_hits` is what stops that, and this is
+    the test that would have caught it. t_d42e6d48 flipped the class, so the shipped
+    half now expects BOTH offenders to block; the address-alone half is re-pinned with
+    the constant patched off, because the hazard this test exists for is the advisory
+    posture and that posture must stay safe too, not merely be hypothetical.
     """
     if not _LIVE_NAME:
         pytest.skip(_NO_LIVE_IDENTITY)
@@ -1023,27 +1060,36 @@ def test_an_address_never_hides_behind_a_name_on_the_same_line(monkeypatch):
         assert [v for _, v in address_guard.identity_hits(line)] == [_LIVE_NAME], label
         offenders = address_guard.scan_blob("d.md", line.encode())
         assert len(offenders) == 2, (label, offenders)
-        # shipped posture: identity is advisory, the address blocks on its own.
-        assert address_guard.blocking(offenders) == [addr_only], (
-            f"{label}: the address escaped the blocking subset")
-        # enforced: both block, and the identity arm still carries no name.
-        monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
+        # shipped posture (enforced since t_d42e6d48): both block, and the identity
+        # arm still carries no name.
         blocked = address_guard.blocking(offenders)
         assert len(blocked) == 2 and addr_only in blocked, (label, blocked)
         assert all(_LIVE_NAME not in o for o in blocked), blocked
+        # advisory: the address must STILL block on its own, whatever the name does.
         monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", False)
+        assert address_guard.blocking(offenders) == [addr_only], (
+            f"{label}: the address escaped the blocking subset")
+        monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
 
 
-def test_cli_reports_an_identity_finding_and_blocks_once_the_knob_is_set(tmp_path):
-    """The flip, through the CLI the hook and CI both call — the shape of
-    `test_cli_blocks_a_home_path_now_that_home_is_enforced`, inverted for a class that
-    ships advisory: rc 0 with the finding REPORTED today, rc 1 when the knob is set.
+def test_cli_blocks_an_identity_finding_now_that_identity_is_enforced(tmp_path):
+    """The flip, through the CLI the hook and CI both call (t_d42e6d48).
+
+    Same shape as `test_cli_blocks_a_home_path_now_that_home_is_enforced`: rc 1 by
+    DEFAULT for a planted name. This is the half that proves the flip landed — while
+    the class shipped advisory this test asserted rc 0, and a still-passing rc-0 pin
+    after the flip would mean the shipped posture is covered by nothing at all. The
+    advisory posture stays covered in-process (report/blocking above), NOT by an
+    env-var off switch ON PURPOSE: `HSCC_ADDRESS_GUARD_IDENTITY_ENFORCE` may only
+    strengthen, so no checkout or CI job can mute the class by exporting it.
 
     Skipped where the branch is inert, because there the CLI has nothing to bite on;
     the in-process tests above cover the mechanism on every host.
     """
     if not _LIVE_NAME:
         pytest.skip(_NO_LIVE_IDENTITY)
+    assert address_guard.OPERATOR_IDENTITIES_ENFORCE is True, (
+        "the flip is gone from the constant while this test still expects rc 1")
     r = _repo(tmp_path)
     (r / "audit.md").write_text(f"`crontab -l` → no crontab for {_LIVE_NAME}\n",
                                 encoding="utf-8")
@@ -1057,20 +1103,21 @@ def test_cli_reports_an_identity_finding_and_blocks_once_the_knob_is_set(tmp_pat
             capture_output=True, env={**os.environ, **env})
 
     default = run()
-    assert default.returncode == 0, (
-        "OPERATOR_IDENTITIES_ENFORCE is False, so an identity finding must REPORT and "
-        "not block — a hard rule that turns the merge queue red on landing is how the "
-        "scrub cards get frozen out")
+    assert default.returncode == 1, (
+        "OPERATOR_IDENTITIES_ENFORCE is True, so a planted name must exit 1 — if this "
+        "passes with 0 the flip did not land and the class is advisory again in all "
+        "but the comment above it")
     err = default.stderr.decode()
-    assert "audit.md:1" in err and "ADVISORY" in err and "OPERATOR IDENTITY" in err
+    assert "audit.md:1" in err and "OPERATOR IDENTITY" in err, err   # reported, not silent
+    assert "the commit is blocked" in err and "ADVISORY" not in err, err
     assert _LIVE_NAME not in err, "the report echoed the name into the terminal/log"
 
-    forced = run(**{address_guard.OPERATOR_IDENTITIES_ENFORCE_ENV: "1"})
-    assert forced.returncode == 1, (
-        "the env knob did not make the class block: the flip cannot be turned on, so "
-        "advisory is permanent")
-    assert "the commit is blocked" in forced.stderr.decode()
-    assert _LIVE_NAME not in forced.stderr.decode()
+    # the env knob can still only strengthen: a truthy value changes nothing...
+    assert run(**{address_guard.OPERATOR_IDENTITIES_ENFORCE_ENV: "1"}).returncode == 1
+    # ...and a falsy value must NOT mute the class
+    assert run(**{address_guard.OPERATOR_IDENTITIES_ENFORCE_ENV: "0"}).returncode == 1, (
+        "the env var became an OFF switch: an exported variable in CI could now "
+        "disable the identity rule")
 
     # a real address still blocks whatever the identity knob says
     (r / "leak.md").write_text("host " + REAL_LAN + "\n", encoding="utf-8")
