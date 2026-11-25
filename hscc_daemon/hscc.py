@@ -1660,7 +1660,15 @@ def _node_paused(argv):
         print(f"error: {err}")
         _print_node_verb_usage("paused")
         return 1
-    pauses = node_pauses.list_pauses()
+    # t_4dcb34e6: this verb's own help promises "Read-only — this reads
+    # ~/.hscc/node_pauses.json and nothing else", but a malformed overlay makes
+    # the parser WARN through ``daemon_ops.log`` — a file write inside the read
+    # (node_pauses.py:96/:106, reached from load():336). The WARN route is
+    # borrowed for this ONE call: the operator still sees every warning on
+    # stderr (unconditionally — see ``node_pauses._echo_muted_warn``), the payload
+    # below is unchanged, and the daemon's repair paths keep their file lines.
+    with node_pauses.silent_read():
+        pauses = node_pauses.list_pauses()
     if opts["--json"]:
         rows = []
         for host in sorted(pauses):

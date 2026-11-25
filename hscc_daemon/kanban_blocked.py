@@ -212,7 +212,14 @@ def list_blocked_tasks(kanban_db=None, registered_only: bool = False):
             # Read-only door: the brew venv has no hermes_state for
             # connect_closing()'s writability preflight, and this only SELECTs.
             # Comments are read on the same connection, before it closes.
-            with board_pin.open_board_ro(kanban_db, board, multi=multi) as conn:
+            # t_4dcb34e6: this door is advertised read-only, and a worker shell's
+            # pin conflict is reported by ``board_pin._emit`` appending a WARN to
+            # ``$HSCC_HOME/daemon.log`` — a file write inside the read. Borrow the
+            # route for the open: the conflict still reaches the operator's stderr
+            # (unconditionally, per ``board_pin._echo_muted_warn``) and ``_WARNED``
+            # is given back rather than spent, so the daemon keeps its alarm.
+            with board_pin.silent_read(), \
+                    board_pin.open_board_ro(kanban_db, board, multi=multi) as conn:
                 rows = conn.execute(
                     "SELECT id, assignee, created_at, block_kind, status, "
                     "last_failure_error, consecutive_failures, title "

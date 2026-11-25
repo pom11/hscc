@@ -593,3 +593,113 @@ class TestWarningIsObservable:
 
         monkeypatch.setattr(sys, "stderr", explode)
         node_pauses._warn("still just a warning")  # must not raise
+
+
+# ── The advertised read door writes NO file (t_4dcb34e6) ────────────────────
+#
+# ``hscc node paused`` promises "Read-only — this reads
+# ~/.hscc/node_pauses.json and nothing else" (hscc.py:1423), but a malformed
+# overlay made its parser WARN through ``daemon_ops.log`` — a file write inside a
+# read (node_pauses.py:96 → :106, reached from ``load``:336) that the doctor door
+# guard is structurally blind to, because no sandbox plants a corrupt overlay.
+# The recipe is the one t_2c218de8 shipped as
+# ``hscc-cluster/tests/test_doctor_tool.py::_seal_door_env``: point HOME and the
+# import-anchored paths at a sandbox, snapshot the tree around the REAL door
+# call, and prove both that the snapshot can see a write and that the latent
+# branch actually fired (the #704 hole is a guard that passes because the
+# condition never happened).
+
+def _snapshot_tree(root):
+    """name -> bytes for every file under ``root`` ({} when absent)."""
+    from pathlib import Path
+    p = Path(root)
+    if not p.exists():
+        return {}
+    return {str(f.relative_to(p)): f.read_bytes()
+            for f in sorted(p.rglob("*")) if f.is_file()}
+
+
+@pytest.fixture
+def sealed_home(tmp_path, monkeypatch):
+    """HOME, the overlay root and the daemon log all point into one sandbox.
+
+    ``LOG_FILE``/``PID_FILE`` are anchored at import (``daemon_ops.py:17-19``), so
+    a test that only moved ``HOME`` would still assert about a file it cannot
+    create and quietly write the OPERATOR's log instead.
+    """
+    from types import SimpleNamespace
+    import hscc_daemon.daemon_ops as daemon_ops
+    home = tmp_path / "fakehome"
+    hscc = home / ".hscc"
+    hscc.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(node_pauses, "HSCC_DIR", str(hscc))
+    monkeypatch.setattr(daemon_ops, "LOG_FILE", str(hscc / "daemon.log"))
+    monkeypatch.setattr(daemon_ops, "PID_FILE", str(hscc / "daemon.pid"))
+    # This module's echo dedupe must not be pre-filled by an earlier test in the
+    # same pytest process, or the presence control below reads as a failure.
+    monkeypatch.setattr(node_pauses, "_MUTED_ECHOED", set())
+    return SimpleNamespace(home=home, hscc=hscc, log=hscc / "daemon.log")
+
+
+class TestPausedDoorWritesNoFile:
+    """The invariant the door advertises, guarded on the door itself."""
+
+    @staticmethod
+    def _door(argv=("--json",)):
+        from hscc_daemon import hscc as hscc_cli
+        return hscc_cli._node_paused(list(argv))
+
+    def test_malformed_overlay_is_loud_on_stderr_and_writes_no_file(
+            self, sealed_home, capsys):
+        (sealed_home.hscc / "node_pauses.json").write_text(
+            '{"pauses": []}', encoding="utf-8")     # 'pauses' is a list
+        before = _snapshot_tree(sealed_home.home)
+
+        rc = self._door()
+        captured = capsys.readouterr()
+
+        assert rc == 0
+        assert json.loads(captured.out)["count"] == 0, (
+            "the read stopped answering — a silent read is not the fix")
+        # Presence control: the WARN this card is about is what the read produced,
+        # so the guard cannot be passing because the latent branch never fired.
+        assert "'pauses' is list" in captured.err, captured.err
+        assert not sealed_home.log.exists(), (
+            "hscc node paused created $HSCC_HOME/daemon.log during a read")
+        after = _snapshot_tree(sealed_home.home)
+        assert after == before, (
+            f"a read wrote into the sandbox: {sorted(set(after) ^ set(before))}")
+        # Control: the snapshot DOES notice a write, so the assert above bites.
+        (sealed_home.hscc / "canary.json").write_text("{}", encoding="utf-8")
+        assert _snapshot_tree(sealed_home.home) != before, (
+            "the snapshot cannot see a write — the read-only claim proves nothing")
+
+    def test_unreadable_overlay_writes_no_file_either(self, sealed_home, capsys):
+        (sealed_home.hscc / "node_pauses.json").write_text(
+            '{"pauses": {"', encoding="utf-8")      # truncated mid-document
+        rc = self._door()
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "unreadable" in captured.err, captured.err
+        assert not sealed_home.log.exists()
+        assert json.loads(captured.out)["count"] == 0
+
+    def test_the_route_is_given_back_after_the_read(self, sealed_home, capsys):
+        """The mute is borrowed, not installed.
+
+        A write path that runs after the read must still get its file line, or the
+        "fix" would have muted the daemon's alarm instead of the door's write.
+        """
+        (sealed_home.hscc / "node_pauses.json").write_text(
+            '{"pauses": []}', encoding="utf-8")
+        assert self._door() == 0
+        capsys.readouterr()
+        assert not sealed_home.log.exists()
+
+        node_pauses._warn("written by a repair path after the read")
+
+        assert sealed_home.log.exists(), (
+            "the read did not give the WARN route back — a muted module is a "
+            "fail-open dressed as a fix")
+        assert "repair path" in sealed_home.log.read_text(encoding="utf-8")
