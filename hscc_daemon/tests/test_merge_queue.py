@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -941,6 +942,270 @@ def test_run_gate_reports_a_gate_that_could_not_be_started(tmp_path, monkeypatch
     assert "could not run gate" in output, output
 
 
+# ── cancellation: a gate leg the queue no longer wants ─────────────────────
+#
+# t_6c3ae143. All six `_cancel_reason` checkpoints in `process_entry` sit
+# OUTSIDE a gate leg, and a leg blocks in `communicate(timeout=)`; so a
+# remove/pause/disable that lands *during* a leg used to be recorded correctly
+# and obeyed never. Measured on 2026-11-24: a full-suite leg kept running for a
+# PR that had already been merged by hand, with `in_flight` already null.
+#
+# The two things these cases exist to protect are the two things the fix must
+# not do: end a gate because of ELAPSED TIME (only the ledger may cancel it),
+# and kill only the SHELL (the `pytest` grandchild is the part that burns the
+# box). The first is asserted against a still-pending PR; the second against a
+# real process group, because no fake pid can show a second process dying.
+
+class _CancellableGateProc(_FakeGateProc):
+    """A leg that keeps running until something kills it.
+
+    ``hold_s`` is how long it stays alive when nothing kills it, so the cases
+    that assert NO cancellation still finish. ``on_block`` runs on the thread
+    that entered the leg, which is how a test lands a ledger change *during* the
+    gate with no sleep and no race: by the time the leg is running, the change
+    is already a fact.
+    """
+
+    def __init__(self, *, pid, hold_s=5.0, on_block=None):
+        super().__init__(returncode=0, pid=pid)
+        self.hold_s = hold_s
+        self._on_block = on_block
+        self._blocked = False
+        self._released = threading.Event()
+
+    def communicate(self, timeout=None):
+        self.budgets.append(timeout)
+        # Once per leg, not once per call: `_kill_gate_group` also calls
+        # `communicate()` when it reaps, and a second `remove` would be the fake
+        # inventing a side effect the OS does not have.
+        if self._on_block is not None and not self._blocked:
+            self._blocked = True
+            self._on_block()
+        self._released.wait(self.hold_s)
+        return self.stdout, self.stderr
+
+    def kill(self):
+        super().kill()
+        # What the OS reports for a process the group kill took — not a code the
+        # gate chose, which is the only thing that lets `_run_gate` tell a
+        # cancelled leg apart from a suite that failed on its own merits.
+        self.returncode = -signal.SIGKILL
+        self._released.set()
+
+
+def _cancellable_popem(*, hold_s=5.0, on_block=None, pid=4242):
+    def build(argv, kwargs):
+        return _CancellableGateProc(pid=pid, hold_s=hold_s, on_block=on_block)
+    return build
+
+
+def _record_killpg(monkeypatch):
+    """Record every group kill without aiming it at the OS.
+
+    A fake proc's pid belongs to no OS process, and may collide with one that
+    belongs to something else, so the real `killpg` must not run — the same
+    reason the existing fake-gate tests all patch it. Returns the hit list:
+    ``(pgid, sig)`` per call, which is how a test reads *which group* the kill
+    was aimed at.
+    """
+    hits = []
+    monkeypatch.setattr(mq.os, "killpg",
+                        lambda pgid, sig: hits.append((pgid, sig)))
+    return hits
+
+
+def _live_cancel_watches():
+    """Mirror of `_live_heartbeats`: a watcher must not outlive its leg either."""
+    return [t for t in threading.enumerate()
+            if t.name.startswith(mq._CANCEL_THREAD_PREFIX)]
+
+
+def _count_cancels(monkeypatch):
+    """Count the mid-leg reads, by wrapping the real predicate."""
+    polls = []
+    real = mq._cancel_reason
+
+    def counting(state_path, project, entry, cfg):
+        polls.append(entry["pr"])
+        return real(state_path, project, entry, cfg)
+
+    monkeypatch.setattr(mq, "_cancel_reason", counting)
+    return polls
+
+
+def test_a_pr_removed_mid_leg_is_cancelled_before_its_budget_is_spent(
+        tmp_path, monkeypatch):
+    """The bug, end to end: `remove` lands during a leg and the leg stops.
+
+    Driven through `tick()` so the claim is claimed by the queue and released by
+    the queue, and with `timeout_s=3600` so the answer cannot come from the
+    budget: the only thing that can end this leg is the ledger.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["bash scripts/run_tests.sh"], timeout_s=3600)
+    gh = FakeGh({41: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    # Without this the tick has no entry to claim and would emit nothing at all
+    # — a green run that would prove nothing whatever.
+    mq.add_to_queue("alpha", 41, path=_state(tmp_path))
+    handed = []
+    hits = _record_killpg(monkeypatch)
+    monkeypatch.setattr(mq, "GATE_CANCEL_POLL_S", 0.05)
+    gone = lambda: mq.remove_from_queue("alpha", 41, path=_state(tmp_path))
+    fake, calls = _fake_subprocess(popem=_cancellable_popem(hold_s=20.0,
+                                                            on_block=gone))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     handback=lambda card, assignee, msg: handed.append(
+                         (card, assignee, msg)) or True)
+
+    assert result["processed"][0]["result"] == "removed", result
+    proc = calls[0][2]
+    # The leg was given its full budget and never got to spend it. Exactly ONE
+    # `communicate()`: a watcher that also reaped would be a second reader on the
+    # same proc, double-closing the pipes the leg is still reading.
+    assert proc.budgets == [3600], proc.budgets
+    assert proc.killed is True
+    # Aimed at the gate's OWN pid, which `start_new_session` made its group id:
+    # that is what reaches the pytest child, not just the shell.
+    assert hits == [(proc.pid, signal.SIGKILL)], hits
+    # Nothing was merged, nothing was pushed, and nobody was told anything.
+    assert gh.merged == []
+    assert handed == [], "a cancelled leg must not hand back to the author"
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert ps["queue"] == [] and ps["waiting"] == []
+    # And above all: a cancelled leg records NO verdict about the code.
+    assert ps["last"] is None, ps["last"]
+    assert _live_cancel_watches() == []
+
+
+def test_a_gate_leg_on_a_still_pending_pr_is_never_cancelled(tmp_path,
+                                                             monkeypatch):
+    """The guard rail: polling may observe a healthy leg, never end one.
+
+    The entry keeps its claim for the whole leg, so the poll runs repeatedly and
+    fires nothing. If cancellation were keyed to elapsed time this case would
+    kill a legitimately running gate, which is the failure the card forbids.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"],
+                         gates=["bash scripts/run_tests.sh"], timeout_s=3600)
+    gh = FakeGh({42: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 42, path=_state(tmp_path))
+    hits = _record_killpg(monkeypatch)
+    polls = _count_cancels(monkeypatch)
+    monkeypatch.setattr(mq, "GATE_CANCEL_POLL_S", 0.05)
+    # hold_s 1.0 against a 0.05 poll is ~20 polls, so the assertion below still
+    # holds on a box slow enough to miss most of them.
+    fake, calls = _fake_subprocess(popem=_cancellable_popem(hold_s=1.0))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run)
+
+    assert result["processed"][0]["result"] == "merged", result
+    proc = calls[0][2]
+    assert proc.killed is False
+    assert hits == [], hits
+    # More reads than `process_entry` has checkpoints (six, and only ~4 are on
+    # this path): proof the poll ran beside the leg rather than not at all.
+    assert len(polls) >= 6, polls
+    assert _live_cancel_watches() == []
+
+
+def test_a_cancel_check_that_raises_leaves_the_running_gate_alone(
+        tmp_path, monkeypatch):
+    """Fail OPEN. `_cancel_reason` takes the file lock; a lock hiccup, a torn
+    read or any other surprise must never be what kills a healthy suite.
+    """
+    hits = _record_killpg(monkeypatch)
+    monkeypatch.setattr(mq, "GATE_CANCEL_POLL_S", 0.05)
+    raised = []
+
+    def raiser():
+        raised.append(1)
+        raise RuntimeError("state file unreadable")
+
+    fake, calls = _fake_subprocess(popem=_cancellable_popem(hold_s=0.4))
+    monkeypatch.setattr(mq, "subprocess", fake)
+
+    verdict, output = mq._run_gate("bash scripts/run_tests.sh", str(tmp_path),
+                                   3600, cancel_check=raiser)
+
+    assert verdict == "pass", output
+    assert raised, "the poll never ran, so this case proved nothing"
+    assert hits == [] and calls[0][2].killed is False
+
+
+def test_a_cancelled_gate_takes_its_whole_process_group_with_it(tmp_path,
+                                                                monkeypatch):
+    """The part that actually burns the box is the gate's CHILD, so this case
+    runs a REAL process group.
+
+    A fake cannot show that a second process died: it has one pid and it execs
+    nothing. Here a shell backgrounds a `sleep`, reports its pid, and the test
+    asserts that pid is dead afterwards and that the group kill was aimed at the
+    group that pid belongs to — the shape of `bash scripts/run_tests.sh` with a
+    `pytest -q -rs` under it, measured live as pids 75734/27435 sharing pgid
+    75734. Only processes this test spawned are killed.
+    """
+    marker = tmp_path / "child.pid"
+    seen = {}
+
+    def cancel_check():
+        # Never cancel before the child exists: until the marker is written
+        # there is nothing to prove, and a premature kill would prove nothing.
+        try:
+            child = int(marker.read_text().strip())
+            seen["child"] = child
+            seen["pgid"] = os.getpgid(child)
+        except (OSError, ValueError):
+            return None
+        return "removed"
+
+    hits = []
+    real_killpg = os.killpg
+
+    def recording(pgid, sig):
+        hits.append((pgid, sig))
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(mq.os, "killpg", recording)
+    command = f"( sleep 30 & echo $! > '{marker}' ; wait )"
+    try:
+        verdict, output = mq._run_gate(command, str(tmp_path), 60,
+                                       cancel_check=cancel_check,
+                                       cancel_poll_s=0.05)
+    finally:
+        # Never leave a `sleep` running for the rest of the suite.
+        if "pgid" in seen:
+            with contextlib.suppress(OSError):
+                real_killpg(seen["pgid"], signal.SIGKILL)
+
+    assert verdict == "cancelled", output
+    assert hits and all(sig == signal.SIGKILL for _, sig in hits), hits
+    # The kill was aimed at the group the CHILD belongs to — not at a bare pid.
+    assert hits[0][0] == seen["pgid"], (hits, seen)
+    assert seen["child"] != seen["pgid"], "no second process, no tree proof"
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(seen["child"], 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the gate's child survived the group kill")
+
+
 def test_gate_timeout_is_not_a_red_gate_and_keeps_the_pr(tmp_path,
                                                          monkeypatch):
     """A budget exhaustion is non-terminal: back to the wait list, not gone."""
@@ -1335,7 +1600,7 @@ def test_remove_during_gate_cancels_before_push_and_never_merges(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 7, card="t_removed", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
         return "pass", ""
 
@@ -1367,7 +1632,7 @@ def test_pause_or_disable_during_gate_stops_before_push_and_keeps_entry(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 8, card="t_hold", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         if action == "pause":
             mq.set_paused("alpha", True, path=_state(tmp_path))
         else:
@@ -1679,7 +1944,7 @@ def test_view_shows_the_live_gating_stage_while_the_gate_runs(tmp_path,
                     path=_state(tmp_path))
     seen = {}
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         seen.update(mq.view(state_path=_state(tmp_path),
                             registry_path=registry))
         return "fail", "gate exploded"
@@ -2658,7 +2923,7 @@ def test_gate_heartbeat_advances_the_stream_while_the_gate_runs(tmp_path,
     seen = []          # (timestamp, stamp) per DISTINCT stamp read in-leg
     leg = {}
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         leg["start"] = time.monotonic()
         deadline = leg["start"] + 10.0
         while time.monotonic() < deadline:
@@ -2714,7 +2979,11 @@ def test_heartbeat_stops_the_moment_the_gate_leg_ends(tmp_path, monkeypatch):
 
     interval = 0.2
     monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
-    monkeypatch.setattr(mq, "_run_gate", lambda c, w, t: ("pass", ""))
+    # Stub matches the real `_run_gate` signature, `cancel_check` included: a
+    # stub that silently absorbed `**kwargs` would keep passing if the parameter
+    # were renamed, and the real caller would then be the only thing that knows.
+    monkeypatch.setattr(mq, "_run_gate",
+                        lambda c, w, t, cancel_check=None: ("pass", ""))
 
     result = mq.tick(state_path=_state(tmp_path),
                      root=str(tmp_path / "queue"), registry_path=registry,
@@ -2952,7 +3221,7 @@ def test_ci_pending_is_rechecked_in_place_without_rerunning_the_gates(
     mq.add_to_queue("alpha", 19, path=_state(tmp_path))
     gate_calls = []
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None):
         gate_calls.append(command)
         return "pass", ""
 

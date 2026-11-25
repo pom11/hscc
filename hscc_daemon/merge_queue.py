@@ -180,6 +180,17 @@ LIVENESS_STAMP_S = 30
 #: outlives the gate" contract is asserted by looking for live threads by name.
 _LIVENESS_THREAD_PREFIX = "mq-gate-liveness"
 
+#: How often a live gate leg re-reads the ledger to ask whether the entry it is
+#: gating still exists (see :class:`_GateCancelWatch`). This bounds how long a
+#: *cancelled* leg may keep running; it can never end a leg the queue still
+#: wants, because the decision is the ledger's answer, not this timer's.
+#: Read at CALL time, so a test can retune it without waiting 30 s.
+GATE_CANCEL_POLL_S = 30
+
+#: Same lookup and same contract as ``_LIVENESS_THREAD_PREFIX``: a cancellation
+#: watcher must not outlive the leg it watches.
+_CANCEL_THREAD_PREFIX = "mq-gate-cancel"
+
 #: The PR URL shape workers leave in a card comment (same shape Hermes'
 #: respawn guard recognises). Owner/repo are captured too: auto-enqueue must
 #: only accept a URL from the project's OWN origin remote.
@@ -1616,7 +1627,7 @@ def _stream_text(stream):
     return stream or ""
 
 
-def _kill_gate_group(proc):
+def _kill_gate_group(proc, *, reap=True):
     """Best-effort: kill the timed-out gate's WHOLE process group, then reap it.
 
     The gate runs `start_new_session=True`, so its pid is also its process-group
@@ -1627,6 +1638,17 @@ def _kill_gate_group(proc):
     `os.killpg` is looked up on the module at call time, which is also what lets
     a test record which group the kill was aimed at without any real process
     being spawned.
+
+    `reap=False` is for the caller that is itself blocked in
+    ``proc.communicate()`` right now (:class:`_GateCancelWatch`).  Two threads
+    must not ``communicate()`` the same `Popen`: each closes the pipe fds in its
+    own teardown, the second one closes a descriptor the first already freed,
+    and the blocked reader surfaces `OSError(9, 'Bad file descriptor')` — which
+    `_run_gate` would report as "could not run gate" for a gate that ran fine.
+    The blocked reader reaps on its own as soon as the group dies: EOF, then
+    `_wait()`, then the exit status.  `reap=True` stays the default because the
+    timeout path calls this *after* `communicate()` has already raised and
+    handed the descriptors back.
 
     Best-effort by design, for two reasons.  A process can die between the kill
     and the reap (the `ESRCH` case), and the group can already be gone; and
@@ -1645,6 +1667,8 @@ def _kill_gate_group(proc):
         proc.kill()
     except Exception:
         pass
+    if not reap:
+        return
     try:
         # Reaps the shell so a killed gate leaves no zombie behind for the
         # daemon's own lifetime.
@@ -1653,14 +1677,111 @@ def _kill_gate_group(proc):
         pass
 
 
-def _run_gate(command, worktree, timeout_s):
+class _GateCancelWatch:
+    """Stop a gate leg whose entry has left the queue, group and all.
+
+    ``process_entry`` re-reads the claim through :func:`_cancel_reason` at every
+    stage boundary — before the gates, after them, before the push, after the
+    push. A stage boundary is simply unreachable while a leg runs:
+    ``communicate(timeout=timeout_s)`` hands back only on the budget, the exit,
+    or an ``OSError``. Measured on 2026-11-24 that gap was the whole hour: PR
+    #725 was merged by hand at 05:48:44Z and removed from the ledger while its
+    full-suite leg kept running as a child of the daemon, with `in_flight`
+    already null and the tick parked in ``communicate``.
+
+    So the check runs *beside* the leg, on a daemon thread, and asks the exact
+    question the existing checkpoints ask — same predicate, same arguments, just
+    polled. Three rules this class exists to honour:
+
+    * **Elapsed time may never cancel a gate.** The decision reads only the
+      ledger: the claim must no longer belong to this PR (``removed``,
+      ``paused``, ``disabled``). ``poll_s`` bounds how long a *cancelled* leg
+      lingers, never whether it is cancelled, so a slow leg on a still-pending
+      PR is observed and left alone. That is the difference between this and a
+      second timeout, and the reason a second timeout is not the fix.
+    * **A failed read means proceed.** :func:`_cancel_reason` takes the file
+      lock, and a lock hiccup or a torn read must not kill a legitimately
+      running gate. The exception path answers "may proceed".
+    * **The kill is the group, not the shell.** It reuses
+      :func:`_kill_gate_group`, the one place that already reaches the
+      ``pytest`` grandchild — the part that actually burns the box.
+
+    Mirror image of :class:`_GateLiveness`: same daemon thread, same joined
+    ``Event`` stop, same "cannot outlive the leg" guarantee, same
+    thread-name-prefix contract. Different because it must poll *first-thing
+    after* the boundary the caller already checked, so the loop waits before its
+    first read rather than stamping immediately.
+    """
+
+    def __init__(self, proc, cancel_check, *, poll_s=None):
+        self.proc = proc
+        self.cancel_check = cancel_check
+        # Resolved at call time, like _GateLiveness does its interval, so
+        # rebinding the module constant (or a test's monkeypatch) takes effect.
+        self.poll_s = GATE_CANCEL_POLL_S if poll_s is None else poll_s
+        self._stop = threading.Event()
+        self._fired = threading.Event()
+        self._thread = None
+        self.reason = None
+
+    @property
+    def fired(self):
+        """True when this watch killed the leg (as opposed to merely polling)."""
+        return self._fired.is_set()
+
+    def _run(self):
+        while not self._stop.wait(self.poll_s):
+            try:
+                reason = self.cancel_check()
+            except Exception:
+                # Fail open, always: see the second rule above.
+                continue
+            if reason:
+                # Set before the kill, so `_run_gate` can never observe a dead
+                # group without the reason it died for.
+                self.reason = reason
+                self._fired.set()
+                # `reap=False`: the tick thread is inside `communicate()` on this
+                # very proc, and it is the one that will read the EOF and collect
+                # the exit status. A second reader here would double-close the
+                # pipes — see _kill_gate_group.
+                _kill_gate_group(self.proc, reap=False)
+                return
+
+    def start(self):
+        # No predicate, or no interval, means no watcher — which is how the
+        # three-argument `_run_gate` call keeps its pre-existing behaviour.
+        if self.cancel_check is None or not self.poll_s:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"{_CANCEL_THREAD_PREFIX}-{self.proc.pid}", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None:
+            # Bounded for the same reason _GateLiveness bounds its join: a
+            # watcher stuck on the file lock may not hang the tick.
+            thread.join(timeout=max(5.0, self.poll_s + 5.0))
+
+
+def _run_gate(command, worktree, timeout_s, cancel_check=None,
+              *, cancel_poll_s=None):
     """Run one shell gate; returns ``(verdict, output)``.
 
-    ``verdict`` is one of ``"pass"``, ``"fail"`` or ``"timeout"``.  The third
-    one is the whole point: running out of the budget is NOT a verdict about
-    the code — the gate never got to answer.  Flattening it into ``fail`` made
-    a slow queue look like a broken PR, dropped the PR from the queue and told
-    the author to go fix code that was never shown to be broken.
+    ``verdict`` is one of ``"pass"``, ``"fail"``, ``"timeout"`` or
+    ``"cancelled"``.  The third one is the whole point of the budget: running
+    out of it is NOT a verdict about the code — the gate never got to answer.
+    Flattening it into ``fail`` made a slow queue look like a broken PR, dropped
+    the PR from the queue and told the author to go fix code that was never
+    shown to be broken.  The fourth is the same distinction one step further:
+    the queue stopped wanting the answer at all (see
+    :class:`_GateCancelWatch`), which is neither a verdict about the code nor an
+    exhausted budget, and must not be reported as either.  ``"cancelled"`` is
+    only ever returned when ``cancel_check`` is supplied.
 
     Three things this leg must get right, all learned from a 1800 s budget that
     a 1092.6 s suite kept failing (see :func:`_gate_qos_prefix`,
@@ -1692,6 +1813,8 @@ def _run_gate(command, worktree, timeout_s):
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
                                 start_new_session=True)
+        watch = _GateCancelWatch(proc, cancel_check, poll_s=cancel_poll_s)
+        watch.start()
         try:
             # communicate() rather than run(timeout=): the timeout must be able
             # to reach the process group, and `subprocess.run` throws its Popen
@@ -1706,6 +1829,19 @@ def _run_gate(command, worktree, timeout_s):
             err = _stream_text(stderr) or _stream_text(exc.stderr)
             return "timeout", _gate_report(f"{out}\n{err}",
                                            note=f"timeout after {timeout_s}s")
+        finally:
+            # Never a watcher without a live leg, on ANY way out of the leg —
+            # including the timeout path, which returns from inside the except.
+            watch.stop()
+        if watch.fired and proc.returncode == -signal.SIGKILL:
+            # Stopped at the poll boundary because the entry left the queue.
+            # Keyed on OUR signal rather than on `fired` alone: a leg that
+            # answered for itself a moment before the poll landed keeps its own
+            # verdict, so a passing suite is never retroactively un-passed and a
+            # real red is never relabelled.
+            return "cancelled", _tail(
+                f"{_stream_text(stdout)}\n{_stream_text(stderr)}\n"
+                f"gate cancelled ({watch.reason}) before it finished")
         verdict = "pass" if proc.returncode == 0 else "fail"
         full = _stream_text(stdout) + _stream_text(stderr)
         # A passing leg keeps the plain tail it always kept — the digest is
@@ -2188,8 +2324,27 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         # finally immediately after (see _GateLiveness).  The `with` closes
         # BEFORE the verdict branch below, so a heartbeat can never outlive the
         # leg it reports on — including the timeout path that requeues.
+        # The only cancellation source a RUNNING leg can reach. The checkpoint
+        # above and the one after this loop are both unreachable while
+        # `communicate()` is blocked inside this call — that gap is how a gate
+        # ran a full suite for a PR merged 32 minutes earlier (t_6c3ae143) — so
+        # the predicate is handed IN and polled from beside the leg.  Same
+        # function, same arguments as the checkpoints: a mid-leg answer cannot
+        # disagree with the one the leg was started on.
         with _GateLiveness(project, entry["pr"], command):
-            verdict, output = _run_gate(command, worktree, timeout_s)
+            verdict, output = _run_gate(
+                command, worktree, timeout_s,
+                cancel_check=lambda: _cancel_reason(state_path, project,
+                                                    entry, cfg))
+        if verdict == "cancelled":
+            # The entry left the queue while the leg ran. Resolve it through the
+            # same `_stop_cancelled` a checkpoint uses — drop on `removed`,
+            # requeue on `paused`/`disabled` — and stop there.  Not a `red-gate`,
+            # and no handback: the leg was not allowed to answer, there is
+            # nothing to report about the code, and the PR may be merged already.
+            reason = (_cancel_reason(state_path, project, entry, cfg)
+                      or "removed")
+            return _stop_cancelled(state_path, project, entry, reason)
         if verdict == "timeout":
             # Out of budget is NOT out of green.  The gate never answered, so
             # nothing here is a verdict about the PR's code: the entry goes
