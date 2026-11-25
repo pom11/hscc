@@ -209,25 +209,44 @@ def ensure_git_repo(
     return {"status": "created" if created else "exists", "github": github_status}
 
 
+def _head_has_commit(repo: str, _run=None) -> bool:
+    """True when HEAD points at a commit; an unborn branch has none."""
+    cp = _run_cmd(["git", "rev-parse", "--verify", "--quiet", "HEAD"], repo, _run)
+    return cp.returncode == 0
+
+
 def ensure_github(repo: str, _run=None, *, private: bool = False,
                   remote_name: str = DEFAULT_REMOTE) -> str:
     """Step 1b — create the GitHub remote via ``gh`` and push.
+
+    ``gh repo create`` refuses to run non-interactively without an explicit
+    visibility, so exactly one of ``--private`` / ``--public`` is always
+    passed (a public remote is the default, matching the flag's own default).
 
     Idempotent against an already-created remote: ``gh repo create`` reporting
     the remote already exists is read as ``exists``, not an error. The repo is
     never corrupted by a failed GitHub step — the local repo is already valid.
 
-    Returns ``created`` | ``exists``. Raises :class:`LifecycleError` if ``gh``
-    fails for a reason other than the remote already existing (so the command
-    can report it and give the retry command; the repo itself is untouched).
+    A repo whose HEAD has no commit cannot be pushed (``--push`` fails on an
+    unborn branch — e.g. a freshly initialized empty repo with nothing to
+    commit yet), so the remote is created without ``--push`` and the return
+    token reports that honestly instead of failing the step.
+
+    Returns ``created`` | ``exists`` | ``created, nothing to push``. Raises
+    :class:`LifecycleError` if ``gh`` fails for a reason other than the remote
+    already existing (so the command can report it and give the retry command;
+    the repo itself is untouched).
     """
     name = Path(repo).name
-    args = ["gh", "repo", "create", name, "--source", repo, "--remote", remote_name, "--push"]
-    if private:
-        args.insert(2, "--private")
+    visibility = "--private" if private else "--public"
+    args = ["gh", "repo", "create", name, visibility, "--source", repo,
+            "--remote", remote_name]
+    pushable = _head_has_commit(repo, _run)
+    if pushable:
+        args.append("--push")
     cp = _run_cmd(args, repo, _run)
     if cp.returncode == 0:
-        return "created"
+        return "created" if pushable else "created, nothing to push"
     err = (cp.stderr or "").strip().lower()
     # gh is idempotent about an existing remote: report exists, not failure.
     if "already exists" in err:
