@@ -28,6 +28,16 @@ Two rules this file holds, both learned the expensive way:
     backdated past the DEFAULT floor with `os.utime` instead. Lowering the floor
     to 1 s would make this suite delete a sibling's two-second-old pack — the
     exact shared-namespace damage the sweep exists to avoid.
+  * **An aged fixture is not ours to keep, so it is never the authority.** Age plus
+    uid is the sweep's ENTIRE eligibility test, and a dir backdated past the default
+    floor is indistinguishable from real SIGKILL litter: any suite that starts on
+    this host while a test runs may lawfully take it (`run_tests.sh` sweeps at
+    runner start; the queue gate, worker cards and opencode panes pack side by
+    side). So every assertion about what a pack's sweep *did* reads that pack's own
+    captured stream — the sweep reports itself whenever it runs, `took 0` included.
+    A fixture that vanished although its pack provably never swept is an environment
+    fact about a host-global namespace, and says so as a skip (`_blame_the_host`),
+    never as a red gate blaming code it never touched.
 """
 
 import os
@@ -94,6 +104,41 @@ def _alive(pid):
     st = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
                         capture_output=True, text=True).stdout.strip()
     return st not in ("", "Z")
+
+
+#: The sweep's own report — printed by `run_tests.sh` whenever the sweep RUNS,
+#: including the run that takes nothing. It is the only evidence about a pack's
+#: sweep that a stranger on the host cannot forge or erase: dirs in
+#: `/tmp/hscc-legs-*` belong to whoever's sweep reaches them first, this pack's
+#: captured stream belongs to this test alone.
+SWEEP_LINE = re.compile(
+    r"^parallel: leg-log sweep: took (\d+) stale leg-log dir\(s\) older than "
+    r"(\d+)s \(scanned (\d+)\)", re.M)
+
+
+def _sweep_report(pack):
+    """`(took, scanned, floor)` from this pack's own stream, or None if it never ran."""
+    m = SWEEP_LINE.search(pack.text())
+    if m is None:
+        return None
+    return int(m.group(1)), int(m.group(3)), int(m.group(2))
+
+
+def _blame_the_host(d, why):
+    """Stop the test — honestly — when a stranger's sweep took an aged fixture.
+
+    Call this ONLY after the test has proved from its own pack's stream that the
+    pack did not sweep. Then a missing fixture has one remaining explanation: a
+    concurrent suite started while this test ran, and its start-time sweep applied
+    the sweep's only test (age + uid) to a dir this file had deliberately backdated
+    past the default floor. That is a fact about a host-global namespace on a box
+    where several suites pack at once, not a defect in the code under test, and a
+    gate that fails on it blames this branch for a stranger's schedule.
+    """
+    if not d.exists():
+        pytest.skip(
+            f"{why}: a concurrent suite's sweep took the aged fixture — "
+            f"/tmp/hscc-legs-* is host-global and age+uid is all the sweep asks")
 
 
 class Pack:
@@ -293,8 +338,9 @@ def test_a_sigkill_leaked_dir_is_gone_after_the_next_pack(pack):
         second.wait_for_live_legs(2)
         assert second.proc.wait(timeout=120) == 0
         assert not d.exists(), "a stale leg-log dir survived the sweep"
-        assert re.search(r"^parallel: swept \d+ stale leg-log", second.text(), re.M), \
-            f"the sweep ran silently:\n{second.text()}"
+        report = _sweep_report(second)
+        assert report is not None, f"the sweep ran silently:\n{second.text()}"
+        assert report[0] >= 1, f"the sweep reported taking nothing: {report}"
     finally:
         second.cleanup()
 
@@ -305,8 +351,37 @@ def test_the_sweep_is_off_when_its_floor_says_off(pack):
     pack.launch(_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0), (LEG_C, 0.2, 0)]),
                 env_extra={SWEEP_ENV: 0})
     assert pack.proc.wait(timeout=120) == 0
-    assert d.exists(), "the sweep ran with the floor at 0"
-    assert "swept" not in pack.text()
+    # The pack's own stream is the authority: the sweep reports itself whenever the
+    # block runs (took 0 included), so the absence of a report means `0` skipped the
+    # block — which IS the property. And no other suite on this host can add or hide
+    # a line in a stream this test captured itself.
+    assert "leg-log sweep" not in pack.text(), \
+        f"the sweep ran with the floor at 0:\n{pack.text()}"
+    # The consequence — the aged dir really survived — is still checked, but only
+    # while the namespace happens to be ours to observe: a sibling suite's
+    # start-time sweep is entitled to take a dir aged past the default floor, and
+    # nothing can tell its work apart afterwards. t_09a601df.
+    _blame_the_host(d, "the floor said off")
+
+
+def test_a_sweep_that_ran_reports_itself_even_taking_nothing(pack):
+    """`took 0` must be a report, not a silence.
+
+    The line used to print only for `took > 0`, which made "this host has no litter"
+    and "the reclaim deletes nothing here" byte-identical. That is how #825 shipped a
+    sweep that was a no-op on the Linux runner (`stat -f %m` answers prose and exits 0,
+    so every candidate was skipped) with every must-survive case in this file green —
+    t_3d406a71 paid a card for that blind spot. Everything asserted here is on this
+    pack's own stream, so it holds however busy the host is: the NUMBERS depend on
+    other suites' litter, the LINE does not.
+    """
+    pack.launch(_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0), (LEG_C, 0.2, 0)]))
+    assert pack.proc.wait(timeout=120) == 0
+    report = _sweep_report(pack)
+    assert report is not None, f"a sweep that ran said nothing:\n{pack.text()}"
+    took, scanned, floor = report
+    assert took <= scanned, f"the sweep took {took} dirs but saw {scanned}"
+    assert floor >= QUEUE_CAP_SECONDS, f"the report contradicts the floor pin: {floor}s"
 
 
 # ── the safety property the sweep must never lose ───────────────────────────
@@ -376,7 +451,9 @@ def test_the_sweep_is_not_on_the_serial_path(pack):
     pack.launch(_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]), parallel=None)
     assert pack.proc.wait(timeout=120) == 0
     assert "parallel:" not in pack.text(), "the serial stream gained a line"
-    assert d.exists(), "the serial path swept a dir it never created"
+    # Same authority as the off-floor case: no `parallel:` line means this pack ran
+    # no sweep at all. Whether the aged dir is still there is the host's business.
+    _blame_the_host(d, "the serial path never sweeps")
 
 
 # ── the catchable half: signals the runner does not trap today ──────────────
@@ -427,8 +504,8 @@ def test_the_sweep_line_cannot_join_the_handback_digest(pack):
     assert pack.proc.wait(timeout=120) == 0
     assert d.exists() is False
     lines = pack.text().splitlines()
-    assert any(l.startswith("parallel: swept ") for l in lines), pack.text()
-    assert not [l for l in mq._failure_lines(pack.text()) if "swept" in l], pack.text()
+    assert any(l.startswith("parallel: leg-log sweep:") for l in lines), pack.text()
+    assert not [l for l in mq._failure_lines(pack.text()) if "leg-log sweep" in l], pack.text()
 
 
 # ── the sweep must be proven to DELETE, not merely to refrain ───────────────
