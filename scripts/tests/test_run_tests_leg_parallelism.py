@@ -159,6 +159,65 @@ def test_the_default_pack_is_two(tmp_path):
     assert peak == 2, r["trace"]
 
 
+def test_a_free_slot_is_recycled_and_reports_its_own_duration(tmp_path):
+    """The head-of-line bug this card found by RUNNING it, pinned.
+
+    The first implementation waited for the OLDEST leg in flight, so a leg that
+    finished early still occupied its slot until the slowest neighbour ended, and
+    its reported duration was the wait, not the work. Measured on the real roster
+    at p=2: seven legs, 627 s of work in 615 s of wall — 1.0x, and a 3 s leg
+    reported 320 s. Both halves are pinned here: a slot must come back
+    immediately, and `elapsed=` must be the leg's own time.
+    """
+    slow, fast_a, fast_b = LEG_A, LEG_B, LEG_C
+    r = _run(tmp_path,
+             plan=_plan([(slow, 3.0, 0), (fast_a, 1.0, 0), (fast_b, 1.0, 0)]),
+             parallel=2)
+    assert r["rc"] == 0, r["log"]
+    # Serial would be 5.0 s + overhead; a pool that recycles finishes in ~3.
+    assert r["wall"] < 4.3, f"the pack did not recycle the slot: {r['wall']:.1f}s wall"
+    done = dict(re.findall(r"^parallel: done leg=(\S+) elapsed=(\d+)s", r["log"], re.M))
+    assert set(done) == {slow, fast_a, fast_b}, r["log"]
+    assert int(done[slow]) >= 3, done
+    for leg in (fast_a, fast_b):
+        assert int(done[leg]) <= 2, (
+            f"{leg} reported {done[leg]}s for 1s of work — the duration is being "
+            f"measured to the REAP, not to the leg's own exit: {r['log']}")
+
+
+def test_a_leg_killed_by_a_signal_reads_red(tmp_path):
+    """A leg that dies without printing a summary must still fail the run.
+
+    The rc comes from the wrapper's own record when it can write one (this stub
+    dies by signal, so the record is 137/143 rather than a pytest code), and from
+    `wait`'s status when it cannot — both of which are non-zero. What this pins is
+    that no path through the new code reads a leg that never completed as green.
+    """
+    stub = tmp_path / "stub_py.sh"
+    # The stub kills itself before pytest could print anything. The wrapper still
+    # records the signal exit; what matters is that the runner propagates it.
+    stub.write_text(STUB.replace('echo "start $leg $$" >> "$STUB_TRACE"',
+                                'echo "start $leg $$" >> "$STUB_TRACE"\n'
+                                'kill -9 "$$"'))
+    stub.chmod(0o755)
+    trace, argv, log = tmp_path / "t", tmp_path / "a", tmp_path / "run.log"
+    trace.write_text("")
+    argv.write_text("")
+    env = dict(os.environ)
+    env.update({"HSCC_TEST_PY": str(stub), "STUB_TRACE": str(trace),
+                "STUB_ARGV": str(argv),
+                "STUB_PLAN": _plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]),
+                "HSCC_TEST_LEGS": f"{LEG_A} {LEG_B}", "HSCC_TEST_PARALLEL": "2",
+                "HSCC_LEG_HEARTBEAT_SECONDS": "0"})
+    with open(log, "wb") as fh:
+        proc = subprocess.run(["bash", str(RUNNER)], stdout=fh,
+                              stderr=subprocess.STDOUT, env=env, timeout=120,
+                              cwd=str(REPO))
+    out = log.read_text()
+    assert proc.returncode == 1, f"a killed leg read as green:\nrc={proc.returncode}\n{out}"
+    assert "FAILURES ABOVE" in out, out
+
+
 def test_a_pack_is_faster_than_serial_for_the_same_plan(tmp_path):
     """The point of the card, measured rather than asserted."""
     plan = _plan([(LEG_A, 1.0, 0), (LEG_B, 1.0, 0), (LEG_C, 1.0, 0)])

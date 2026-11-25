@@ -759,17 +759,34 @@ for d in "${LEGS[@]}"; do
 done
 else
   # ── the bounded pack (t_6c2123f9) ─────────────────────────────────────────
-  # bash 3.2 is the interpreter this script must run under (/bin/bash on macOS
-  # is 3.2.57), so there is no `wait -n` and no associative array. The pool is
-  # therefore a FIFO over append-only arrays: legs launch in roster order and
-  # are reaped in launch order, which bounds the in-flight count at PAR without
-  # needing to find "the one that finished first". Reaping in launch order is
-  # also what keeps the summary and the concatenated blocks in ROSTER order,
-  # which is the whole digest contract — never reorder a red leg.
-  declare -a P_PID P_NAME P_LOG P_T0S P_CODE
+  # bash 3.2 is the interpreter this script must run under (/bin/bash on macOS is
+  # 3.2.57), so there is no `wait -n` and no associative array.
+  #
+  # WHY A POLL AND NOT A FIFO WAIT. The first version of this loop waited for the
+  # OLDEST leg in flight, which is the obvious way to bound a pool without
+  # `wait -n`, and it is nearly useless here: measured on the real roster at
+  # p=2, seven legs cost 627 s of work in 615 s of wall — **1.0x**. The reason is
+  # head-of-line blocking: while `hscc_daemon` (320 s) was the oldest in flight,
+  # `sparkrun-hermes` (3 s) had finished 313 s earlier and its slot stayed
+  # counted as busy, so no new leg launched. A pack that cannot recycle a free
+  # slot is not a pack.
+  #
+  # So completion is DETECTED rather than WAITED FOR: a zombie (`stat` starts
+  # with Z) is a finished child, `wait <pid>` on it returns its code
+  # immediately, and the slot is recycled the same tick. That is `wait -n`
+  # written for bash 3.2. The 0.5 s tick costs two `ps` calls per live leg and
+  # is invisible next to legs measured in minutes.
+  #
+  # Reaping order is therefore COMPLETION order, while the summary and the
+  # concatenated blocks stay ROSTER order (index order) — which is the digest
+  # contract, and is why everything is keyed by index and never by a cursor into
+  # a shifting list.
+  declare -a P_PID P_NAME P_LOG P_T0S P_CODE P_DONE P_END
   P_N="${#LEGS[@]}"
-  P_NEXT=0; P_HEAD=0; P_LIVE=0
+  P_NEXT=0; P_HEAD=0; P_LIVE=0; P_REAPED=0
   P_T0="$(date +%s)"
+  P_I=0
+  while [ "$P_I" -lt "$P_N" ]; do P_DONE[$P_I]=""; P_I=$((P_I+1)); done
 
   # ONE watcher for the whole run, told which legs exist by the file it re-reads
   # each tick (scripts/leg_heartbeat.sh's 5th argument). It is a child of THIS
@@ -792,18 +809,29 @@ else
 
   # CURRENT_SUITE must keep naming what is running: the SIGTERM line reads it,
   # and with a pack "what is running" is a SET. Rebuilt on every launch and every
-  # reap, in roster order, from the legs between the two cursors.
+  # reap, in roster order, from the legs not yet reaped.
   _live_suite() {
     CURRENT_SUITE=""
     _j="$P_HEAD"
     while [ "$_j" -lt "$P_NEXT" ]; do
-      CURRENT_SUITE="${CURRENT_SUITE:+$CURRENT_SUITE }${P_NAME[$_j]}"
+      [ -n "${P_DONE[$_j]}" ] || CURRENT_SUITE="${CURRENT_SUITE:+$CURRENT_SUITE }${P_NAME[$_j]}"
       _j=$((_j+1))
     done
     [ -n "$CURRENT_SUITE" ] || CURRENT_SUITE="(draining)"
   }
 
-  while [ "$P_NEXT" -lt "$P_N" ] || [ "$P_LIVE" -gt 0 ]; do
+  # A finished child is one whose STAT starts with Z (a zombie: exited, not yet
+  # reaped) or whose STAT is empty (already reaped by an earlier tick). `kill -0`
+  # is NOT the test — it succeeds on a zombie, which is how a pool stops seeing
+  # free slots.
+  _finished() {
+    _st="$(ps -o stat= -p "${P_PID[$1]}" 2>/dev/null | tr -d ' ')"
+    [ -z "$_st" ] && return 0
+    [ "${_st#Z}" != "$_st" ] && return 0
+    return 1
+  }
+
+  while [ "$P_REAPED" -lt "$P_N" ]; do
     while [ "$P_NEXT" -lt "$P_N" ] && [ "$P_LIVE" -lt "$PAR" ]; do
       d="${LEGS[$P_NEXT]}"
       logf="$LEG_TMP/$P_NEXT-$d.log"
@@ -820,6 +848,12 @@ else
       # run the load-sensitive cases on every ordinary leg while the serial gate
       # does not, i.e. the two postures would silently test different things.
       # Pinned by test_pack_runs_the_same_pytest_argv_as_the_serial_leg.
+      #
+      # The wrapper records its OWN exit code and end clock before the subshell
+      # exits. The runner cannot time a leg it has not reaped yet (with a bound
+      # of N, a leg can sit finished for as long as its slowest neighbour runs —
+      # measured: a 3 s leg reported 320 s), so the duration in the `parallel:
+      # done` line comes from here, not from the reap.
       (
         if [ "$d" = "loadstress" ]; then
           env "${ENV_UNSET_ARGS[@]}" \
@@ -829,23 +863,47 @@ else
             "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider \
             -m "not loadstress" "$@"
         fi
+        rc_inner=$?
+        printf '%s %s\n' "$rc_inner" "$(date +%s)" > "$LEG_TMP/$P_NEXT.rc"
+        exit "$rc_inner"
       ) > "$logf" 2>&1 &
       P_PID[$P_NEXT]=$!
       printf '%s\t%s\t%s\n' "$d" "$!" "${P_T0S[$P_NEXT]}" >> "$LEG_PIDFILE"
       P_NEXT=$((P_NEXT+1)); P_LIVE=$((P_LIVE+1))
       _live_suite
     done
-    if [ "$P_LIVE" -eq 0 ]; then continue; fi
-    wait "${P_PID[$P_HEAD]}"; code=$?
-    P_CODE[$P_HEAD]="$code"
-    P_ELAPSED=$(( $(date +%s) - ${P_T0S[$P_HEAD]} ))
-    # LIVE, into the runner's own stream: the one line a reader of a redirected
-    # log can act on while the pack is still running. Prefixed `parallel:` so it
-    # can never be mistaken for one of the anchored digest lines.
-    printf 'parallel: done leg=%s elapsed=%ss rc=%s\n' \
-      "${P_NAME[$P_HEAD]}" "$P_ELAPSED" "$code"
-    P_LIVE=$((P_LIVE-1)); P_HEAD=$((P_HEAD+1))
+
+    _k="$P_HEAD"
+    while [ "$_k" -lt "$P_NEXT" ]; do
+      if [ -z "${P_DONE[$_k]}" ] && _finished "$_k"; then
+        wait "${P_PID[$_k]}" 2>/dev/null
+        wait_rc=$?
+        # The leg's own record is the authority on both numbers; `wait`'s status
+        # is the fallback for a wrapper that died before it could write it (a
+        # missing record must read as RED, never as the 0 of the test above).
+        rc_inner=""; p_end=""
+        if [ -f "$LEG_TMP/$_k.rc" ]; then
+          read -r rc_inner p_end < "$LEG_TMP/$_k.rc" || true
+        fi
+        [ -n "$rc_inner" ] || rc_inner="$wait_rc"
+        P_CODE[$_k]="$rc_inner"
+        P_END[$_k]="${p_end:-$(date +%s)}"
+        P_DONE[$_k]=1
+        P_LIVE=$((P_LIVE-1)); P_REAPED=$((P_REAPED+1))
+        # LIVE, into the runner's own stream: the one line a reader of a
+        # redirected log can act on while the pack is still running. Prefixed
+        # `parallel:` so it can never be mistaken for an anchored digest line.
+        printf 'parallel: done leg=%s elapsed=%ss rc=%s pack=%ss\n' \
+          "${P_NAME[$_k]}" "$(( ${P_END[$_k]} - ${P_T0S[$_k]} ))" \
+          "${P_CODE[$_k]}" "$(( $(date +%s) - P_T0 ))"
+      fi
+      _k=$((_k+1))
+    done
+    while [ "$P_HEAD" -lt "$P_NEXT" ] && [ -n "${P_DONE[$P_HEAD]}" ]; do
+      P_HEAD=$((P_HEAD+1))
+    done
     _live_suite
+    [ "$P_REAPED" -lt "$P_N" ] && sleep 0.5
   done
 
   [ -n "$HB_PID" ] && kill "$HB_PID" 2>/dev/null
