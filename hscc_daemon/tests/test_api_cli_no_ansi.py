@@ -9,12 +9,25 @@ byte-exact machine contract — the QR payload built by ``_build_qr_payload``
 for the iOS scanner — is NEVER altered by theming, and that no literal
 ``[ok]`` / ``[warn]`` / ``[error]`` markup ever leaks to a piped consumer.
 
-Only presentation (and the QR wire payload) is exercised here; the 
+Only presentation (and the QR wire payload) is exercised here; the
 start/stop/status lifecycle logic and the never-print-the-token invariant are
-covered by test_api_cli.py / test_unified_cli.py. No real API server is bound,
-no real background process is spawned, and no real ``launchctl`` is ever asked:
-the verbs that consult the supervisor do so through an injected ``_run_probe``
-(see ``_supervisor_has_no_unit`` below), so no case here reads the host.
+covered by test_api_cli.py / test_unified_cli.py. No real API server is bound
+and no real background process is spawned.
+
+No real ``launchctl`` is ever EXECED anywhere in this file: the fence in
+``launchd_status`` refuses to ask inside a pytest process, so an unsheamed verb
+gets a visible refusal row rather than a fork.
+
+What is NOT hermetic, stated plainly because it is the sentence the next reader
+acts on: only the THREE lifecycle cases below declare a supervisor posture
+(``test_status_not_running_no_ansi``, ``test_stop_no_ansi``,
+``test_stop_running_no_ansi`` — see ``_supervisor_has_no_unit``). The other four
+that drive these verbs — ``test_no_raw_markup_leak``, ``test_status_no_ansi_with_qr``,
+``test_status_running_no_ansi``, ``test_status_stale_pid_no_ansi`` — still call them
+unsheamed, and ``_launchd_matters()`` stats the operator's real
+``~/Library/LaunchAgents/com.hscc.api.plist`` for each. They stay green only
+because the fence answers and their assertions never read a supervisor row.
+Residual tracked in t_6c4c17fc; do not copy the unsheamed shape into a new case.
 """
 
 import io
@@ -113,17 +126,25 @@ def no_fork(monkeypatch):
 # SIGTERM about, and pins the two ambient inputs that decide whether the seam is
 # consulted at all. Same shape as test_api_cli_launchd.py::_run_status.
 #
-# So the file's verdict no longer moves with the host: one canned `launchctl
-# print` answer is the fact under test, and the cases that want the supervised
-# (bootout) path are the ones in test_api_cli_launchd.py that declare it.
+# So the verdict of THESE THREE cases no longer moves with the host: one canned
+# `launchctl print` answer is the fact under test, and the cases that want the
+# supervised (bootout) path are the ones in test_api_cli_launchd.py that declare
+# it. The four status/markup cases that drive these verbs without a seam are the
+# residual named in the module docstring (t_6c4c17fc) — they are green on the
+# fence's refusal, not on a declared posture.
 
-#: launchd's own answer to `launchctl print` for a job that is not loaded is
-#: rc!=0 plus a could-not-find line, and `launchd_status` reads that as an ANSWER
-#: (available, not loaded) — never as a fault. Kept as data so the posture is
-#: readable rather than buried in a lambda.
+#: Measured on this box: `launchctl print gui/<uid>/com.hscc.api` for a job that
+#: is not loaded answers rc 113 with `Bad request.` plus a could-not-find-service
+#: line (and `_launchctl_run` folds stderr into the returned text). `launchd_status`
+#: reads ANY rc!=0 as an ANSWER — available, not loaded — never as a fault. Kept as
+#: data so the posture is readable rather than buried in a lambda. The same value is
+#: pinned at the probe level in test_api_cli_launchd.py::
+#: test_probe_not_loaded_is_an_answer_not_a_fault; rc 3 is bootout's already-unloaded
+#: answer, not print's.
 LAUNCHCTL_NO_JOB = (
-    3,
-    "Could not find job: the requested service is not loaded.",
+    113,
+    'Bad request.\nCould not find service "com.hscc.api" '
+    "in domain for user gui: 501",
 )
 
 
