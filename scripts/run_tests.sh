@@ -811,12 +811,12 @@ else
   # concatenated blocks stay ROSTER order (index order) — which is the digest
   # contract, and is why everything is keyed by index and never by a cursor into
   # a shifting list.
-  declare -a P_PID P_NAME P_LOG P_T0S P_CODE P_DONE P_END
+  declare -a P_PID P_NAME P_LOG P_T0S P_CODE P_DONE P_END P_ORPHAN
   P_N="${#LEGS[@]}"
   P_NEXT=0; P_HEAD=0; P_LIVE=0; P_REAPED=0
   P_T0="$(date +%s)"
   P_I=0
-  while [ "$P_I" -lt "$P_N" ]; do P_DONE[$P_I]=""; P_I=$((P_I+1)); done
+  while [ "$P_I" -lt "$P_N" ]; do P_DONE[$P_I]=""; P_ORPHAN[$P_I]=""; P_I=$((P_I+1)); done
 
   # ONE watcher for the whole run, told which legs exist by the file it re-reads
   # each tick (scripts/leg_heartbeat.sh's 5th argument). It is a child of THIS
@@ -934,6 +934,28 @@ else
         if [ -f "$LEG_TMP/$_k.rc" ]; then
           read -r rc_inner p_end < "$LEG_TMP/$_k.rc" || true
         fi
+        # ── "the harness could not run this leg" is NOT "this leg's tests failed" ──
+        # Two facts are available here and nowhere else, and together they separate
+        # the two classes: the leg's own `.rc` record (written by the wrapper at the
+        # instant pytest returned) and the leg's own log. When the record is MISSING
+        # and the log holds NOTHING, the pack has no evidence whatsoever about this
+        # leg — the wrapper died before it could record, so what follows is `wait`'s
+        # status, which is a fact about the wrapper, not about any test.
+        # WHY IT HAD TO BE SAID (t_692814f5, measured): a leg whose `> "$logf"` could
+        # not be opened died exactly this way and reported `pytest exit 1, 0s` — the
+        # byte-for-byte shape of a red test — so a roster leg silently stopped being
+        # gated for a whole release. The code `wait` leaves behind depends on HOW the
+        # record was lost (1 for a failed redirect, 137 for a SIGKILLed wrapper), so
+        # it cannot carry the class; only these two facts can.
+        # WHY THE EMPTY LOG IS LOAD-BEARING, NOT DECORATIVE: a leg that got as far as
+        # printing `FAILED path::test` and only then lost its wrapper has real evidence
+        # about a test, and must stay the ordinary red row. Claiming "harness" there
+        # would be a lie and would teach people to distrust the phrase. `-s`, not `-f`:
+        # a failed redirect leaves a zero-byte file that `-f` happily calls present.
+        # Pinned by scripts/tests/test_run_tests_leg_harness_verdict.py.
+        if [ ! -f "$LEG_TMP/$_k.rc" ] && [ ! -s "${P_LOG[$_k]}" ]; then
+          P_ORPHAN[$_k]=1
+        fi
         [ -n "$rc_inner" ] || rc_inner="$wait_rc"
         P_CODE[$_k]="$rc_inner"
         P_END[$_k]="${p_end:-$(date +%s)}"
@@ -942,9 +964,14 @@ else
         # LIVE, into the runner's own stream: the one line a reader of a
         # redirected log can act on while the pack is still running. Prefixed
         # `parallel:` so it can never be mistaken for an anchored digest line.
-        printf 'parallel: done leg=%s elapsed=%ss rc=%s pack=%ss\n' \
+        # `record=missing` is that line's share of the verdict above: the summary
+        # row is what the queue parses, but a human tailing a running pack has only
+        # this, and "rc=137 pack=1s" alone does not say the leg never ran.
+        _rec=""
+        [ -n "${P_ORPHAN[$_k]}" ] && _rec=" record=missing"
+        printf 'parallel: done leg=%s elapsed=%ss rc=%s pack=%ss%s\n' \
           "${P_NAME[$_k]}" "$(( ${P_END[$_k]} - ${P_T0S[$_k]} ))" \
-          "${P_CODE[$_k]}" "$(( $(date +%s) - P_T0 ))"
+          "${P_CODE[$_k]}" "$(( $(date +%s) - P_T0 ))" "$_rec"
       fi
       _k=$((_k+1))
     done
@@ -969,7 +996,20 @@ else
     # is still a gate whose cost a reader needs to see, and the queue's digest
     # takes the row verbatim.
     LEG_SECS=$(( ${P_END[$P_I]} - ${P_T0S[$P_I]} ))
-    if [ "${P_CODE[$P_I]}" -eq 0 ]; then
+    # The harness verdict is tested BEFORE the exit-code-0 branch, on purpose: a leg
+    # that left no record must never be able to read as the `0` of a green leg, and
+    # with no record the code below is `wait`'s, which the fallback exists to catch.
+    # The row keeps the `  ✗ ` prefix (that is the anchor `merge_queue._LEG_FAILURE_RES`
+    # matches after stripping indentation), the verbatim leg NAME, and the literal
+    # `pytest exit N` token — it only ADDS a phrase inside the parenthetical, so every
+    # existing reader keeps working and the serial row stays byte-identical. The phrase
+    # is what lets .github/scripts/leg_verdict.sh route this to a hard red instead of
+    # the advisory branch: `pytest exit 1` there means "a test failed", and a leg that
+    # never ran must never be advisory.
+    if [ -n "${P_ORPHAN[$P_I]}" ]; then
+      summary+=("  ✗ ${P_NAME[$P_I]} (no leg output — harness failure, pytest exit ${P_CODE[$P_I]}, ${LEG_SECS}s)")
+      rc=1
+    elif [ "${P_CODE[$P_I]}" -eq 0 ]; then
       summary+=("  ✓ ${P_NAME[$P_I]} (${LEG_SECS}s)")
     else
       summary+=("  ✗ ${P_NAME[$P_I]} (pytest exit ${P_CODE[$P_I]}, ${LEG_SECS}s)")

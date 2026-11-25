@@ -72,6 +72,51 @@ def test_a_killed_leg_is_red_even_in_advisory(tmp_path):
     assert proc.returncode == 1
 
 
+# ── the class that used to be indistinguishable from a red test (t_f508ce51) ──
+#
+# A packed leg whose wrapper died before it could write its `.rc` record, and whose
+# log holds nothing, has NO evidence about it at all. Before run_tests.sh said so on
+# the row, that leg reported `pytest exit 1` — this script's own definition of an
+# ordinary TEST failure, i.e. `::warning::` and a GREEN check. The shape below is what
+# the runner emits for it now (byte-compatible with the digest readers; see
+# scripts/tests/test_run_tests_leg_harness_verdict.py for the runner side).
+
+NO_LEG = ("━━━ Summary ━━━\n"
+          "  ✗ hscc-api (no leg output — harness failure, pytest exit 1, 0s)\n"
+          "FAILURES ABOVE\n")
+
+
+def test_a_leg_the_harness_could_not_run_is_red_even_in_advisory(tmp_path):
+    """THE hole this closes: rc 1 + `pytest exit 1` used to mean advisory green."""
+    proc = _verdict(tmp_path, 1, NO_LEG)
+    assert proc.returncode == 1, (
+        "a leg that produced no record and no output is never advisory — it never ran")
+    assert "::error::" in proc.stdout, proc.stdout
+    assert "::warning::" not in proc.stdout, proc.stdout
+
+
+def test_the_harness_verdict_is_still_red_when_enforced(tmp_path):
+    proc = _verdict(tmp_path, 1, NO_LEG, ENFORCE="true")
+    assert proc.returncode == 1
+    assert "::error::" in proc.stdout
+
+
+def test_the_phrase_only_counts_on_a_summary_row(tmp_path):
+    """The anchor has teeth in the fail-towards-test direction too.
+
+    A genuine test failure whose own output happens to contain the words must stay
+    ADVISORY: reclassifying a real red as "the harness" would make every flake into a
+    blocking infrastructure failure and teach people to ignore the verdict.
+    """
+    log = ("━━━ hscc-api ━━━\n"
+           "FAILED hscc-api/tests/test_stub.py::test_quotes - assert 'no leg output' == ''\n"
+           + SUMMARY.format(code=1))
+    proc = _verdict(tmp_path, 1, log)
+    assert proc.returncode == 0, (
+        f"a real test failure was reclassified as the harness:\n{proc.stdout}")
+    assert "::warning::" in proc.stdout, proc.stdout
+
+
 def test_a_truncated_run_is_red_even_in_advisory(tmp_path):
     proc = _verdict(tmp_path, 1, "━━━ hscc-api ━━━\n")
     assert proc.returncode == 1
