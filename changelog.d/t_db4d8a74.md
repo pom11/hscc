@@ -29,16 +29,34 @@ task: t_db4d8a74
   `13 passed` with `HSCC_LAUNCHD_PROBE=1` forcing the question while the live unit
   sits loaded. Ground truth recorded with the run: the real plist present and
   `launchctl print gui/$UID/com.hscc.api` answering `state = running`.
-- Full `hscc_daemon` leg under that live posture: `5376 passed, 2 skipped` (0
-  failed, exit 0) at 5378 collected.
-- Mutation probe on the two new pins: removing the seam injection from the status
-  case bites (1 failed); answering "unit loaded" instead of "no such job" bites
-  (1 failed) — the reason that case also asserts there is NO supervisor row,
-  since launchd's own "state = not running" contains the phrase it already
-  asserts; closing the supervisor gate so the seam is never consulted bites too
-  (3 failed), which is what the one-`launchctl print`-per-verb call-count pin is
-  for. File byte-identical after every mutation.
-- The four other cases that reach the verbs without mentioning the seam
+- Full `hscc_daemon` leg, both tallies labelled by posture and by deselection, so
+  they cannot be read as contradicting each other. Gate-shaped (`HSCC_TEST_LEGS=
+  hscc_daemon bash scripts/run_tests.sh`, so `-m "not loadstress"` applies), under
+  the posture that was red — operator's real HOME, live API, loaded unit:
+  `5368 passed, 1 skipped, 9 deselected in 343.19s`, exit 0, ALL GREEN. Same tree,
+  same posture, nothing deselected: `5376 passed, 2 skipped` of 5378 collected,
+  exit 0. The two reconcile — 5378 collected minus the 9 deselected = 5369 run, and
+  those 9 split 8 passed + 1 skipped.
+- Mutation probes on the pins, re-run at this revision, measured tree confirmed as
+  the worktree's own `hscc_daemon/api_cli.py` (not the deployed plugin copy), file
+  byte-identical after every plant: removing the seam injection from the status case
+  bites (1 failed); answering "unit loaded" instead of "no such job" bites (1
+  failed) — the reason that case also asserts there is NO supervisor row, since
+  launchd's own "state = not running" contains the phrase it already asserts; and a
+  plant that fakes the call record so the count pin is satisfied by a lie while the
+  verb never consults the seam bites too (1 failed, on `rc == 0`).
+- The file's own claims are measured, not asserted: a plugin attributes every
+  supervisor question to the case that asked it (`SEAM_JSON` attribution). It
+  confirms the three lifecycle cases inject the seam in every posture and that four
+  others do not — which is exactly what the module docstring now says, and what it
+  previously over-claimed. It also confirms the canned answer carries launchd's real
+  value for an unloaded job (rc 113, `Bad request.` plus a could-not-find-service
+  line, measured against a throwaway label), matching the value
+  `test_api_cli_launchd.py` already pins; `launchd_status` reads any `rc!=0` as
+  available-and-not-loaded, so the correction changes no verdict.
+- The five entries that reach the verbs without declaring a posture are left as
+  their own cards, green today and latent rather than red: four other files
   (`test_api_cli_detach_stdio.py`, `test_api_multibind.py`, `test_autodown_cli.py`,
-  `test_cli_h_shortflag.py`) are green today — 212 passed — so that leak is latent,
-  not red, and is left as its own card.
+  `test_cli_h_shortflag.py`) plus the four unsheamed cases in this file itself, all
+  five listed on t_6c4c17fc. A separately measured gap in `_handle_stop`'s
+  `available=False` row — renaming it reddens 0 of 238 cases — is t_cf8416dd.
