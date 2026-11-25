@@ -149,6 +149,17 @@ HEAD_READ_POLL_DELAY_S = 3.0
 #: re-read on every tick until the checks are green or red.
 CI_PENDING_STAGE = "ci-pending"
 
+#: The in-flight stage of a claim the operator removed while its gate was
+#: still running.  The claim is HELD here on purpose (see
+#: :func:`remove_from_queue`): the work is live, so the ledger must not report
+#: an idle repo.  The running processing settles it at its next checkpoint,
+#: and the dead-run recovery drops it instead of requeuing it.
+CANCELLING_STAGE = "cancelling"
+
+#: Set on an in-flight claim that a ``remove`` deferred. Its presence — not the
+#: stage — is what ``_cancel_reason`` and the recovery read.
+CANCEL_KEY = "cancel_requested"
+
 #: How long a pushed head may keep the claim while CI stays silent.  Past this
 #: the entry goes back to the wait list (which every tick rechecks), never
 #: terminal: a CI that never reported is not a verdict about the code.  A
@@ -554,7 +565,24 @@ def add_to_queue(project, pr, card=None, assignee=None, branch=None,
 
 
 def remove_from_queue(project, pr, state=None, path=None):
-    """Remove a PR from ``project``'s queue (and any in-flight claim)."""
+    """Remove a PR from ``project``'s queue, deferring an in-flight removal.
+
+    The FIFO and the wait list lose the entry immediately. A claim this PR
+    still holds is NOT nulled: its gate is live, and nulling the claim (as
+    this function used to) makes the repo look idle while a gate still holds
+    the worktree and the per-repo lock, leaves the post-gate path writing a
+    ``last`` row for a PR that no longer exists anywhere in the ledger, and
+    lets the next tick claim a second PR against the same checkout.
+
+    Instead the claim is marked (:data:`CANCEL_KEY`,
+    :data:`CANCELLING_STAGE`) and kept — a *deferred* removal, the same shape
+    ``pause``/``disable`` already leave behind. The running processing sees
+    the mark at its next :func:`_cancel_reason` checkpoint and settles it
+    through :func:`_stop_cancelled`, which drops the entry; a daemon that
+    dies first has the mark dropped, not requeued, by the tick's dead-run
+    recovery. Either way the operator's removal is final; only its bookkeeping
+    waits for the gate.
+    """
     with _lock, _file_lock():
         doc = state if state is not None else load_state(path)
         ps = _project_state(doc, project)
@@ -562,8 +590,11 @@ def remove_from_queue(project, pr, state=None, path=None):
                        if int(e.get("pr", 0)) != int(pr)]
         ps["waiting"] = [e for e in ps["waiting"]
                          if int(e.get("pr", 0)) != int(pr)]
-        if ps.get("in_flight") and int(ps["in_flight"].get("pr", 0)) == int(pr):
-            ps["in_flight"] = None
+        flight = ps.get("in_flight")
+        if isinstance(flight, dict) and int(flight.get("pr", 0)) == int(pr):
+            if not flight.get(CANCEL_KEY):
+                flight[CANCEL_KEY] = _now_iso()
+                flight["stage"] = CANCELLING_STAGE
         save_state(doc, path)
         return doc
 
@@ -2783,6 +2814,11 @@ def _cancel_reason(state_path, project, entry, cfg):
     A ``remove`` clears the claim; ``pause``/``disable`` leave it but change the
     project. All three can land while a rebase or a gate is running, so this is
     a FRESH read under the file lock — never the tick's older snapshot.
+
+    A removal that landed while this PR held the claim does not clear it (see
+    :func:`remove_from_queue`): the mark is the cancellation here, so the
+    still-running processing stops at the next checkpoint and settles the claim
+    instead of carrying on as if nothing had happened.
     """
     with _file_lock():
         doc = load_state(state_path)
@@ -2790,6 +2826,8 @@ def _cancel_reason(state_path, project, entry, cfg):
         flight = ps.get("in_flight")
         if not (flight
                 and int(flight.get("pr", 0)) == int(entry.get("pr", 0))):
+            return "removed"
+        if flight.get(CANCEL_KEY):
             return "removed"
         if ps.get("paused"):
             return "paused"
@@ -2991,6 +3029,19 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                                    pgid=None)
                 except Exception:
                     pass
+        if verdict != "cancelled":
+            # A removal that landed while this leg ran now DEFERS instead of
+            # clearing the claim (see remove_from_queue), so the mark — not a
+            # missing claim — is the tell.  A leg that answered before the
+            # watcher's poll boundary must not stamp that answer against a PR
+            # the operator took out of the queue (t_7cf67395).
+            reason = _cancel_reason(state_path, project, entry, cfg)
+            if reason:
+                if verdict != "pass":
+                    log(f"merge-queue {project}: PR #{entry['pr']} verdict "
+                        f"'{verdict}' dropped: the claim was removed while "
+                        "it ran", "WARN")
+                return _stop_cancelled(state_path, project, entry, reason)
         if verdict == "cancelled":
             if overlap_watch is not None and overlap_watch.red:
                 # CI rejected the pushed head while the local gate was still
@@ -4588,6 +4639,72 @@ def _outcome_line(log, project, entry, outcome):
         + (f": {detail}" if detail else ""))
 
 
+def _tick_failure(log, result, project, where, exc):
+    """Announce and record a raise inside the tick.  Never raises itself.
+
+    The tick has always been able to die on a transient — a ``gh`` probe that
+    answers oddly, a kanban read that fails, a project whose registry row
+    cannot be resolved — and the daemon entry point has always swallowed that
+    exception into the stream file without ever writing a log line.  That is
+    the reason the 2026-11-23 wedge could not be diagnosed from the daemon
+    log: a raised tick and a tick that legitimately had nothing to do looked
+    identical from the outside.  A raise is now named, with its traceback, at
+    the moment it happens.
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    result["errors"].append(f"{project}: {where}: {detail}")
+    with contextlib.suppress(Exception):
+        log(f"merge-queue {project}: {where} raised {detail}\n"
+            f"{traceback.format_exc()}", "ERROR")
+
+
+def _busy_reason(project, flight):
+    """Why this project's FIFO head stays put: another PR owns the repo."""
+    return (f"{project} is busy with PR #{flight.get('pr')} "
+            f"(stage={flight.get('stage') or 'running'})")
+
+
+def _inactive_reason(cfg, ps):
+    """Why this project is not being processed right now, or ``None``.
+
+    The three conditions the tick already tested (no registry entry, paused,
+    disabled) were tested and then thrown away, so a queue that sat untouched
+    for an hour gave the operator nothing to read.  Same test, kept this time.
+    """
+    if cfg is None:
+        return "no registry entry — nothing to run"
+    if ps.get("paused"):
+        return "the project is paused"
+    if not effective_enabled(cfg, ps):
+        return "the queue is disabled for this project"
+    return None
+
+
+def _declined(log, doc, project, reason):
+    """Say which queued PR was NOT claimed this tick, and why.
+
+    A tick that passes over an eligible PR used to write nothing at all: on
+    the 2026-11-23 wedge the stream ticked 30+ times with one eligible PR and
+    produced zero merge-queue lines, which made a refused claim
+    indistinguishable from a daemon that had stopped.  Only a project that
+    actually has an entry is announced — an idle queue is the normal state and
+    a 60s stream must not fill up with ``nothing to do``.
+    """
+    ps = _project_state(doc, project)
+    head = None
+    for bucket in ("queue", "waiting"):
+        for cand in (ps.get(bucket) or []):
+            if isinstance(cand, dict):
+                head = cand
+                break
+        if head is not None:
+            break
+    if head is None:
+        return
+    log(f"merge-queue {project}: PR #{head.get('pr')} not claimed: {reason}",
+        "DEBUG")
+
+
 def tick(*, state_path=None, root=None, registry_path=None,
          git_runner=None, gh_runner=None, handback=None, auto_source=None,
          config_loader=None, log=None, now=None, kill_runner=None,
@@ -4610,6 +4727,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
 
         # Recover a run that died mid-flight: put it back at the head.
         recovered = []
+        settled = []
         for name in names:
             ps = _project_state(doc, name)
             flight = ps.get("in_flight")
@@ -4643,17 +4761,36 @@ def tick(*, state_path=None, root=None, registry_path=None,
                     recovered.append(name)
                     continue
                 ps["in_flight"] = None
-                if not any(int(e.get("pr", 0)) == int(flight.get("pr", 0))
-                           for e in ps["queue"]):
-                    ps["queue"].insert(0, flight)
-                recovered.append(name)
-        if recovered:
+                if flight.get(CANCEL_KEY):
+                    # The operator removed this PR while its gate was live and
+                    # the run died before the gate settled the deferred removal.
+                    # Requeuing it here would silently undo the removal and put
+                    # the PR back on a repo that was told to stop touching it,
+                    # so the mark wins over the recovery (t_7cf67395).
+                    settled.append(name)
+                    log(f"merge-queue {name}: PR #{flight.get('pr')} was "
+                        "removed while in flight; the claim is dropped, not "
+                        "requeued", "INFO")
+                else:
+                    if not any(int(e.get("pr", 0))
+                               == int(flight.get("pr", 0))
+                               for e in ps["queue"]):
+                        ps["queue"].insert(0, flight)
+                    recovered.append(name)
+        if recovered or settled:
             save_state(doc, state_path)
 
         cfgs = {}
         enabled = {}
         for name in names:
-            cfg = config_loader(name, registry_path)
+            try:
+                cfg = config_loader(name, registry_path)
+            except Exception as exc:
+                # One unreadable project config is that project's problem, not
+                # the whole tick's: with no config it is simply not eligible,
+                # and the reason is said out loud instead of ending the tick.
+                _tick_failure(log, result, name, "project config", exc)
+                cfg = None
             cfgs[name] = cfg
             ps = _project_state(doc, name)
             enabled[name] = effective_enabled(cfg, ps) if cfg is not None else False
@@ -4682,10 +4819,22 @@ def tick(*, state_path=None, root=None, registry_path=None,
             # went green while it sat in `waiting` must be able to re-enter the
             # queue. Auto-enqueue alone only runs on an EMPTY FIFO, which is
             # exactly the livelock this drain removes.
+            #
+            # The drain is network+git work, and a raise in it used to take the
+            # whole tick — including every other repo — down with it, silently.
+            # One repo's drain failing now costs that repo this tick only.
+            drained = True
             for name in active:
-                _drain_waiting(name, cfgs[name], state_path=state_path,
-                               git_runner=git_runner, gh_runner=gh_runner,
-                               log=log, handback=handback)
+                try:
+                    _drain_waiting(name, cfgs[name], state_path=state_path,
+                                   git_runner=git_runner, gh_runner=gh_runner,
+                                   log=log, handback=handback)
+                except Exception as exc:
+                    _tick_failure(log, result, name, "wait-list drain", exc)
+                    drained = False
+                    break
+            if not drained:
+                continue
             doc = load_state(state_path)
 
             # Auto-enqueue only when this repo's whole FIFO is empty, so a
@@ -4797,13 +4946,12 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         ps, member_cfg,
                         effective_enabled(member_cfg, ps)
                         if member_cfg else False)
-                    if name == claim_name:
-                        continue
-                    head = (ps.get("queue") or [None])[0]
-                    if isinstance(head, dict) and head.get("pr") is not None:
-                        _decline(log, name, head["pr"],
-                                 f"repo busy: PR #{entry['pr']} holds the "
-                                 f"claim ({CI_PENDING_STAGE})")
+                    # One PR per repo per tick: whatever is queued behind the
+                    # pushed head waits, and says so.
+                    _declined(log, doc, name,
+                              f"{claim_name} holds the claim "
+                              f"(PR #{entry['pr']}, "
+                              f"stage={CI_PENDING_STAGE})")
                 continue
 
             # Claim the oldest entry across every project on this repo, under
@@ -4815,6 +4963,16 @@ def tick(*, state_path=None, root=None, registry_path=None,
             with _file_lock():
                 doc = load_state(state_path)
                 best = None
+                # A claim can also be live in ANOTHER process (a CLI or API
+                # tick against the same ledger), which the recovery above
+                # cannot see. One PR per repo per tick holds here too — and the
+                # entry that has to wait is named instead of passed over.
+                busy = {}
+                for name in members:
+                    flight = _project_state(doc, name).get("in_flight")
+                    if (isinstance(flight, dict)
+                            and flight.get("pr") is not None):
+                        busy[name] = flight
                 for idx, name in enumerate(members):
                     cfg = cfgs.get(name)
                     ps = _project_state(doc, name)
@@ -4823,6 +4981,10 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         # A pause/disable that raced in during discovery still
                         # owes the operator a line naming the PR it left queued.
                         _note_decline(declined, name, ps, cfg)
+                        continue
+                    if name in busy:
+                        _declined(log, doc, name,
+                                  _busy_reason(name, busy[name]))
                         continue
                     for pos, entry in enumerate(ps.get("queue") or []):
                         if _hold_of(ps, entry.get("pr")) is not None:
