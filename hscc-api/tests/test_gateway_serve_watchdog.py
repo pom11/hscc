@@ -363,7 +363,9 @@ def _free_port() -> int:
 
 #: Sentinels for :func:`_state_and_command`. ``UNKNOWN`` is deliberately NOT
 #: the same answer as ``DEAD``: "gone" is the answer that can hide a surviving
-#: orphan, so a platform that could not answer must never be read as one.
+#: orphan, so a platform that could not answer must never be read as one. It
+#: means exactly that — COULD NOT answer. A probe that ran and reported no such
+#: process is a plain answer, and the answer it gives is DEAD.
 DEAD = "dead"
 UNKNOWN = "unknown"
 
@@ -405,13 +407,20 @@ def _state_and_command(pid):
             return tail[0], None
         return tail[0], raw.decode("utf-8", "replace")
     try:
-        out = subprocess.run(
+        proc = subprocess.run(
             ["ps", "-ww", "-o", "state=,command=", "-p", str(int(pid))],
-            capture_output=True, text=True, timeout=5).stdout.strip()
+            capture_output=True, text=True, timeout=5)
     except Exception:  # noqa: BLE001 — a ps that will not answer is not a death
         return UNKNOWN, None
+    out = proc.stdout.strip()
     if not out:
-        return UNKNOWN, None
+        # A `ps` that RAN and printed no row is the platform answering "there is
+        # no such process" (measured on macOS: a reaped pid gives rc=1 and empty
+        # stdout), which is the same statement the /proc branch makes with a
+        # missing `stat`: DEAD. A ps that never answered is caught above and
+        # stays UNKNOWN. Empty output with a ZERO exit is neither, so it stays
+        # UNKNOWN too — "gone" is the answer that lets an orphan through.
+        return (DEAD, None) if proc.returncode else (UNKNOWN, None)
     state, _, command = out.partition(" ")
     return state, command
 
@@ -433,7 +442,12 @@ def _alive(pid, marker=None) -> bool:
     wait had already seen the pid go and the very next ``_alive`` answered
     "running". Existence is not identity, and asserting on existence alone makes
     a passing teardown look like a failure. The marker is a path that appears in
-    the argv of the process this test started and in no one else's.
+    the argv of the process this test started and in no one else's. Recycling is
+    not the only way that flip happens: measured on this host with no recycle
+    involved, when the reaper lands between the ``kill`` and the ``ps`` below the
+    first probe answers "exists" and the second answers "no such process", which
+    used to be read as UNKNOWN and so as "alive" — pinned by
+    :func:`test_state_and_command_believes_a_ps_that_says_no_such_process`.
 
     When the platform cannot answer at all, the answer is "alive": the safe
     direction, because a wrong "gone" is what lets an orphan through the door.
@@ -531,6 +545,68 @@ def test_state_and_command_parses_a_proc_style_layout(tmp_path, monkeypatch):
     # (No _alive() call here on purpose: _alive starts with a real
     # kill(4242, 0), and whether that pid exists on this machine has nothing to
     # do with the parsing being tested.)
+
+
+def test_state_and_command_believes_a_ps_that_says_no_such_process(tmp_path,
+                                                                  monkeypatch):
+    """The BSD branch, driven through a fake ``ps`` on any platform.
+
+    macOS has no ``/proc``, so liveness there rests entirely on what ``ps -p``
+    answers — and it answers THREE different things that the reader must not
+    collapse into one: a row (running or zombie), no row with a non-zero exit
+    (its own "there is no such process"), and no answer at all (a ``ps`` that
+    could not run). Measured on this host: a reaped pid gives ``rc=1`` and EMPTY
+    stdout, a zombie gives ``rc=0`` and ``Z <defunct>``, a live one gives
+    ``rc=0`` and its argv.
+
+    The empty-with-non-zero-exit answer is DEAD, not UNKNOWN, and that is the
+    flake this pins. ``_alive`` asks ``kill(pid, 0)`` FIRST and ``ps`` SECOND, so
+    when the reaper lands between the two probes the first answers "exists" and
+    the second answers "no such process" — and an answer of UNKNOWN is reported
+    as ALIVE, the safe direction for a supervisor and the wrong direction for an
+    assertion. ``test_watchdog_buries_its_child_when_the_parent_is_sigkilled``
+    then fails ``assert not _alive(...)`` on a serve that is verifiably dead:
+    measured 1 failed in 24 poison-arm runs on the gate host (2 in 30 in a bare
+    sampling loop of the same two probes), 0 in 24 on a quiet one.
+
+    "gone" stays unreachable for a ``ps`` that could not run: that is the
+    exception path above, and it stays UNKNOWN.
+    """
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "_PROC_DIR", tmp_path / "no_proc")   # -> ps branch
+    give = {}
+
+    def fake_run(cmd, **kwargs):
+        give["cmd"] = cmd
+        return give["answer"]
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # Ran, and has no row for this pid: the platform's own answer is "gone".
+    give["answer"] = subprocess.CompletedProcess([], 1, "", "")
+    assert _state_and_command(4242) == (DEAD, None)
+    assert "-ww" in give["cmd"] and "-p" in give["cmd"]
+
+    # A row is a row — the state token and the argv come back from it.
+    marker = str(tmp_path / "fake_serve.py")
+    give["answer"] = subprocess.CompletedProcess([], 0, "Z    <defunct>\n", "")
+    assert _state_and_command(4242) == ("Z", "   <defunct>")
+    give["answer"] = subprocess.CompletedProcess(
+        [], 0, f"S    /usr/bin/python {marker}\n", "")
+    state, command = _state_and_command(4242)
+    assert state == "S" and command is not None and marker in command
+
+    # No row AND a zero exit is not an answer either way, so it stays UNKNOWN.
+    give["answer"] = subprocess.CompletedProcess([], 0, "", "")
+    assert _state_and_command(4242) == (UNKNOWN, None)
+
+    # A ps that cannot run at all is UNKNOWN, never DEAD: "gone" is the answer
+    # that lets an orphan through the door.
+    def explode(*args, **kwargs):
+        raise OSError(2, "no ps on this box")
+
+    monkeypatch.setattr(subprocess, "run", explode)
+    assert _state_and_command(4242) == (UNKNOWN, None)
 
 
 def test_state_and_command_of_this_process_agrees_with_kill(tmp_path, monkeypatch):
