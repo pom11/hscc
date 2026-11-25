@@ -28,8 +28,10 @@ could not see ``/Users/<real-user>/.hermes/...`` any better than a gate could.
 
   * ``/Users/<x>/...`` and ``/home/<x>/...`` name the operator's machine and
     account, so every *concrete* user is a leak. The rule is deliberately NOT
-    "the operator's username": banning every concrete user is strictly stronger,
-    and writing the real name into this file would publish it in the guard itself.
+    "the operator's username" *as a literal*: banning every concrete user is
+    strictly stronger for a path, and writing the real name into this file would
+    publish it in the guard itself.
+
   * ``/Users/<operator>`` is the documented replacement (the repo's own redaction
     prose already uses it) and is allowed BY CONSTRUCTION — ``<`` and ``>`` are not
     path-name characters, so the pattern cannot match it.
@@ -45,6 +47,16 @@ the tracked-tree baseline was measured and scrubbed). They were advisory at
 first, for the reason ``ADDRESS_GUARD_ENFORCE`` documents for the CI job: a rule
 that turns the suite red the moment it lands blocks the merge queue instead of
 fixing the files.
+
+A name written where NO home root precedes it is the fourth class (t_25f7a806), and
+no path rule can reach it: ``no crontab for <user>``, a database role
+``<user>_hermes``, and the sharpest of them a path flattened into a slug,
+``-Users-<user>`` — where the literal ``/Users/`` never occurs, so ``git grep
+"/Users/"`` and this module's home branch both read the line as clean. It is
+detected by IDENTITY, never by literal: the name is read from the runtime
+environment, so no tracked byte of this file carries it and the control cannot
+publish what it does not hold. The class is reported WITHOUT the name for the same
+reason — see ``OPERATOR_IDENTITIES_ENFORCE`` and the identity section below.
 
 100.64.0.0/10 is CGNAT, which is where Tailscale hands out addresses, so a real
 tailnet address lives somewhere in it. Rather than ban the whole range — tests
@@ -154,7 +166,138 @@ _HOME_BRANCH = (
     r"(?:/[^" + _HOME_TAIL_STOP + r"]*)?"
 )
 
-FORBIDDEN = re.compile(_ADDRESS_BRANCH + "|" + _HOME_BRANCH)
+# ── the operator-identity class (t_25f7a806) ─────────────────────────────────
+#
+# The fourth spelling of the class this module exists for: the operator's own short
+# name written where no home root precedes it. Measured on origin/main before this
+# card: 21 occurrences in 8 tracked files, and `FORBIDDEN` saw 0 of them (the three
+# published shapes each miss — `no crontab for <user>`, `<user>_hermes`, and the
+# slug form `-Users-<user>`). Reasoning and the rejected options:
+# docs/audits/operator-identity-decision_t_25f7a806.md.
+#
+# WHY this may be detected when t_3480956c refused to. That card refused to write
+# the LITERAL into the guard — "publishing it in the security control itself" — and
+# an enumerated deny-list of operator names carries that cost plus a worse one: it
+# only ever covers the machines somebody has already named. Neither applies to a
+# name READ FROM THE RUNTIME ENVIRONMENT. No tracked byte of this file holds a
+# username, so the control cannot publish what it does not hold, and the rule covers
+# whoever runs it rather than whoever was named when it was written.
+#
+# The honest price, stated where a reader will find it: the verdict is
+# machine-dependent. On a GitHub-hosted runner the derived name is `runner`, which
+# is sanctioned, so CI stays blind to this class exactly as it always was. The teeth
+# are where a human commits — the local hook and the local suite, on the machine
+# whose identity is actually at risk.
+IDENTITY_PLACEHOLDER = "<operator>"
+
+# A name that describes a role rather than a person, and the length below which a
+# name cannot carry identity. Both exist so the class declines itself rather than
+# crying wolf: on a machine owned by `root` or `test`, a rule that flagged every
+# occurrence of that word would train everyone to reach for `--no-verify`, which is
+# the failure mode this repo has already been paid for twice.
+GENERIC_ACCOUNT_NAMES = frozenset({
+    "admin", "administrator", "bin", "build", "builder", "ci", "daemon", "demo",
+    "dev", "docker", "guest", "hermes", "hscc", "info", "jenkins", "main",
+    "mysql", "nginx", "nobody", "operator", "owner", "postgres", "root", "runner",
+    "runneradmin", "sample", "service", "shared", "support", "sys", "system",
+    "team", "test", "tester", "ubuntu", "user", "vagrant", "www", "www-data",
+})
+MIN_IDENTITY_NAME_LEN = 4
+
+
+def runtime_identity_names():
+    """The names of whoever is running the guard, minus the ones that name nobody.
+
+    Three sources, not one: `Path.home().name` is what a home path and a flattened
+    slug both embed, while `USER`/`LOGNAME` still name the operator in a container
+    that was given HOME=/ . The filters are the class declining itself — a service
+    account, a sanctioned fixture name, or a token too short to be a name.
+    """
+    candidates = set()
+    for who in (os.environ.get("USER"), os.environ.get("LOGNAME")):
+        if who:
+            candidates.add(who)
+    try:
+        home = Path.home()
+    except (OSError, RuntimeError, KeyError):        # HOME unset or unusable
+        home = None
+    if home is not None and home.name:
+        candidates.add(home.name)
+    return frozenset(
+        n for n in candidates
+        if len(n) >= MIN_IDENTITY_NAME_LEN
+        and n.lower() not in GENERIC_ACCOUNT_NAMES
+        and n not in SANCTIONED_HOME_USERS
+    )
+
+
+def identity_branch_for(names):
+    """The identity branch's regex TEXT for ``names``, or None when there are none.
+
+    The delimiters matter both ways. ``(?<![A-Za-z0-9])`` / ``(?![A-Za-z0-9])`` make
+    the name a NAME: `desk` + name and name + `y` are different words and must not
+    trip, while `_`, `-`, `/`, `.` and whitespace may sit on either side, because
+    that is exactly how a name reaches an identifier (`name_hermes`), a flattened
+    path (`-Users-name`) and a shell fragment (`for name`).
+
+    A left boundary is ALLOWED here and REFUSED for the home branch, and the
+    difference is worth writing down because the home card's reasoning is emphatic:
+    for a path a glued prefix does not change the fact the path is there (a `\\n`
+    escape leaves a word char in front of the slash in the file bytes, and a
+    lookbehind would blind every gate to a real leak); for a name a glued prefix DOES
+    change the fact — `xname` is not the operator's name. So the boundary buys the
+    false-positive floor this rule needs at no cost in coverage.
+
+    `(?i:...)` is scoped to this branch on purpose. A global IGNORECASE would widen
+    `/Users|/home` as a side effect, and inside ONE pattern a new branch has to earn
+    its keep without moving another branch's semantics.
+    """
+    ordered = sorted(names)                          # sorted: the pattern is text
+    if not ordered:
+        return None
+    return (r"(?i:(?<![A-Za-z0-9])(?:"
+            + "|".join(re.escape(n) for n in ordered)
+            + r")(?![A-Za-z0-9]))")
+
+
+IDENTITY_NAMES = runtime_identity_names()
+
+
+def forbidden_pattern(names=IDENTITY_NAMES):
+    """THE pattern text — one definition, so a test can compile the same rule for an
+    injected name instead of carrying a copy of it (a second regex is a second
+    opportunity to get it wrong, and the CI redactor loads this one and nothing else).
+
+    The default is bound at import time because it is the value `FORBIDDEN` itself
+    was compiled from; `test_the_shipped_identity_branch_is_the_one_the_pattern_uses`
+    pins that the two never drift.
+    """
+    text = _ADDRESS_BRANCH + "|" + _HOME_BRANCH
+    branch = identity_branch_for(names)
+    return text + ("|" + branch if branch else "")
+
+
+FORBIDDEN = re.compile(forbidden_pattern())
+
+
+def identity_lookup(names):
+    """The post-pattern classifier for ``names`` — anchored whole, or None.
+
+    NOT a second detector. It is applied only to text `FORBIDDEN` has already
+    matched, and a name has no shape to match by, which is why this compares rather
+    than parses. The `\\A...\\Z` anchors are load-bearing: an unanchored classifier
+    could widen a match on its own and re-open the exemption-by-prefix this repo
+    already refuses for the fixture allowlist.
+    """
+    ordered = sorted(names)
+    if not ordered:
+        return None
+    return re.compile(r"\A(?:" + "|".join(re.escape(n) for n in ordered) + r")\Z",
+                      re.IGNORECASE)
+
+
+IDENTITY_LOOKUP = identity_lookup(IDENTITY_NAMES)
+
 
 # Which class a FORBIDDEN match belongs to. Anchored, and applied to the match
 # text only: `report()` has to explain an address and a home path differently, and
@@ -265,25 +408,41 @@ def find_in_text(text):
 
 
 def is_home_occurrence(matched):
-    """True if a FORBIDDEN match is an absolute home path, false if an address."""
+    """True if a FORBIDDEN match is an absolute home path, false otherwise."""
     return bool(_HOME_MATCH.match(matched))
+
+
+def is_identity_occurrence(matched):
+    """True if a FORBIDDEN match is the runtime identity's own name.
+
+    Classification AFTER the pattern, by comparison, never by re-parsing the
+    offender — and a name has no shape to match by, so there is nothing else to
+    compare against. Returns False on a host where the class declined itself.
+    """
+    return bool(IDENTITY_LOOKUP.match(matched)) if IDENTITY_LOOKUP else False
 
 
 def address_hits(text):
     """The address-only view of ``all_hits``.
 
-    For the places that must reason about an *address* specifically while the home
+    For the places that must reason about an *address* specifically while another
     class is still advisory: ``report``'s fix text, and the compiled-`.pyc` test,
     whose blob legitimately carries its own ``co_filename`` — which on a Linux
     runner lives inside that user's home directory, and is not the thing that test
     is blind to.
     """
-    return [(i, v) for i, v in all_hits(text) if not is_home_occurrence(v)]
+    return [(i, v) for i, v in all_hits(text)
+            if not is_home_occurrence(v) and not is_identity_occurrence(v)]
 
 
 def home_hits(text):
     """The home-path-only view of ``all_hits``."""
     return [(i, v) for i, v in all_hits(text) if is_home_occurrence(v)]
+
+
+def identity_hits(text):
+    """The operator-identity-only view of ``all_hits``."""
+    return [(i, v) for i, v in all_hits(text) if is_identity_occurrence(v)]
 
 
 # ── the home class: BLOCKING (t_34de41c3) ────────────────────────────────────
@@ -333,21 +492,79 @@ def is_home_offender(offender):
     return offender.endswith(HOME_PATH_OFFENDER_SUFFIX)
 
 
+# ── the operator-identity class: ADVISORY (t_25f7a806) ────────────────────────
+#
+# Advisory at landing, and not because the tree is dirty — the scrub in this card
+# took `scan_tracked` to 0. A rule derived from the runtime identity is only as
+# predictable as the identity it derives from, and the merge queue runs this suite
+# on the operator's own host where the branch is live; a fork or a contributor's
+# checkout derives *their* name, which is a population nobody has measured. So:
+# report today, flip once `blocking()` has been measured at 0 on the tree that flips
+# (docs/audits/operator-identity-decision_t_25f7a806.md, "Decision 3").
+#
+# The env knob may ONLY STRENGTHEN, exactly like the home knob: an exported variable
+# in CI must never be able to mute a class, and `test_the_identity_knob_may_only_
+# strengthen` pins the enforced-plus-falsy-env case, which is the one that would
+# quietly turn a hard rule off.
+OPERATOR_IDENTITIES_ENFORCE = False
+OPERATOR_IDENTITIES_ENFORCE_ENV = "HSCC_ADDRESS_GUARD_IDENTITY_ENFORCE"
+
+# Recognisable tail on an identity offender, same reason as the home suffix:
+# `report()` and `blocking()` classify by `str.endswith` instead of re-parsing
+# `rel:line: value`, which a tracked path containing a colon would break.
+IDENTITY_OFFENDER_SUFFIX = f"operator identity — scrub to {IDENTITY_PLACEHOLDER}"
+
+
+def identity_enforced():
+    """Whether identity offenders block. Read at call time, not import time."""
+    if os.environ.get(OPERATOR_IDENTITIES_ENFORCE_ENV, "").strip().lower() in (
+            "1", "true", "yes", "on"):
+        return True
+    return bool(OPERATOR_IDENTITIES_ENFORCE)
+
+
+def identity_offender(rel, line):
+    """The offender string for an operator name — and it carries NO name.
+
+    This is the reason the class may live inside `FORBIDDEN` at all. The CI redactor
+    masks the public job log with the pattern *its own environment derives*, so a
+    report generated on the operator's machine and redacted somewhere else — the
+    pattern crosses to it over a pipe, from a different host — would have no way to
+    see the value in the text. An offender that never embeds the match does not
+    depend on that coincidence: the detector knows the name, the report never prints
+    it. `test_an_identity_offender_never_carries_the_name_it_matched` pins it.
+    """
+    return f"{rel}:{line}: {IDENTITY_PLACEHOLDER} — {IDENTITY_OFFENDER_SUFFIX}"
+
+
+def is_identity_offender(offender):
+    """True for an offender produced by ``identity_offender``."""
+    return offender.endswith(IDENTITY_OFFENDER_SUFFIX)
+
+
+def _is_advisory_now(offender):
+    """True for a class that is reported but must not fail a gate right now."""
+    if is_home_offender(offender):
+        return not home_enforced()
+    if is_identity_offender(offender):
+        return not identity_enforced()
+    return False
+
+
 def blocking(offenders):
     """The offenders that must fail a commit / the suite / the CI job.
 
-    Addresses and build artefacts always. Home paths only once the home class is
-    enforced, so the two gates and the pytest assertion cannot disagree about the
-    same tree: they all ask THIS function, in the same environment.
+    Addresses and build artefacts always. A home path or an operator identity only
+    once its class is enforced, so the two gates and the pytest assertion cannot
+    disagree about the same tree: they all ask THIS function, in the same
+    environment.
     """
-    if home_enforced():
-        return list(offenders)
-    return [o for o in offenders if not is_home_offender(o)]
+    return [o for o in offenders if not _is_advisory_now(o)]
 
 
 def advisory(offenders):
-    """The offenders reported but not failed on (home paths, while advisory)."""
-    return [o for o in offenders if is_home_offender(o) and not home_enforced()]
+    """The offenders reported but not failed on (a class not yet enforced)."""
+    return [o for o in offenders if _is_advisory_now(o)]
 
 
 def is_build_artefact(rel):
@@ -440,9 +657,22 @@ def scan_blob(rel, data):
         return []
     if not isinstance(data, str):
         data = data.decode("utf-8", errors="ignore")
-    return [home_offender(rel, line, matched) if is_home_occurrence(matched)
-            else f"{rel}:{line}: {matched}"
-            for line, matched in all_hits(data)]
+    return [_offender(rel, line, matched) for line, matched in all_hits(data)]
+
+
+def _offender(rel, line, matched):
+    """Format one hit as an offender, naming the class whose fix differs.
+
+    ONE dispatcher, so `scan_blob` (staged) and `scan_paths` (tracked) can never
+    name a class differently — the hook and the CI job disagreeing about the same
+    tree is the failure this module keeps being paid for. The identity arm
+    deliberately drops the match on the floor: see ``identity_offender``.
+    """
+    if is_home_occurrence(matched):
+        return home_offender(rel, line, matched)
+    if is_identity_occurrence(matched):
+        return identity_offender(rel, line)
+    return f"{rel}:{line}: {matched}"
 
 
 def scan_paths(root, rels, read=None):
@@ -585,22 +815,26 @@ def scan_tracked(repo):
 def report(offenders, scope="staged tree"):
     """The failure text: offending file:line, then the fix for each class.
 
-    Three classes of offender, three different fixes, so they are reported apart.
+    Four classes of offender, four different fixes, so they are reported apart.
     An address is scrubbed to a placeholder; a home path to ``/Users/<operator>``;
-    a build artefact is removed from the index (telling someone to "scrub to
-    10.0.0.x" a `.pyc` is a dead end, and a dead end on a commit path is how
-    `--no-verify` gets used).
+    an operator identity is never echoed back at all; a build artefact is removed
+    from the index (telling someone to "scrub to 10.0.0.x" a `.pyc` is a dead end,
+    and a dead end on a commit path is how `--no-verify` gets used).
     """
-    artefacts, addresses, homes = [], [], []
+    artefacts, addresses, homes, identities = [], [], [], []
     for o in offenders:
         if o.endswith(BUILD_ARTEFACT_OFFENDER_SUFFIX):
             artefacts.append(o)
         elif is_home_offender(o):
             homes.append(o)
+        elif is_identity_offender(o):
+            identities.append(o)
         else:
             addresses.append(o)
-    enforced = home_enforced()
-    hard = bool(addresses or artefacts or (homes and enforced))
+    homes_enforced = home_enforced()
+    identities_enforced = identity_enforced()
+    hard = bool(addresses or artefacts or (homes and homes_enforced)
+                or (identities and identities_enforced))
 
     if addresses:
         header = (f"REAL OPERATOR ADDRESS in the {scope} — this repo is PUBLIC, "
@@ -608,9 +842,16 @@ def report(offenders, scope="staged tree"):
     elif artefacts:
         header = (f"BUILD ARTEFACT in the {scope} — this repo is PUBLIC, "
                   "the commit is blocked.")
-    elif homes and enforced:
+    elif homes and homes_enforced:
         header = (f"OPERATOR HOME PATH in the {scope} — this repo is PUBLIC, "
                   "the commit is blocked.")
+    elif identities and identities_enforced:
+        header = (f"OPERATOR IDENTITY in the {scope} — this repo is PUBLIC, "
+                  "the commit is blocked.")
+    elif identities:
+        header = (f"OPERATOR IDENTITY in the {scope} — this repo is PUBLIC. "
+                  "ADVISORY: reported, not blocked (OPERATOR_IDENTITIES_ENFORCE is "
+                  "off until the flip is measured on the tree that flips it).")
     else:
         header = (f"OPERATOR HOME PATH in the {scope} — this repo is PUBLIC. "
                   "ADVISORY: reported, not blocked (HOME_PATHS_ENFORCE is off "
@@ -640,6 +881,21 @@ def report(offenders, scope="staged tree"):
             f"  in a test    -> /Users/{FIXTURE_HOME_USER}"
             f"   (the sanctioned fixture user; never exempt a whole directory)",
         ]
+    if identities:
+        lines += [f"  {o}" for o in identities[:20]]
+        if len(identities) > 20:
+            lines.append(f"  ... and {len(identities) - 20} more")
+        lines += [
+            "",
+            "Scrub the name. It identifies the operator and their machine — the same",
+            "disclosure as a real address — and it reached here by a spelling no path",
+            "rule can see, because a path flattened into a slug keeps no home root to",
+            "grep for:",
+            f"  captured output -> {IDENTITY_PLACEHOLDER}",
+            "  an identifier   -> a generic role name (e.g. hermes_role)",
+            "  a slug path     -> drop the flattened home component",
+            "  in a test       -> a token assembled at runtime, never a literal",
+        ]
     if artefacts:
         lines += [
             "",
@@ -664,7 +920,7 @@ def report(offenders, scope="staged tree"):
             "",
             "Nothing here blocks this commit today. Scrub it anyway: the class is",
             "the one that leaked, and this becomes a hard failure once the existing",
-            "tracked-tree baseline is scrubbed (HOME_PATHS_ENFORCE in",
+            "tracked-tree baseline is scrubbed (the class's *_ENFORCE constant in",
             "scripts/address_guard.py).",
         ]
         return "\n".join(lines)
