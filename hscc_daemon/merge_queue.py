@@ -215,6 +215,17 @@ GATE_CANCEL_POLL_S = 30
 #: watcher must not outlive the leg it watches.
 _CANCEL_THREAD_PREFIX = "mq-gate-cancel"
 
+#: How often an overlapping local gate asks GitHub whether the pushed head's
+#: checks have gone red (see :class:`_OverlapCiWatch`).  Each poll is one
+#: ``gh pr view``, so this deliberately matches the gate's own cancellation
+#: cadence: a red CI is caught within one poll without turning a long gate into
+#: hundreds of API reads.  Read at CALL time, so a test can retune it.
+OVERLAP_CI_POLL_S = 30
+
+#: Project whose queue overlaps its local gate with GitHub CI when its registry
+#: row does not say either way.  Every other project keeps the sequential order.
+OVERLAP_CI_DEFAULT_PROJECT = "hscc"
+
 #: The PR URL shape workers leave in a card comment (same shape Hermes'
 #: respawn guard recognises). Owner/repo are captured too: auto-enqueue must
 #: only accept a URL from the project's OWN origin remote.
@@ -674,6 +685,21 @@ def _config_from_row(row):
     cfg["default_reason"] = default_reason(cfg)
     cfg["default_enabled"] = cfg["default_reason"] is None
     return cfg
+
+
+def _overlap_ci_enabled(cfg):
+    """True when this entry's local gate should overlap GitHub CI.
+
+    ``merge_queue.overlap_ci`` is the switch; absent, hscc's own queue overlaps
+    by default and every other project keeps the sequential order.  Strings are
+    accepted so a hand-written registry cannot turn "false" into True.
+    """
+    raw = cfg.get("overlap_ci")
+    if raw is None:
+        return str(cfg.get("name") or "") == OVERLAP_CI_DEFAULT_PROJECT
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(raw)
 
 
 def _git_checkout(repo):
@@ -1929,6 +1955,59 @@ class _GateCancelWatch:
             thread.join(timeout=max(5.0, self.poll_s + 5.0))
 
 
+class _OverlapCiWatch:
+    """Ask GitHub whether CI on the pushed head has gone RED beside a gate.
+
+    When overlap is on, ``process_entry`` pushes the rebased head BEFORE the
+    local gate, so GitHub's checks are already running on that exact SHA.  The
+    existing cancellation watcher (:class:`_GateCancelWatch`) polls this beside
+    the running leg, and a red answer cancels the leg through the same path a
+    removed claim takes (#749) instead of spending the rest of the budget on a
+    head CI has already rejected.
+
+    Only red is a verdict here.  Pending is "not yet", green leaves the merge
+    answer to ``_settle_pushed_head`` (the exact-SHA authority), and a reported
+    head that is not ours is the caller's release path — never this watcher's.
+    A failed read answers "proceed", exactly like ``_GateCancelWatch``: a flaky
+    ``gh`` must not kill a gate.
+    """
+
+    RED = "ci-red"
+
+    def __init__(self, cfg, pr, head_sha, required, *, gh_runner=None,
+                 poll_s=None):
+        self.cfg = cfg
+        self.pr = pr
+        self.head_sha = head_sha
+        self.required = required
+        self.gh_runner = gh_runner
+        self.poll_s = OVERLAP_CI_POLL_S if poll_s is None else poll_s
+        self._next = 0.0
+        self.red = False
+
+    def check(self):
+        if self.red:
+            return self.RED
+        now = time.monotonic()
+        if now < self._next:
+            return None
+        # Stamped before the read: a slow gh is one poll, never a burst.
+        self._next = now + self.poll_s
+        try:
+            info = pr_view_settled(self.cfg["repo"], self.pr,
+                                   runner=self.gh_runner)
+        except Exception:
+            return None
+        if not isinstance(info, dict):
+            return None
+        if str(info.get("headRefOid") or "") != self.head_sha:
+            return None
+        if _checks_verdict(info, required_checks=self.required) == "red":
+            self.red = True
+            return self.RED
+        return None
+
+
 def _run_gate(command, worktree, timeout_s, cancel_check=None,
               *, cancel_poll_s=None, on_start=None):
     """Run one shell gate; returns ``(verdict, output)``.
@@ -2770,13 +2849,45 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     _update_flight(state_path, project, entry["pr"],
                    stage="gating" if gates else "merging")
     timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
+    overlap = _overlap_ci_enabled(cfg)
+    pushed_sha = ""
+    pushed_at = None
+    overlap_watch = None
+    if overlap:
+        # Push the rebased head FIRST so GitHub CI runs on the exact SHA the
+        # local gate is judging.  Same lease-pinned force-push and same head
+        # re-read as the sequential order used after the gate; both answering
+        # green for this SHA is still required, and `_settle_pushed_head` below
+        # remains the only merge authority.
+        err = _push_branch(worktree, info, git_runner)
+        if err:
+            return _retry_or_drop(doc, state_path, project, entry, err)
+        sha = _git(["rev-parse", "HEAD"], worktree, git_runner)
+        pushed_sha = (sha.stdout or "").strip() if sha is not None else ""
+        if not pushed_sha:
+            return _retry_or_drop(doc, state_path, project, entry,
+                                  "could not read the pushed head SHA")
+        pushed_at = _now_iso()
+        overlap_watch = _OverlapCiWatch(
+            cfg, entry["pr"], pushed_sha, required, gh_runner=gh_runner)
+
+    def _gate_cancel_check():
+        # The ledger answer comes first, exactly as before: remove/pause/disable
+        # must keep winning over a CI red.
+        reason = _cancel_reason(state_path, project, entry, cfg)
+        if reason or overlap_watch is None:
+            return reason
+        return overlap_watch.check()
+
     for command in gates:
+        overlap_note = (f" (overlapping CI on {pushed_sha[:12]})"
+                        if pushed_sha else "")
         # Name the leg BEFORE it runs. It can hold the whole queue for its
         # entire budget, and until now the first line the log ever got about it
         # was the verdict at the far end — the measured 65 minutes of silence
         # was exactly one such leg (t_8c461597).
-        log(f"merge-queue {project}: PR #{entry['pr']} gate start: {command} "
-            f"(budget {timeout_s}s)", "INFO")
+        log(f"merge-queue {project}: PR #{entry['pr']} gate start{overlap_note}: "
+            f"{command} (budget {timeout_s}s)", "INFO")
         # One gate leg can hold the entire DEFAULT_GATE_TIMEOUT_S budget, so the
         # stream is heartbeated from around the call, not after it: the wrapper
         # starts the heartbeat immediately before the leg and stops it in a
@@ -2807,8 +2918,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             with _GateLiveness(project, entry["pr"], command):
                 verdict, output = _run_gate(
                     command, worktree, timeout_s,
-                    cancel_check=lambda: _cancel_reason(state_path, project,
-                                                        entry, cfg),
+                    cancel_check=_gate_cancel_check,
                     on_start=_record_gate_pgid)
         finally:
             if gate_pgids:
@@ -2818,6 +2928,29 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                 except Exception:
                     pass
         if verdict == "cancelled":
+            if overlap_watch is not None and overlap_watch.red:
+                # CI rejected the pushed head while the local gate was still
+                # running.  The gate was stopped through the same path a
+                # removed claim takes (#749); the verdict is CI's, so hand the
+                # card back exactly as the post-gate red-CI path does and do
+                # not spend the rest of the budget waiting for the gate.
+                body = (
+                    f"Merge queue: CI is red on the pushed head "
+                    f"{pushed_sha[:12]}.\n\n"
+                    "The local gate was still running when GitHub reported the "
+                    "PR's own checks red on that head, so it was cancelled. "
+                    "The repository's checks are a real verdict on this code.\n\n"
+                    f"{resolve_instructions(entry.get('branch'), base)}\n")
+                _finish(None, project, state_path, None, "red-ci", entry,
+                        head_sha=pushed_sha, log=log)
+                _handback(entry, cfg, body, handback, gh_runner, log=log,
+                          reason="CI red", state_path=state_path,
+                          project=project)
+                log(f"merge-queue {project}: PR #{entry['pr']} CI red on "
+                    f"pushed head {pushed_sha[:12]}; local gate cancelled",
+                    "WARN")
+                return {"pr": entry["pr"], "result": "red-ci",
+                        "head_sha": pushed_sha}
             # The entry left the queue while the leg ran. Resolve it through the
             # same `_stop_cancelled` a checkpoint uses — drop on `removed`,
             # requeue on `paused`/`disabled` — and stop there.  Not a `red-gate`,
@@ -2875,7 +3008,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                     f"{output}\n\n"
                     f"{resolve_instructions(info.get('headRefName'), base)}\n")
             _finish(doc, project, state_path, ps, "red-gate", entry,
-                    gate=command, head_sha=info.get("headRefOid"), log=log)
+                    gate=command, head_sha=pushed_sha or info.get("headRefOid"),
+                    log=log)
             _handback(entry, cfg, body, handback, gh_runner, log=log,
                       reason="gate failed", state_path=state_path,
                       project=project)
@@ -2891,16 +3025,20 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     if cancel:
         return _stop_cancelled(state_path, project, entry, cancel)
 
-    _update_flight(state_path, project, entry["pr"], stage="merging")
-    err = _push_branch(worktree, info, git_runner)
-    if err:
-        return _retry_or_drop(doc, state_path, project, entry, err)
+    if not overlap:
+        _update_flight(state_path, project, entry["pr"], stage="merging")
+        err = _push_branch(worktree, info, git_runner)
+        if err:
+            return _retry_or_drop(doc, state_path, project, entry, err)
 
-    sha = _git(["rev-parse", "HEAD"], worktree, git_runner)
-    head_sha = (sha.stdout or "").strip() if sha is not None else ""
-    if not head_sha:
-        return _retry_or_drop(doc, state_path, project, entry,
-                              "could not read the pushed head SHA")
+        sha = _git(["rev-parse", "HEAD"], worktree, git_runner)
+        pushed_sha = (sha.stdout or "").strip() if sha is not None else ""
+        if not pushed_sha:
+            return _retry_or_drop(doc, state_path, project, entry,
+                                  "could not read the pushed head SHA")
+        pushed_at = None
+
+    head_sha = pushed_sha
 
     # The force-push moved the head, so the pre-push readiness answer is stale:
     # re-read the PR itself and merge only this exact SHA while it is green.
@@ -2915,6 +3053,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         project, cfg, entry, after, head_sha, base=base,
         state_path=state_path, cwd=worktree, git_runner=git_runner,
         gh_runner=gh_runner, handback=handback, log=log,
+        ci_since=pushed_at,
         pre_push_sha=str(info.get("headRefOid") or ""))
 
 
