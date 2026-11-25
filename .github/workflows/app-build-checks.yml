@@ -8,6 +8,18 @@ name: app-build-checks
 # on a runner whose Xcode is older than that SDK. Skipping is announced and
 # does not fail the job; the macOS legs run everywhere (macOS 14 deployment
 # target), and every other iOS gate compiles against the macOS SDK.
+#
+# WHEN THE COMPILE RUNS (t_31679ad1). Measured 2026-11-25: this workflow ran the
+# `compile` job on macos-latest for EVERY push and pull_request (9-27 min each)
+# while the account's macOS pool held 5 running and 10 queued; PRs waited 30+ min
+# for a runner, #792/#802/#722 all hit the merge queue's 1800 s CI-pending budget
+# and nothing queue-merged for 4 h. A Python-only PR cannot affect the Apple
+# clients, so the ubuntu `changes` job decides from the diff and the heavy steps
+# live in `apple`, which is skipped when nothing Apple-related moved. A push to
+# main always compiles: that is the backstop for a wrong touched-path decision.
+# `compile` is the stable check name and now aggregates: green on a legitimate
+# skip, red when the compile failed or did not run, or when the selector itself
+# broke. Never green because nothing ran.
 
 on:
   push:
@@ -21,7 +33,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  compile:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.decide.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The touched-path diff needs both commits, so no shallow clone.
+          fetch-depth: 0
+
+      - name: Decide whether the Apple build inputs moved
+        id: decide
+        # All dynamic values reach the shell through the environment, never
+        # inlined into the script, so a branch name cannot inject commands.
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/decide_app_build.sh
+
+  apple:
+    name: apple compile
+    needs: changes
+    # Skipped only when the ubuntu selector says the diff cannot affect the
+    # Apple clients; `compile` below turns that skip into the required check.
+    if: needs.changes.outputs.apps == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -123,3 +161,45 @@ jobs:
             echo "::endgroup::"
           done
           exit "$rc"
+
+  compile:
+    name: compile
+    # The stable check name. It reports on every PR — including the ones whose
+    # heavy job was skipped — and it fails on anything it cannot vouch for.
+    needs: [changes, apple]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          APPS: ${{ needs.changes.outputs.apps }}
+          APPLE_RESULT: ${{ needs.apple.result }}
+        run: |
+          set -euo pipefail
+          echo "changes: ${CHANGES_RESULT} (apps=${APPS:-<unset>})"
+          echo "apple: ${APPLE_RESULT}"
+          if [ "${CHANGES_RESULT}" != "success" ]; then
+            echo "::error::the touched-path selector did not complete — refusing to report a compile verdict"
+            exit 1
+          fi
+          case "${APPS}" in
+            true)
+              if [ "${APPLE_RESULT}" != "success" ]; then
+                echo "::error::Apple build inputs changed but the compile did not succeed (${APPLE_RESULT})"
+                exit 1
+              fi
+              echo "Apple build inputs changed; compile passed"
+              ;;
+            false)
+              if [ "${APPLE_RESULT}" != "skipped" ]; then
+                echo "::error::the selector skipped the compile but the heavy job reported ${APPLE_RESULT}"
+                exit 1
+              fi
+              echo "no Apple build input in the diff; compile skipped"
+              ;;
+            *)
+              echo "::error::the selector produced no apps verdict (${APPS:-<unset>})"
+              exit 1
+              ;;
+          esac

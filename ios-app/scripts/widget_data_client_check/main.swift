@@ -172,7 +172,7 @@ let historyBody = Data(#"""
           {"tier":1,"ts":1794978360,"host":"192.0.2.10","gpu_util_pct":0.0,"gpu_power_w":null,"gpu_power_w_max":null,"n":12,"error":"collect failed"}],
  "engines":[{"tier":1,"ts":1794978300,"node":"192.0.2.10","port":"8000","model":"org/Qwen-Test","run":2,"wait":1,"kv":12.5,"gen_tps":40.0,"n":30,"error":null}],
  "counts":{"hosts":2,"engines":1},
- "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
+ "store":{"path":"/Users/hscc-fixture/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
  "note":"","speak":"Last 6h at 60s resolution: 2 node points, 1 engine point."}
 """#.utf8)
 
@@ -190,7 +190,7 @@ let historyAllNodesBody = Data(#"""
           {"tier":1,"ts":1794978360,"host":"192.0.2.11","gpu_util_pct":0.0,"gpu_power_w":null,"gpu_power_w_max":null,"n":12,"error":"collect failed"}],
  "engines":[],
  "counts":{"hosts":2,"engines":0},
- "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
+ "store":{"path":"/Users/hscc-fixture/.hscc/metrics/history.db","exists":true,"db_bytes":3355443,"tier0_resident":null},
  "note":"","speak":"Last hour at 60s resolution: 2 node points."}
 """#.utf8)
 
@@ -208,7 +208,7 @@ let historyTier0Body = Data(#"""
  "max_fields":[],"since":1794999000,"until":1794999900,"node":"all",
  "hosts_included":true,"engines_included":true,"hosts":[],"engines":[],
  "counts":{"hosts":0,"engines":0},
- "store":{"path":"/Users/example/.hscc/metrics/history.db","exists":true,"db_bytes":16384,"tier0_resident":false},
+ "store":{"path":"/Users/hscc-fixture/.hscc/metrics/history.db","exists":true,"db_bytes":16384,"tier0_resident":false},
  "note":"tier 0 is the sampler's in-memory ring and lives in the daemon process; this server process cannot read it, so no 2 s points are served here. Use window=1h for the durable 1-minute tier.",
  "speak":"The 15 m window is the daemon's in-memory ring and this server process does not own it. Ask for window=1h for 1-minute points."}
 """#.utf8)

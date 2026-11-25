@@ -229,9 +229,9 @@ class TestHold:
 
 class TestScan:
     @pytest.mark.parametrize("cmd,want", [
-        ("/Users/x/miniconda3/envs/p313/bin/hscc start", True),
-        ("/Users/x/.hermes/hermes-agent/venv/bin/python "
-         "/Users/x/.hermes/plugins/hscc_daemon/hscc.py start-daemon", True),
+        ("/Users/hscc-fixture/miniconda3/envs/p313/bin/hscc start", True),
+        ("/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python "
+         "/Users/hscc-fixture/.hermes/plugins/hscc_daemon/hscc.py start-daemon", True),
         ("hscc start-daemon", True),
         ("hscc status", False),
         ("/x/bin/hscc api start --tailscale --no-qr", False),

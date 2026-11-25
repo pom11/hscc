@@ -562,6 +562,12 @@ def _home(root, user=_REAL_USER, rest=""):
     ("~/.hermes/gateway.sock", None),
     ("/usr/local/bin/python3", None),
     ("/private/var/folders/9x/T/pytest-of-someone", None),
+    # clean: a user component that cannot be an account (t_34de41c3). Assembled,
+    # because writing the ellipsis form literally would plant the finding here.
+    ("/Users/" + "." * 3 + "/dev/eco", None),                    # prose ellipsis
+    ("/home/" + "." + "local/bin/hscc", None),                   # a dotfile, not a home
+    # trips: a digit-led account name is still a concrete user
+    (f"/Users/{'2'}fac/x", True),
 ])
 def test_find_in_text_home_verdicts(text, expect_hit):
     hits = address_guard.home_hits(text)
@@ -572,25 +578,75 @@ def test_find_in_text_home_verdicts(text, expect_hit):
         assert address_guard.is_home_occurrence(hits[0][1])
 
 
-def test_an_address_never_hides_behind_a_home_path_on_the_same_line():
+def test_a_newline_escaped_home_path_still_trips_the_branch():
+    """THE reason this branch has a lookahead and not a lookbehind (t_34de41c3).
+
+    A home path written after a ``\\n`` escape inside a string literal has a WORD
+    CHARACTER in front of the slash in the file bytes — the `n` of the escape. Any
+    left-boundary lookbehind over the path-name class (``(?<![A-Za-z0-9._-])``,
+    the shape proposed for the relative-path false positives) therefore declines
+    it, and the hook, the pytest gate and the CI backstop all pass a real leak
+    committed as ``".../bin/zsh\\n/Users/<user>/.ssh/id_rsa\\n"``.
+
+    Same failure family as the ``.pyc`` trap that forces the build-artefact
+    refusal, and the reason ``\\b`` is refused here. If a future change adds a
+    left boundary to ``_HOME_BRANCH``, this test is the one that goes red.
+    """
+    planted = "/bin/zsh\\n" + _home("/Users", rest="/.ssh/id_rsa") + "\\n"
+    assert "\\n" in planted, "the escape must be the two bytes backslash-n"
+    hits = address_guard.home_hits(planted)
+    assert hits, f"a \\n escape must not hide a home path: {planted!r}"
+    assert hits[0][1].startswith(_home("/Users", rest="/.ssh")), hits
+
+
+def test_a_home_path_after_a_word_char_still_trips_the_branch():
+    """The quote/paren/start-of-line family, widened to the adjacency a
+    lookbehind would eat — no context may hide the branch (t_3480956c's rule,
+    re-pinned for t_34de41c3)."""
+    for ctx, label in (
+            (f'"{_home("/Users", rest="/x")}"', "double quote"),
+            (f"({_home('/home', rest='/x')})", "paren"),
+            (_home("/Users", rest="/x"), "start of line"),
+            (f"cmd --home={_home('/home', rest='/x')}", "after ="),
+            (f"file://{_home('/Users', rest='/x')}", "after a URL scheme"),
+            (f"| {_home('/home', rest='/x')} |", "Markdown table cell"),
+            (f"<code>{_home('/Users', rest='/x')}</code>", "HTML code element"),
+    ):
+        assert address_guard.home_hits(ctx), f"{label}: the branch went blind"
+
+
+def test_an_address_never_hides_behind_a_home_path_on_the_same_line(monkeypatch):
     """THE interaction hazard of making one class advisory, pinned in both orders.
 
     With one match per line, a line holding a home path and a real LAN address
-    would have reported only the home path while the home class is advisory — so
+    would have reported only the home path while the home class was advisory — so
     the blocking address would leave the gate unseen and the commit would pass.
     `find_in_text` returns every match for that reason, and this is the test that
     would have caught it.
+
+    t_34de41c3 made the home class blocking, so the hazard changed shape and is
+    now pinned in BOTH postures: the address must reach the blocking subset while
+    home is filtered out (advisory) *and* while home blocks alongside it.
     """
     addr = "10" + ".0.0.5"
     path = _home("/Users", rest="/x")
+    addr_only = f"d.md:1: {addr}"
     for line, label in ((f"host {addr} and {path}", "address first"),
                         (f"{path} and host {addr}", "home path first")):
         assert [v for _, v in address_guard.address_hits(line)] == [addr], label
         assert [v for _, v in address_guard.home_hits(line)] == [path], label
         offenders = address_guard.scan_blob("d.md", line.encode())
         assert len(offenders) == 2, (label, offenders)
-        assert address_guard.blocking(offenders) == [f"d.md:1: {addr}"], (
+        # enforced (the shipped posture since t_34de41c3): both block.
+        assert addr_only in address_guard.blocking(offenders), (
             f"{label}: the address escaped the blocking subset")
+        assert len(address_guard.blocking(offenders)) == 2, label
+        # advisory (reachable only by editing the constant now): the address
+        # still blocks on its own — it was never allowed to ride along with home.
+        monkeypatch.setattr(address_guard, "HOME_PATHS_ENFORCE", False)
+        assert address_guard.blocking(offenders) == [addr_only], (
+            f"{label}: advisory mode lost the address")
+        monkeypatch.setattr(address_guard, "HOME_PATHS_ENFORCE", True)
 
 
 def test_home_path_is_visible_to_the_pattern_the_redactor_loads():
@@ -617,6 +673,104 @@ def test_scan_blob_formats_a_home_offender_with_file_line_and_fix():
     assert got[0].startswith(f"docs/testing/loadstress-leg.md:1: {_home('/Users')}")
     assert address_guard.is_home_offender(got[0]), "an offender the report cannot classify"
     assert address_guard.HOME_PATH_OFFENDER_SUFFIX in got[0]
+
+
+# ── machine hostnames (t_68ccc902) ───────────────────────────────────────────
+#
+# The real leak was a macOS LocalHostName in an audit header and a kanban claimer
+# field. The rule is a SHAPE, so the must-trip fixtures are assembled at runtime
+# and carried on a reserved TLD (.invalid): the tracked bytes below never contain
+# a hostname-shaped literal, and the fixture cannot name a real machine.
+_HOST_TRIP = "Alices-" + "Mac-Studio.invalid"          # reserved TLD
+_HOST_BOOK = "Bobs-" + "MacBook-Pro.local"
+_HOST_MINI = "Carls-" + "Mac-mini.local"
+_HOST_IMAC = "Danas-" + "iMac.local"
+
+
+@pytest.mark.parametrize("text,expect_hit", [
+    (f"host: {_HOST_TRIP} (macOS)", True),                 # the audit-header shape
+    (f"claimer `{_HOST_TRIP}.local:mock`", True),          # the claimer-field shape
+    (f"login {_HOST_BOOK}", True),                         # MacBook Pro default name
+    (f"login {_HOST_MINI}", True),                         # Mac mini default name
+    (f"login {_HOST_IMAC}", True),                         # iMac default name
+    ("<host>.local and <host>", None),                     # the documented replacement
+    ("build-mac-studio.invalid", None),                    # reserved, no possessive shape
+    ("Alice's Mac Studio is the control plane", None),     # prose: apostrophe + space
+    ("the Mac Studio that hosts the fleet", None),         # generic hardware
+    ("~/.local/bin and /opt/homebrew/bin", None),          # `.local` is not enough
+])
+def test_find_in_text_hostname_verdicts(text, expect_hit):
+    hits = address_guard.hostname_hits(text)
+    if expect_hit is None:
+        assert hits == [], f"false positive on a machine hostname: {text!r}"
+    else:
+        assert hits, f"missed the machine hostname in {text!r}"
+        assert address_guard.is_hostname_occurrence(hits[0][1])
+
+
+def test_scan_blob_formats_a_hostname_offender_with_file_line_and_fix():
+    got = address_guard.scan_blob("docs/audit.md", f"host: {_HOST_TRIP}\n".encode())
+    assert len(got) == 1
+    assert got[0].startswith(f"docs/audit.md:1: {_HOST_TRIP.split('.')[0]}")
+    assert address_guard.is_hostname_offender(got[0]), (
+        "an offender the report cannot classify")
+    assert address_guard.HOSTNAME_OFFENDER_SUFFIX in got[0]
+
+
+def test_hostname_class_blocks_by_default_and_can_be_switched_off(monkeypatch):
+    """Both halves of the posture: the class is ON now that the baseline is clean,
+    and the switch still turns it advisory without turning the DETECTOR off."""
+    (found,) = address_guard.scan_blob("docs/x.md", f"host {_HOST_TRIP}\n".encode())
+    assert address_guard.HOSTNAMES_ENFORCE is True, (
+        "the hostname class landed advisory although its tracked-tree baseline was"
+        " scrubbed to zero — that is the blind gate this card replaces")
+
+    monkeypatch.setattr(address_guard, "HOSTNAMES_ENFORCE", False)
+    assert address_guard.advisory([found]) == [found]
+    assert address_guard.blocking([found]) == []
+
+    monkeypatch.setattr(address_guard, "HOSTNAMES_ENFORCE", True)
+    assert address_guard.blocking([found]) == [found], (
+        "HOSTNAMES_ENFORCE=True did not block: the rule can never be turned on")
+    assert address_guard.advisory([found]) == []
+
+
+def test_report_explains_a_hostname_differently_from_an_address(monkeypatch):
+    """The fix is `<host>`, not an address placeholder; advisory states itself."""
+    planted = address_guard.hostname_offender(
+        "docs/audit.md", 4, _HOST_TRIP.split(".")[0])
+    text = address_guard.report([planted])
+    assert "docs/audit.md:4" in text
+    assert address_guard.HOSTNAME_PLACEHOLDER in text
+    assert "PUBLIC" in text and "blocked" in text
+    assert "10.0.0.x" not in text, "the hostname fix text suggested an address scrub"
+
+    monkeypatch.setattr(address_guard, "HOSTNAMES_ENFORCE", False)
+    advisory_text = address_guard.report([planted])
+    assert "ADVISORY" in advisory_text and "HOSTNAMES_ENFORCE" in advisory_text
+
+
+def test_an_address_never_hides_behind_a_hostname_on_the_same_line(monkeypatch):
+    """The one-hit-per-line hazard, with the hostname switch OFF.
+
+    `all_hits` reports both classes; if it silently kept only the advisory
+    hostname, the blocking address would leave the gate unseen and the commit
+    would pass.
+    """
+    monkeypatch.setattr(address_guard, "HOSTNAMES_ENFORCE", False)
+    line = f"claimer {_HOST_TRIP} and host {REAL_LAN}"
+    offenders = address_guard.scan_blob("d.md", line.encode())
+    assert len(offenders) == 2, offenders
+    assert address_guard.blocking(offenders) == [f"d.md:1: {REAL_LAN}"]
+
+
+def test_hostname_is_visible_to_the_pattern_the_redactor_loads():
+    """Same cross-file invariant as the home class: the redactor loads only
+    FORBIDDEN, so a hostname rule in a second pattern would publish the value."""
+    match = address_guard.FORBIDDEN.search(f"host: {_HOST_TRIP}")
+    assert match and address_guard.is_hostname_occurrence(match.group(0)), (
+        "FORBIDDEN no longer matches a machine hostname: the CI redactor (which"
+        " loads only FORBIDDEN) would print it into a public job log")
 
 
 # ── the fixture pair, pinned both ways (the readme_lint habit) ───────────────
@@ -664,24 +818,46 @@ def test_the_fixtures_themselves_are_clean_tracked_content():
 
 # ── advisory now, blocking on the flip ───────────────────────────────────────
 
-def test_report_explains_a_home_path_differently_from_an_address():
+def test_report_explains_a_home_path_differently_from_an_address(monkeypatch):
     """The fix for a home path is not `10.0.0.x`, and a wrong fix on a commit path
-    is how --no-verify gets used."""
+    is how --no-verify gets used. Both postures, because the header text differs
+    between them and a reader must never have to guess which one fired."""
     planted = address_guard.home_offender("a.md", 3, _home("/Users", rest="/x"))
+
+    # enforced — the shipped posture since t_34de41c3.
     text = address_guard.report([planted])
     assert "a.md:3" in text
     assert address_guard.HOME_PLACEHOLDER in text
     assert address_guard.FIXTURE_HOME_USER in text
     assert "PUBLIC" in text
-    assert "ADVISORY" in text, "advisory must be stated, not left to the exit code"
+    assert "blocked" in text, "the enforced header must say the commit is blocked"
+    assert "ADVISORY" not in text, (
+        "an enforced finding must not be described as advisory — that wording is "
+        "how a hard rule reads as optional to whoever hits it")
     # mixed: the address still gets its own placeholders, the home path gets its own
     mixed = address_guard.report([planted, "b.md:1: " + REAL_LAN])
     assert "10.0.0.x" in mixed and "100.64.0.1" in mixed
     assert "a.md:3" in mixed and "b.md:1" in mixed
 
+    # advisory — reachable only by editing the constant, so the wording stays
+    # exercised rather than rotting into a lie.
+    monkeypatch.setattr(address_guard, "HOME_PATHS_ENFORCE", False)
+    adv = address_guard.report([planted])
+    assert "ADVISORY" in adv, "advisory must be stated, not left to the exit code"
+    assert address_guard.advisory([planted]) == [planted]
+    assert address_guard.blocking([planted]) == []
 
-def test_cli_reports_a_home_path_without_blocking_and_blocks_when_enforced(tmp_path):
-    """Both halves of the posture, through the CLI the hook and CI both call."""
+
+def test_cli_blocks_a_home_path_now_that_home_is_enforced(tmp_path):
+    """The flip, through the CLI the hook and CI both call (t_34de41c3).
+
+    This is the "prove the rule bites" half of the advisory-then-flip habit: a
+    knob nobody can turn on is a knob that silently stays off, and an advisory
+    class is exactly how the PR #724 shape reached origin. The advisory posture is
+    covered in-process (report/blocking above) rather than by an env-var off
+    switch ON PURPOSE — `HSCC_ADDRESS_GUARD_HOME_ENFORCE` can only strengthen the
+    rule, so a CI job or a checkout cannot mute the home class by exporting it.
+    """
     r = _repo(tmp_path)
     (r / "loadstress.md").write_text(
         f"interpreter: {_home('/Users', rest='/.hermes/venv/bin/python')}\n",
@@ -696,18 +872,20 @@ def test_cli_reports_a_home_path_without_blocking_and_blocks_when_enforced(tmp_p
              "--staged", "--repo", str(r)],
             capture_output=True, env=proc_env)
 
-    advisory = run()
-    assert advisory.returncode == 0, advisory.stderr.decode()   # advisory: reported
-    err = advisory.stderr.decode()
-    assert "loadstress.md:1" in err, err                          # ...and visible
-    assert "ADVISORY" in err
-    assert address_guard.HOME_PLACEHOLDER in err                  # ...with the fix
+    default = run()
+    assert default.returncode == 1, (
+        "HOME_PATHS_ENFORCE is True, so a planted home path must exit 1 — if this "
+        "passes with 0 the flip did not land")
+    err = default.stderr.decode()
+    assert "loadstress.md:1" in err, err                        # reported, not silent
+    assert "blocked" in err and address_guard.HOME_PLACEHOLDER in err
 
-    enforced = run(**{address_guard.HOME_PATHS_ENFORCE_ENV: "true"})
-    assert enforced.returncode == 1, (
-        "the home class can never be turned on — advisory would be permanent, which"
-        " is the blind gate this card replaces with a slower one")
-    assert "blocked" in enforced.stderr.decode()
+    # the env knob can still only strengthen: a truthy value changes nothing
+    assert run(**{address_guard.HOME_PATHS_ENFORCE_ENV: "true"}).returncode == 1
+    # ...and a falsy value must NOT mute the class
+    assert run(**{address_guard.HOME_PATHS_ENFORCE_ENV: "0"}).returncode == 1, (
+        "the env var became an OFF switch: an exported variable in CI could now "
+        "disable the home rule")
     # a real address still blocks whatever the home knob says
     (r / "leak.md").write_text("host " + REAL_LAN + "\n", encoding="utf-8")
     _git(r, "add", "leak.md")

@@ -1,7 +1,7 @@
 # The sibling-interpreter stamp is unusable while `p313` lacks hermes' runtime deps
 
 Card: `t_02c98915` · measured at `origin/main` = `3aca67dd` (2026-11-10) ·
-host: Razvans-Mac-Studio (macOS), load recorded below with each timed number.
+host: macOS, load recorded below with each timed number.
 
 ## Amendment (2026-11-18, t_0fd2c149) — this page is the measurement; the
 runner's roster is the live authority

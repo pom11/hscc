@@ -20,7 +20,7 @@ route's own clock seam (`_history_now`), which is what
 bucket starts are reproducible.
 
 Sanitisation (the ONLY rewrite applied to handler output):
-  * `store.path`  -> `/Users/example/.hscc/metrics/history.db`
+  * `store.path`  -> `/Users/hscc-fixture/.hscc/metrics/history.db`
     (the generator's temp dir would otherwise leak a machine-specific path;
     `ClusterHistoryStore` deliberately does not declare `path`, so the model
     never decodes it — the key stays on the wire on purpose so that refusal is
@@ -61,7 +61,7 @@ HOST_A = "192.0.2.10"                       # TEST-NET-1 — never a real node
 HOST_B = "192.0.2.11"
 PORT = "8000"
 MODEL = "org/Qwen-Test"
-PATH_PLACEHOLDER = "/Users/example/.hscc/metrics/history.db"
+PATH_PLACEHOLDER = "/Users/hscc-fixture/.hscc/metrics/history.db"
 
 #: aligned to 2 s, 1 min and 5 min so every bucket boundary is a real one.
 NOW = 1_795_000_000 - (1_795_000_000 % 300)

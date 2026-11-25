@@ -2,73 +2,73 @@
  "projects": [
   {
    "name": "hscc",
-   "repo": "/home/devuser/dev/hscc",
+   "repo": "/home/hscc-fixture/dev/hscc",
    "board": "hscc",
    "topic": 2046
   },
   {
    "name": "ecofire-bc",
-   "repo": "/home/devuser/dev/EcoFire_customizations_bc",
+   "repo": "/home/hscc-fixture/dev/EcoFire_customizations_bc",
    "board": "ecofire-bc",
    "topic": 3899
   },
   {
    "name": "ecofire-app",
-   "repo": "/home/devuser/dev/ecofire",
+   "repo": "/home/hscc-fixture/dev/ecofire",
    "board": "ecofire-app",
    "topic": 2257
   },
   {
    "name": "sphoin",
-   "repo": "/home/devuser/dev/sphoin_engine",
+   "repo": "/home/hscc-fixture/dev/sphoin_engine",
    "board": "sphoin",
    "topic": 2
   },
   {
    "name": "soconn",
-   "repo": "/home/devuser/dev/soconn",
+   "repo": "/home/hscc-fixture/dev/soconn",
    "board": "soconn",
    "topic": 7074
   },
   {
    "name": "flosana",
-   "repo": "/home/devuser/dev/flosana",
+   "repo": "/home/hscc-fixture/dev/flosana",
    "board": "flosana",
    "topic": 7253
   },
   {
    "name": "powerbi",
-   "repo": "/home/devuser/dev/ecofire-powerbi",
+   "repo": "/home/hscc-fixture/dev/ecofire-powerbi",
    "board": "powerbi",
    "topic": 6366
   },
   {
    "name": "efsdriver",
-   "repo": "/home/devuser/dev/efsdriver",
+   "repo": "/home/hscc-fixture/dev/efsdriver",
    "board": "efsdriver",
    "topic": 6369
   },
   {
    "name": "grid",
-   "repo": "/home/devuser/dev/Grid",
+   "repo": "/home/hscc-fixture/dev/Grid",
    "board": "grid",
    "topic": 9031
   },
   {
    "name": "radio",
-   "repo": "/home/devuser/dev/Radio",
+   "repo": "/home/hscc-fixture/dev/Radio",
    "board": "radio",
    "topic": 9032
   },
   {
    "name": "pickolo",
-   "repo": "/home/devuser/dev/pickolo",
+   "repo": "/home/hscc-fixture/dev/pickolo",
    "board": "pickolo",
    "topic": 9033
   },
   {
    "name": "pom",
-   "repo": "/home/devuser/dev/pom",
+   "repo": "/home/hscc-fixture/dev/pom",
    "board": "pom",
    "topic": 9034
   }

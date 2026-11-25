@@ -58,7 +58,7 @@ def _fleet_health():
     return {"_cluster_default_runner": lambda: '{"hosts": ["192.0.2.1"]}',
             "_status_runner": lambda cl: "",
             "_serving_raw": json.dumps({"units": []}),
-            "_venv_python": "/home/u/.venvs/sparkrun/bin/python",
+            "_venv_python": "/home/hscc-fixture/.venvs/sparkrun/bin/python",
             "_lan_probe": lambda i, n: None}
 
 

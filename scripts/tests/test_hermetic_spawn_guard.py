@@ -156,7 +156,7 @@ def test_a_named_venv_interpreter_is_clean():
 def test_home_prefixed_cwd_is_a_violation():
     src = '''
         import subprocess
-        subprocess.run(["/usr/bin/true"], cwd="/Users/operator/dev/hscc")
+        subprocess.run(["/usr/bin/true"], cwd="/Users/hscc-fixture/dev/hscc")
         '''
     assert _kinds(src) == [guard.KIND_HOME_PATH]
 
@@ -179,17 +179,17 @@ def test_linux_operator_home_shape_is_caught_on_a_mac_runner():
     """
     src = '''
         import subprocess
-        subprocess.run(["x"], cwd="/Users/someone/dev/hscc")
+        subprocess.run(["x"], cwd="/Users/hscc-fixture/dev/hscc")
         '''
     assert _kinds(src) == [guard.KIND_HOME_PATH]
 
 
 def test_home_shape_arm_works_with_a_foreign_root_set():
     """Pass roots explicitly: the verdict must not depend on this host's home."""
-    assert guard.is_home_prefixed("/Users/x/dev/hscc", roots=frozenset({"/home/runner"}))
+    assert guard.is_home_prefixed("/Users/hscc-fixture/dev/hscc", roots=frozenset({"/home/runner"}))
     assert guard.is_home_prefixed("/home/runner/x", roots=frozenset({"/home/runner"}))
     assert not guard.is_home_prefixed("/tmp/work", roots=frozenset({"/home/runner"}))
-    assert not guard.is_home_prefixed("/tmp/Users/x", roots=frozenset({"/home/runner"}))
+    assert not guard.is_home_prefixed("/tmp/Users/hscc-fixture", roots=frozenset({"/home/runner"}))
 
 
 def test_home_threshold_survives_a_sealed_home(monkeypatch):
@@ -208,7 +208,7 @@ def test_home_threshold_survives_a_sealed_home(monkeypatch):
     assert str(Path.home()) == sandbox
     src = '''
         import subprocess
-        subprocess.run(["x"], cwd="/Users/operator/dev/hscc")
+        subprocess.run(["x"], cwd="/Users/hscc-fixture/dev/hscc")
         '''
     assert _kinds(src) == [guard.KIND_HOME_PATH]
 
@@ -373,18 +373,18 @@ def test_the_report_offers_the_rule_3_remedy():
 # --------------------------------------------------------------------------- #
 
 FIXTURE_DATA_SRC = '''
-    """Why ~/dev/hscc and /Users/operator/hscc must never be spawned directly."""
+    """Why ~/dev/hscc and /Users/hscc-fixture/hscc must never be spawned directly."""
 
-    HOME_DIR = "/Users/operator"
-    REGISTRY_ROW = {"repo": "/Users/operator/dev/hscc", "home": "/home/operator"}
-    CANDIDATES = ["/Users/operator/.hermes/x", "/home/operator/.hermes/y"]
+    HOME_DIR = "/Users/hscc-fixture"
+    REGISTRY_ROW = {"repo": "/Users/hscc-fixture/dev/hscc", "home": "/home/hscc-fixture"}
+    CANDIDATES = ["/Users/hscc-fixture/.hermes/x", "/home/hscc-fixture/.hermes/y"]
 
     def test_path_parsing():
-        assert parse("/Users/operator/dev/hscc/cli.py") == "cli.py"
+        assert parse("/Users/hscc-fixture/dev/hscc/cli.py") == "cli.py"
 
     def test_a_fake_probe_records_a_home_path():
-        probe = FakeProbe(ok_paths={"/home/operator/venv/bin/python"})
-        assert subprocess.CompletedProcess(["/Users/operator/x"], 0, "", "")
+        probe = FakeProbe(ok_paths={"/home/hscc-fixture/venv/bin/python"})
+        assert subprocess.CompletedProcess(["/Users/hscc-fixture/x"], 0, "", "")
     '''
 
 
@@ -405,8 +405,8 @@ def test_a_home_path_in_a_log_or_read_call_is_not_a_violation():
     src = '''
         import subprocess
         subprocess.check_call(["/bin/ls"], cwd="/tmp/ok")
-        log.info("/Users/operator/dev/hscc")
-        assert open("/Users/operator/x").read() == ""
+        log.info("/Users/hscc-fixture/dev/hscc")
+        assert open("/Users/hscc-fixture/x").read() == ""
         '''
     assert _kinds(src) == []
 
@@ -431,7 +431,7 @@ def test_an_unreadable_source_is_a_violation(tmp_path):
 def test_the_report_names_the_file_line_and_the_remedy():
     text = guard.report(_scan('''
         import subprocess
-        subprocess.run(["python", "x.py"], cwd="/Users/operator/hscc")
+        subprocess.run(["python", "x.py"], cwd="/Users/hscc-fixture/hscc")
         ''', rel="tests/test_x.py"), "hscc-cluster", 42)
     # line 1 of the dedented source is blank, so the spawn is line 3.
     assert "tests/test_x.py:3" in text

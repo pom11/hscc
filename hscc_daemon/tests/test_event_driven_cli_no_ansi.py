@@ -31,26 +31,30 @@ def _no_ansi(fn):
 
 
 class TestNoAnsiEventDrivenCli:
-    def _patch_paths(self, monkeypatch, tmp_path):
-        # Redirect the real LaunchAgents + ~/.hscc paths to tmp so the CLI
-        # commands can never touch the live host (launchd jobs stay uncreated).
-        monkeypatch.setattr(ed, "PLIST_DIR", str(tmp_path / "LaunchAgents"))
-        monkeypatch.setattr(ed, "HSCC_DIR", str(tmp_path / "hscc"))
-        monkeypatch.setattr(ed, "STATE_DIR", str(tmp_path / "hscc" / "state"))
-
+    # NO per-test path patching in this class, deliberately (t_35d9f6ea).
+    # These commands reach ``os.makedirs(PLIST_DIR)`` plus a plist write
+    # (cmd_install_event_driven) and an ``os.remove`` per stream
+    # (cmd_uninstall_event_driven -> LaunchdJobGenerator.uninstall_job). This
+    # file used to carry its own ``_patch_paths`` helper, and that is exactly
+    # the shape that leaves the NEXT event-driven test file unprotected: the
+    # suite-wide seal was never load-bearing here, so deleting it would have
+    # broken nothing. Every path these commands touch is now redirected by the
+    # autouse ``conftest._isolate_hscc`` seal, whose values are the same ones
+    # that helper set (``<tmp>/Library/LaunchAgents``, ``<tmp>/hscc``,
+    # ``<tmp>/hscc/state``), so these five commands run against the seal
+    # itself and the seal is what keeps the operator's real LaunchAgents
+    # intact. A test that patched its own path would still win (monkeypatch
+    # LIFO teardown) — patching is unnecessary here, not forbidden.
     def test_install(self, monkeypatch, tmp_path, fake_subprocess):
         fake_subprocess.set_result(returncode=0)
-        self._patch_paths(monkeypatch, tmp_path)
         _no_ansi(ed.cmd_install_event_driven)
 
     def test_uninstall(self, monkeypatch, tmp_path, fake_subprocess):
         fake_subprocess.set_result(returncode=0)
-        self._patch_paths(monkeypatch, tmp_path)
         _no_ansi(ed.cmd_uninstall_event_driven)
 
     def test_status(self, monkeypatch, tmp_path, fake_subprocess):
         fake_subprocess.set_result(returncode=0)
-        self._patch_paths(monkeypatch, tmp_path)
         # No daemon.log in the redirected HSCC_DIR -> the watchers branch
         # prints "No daemon log found" (still no ANSI).
         _no_ansi(ed.cmd_event_status)
@@ -58,7 +62,6 @@ class TestNoAnsiEventDrivenCli:
     def test_status_with_daemon_log(self, monkeypatch, tmp_path,
                                     fake_subprocess):
         fake_subprocess.set_result(returncode=0)
-        self._patch_paths(monkeypatch, tmp_path)
         (tmp_path / "hscc").mkdir(parents=True, exist_ok=True)
         (tmp_path / "hscc" / "daemon.log").write_text(
             "KqueueWatcher started\nKqueueWatcher on dgx\n")
@@ -67,7 +70,6 @@ class TestNoAnsiEventDrivenCli:
     def test_help(self, monkeypatch, tmp_path, fake_subprocess):
         """main()'s help path (len(sys.argv) < 2) must not emit ANSI either.
         It calls sys.exit(0), so we capture SystemExit."""
-        self._patch_paths(monkeypatch, tmp_path)
         monkeypatch.setattr(ed.sys, "argv", ["event_driven.py"])
         f = io.StringIO()
         with redirect_stdout(f):

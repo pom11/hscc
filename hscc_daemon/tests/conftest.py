@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -229,7 +230,14 @@ def _isolate_hscc(tmp_path, monkeypatch):
       (b) Patch every module-level ``~/.hscc``-rooted constant (each module
           computes its own copy at IMPORT time, so they are already baked in
           before this fixture runs and must be overwritten explicitly). See
-          ``_module_attrs()`` — the enumerated audit in the card.
+          ``_module_attrs()`` — the enumerated audit in the card. The same
+          list also carries the ``$HOME``-rooted constants that live OUTSIDE
+          ``~/.hscc`` and therefore escape (a) by construction — today
+          ``event_driven.PLIST_DIR`` = ``~/Library/LaunchAgents`` (t_35d9f6ea),
+          plus install.py's launchd/systemd paths and
+          ``api_launchd.API_PLIST_PATH`` (t_2f09d480; see the seal pin below),
+          because those writers REMOVE/WRITE the operator's live supervisor
+          units.
       (c) Redirect ``state.STATE_DIR`` to the tmp state dir too, so the common
           ``state.write_state`` funnel can never reach ``~/.hscc/state``.
 
@@ -260,7 +268,9 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
+            api_launchd,
             autodown, cli as hscc_cli, daemon_ops, daemon_singleton, desktop,
+            event_driven, install,
             health,
             heal_breaker, heal_lease,
             hscc, lifecycle, node_pauses,
@@ -471,10 +481,146 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # monkeypatch when they exercise the nonspawnable path.
             (dispatcher_wedge, "_assignee_is_nonspawnable",
              lambda assignee: False),
+            # event_driven.py (t_35d9f6ea) — the launchd/kqueue event-driven
+            # surface. Its three $HOME-rooted constants are import-time
+            # literals, so the (a) expanduser redirect cannot reach them:
+            # (a) only rewrites paths under ``~/.hscc`` and delegates
+            # everything else to the real expanduser, and
+            # ``~/Library/LaunchAgents`` is not under it.
+            #
+            # This one is not a litter risk, it is a DELETION risk.
+            # ``LaunchdJobGenerator.uninstall_job`` does
+            # ``os.remove(os.path.join(PLIST_DIR, f"{label}.plist"))`` for
+            # every stream in PERIODIC_STREAMS, so a test that reaches it
+            # without patching PLIST_DIR removes the operator's live
+            # ``com.nousresearch.hscc-periodic.*.plist`` — de-Registering
+            # their periodic cluster checks — with NO subprocess involved,
+            # i.e. invisible to the launchctl exec fence (t_5fd62226) and to
+            # every fork spy. ``install_job``/``cmd_install_event_driven``
+            # additionally ``os.makedirs(PLIST_DIR)`` + write into it.
+            #
+            # The values mirror the real layout under the per-test tmp dir
+            # (tmp_path stands in for $HOME), which is also exactly what
+            # test_event_driven_cli_no_ansi.py used to patch per-test — so
+            # the seal replaces that patching instead of layering under it.
+            (event_driven, "HSCC_DIR", base),
+            (event_driven, "STATE_DIR", p("state")),
+            (event_driven, "PLIST_DIR",
+             os.path.join(str(tmp_path), "Library", "LaunchAgents")),
+            # install.py + api_launchd.py (t_2f09d480) — the same class as the
+            # event_driven block above, in the two modules that also WRITE and
+            # REMOVE a plist under ~/Library/LaunchAgents (plus install.py's
+            # systemd twin under ~/.config/systemd/user). All of these are
+            # import-time $HOME literals, so (a) cannot reach them; before this
+            # entry only the per-test patches kept them off the operator's real
+            # directory, which means one forgetful case could rewrite or
+            # ``os.remove`` the live daemon/API supervisor units — no
+            # subprocess, so neither the launchctl fence nor a fork spy sees it.
+            #
+            # tmp_path stands in for $HOME so the values mirror the production
+            # layout: ``<tmp>/Library/LaunchAgents/<label>.plist`` and
+            # ``<tmp>/.config/systemd/user/<unit>``. Derived from the module's
+            # own names where possible so a rename cannot leave a stale seal.
+            (install, "PLIST_DIR",
+             os.path.join(str(tmp_path), "Library", "LaunchAgents")),
+            (install, "PLIST_FILE",
+             os.path.join(str(tmp_path), "Library", "LaunchAgents",
+                          os.path.basename(install.PLIST_FILE))),
+            (install, "SYSTEMD_USER_DIR",
+             Path(str(tmp_path)) / ".config" / "systemd" / "user"),
+            (install, "SYSTEMD_UNIT_FILE",
+             Path(str(tmp_path)) / ".config" / "systemd" / "user"
+             / install.SYSTEMD_UNIT_NAME),
+            (install, "LEGACY_SYSTEMD_UNIT_FILE",
+             Path(str(tmp_path)) / ".config" / "systemd" / "user"
+             / install.LEGACY_SYSTEMD_UNIT_NAME),
+            (api_launchd, "API_PLIST_PATH",
+             os.path.join(str(tmp_path), "Library", "LaunchAgents",
+                          os.path.basename(api_launchd.API_PLIST_PATH))),
         ]
 
     for mod, attr, val in _module_attrs():
         monkeypatch.setattr(mod, attr, val, raising=False)
+
+    # ── Seal pin (t_35d9f6ea) ────────────────────────────────────────────
+    # Read the patched attributes BACK and guard-assert them. Why an assert
+    # here rather than only in a test: the whole point of this seal is that a
+    # test which FORGETS to patch is still safe, so no test can be the thing
+    # that notices the seal vanished — a test that patches its own path stays
+    # green forever with the seal deleted. And `monkeypatch.setattr(...,
+    # raising=False)` would happily CREATE a misspelled attribute instead of
+    # redirecting the real one, so only reading the production name under its
+    # real spelling proves the redirect happened.
+    #
+    # Measured against, never against the operator's live directory: nothing
+    # here creates, reads or removes anything under the real
+    # ~/Library/LaunchAgents. The negative arm compares path STRINGS.
+    from hscc_daemon import event_driven as _ed
+    _real_home = _real_expanduser("~")
+    _real_plist_dir = os.path.join(_real_home, "Library", "LaunchAgents")
+    assert _ed.PLIST_DIR == os.path.join(str(tmp_path), "Library",
+                                         "LaunchAgents"), (
+        "the autouse seal no longer redirects event_driven.PLIST_DIR — it is "
+        f"{_ed.PLIST_DIR!r}, i.e. a path outside this test's tmp dir. "
+        "event_driven.LaunchdJobGenerator.uninstall_job os.remove()s "
+        "<PLIST_DIR>/<label>.plist, so an unsealed value deletes the "
+        "OPERATOR'S live com.nousresearch.hscc-periodic.*.plist files with no "
+        "subprocess involved and no fence can see it. Re-add the entry in "
+        "_module_attrs() above; the sandboxed proof is "
+        "test_no_live_hscc_leak.py."
+    )
+    assert _real_plist_dir != _ed.PLIST_DIR and _real_home not in _ed.PLIST_DIR
+    assert _ed.HSCC_DIR == base, (
+        f"the autouse seal no longer redirects event_driven.HSCC_DIR "
+        f"({_ed.HSCC_DIR!r}); _event_log appends to <HSCC_DIR>/daemon.log")
+    assert _ed.STATE_DIR == os.path.join(base, "state"), (
+        f"the autouse seal no longer redirects event_driven.STATE_DIR "
+        f"({_ed.STATE_DIR!r}); the kqueue watcher makedirs it")
+
+    # Same read-back for the two modules sealed by t_2f09d480. install.py's
+    # ``_install_launchd`` makedirs + WRITES PLIST_FILE and ``_uninstall_launchd``
+    # unlinks it; api_launchd.install_api_plist / uninstall_api_plist do the
+    # same to API_PLIST_PATH; the systemd twin is written by emit_systemd_unit
+    # and unlinked for both names by the purge/uninstall paths.
+    from hscc_daemon import api_launchd as _api
+    from hscc_daemon import install as _install
+    _sealed_plist_dir = os.path.join(str(tmp_path), "Library", "LaunchAgents")
+    assert _install.PLIST_DIR == _sealed_plist_dir, (
+        "the autouse seal no longer redirects install.PLIST_DIR — it is "
+        f"{_install.PLIST_DIR!r}. _install_launchd writes PLIST_FILE there and "
+        "_uninstall_launchd unlinks it, so an unsealed value rewrites or "
+        "removes the OPERATOR'S live daemon unit. Re-add the entry in "
+        "_module_attrs(); the sandboxed proof is "
+        "test_plist_seal_install_api_t_2f09d480.py.")
+    assert _install.PLIST_FILE == os.path.join(
+        _sealed_plist_dir, "com.hermes.hscc_daemon.plist"), (
+        f"install.PLIST_FILE is not the sealed plist ({_install.PLIST_FILE!r})")
+    assert _real_plist_dir != _install.PLIST_DIR and \
+        _real_home not in _install.PLIST_DIR
+    _sealed_systemd = Path(str(tmp_path)) / ".config" / "systemd" / "user"
+    assert _install.SYSTEMD_USER_DIR == _sealed_systemd, (
+        f"install.SYSTEMD_USER_DIR is not sealed ({_install.SYSTEMD_USER_DIR!r});"
+        " emit_systemd_unit writes the unit there and uninstall/purge unlink it")
+    assert _install.SYSTEMD_UNIT_FILE == \
+        _sealed_systemd / _install.SYSTEMD_UNIT_NAME, (
+            f"install.SYSTEMD_UNIT_FILE is not sealed "
+            f"({_install.SYSTEMD_UNIT_FILE!r})")
+    assert _install.LEGACY_SYSTEMD_UNIT_FILE == \
+        _sealed_systemd / _install.LEGACY_SYSTEMD_UNIT_NAME, (
+            f"install.LEGACY_SYSTEMD_UNIT_FILE is not sealed "
+            f"({_install.LEGACY_SYSTEMD_UNIT_FILE!r}); uninstall purges it")
+    assert str(_sealed_systemd) != os.path.join(
+        _real_home, ".config", "systemd", "user")
+    assert _api.API_PLIST_PATH == os.path.join(
+        _sealed_plist_dir, "com.hscc.api.plist"), (
+        "the autouse seal no longer redirects api_launchd.API_PLIST_PATH — it "
+        f"is {_api.API_PLIST_PATH!r}. uninstall_api_plist does a bare "
+        "os.remove() of it, so an unsealed value deletes the OPERATOR'S live "
+        "API supervisor unit with no subprocess for any fence to see. Re-add "
+        "the entry in _module_attrs(); the sandboxed proof is "
+        "test_plist_seal_install_api_t_2f09d480.py.")
+    assert _real_plist_dir != _api.API_PLIST_PATH and \
+        _real_home not in _api.API_PLIST_PATH
 
     # NOT neutered here, deliberately. desktop._notify_macos / _notify_linux
     # shell out to osascript / notify-send, so a test that reaches a real

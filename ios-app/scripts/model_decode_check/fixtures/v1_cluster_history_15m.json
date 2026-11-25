@@ -41,7 +41,7 @@
   "bound_bytes": 10485760,
   "db_bytes": 16384,
   "exists": true,
-  "path": "/Users/example/.hscc/metrics/history.db",
+  "path": "/Users/hscc-fixture/.hscc/metrics/history.db",
   "tier0_resident": false,
   "tier1_rows": null,
   "tier2_rows": null
