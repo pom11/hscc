@@ -646,21 +646,33 @@ unset _pin
 # loss. Measured through this same runner at the gate's own priority
 # (`taskpolicy -b`, `ps -o pri` 4): five legs serial 188 s vs three-deep 96 s.
 #
-# WHY THE DEFAULT IS 1 AND NOT 2 — THE MEASUREMENT THAT DECIDED IT. The card set
-# the bar at "a full-roster concurrent run must be green before the default goes
-# above 1", so the roster was run at p=2. It is **not green**: 12 legs, 3 red —
-# `hscc-api` (an ERROR at setup in `test_gateway_serve_watchdog.py:637`:
-# `harness identity check broken on darwin: our own live parent pid 3578 did not
-# match its own argv marker; _state_and_command answered ('Z', '<defunct>')`),
-# plus `scripts` (1 failed) and `.github/scripts`. Five legs packed were green and
-# a narrowed two-leg gate (`hscc_daemon` + `scripts`) is the case the speedup was
-# measured on, but a mechanism that reddens three legs of the twelve-leg roster
-# cannot become the posture every gate takes by default. So the pack is OPT-IN
-# until `hscc-api`'s harness identity check stops tripping when its leg is packed
-# — the zombie/`<defunct>` parent is the lead, and the two candidate mechanisms
-# are named in scripts/tests/test_run_tests_leg_parallelism.py's module docstring
-# (deferred reaping leaves a finished child unreaped for up to one poll tick; and
-# `set -m` puts a packed leg in its own process group).
+# WHY THE DEFAULT IS 1 AND NOT 2 — THE MEASUREMENT THAT DECIDED IT, AND THE
+# MEASUREMENT THAT UNBLOCKED MOVING IT. The card set the bar at "a full-roster
+# concurrent run must be green before the default goes above 1", so the roster was
+# run at p=2. The first run was NOT green: 12 legs, 3 red — `hscc-api` (an ERROR at
+# setup in `test_gateway_serve_watchdog.py:637`: `harness identity check broken on
+# darwin: our own live parent pid 3578 did not match its own argv marker;
+# _state_and_command answered ('Z', '<defunct>')`), plus `scripts` (1 failed) and
+# `.github/scripts`. All three were then root-caused, and NONE of them was the
+# mechanism this block used to blame: the zombie was the watchdog test's OWN child
+# (the sandbox parent its `stop` mode instructs to exit, which no runner tick can
+# reap — it is the pytest process's own child), the `.github/scripts` leg never ran
+# at all because its log path spliced the leg NAME (a path) into a FILENAME, and
+# `scripts` came back green. Both mechanisms this block used to name as the lead —
+# deferred reaping and the pack's own process groups — are disproven for all three;
+# `docs/audits/packed-roster-reds_t_4fc35c1f.md` carries the before/after numbers
+# (0 red in 25 at ordinary priority, 8 red in 30 under bounded burners, 0/30 after
+# the fixture fix — with HSCC_TEST_PARALLEL unset throughout, so no pack involved).
+#
+# THE BAR IS NOW MET: the full twelve-leg roster is green at p=2, 12/12, 713 s wall
+# against 1396 s of summed leg work = **1.96x** (t_4fc35c1f, this host, one clean
+# run). What keeps the default at 1 is no longer a red roster — it is that flipping
+# it is a CONTRACT change, not a green question. The serial stream is what two
+# readers were measured against (below), `test_the_default_is_the_serial_stream_and_
+# prints_nothing_new` pins unset as silent and byte-identical to the pre-concurrency
+# runner, and the narrowed `hscc_daemon scripts` gate has never been TIMED packed.
+# The flip needs those re-pinned and that number measured; it is one small slice,
+# unblocked, and deliberately not done half-verified here.
 #
 # CONTRACT (pinned by scripts/tests/test_run_tests_leg_parallelism.py):
 #   HSCC_TEST_PARALLEL unset or empty -> the SERIAL loop below, UNTOUCHED: no
@@ -806,7 +818,24 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
   # "where does suite scratch live" is how a run stops being reproducible), and
   # never inside the sealed HOME. A tmp dir it cannot make is a reason to run
   # serially, not a reason to fail a gate.
-  LEG_TMP="$(mktemp -d /tmp/hscc-legs-XXXXXX 2>/dev/null || true)"
+  #
+  # `HSCC_LEG_TMP_ROOT` moves the ROOT, never the mechanism: the default is the
+  # literal `/tmp` and `$TMPDIR` is still not consulted (guarded by
+  # test_the_default_leg_root_stays_tmp_even_with_a_tmpdir). The seam exists
+  # because `/tmp/hscc-legs-XXXXXX` is a HOST-GLOBAL namespace and a gate no
+  # longer has the box to itself — since #800/#801 two packed runs overlap on
+  # one host (a queue gate plus CI-overlap, a gate plus a worker's suite), and
+  # each creates and `rm -rf`s a dir there during the other's window. While the
+  # root was unmovable, no test could tell "this run leaked" from "a sibling run
+  # existed" — that is what red-gated PR #786's gate on 2026-11-25. Nothing in
+  # production sets it; it is a test seam.
+  LEG_TMP_ROOT="${HSCC_LEG_TMP_ROOT:-/tmp}"
+  case "$LEG_TMP_ROOT" in
+    /*) ;;
+    *) echo "parallel: HSCC_LEG_TMP_ROOT='$LEG_TMP_ROOT' is not an absolute path — using /tmp"
+       LEG_TMP_ROOT=/tmp ;;
+  esac
+  LEG_TMP="$(mktemp -d "$LEG_TMP_ROOT/hscc-legs-XXXXXX" 2>/dev/null || true)"
   if [ -n "$LEG_TMP" ] && [ -d "$LEG_TMP" ]; then
     LEG_PIDFILE="$LEG_TMP/legs.tsv"
     : > "$LEG_PIDFILE"
@@ -816,7 +845,7 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
   else
     LEG_TMP=""
     PAR=1
-    echo "parallel: cannot create /tmp/hscc-legs-XXXXXX — running SERIALLY"
+    echo "parallel: cannot create $LEG_TMP_ROOT/hscc-legs-XXXXXX — running SERIALLY"
   fi
 fi
 

@@ -1,0 +1,81 @@
+kind: Fixed
+task: t_4fc35c1f
+
+* runner: **a packed leg whose name is a path now runs at all.** The leg log was
+  built by splicing the leg name into a filename (`$LEG_TMP/$P_NEXT-$d.log`), and
+  `.github/scripts` is the one roster leg whose name is nested, so its log path was
+  `…/1-.github/scripts.log` — a file inside a directory that was never created. The
+  redirect failed in the child before `env` was execed, so pytest never started, the
+  wrapper recorded no `.rc`, and the leg read red off `wait`'s status: `elapsed=0s
+  rc=1`, an empty block, and no `FAILED` line for anyone to capture. **It was red on
+  every packed run, at every parallelism, on every host** — one of the three reds that
+  kept `HSCC_TEST_PARALLEL`'s default at 1 was never a concurrency problem at all.
+  Eleven of twelve leg names are one flat component, which is why the 24 tests that
+  shipped with the pack could not see it. `/` is now flattened in the log filename;
+  roster order stays in the index prefix and the leg's real name stays in the
+  heartbeat TSV and the summary rows.
+* test harness: **the `hscc-api` watchdog leg's `('Z', '<defunct>')` setup error was a
+  race inside the fixture, not a side effect of leg packing** — and the two mechanisms
+  the parent card named (`t_6c2123f9`: the runner's deferred reaping, and `set -m`)
+  cannot produce it. The pid in that message is the sandbox API parent the `sidecar`
+  fixture spawned itself, so it is a direct child of the pytest process and only that
+  process's teardown can reap it; no runner tick touches it. In `mode="stop"` the
+  parent is instructed to call `shutdown()` and `raise SystemExit(0)` the moment it is
+  ready, and the fixture then asserted that same pid was still alive — a demand that
+  the fixture, not the scenario, win the scheduler. Measured on one node id, serial,
+  `HSCC_TEST_PARALLEL` unset: **0 red in 25 runs at ordinary priority, 8 red in 30
+  under twelve bounded burners**, every one `('Z', '<defunct>')`, and **0 red in 25**
+  for the `serve` arm under the same load — so the variable is CPU pressure, and the
+  arm. The pack was one more source of pressure, not a new mechanism.
+  The platform half of the self-check now runs against a marker-bearing canary the
+  harness starts and holds itself, so it still reddens on a clipped `ps` column, and
+  the liveness assertion stays where it is a real precondition (`serve`,
+  `no_watchdog`, `stop_on_file` — that one gates its stop on a sentinel the harness
+  writes later). In `stop` the harness asks its own `Popen`, the authority on its own
+  child and immune to pid recycling, that the parent is either still running or exited
+  `0`. The posture that measured 8/30 measures **0/30** after.
+  `docs/audits/packed-roster-reds_t_4fc35c1f.md`.
+* runner: **the leg-log hygiene test stopped asserting on the whole host's
+  `/tmp`.** It snapshotted `/tmp/hscc-legs-*` before the pack and demanded the
+  same set afterwards, but that namespace is host-global: any other packed run on
+  the box — a second queue gate, a worker running its own suite — creates and
+  `rm -rf`s a dir inside the window, and a sibling run is indistinguishable from a
+  leak. Measured here: **3 serial copies of the test green, 6 launched at once red
+  2** (`AssertionError: tmp litter`), and the red is the diff the queue handed back
+  for this PR's gate — one dir present at `before` that vanished plus one absent at
+  `before` that appeared. `HSCC_LEG_TMP_ROOT` now moves the pack's log ROOT, so the
+  check runs in a namespace the run owns and the private root must be empty
+  afterwards — which still catches a dir the run never names, the leak the global
+  glob was written for. The default stays the literal `/tmp` and `$TMPDIR` is still
+  never consulted (a new test pins it). **6/6 green under the load that reddened
+  2/6.**
+---
+kind: Verified
+task: t_4fc35c1f
+
+* runner: `scripts/tests/test_run_tests_leg_parallelism.py` — **26 tests**, green. The
+  new one packs `.github/scripts` with a flat-named leg and requires the leg's block to
+  be NON-EMPTY, because the runner prints the `━━━ <leg> ━━━` header whether or not the
+  log opened: a header with nothing under it is this defect, and a green stub cannot
+  produce one. Verified to bite — with the fix reverted it reproduces `✗
+  .github/scripts (pytest exit 1)` exactly.
+* test harness: `hscc-api/tests/test_gateway_serve_watchdog.py` — **19 passed, 1
+  xfailed** unchanged from before the fix at the file level (the flake is invisible in a
+  single quiet run, which is the point), plus the repeat evidence above: 30 runs of the
+  racing node under the same burner load, red 8 → green 0.
+* runner: **the full twelve-leg roster is GREEN packed**, which is the bar the
+  parent card set for moving the default and had not been met. `HSCC_TEST_PARALLEL=2`
+  on the committed tree with both fixes: **12/12 legs green, `LEGEXIT=0`, 713 s wall
+  against 1396 s of summed leg work = 1.96×**, on this host at load 3.5. The `pack=`
+  column is the recycling trace that buys it: `sparkrun-hermes` `elapsed=4s pack=241s`
+  — launched into the slot `hscc-bootstrap` (237 s) vacated, finished 4 s later, 163 s
+  before the pack ended; same shape for `memori_byodb` (4 s) and `hscc-project` (7 s).
+  Those are the legs the pre-recycling loop left queued behind a multi-minute
+  neighbour, which is exactly why that loop measured **1.0x**.
+* runner: the narrowed `hscc_daemon scripts` gate at p=2 is **derived, not measured**
+  (~340 s packed vs 579 s serial from this run's per-leg durations). Stated as derived
+  because nobody has timed that gate packed, and the card asks for a measured number.
+* runner: `scripts` measured **green packed** twice — 699 passed, 4 skipped in 246.22 s
+  beside `.github/scripts`, and again inside the full roster at 248 s. The `1 failed of
+  702` the parent card recorded did not reproduce and its failure line is still
+  un-captured; recorded as unresolved rather than absorbed.
