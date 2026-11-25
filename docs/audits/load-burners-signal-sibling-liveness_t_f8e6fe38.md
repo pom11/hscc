@@ -78,37 +78,81 @@ measurement rather than assumed.
 fallback: every burner, watchdog and command child pays a CPython startup, and
 carries the burner tag in its argv until `execvp`.
 
-## Hypothesis under test
+## Finding 6 — the SIG_IGN-inheritance hypothesis is KILLED (measured, not reasoned)
 
-Signal-disposition inheritance. If the pytest process holds **SIGINT = SIG_IGN**
-when it spawns the harness, `/bin/sh` (bash 3.2) inherits SIGINT ignored and —
-per POSIX, and bash's own rule — **cannot install a trap for a signal it
-inherited ignored**. Then `trap 'exit 130' INT` is inert, `send_signal(SIGINT)`
-is a no-op, and the harness sits in `wait "$COMMAND_PID"` until its 60 s
-watchdog. That matches all three observations: SIGINT-only, a hard 10 s
-timeout, and a host that is not oversubscribed.
+Worth recording because it is the hypothesis the evidence most strongly
+suggested, and it is wrong.
 
-The repo already documents this inheritance hazard three times, always about
-backgrounded jobs (`scripts/run_tests.sh:737`, `scripts/leg_heartbeat.sh:57`,
-`scripts/tests/test_leg_heartbeat.py:229`): "a backgrounded job in a
-non-interactive shell gets SIG_IGN on SIGINT". CPython's `subprocess` restores
-SIGPIPE/SIGXFSZ/SIGXCPU in the child, **not** SIGINT, so an ignored SIGINT does
-reach the harness.
+Signal-disposition inheritance *would* explain everything: if the suite process
+held SIGINT = SIG_IGN when it spawned the harness, `/bin/sh` (bash 3.2) inherits
+it ignored and, per POSIX and bash's own rule, **cannot install a trap for an
+ignored signal** — `trap 'exit 130' INT` inert, `send_signal(SIGINT)` a no-op,
+the harness parked in `wait "$COMMAND_PID"` until its 60 s watchdog. SIGINT-only,
+hard 10 s timeout, idle-ish host: all three fit. The repo even documents this
+hazard three times (`scripts/run_tests.sh:737`, `scripts/leg_heartbeat.sh:57`,
+`scripts/tests/test_leg_heartbeat.py:229`), and CPython's `subprocess` restores
+SIGPIPE/SIGXFSZ/SIGXCPU in children but **not** SIGINT, so it would propagate.
 
-`sigdump.py` (a pytest `-p` plugin, loaded off PYTHONPATH, no repo file touched)
-records the pytest process's own INT/TERM/HUP dispositions before every test,
-plus a live probe of whether a `/bin/sh` child spawned at that instant can still
-trap SIGINT. First 160 tests of a paired run: disposition unchanged
-(`default_int_handler`, child trappable). The decisive samples are the ones at
-and immediately before the `test_load_burners.py` node ids.
+`sigdump.py` (a pytest `-p` plugin off PYTHONPATH — no repo file touched)
+records the suite process's own INT/TERM/HUP dispositions before **every** test,
+and probes whether a `/bin/sh` child spawned at that instant can still trap
+SIGINT. Over a full paired run (568 tests sampled, sibling suite alive):
+
+```
+tests where a spawned /bin/sh could NOT trap SIGINT: 0
+  test_signal_to_the_harness_takes_every_burner_with_it[2-130]
+      INT=<built-in function default_int_handler>  child_can_trap_INT=True
+```
+
+So at the exact node id that fails, SIGINT is the ordinary Python handler and a
+child spawned right there **can** trap it. The harness is never born unable to
+trap SIGINT. Whatever stalls it happens after the signal is delivered, inside
+bash — which moves the next probe from the test's process into
+`scripts/load_burners.sh` itself.
+
+Second thing this run showed: **the stall did not reproduce with the plugin
+loaded.** A `/bin/sh` probe spawn inserted before every test — a few ms of
+scheduling delay in front of the case — was enough to hide it. That is itself
+evidence: the failure is a tight race in when the signal lands relative to
+something the harness is doing, not a stable property of the environment.
+
+## Where the next worker should look
+
+The remaining suspects are all inside bash's signal path, and the two that fit
+"SIGINT specifically" are:
+
+1. **A trap landing during bash 3.2's own fork/exec window.** The harness forks
+   constantly (`new_group` per child, and `sleep 0.2` inside `cleanup`). Bash
+   defers pending traps around some of those windows; a SIGINT that arrives in
+   one of them may be held until the wait it interrupts is re-entered.
+2. **`wait "$pid"` inside `cleanup()` (load_burners.sh:122-124) blocking on a
+   child that has not died yet.** Under a sibling the KILL lands but the reap
+   needs the target to be scheduled; the `while :; do :; done` burners are the
+   most starvable processes on the box *by construction*.
+
+Probe shape that settles it: have `load_burners.sh` touch a marker at trap entry
+and at each cleanup stage (a `HSCC_LOAD_BURNERS_TRACE` env var, off by default so
+nothing shipped changes), then read which stage the stalled harness reached.
 
 ## Reproduce it
 
+Two full suites, launched together from two worktrees of the same commit
+(`pair.sh` — the shape that failed 2/2):
+
 ```bash
-# the pair that fails 2/2 (both worktrees at the same commit)
-bash scripts/…/pair.sh <worktreeA> <logA> <worktreeB> <logB>   # two full suites, launched together
-# the timing distribution, against any live sibling suite
-HSCC_PROBE_REPO=<worktree> python probe_signal_case.py --reps 8 --sig INT
+cd <worktreeA> && env -u HERMES_DELEGATED_CHILD_CONTEXT \
+  HERMES_DISABLE_LAZY_INSTALLS=1 "$PY" -m pytest -q -rs scripts/tests \
+  -p no:cacheprovider -m "not loadstress" > logA 2>&1 &
+cd <worktreeB> && env -u HERMES_DELEGATED_CHILD_CONTEXT \
+  HERMES_DISABLE_LAZY_INSTALLS=1 "$PY" -m pytest -q -rs scripts/tests \
+  -p no:cacheprovider -m "not loadstress" > logB 2>&1 &
+wait
+```
+
+The per-test signal/disposition probe is loaded without touching the tree:
+
+```bash
+PYTHONPATH=<scratch> … -m pytest … -p sigdump      # SIGDUMP_LOG=<file>
 ```
 
 ## Left, for the next worker
