@@ -86,6 +86,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         "  topic   forum topic named after the project",
         "  board   kanban board slug = project name",
         "  roadmap ROADMAP.md seeded with Now/Next/Later",
+        "  profile <name>-orch Hermes profile, with orchpad (pinned plugin, enabled)",
         "  registry entry binding repo <-> board <-> topic",
     ]
     if dry_run or not apply:

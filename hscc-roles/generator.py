@@ -551,6 +551,18 @@ _ANTI_CHURN_RULES = (
     "6. **Always pass the board explicitly** on every kanban call.\n"
 )
 
+#: The orchestrator's own pad (orchpad, t_2d87d94d). Kept off worker SOULs on
+#: purpose: a worker has a card, an orchestrator has follow-ups it has not
+#: carded yet. The one hard rule is that real work still goes to kanban.
+_PAD_SECTION = (
+    "## Your pad (orchpad)\n\n"
+    "Your pad is for your own follow-ups, ideas, observations and things you "
+    "are waiting on. Real work for a worker is not a pad item: promote it to a "
+    "kanban card with `orchpad_promote` and keep the link on the pad item. "
+    "Check the pad at the start of every session.\n"
+    "\n"
+)
+
 # The ONE main orchestrator (design 2026-11-19): the board duties of the old
 # general catch-all and the cluster authority of the old `orchestrator` role
 # merged into one SOUL. It is the only profile allowed to answer "what is
@@ -629,7 +641,7 @@ _MAIN_OPS = (
     "- No destructive git or `rm -r` without the operator.\n"
     "- Fleet access only through sparkrun/hscc, never raw docker/ssh.\n"
     "\n"
-) + _ANTI_CHURN_RULES
+) + _PAD_SECTION + _ANTI_CHURN_RULES
 
 # The legacy cluster-wide role is RETIRED (design 2026-11-19): the main
 # orchestrator owns its authority. Its SOUL must say so plainly and must not
@@ -739,7 +751,7 @@ _PROJECT_ORCH_OPS = (
     "State verdicts and the check that proves them, never a SHA of `main`: "
     "SHAs go stale, a method does not.\n"
     "\n"
-) + _ANTI_CHURN_RULES
+) + _PAD_SECTION + _ANTI_CHURN_RULES
 
 
 def _is_main_orchestrator(name):

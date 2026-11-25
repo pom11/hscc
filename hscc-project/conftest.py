@@ -18,9 +18,14 @@ def _sandbox_qa_home(tmp_path_factory):
     """
     root = str(tmp_path_factory.mktemp("qa-home"))
     old = os.environ.get("HERMES_HOME")
+    # A developer shell may export the real Hermes venv; the orchpad repair
+    # path must never pip-install into it from a test.
+    old_python = os.environ.pop("HSCC_HERMES_PYTHON", None)
     os.environ["HERMES_HOME"] = root
     yield root
     if old is None:
         os.environ.pop("HERMES_HOME", None)
     else:
         os.environ["HERMES_HOME"] = old
+    if old_python is not None:
+        os.environ["HSCC_HERMES_PYTHON"] = old_python
