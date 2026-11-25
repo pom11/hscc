@@ -5,8 +5,9 @@ Card: `t_5f9fab03`. Parent: `t_f8e6fe38` (audit
 first; the measurement there is re-verified below, not re-derived).
 Base: `origin/main` (branch `wt/t_5f9fab03`).
 
-Status: **IN PROGRESS** — trace implemented, pair run pending. This section is
-the scaffold; findings append as they land.
+Status: **probe shipped; fix open, with the stage localized by measurement
+and one wait-shape fix measured-and-rejected.** The card's decision table
+answered at outcome (1) — see F1–F4 and "Left for the next worker".
 
 ## What the parent established (constraints carried forward)
 
@@ -81,9 +82,14 @@ answer the card's question with the card's own decision table, outcome **(1)**:
   0) while the same traces carry the TERM and HUP arms' `term-trap`/`hup-trap`
   — the signal-specificity the parent measured is reproduced inside the
   harness this time.
-* The stalled harnesses (run 1: pids 68888/68900, tags `hscc-load-test-*`)
-  end at `start -> in-wait` and emit nothing else — no `int-trap`, no
-  `cleanup-entry`, and no `term-trap` when the test's `terminate()` lands.
+* The stalled harnesses (run 1: pids 68888/68900; run 2: 16834/16835, tags
+  `hscc-load-test-*`) emit no marker after `start -> in-wait` when the INT
+  lands — no `int-trap`, no `cleanup-entry`. When the test's rescue
+  `terminate()` arrives ~10 s later, the **TERM trap runs and cleanup
+  completes normally** (`term-trap -> cleanup-entry -> … -> cleanup-exit
+  143`, in every capture) — matching the parent's `returncode: 143` (the
+  positive exit, i.e. the trap's `exit 143`, not a default kill). So the
+  rescue path is healthy and ONLY the INT is lost.
 * (Analyzer note: pids tagged `hscc-loadstress-guard-*` also stop at
   `in-wait` BY DESIGN — that guard test SIGKILLs its harness; they are not
   stalls. The signal arms' harnesses are tagged `hscc-load-test-*`.)
@@ -115,23 +121,58 @@ claim assumed away.
   explanation (a harness whose trap ran would have completed cleanup and
   killed the burners — F2), and any timeout sizing: the stalled state has no
   internal end.
-* Ruled in: **bash 3.2's trap dispatch while blocked in `wait` is unreliable
-  in a narrow race**. The most battle-tested POSIX path instead is the
-  command boundary: a trap deferred during a foreground command reliably
-  runs when that command finishes — this file's own header measured it
-  (held for 30 s, then RUN). The fix follows: never let the harness block in
-  one unbounded `wait`; await the command in bounded foreground slices, so
-  the worst-case trap latency is one poll **by construction** — and the
-  guarantee no longer depends on the racy primitive at all.
+* Ruled in: the loss happens BEFORE bash runs any trap — see the next two
+  sections for the polling experiment that pins it there (the
+  command-boundary flush this bullet originally proposed was measured and
+  did NOT recover the trap).
 
-## Fix
+## Attempted fix — bounded-slice polling: MEASURED AND REJECTED
 
-`wait "$COMMAND_PID"` is replaced by a bounded poll: `while kill -0
-"$COMMAND_PID"; do sleep 0.1; done`, then a final (non-blocking) `wait` to
-collect the command's status. POSIX-portable (works on bash 3.2 and dash);
-worst-case signal→trap latency is 0.1 s + cleanup (~0.3–0.6 s total, still
-under 6 % of the test's 10 s budget); exit statuses unchanged (130/143/129/
-124/`$?`). Proven in the pair shape below — the state that failed 4/4 suite
-runs above is the same state that passes N/N below, with `int-trap`
-markers now present on every INT arm.
+Hypothesis: replace `wait "$COMMAND_PID"` with
+`while kill -0 "$pid"; do sleep 0.1; done` so the trap only ever waits
+behind a bounded foreground command, whose completion POSIX shells flush
+deferred traps at (the header's own 30 s measurement). Commit `926a712c`
+shipped it; pair run 2 then showed:
+
+```
+run 2: suite A 3 failed, 736 passed, 4 skipped in 166.28s   (SIGINT arm FAILED)
+       suite B 3 failed, 736 passed, 4 skipped in 166.92s   (SIGINT arm FAILED)
+       int-trap markers in either suite's whole trace: 0
+```
+
+`watch_stall.sh` caught the two stalled harnesses **on the polling build**
+(their child lists show the 0.1 s `sleep` slice cycling) and `/usr/bin/sample`
+put bash in `__wait4` — i.e. the harness crossed ~105 command boundaries in
+the stalled state and STILL never ran the INT trap. The command-boundary
+flush hypothesis is therefore dead: **bash 3.2 never delivered the signal to
+its own handler** (the loss is in bash's signal mask/queue internals — most
+likely SIGINT left blocked/pending by a `sig_block()` window during the
+startup fork storm, where this host's missing `setsid` forces a python3
+`new_group` shim per child). No trap shape, wait shape, or timeout inside
+the POSIX harness can recover a signal whose handler never runs. The polling
+change was reverted (`git revert`-equivalent in the follow-up commit) — a
+disproved behaviour change does not ship.
+
+## Left for the next worker (measured ground, no re-derivation needed)
+
+1. **lldb-level confirmation of the mask/queue state**: catch a stalled
+   harness (the `watch_stall.sh` shape pins it within ~0.5 s of the stall;
+   the stalled harness is the one with no marker after `in-wait`), attach
+   with `lldb -p` and read the signal mask (`sigprocmask` state) and pending
+   set — one attach answers "blocked in mask" vs "queued but stuck".
+2. **If blocked-in-mask (the evidence now favours it)**: the harness cannot
+   fix its own interpreter, so the fix is structural — the signal-owning
+   process must not be bash 3.2 for the duration of the race. Cheapest
+   shape on the table: start the harness under a tiny signal-proxy that
+   `sigprocmask`s to a known state and `exec`s the script *before* any
+   forks (python3 is already a hard dependency of `new_group` on this
+   host) — or move the harness to the python3 `new_group` shape wholesale
+   (bigger diff, breaks the POSIX-shell identity and dash on CI). Decide
+   with a card; do not start from "raise the timeout", which F4 of
+   t_f8e6fe38 and this card both rule out.
+3. **Reproduce recipe unchanged**: `pair.sh` shape from the parent audit
+   (two full `scripts/tests` suites, two worktrees, same commit) failed the
+   SIGINT arm 4/4 suite-runs before the polling experiment and 2/2 after
+   it — the race is reliably present under that shape on this host.
+
 
