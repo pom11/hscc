@@ -1569,6 +1569,115 @@ def test_restart_mid_run_recovers_in_flight_to_the_queue_head(tmp_path):
     assert doc["projects"]["alpha"]["queue"] == []
 
 
+def test_the_running_gates_pgid_is_in_the_ledger_while_the_leg_runs(
+        tmp_path, monkeypatch):
+    """A daemon restart can only find the orphan gate through the ledger."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    seen = []
+
+    def gate(command, worktree, timeout_s, cancel_check=None, *,
+             on_start=None, **kw):
+        on_start(4242)
+        flight = mq.load_state(_state(tmp_path))[
+            "projects"]["alpha"]["in_flight"]
+        seen.append(flight.get("pgid"))
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     auto_source=lambda *a, **k: [])
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert seen == [4242], seen
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert ps["queue"] == []
+
+
+def test_run_gate_hands_the_spawned_pgid_to_the_ledger_callback(
+        tmp_path, monkeypatch):
+    """The pgid exists only after Popen; a callback failure never fails a gate."""
+    fake, _calls = _fake_subprocess(
+        popem=lambda argv, kwargs: _FakeGateProc(returncode=0, pid=4242))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    seen = []
+
+    verdict, _output = mq._run_gate("true", str(tmp_path), 42,
+                                    on_start=seen.append)
+    assert verdict == "pass"
+    assert seen == [4242]
+
+    def explode(_pid):
+        raise RuntimeError("ledger write failed")
+
+    verdict, _output = mq._run_gate("true", str(tmp_path), 42,
+                                    on_start=explode)
+    assert verdict == "pass", "bookkeeping may not fail the gate it records"
+
+
+def test_restart_kills_the_previous_daemons_gate_group_before_regating(
+        tmp_path):
+    """The 2.17.6 orphan: gate reparented to launchd, still in the worktree."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    mq.add_to_queue("alpha", 13, card="t_restart", path=_state(tmp_path))
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    ps["in_flight"] = dict(ps["queue"].pop(0), pgid=4242, stage="gating")
+    # Recovery runs before pause/enable can stop the tick, exactly as it must:
+    # a paused queue still cannot leave a suite running in its checkout.
+    ps["paused"] = True
+    mq.save_state(doc, _state(tmp_path))
+
+    calls = []
+    alive = {4242}
+
+    def fake_kill(pgid, sig):
+        calls.append((pgid, sig))
+        if pgid not in alive:
+            raise ProcessLookupError(pgid)
+        if sig == signal.SIGKILL:
+            alive.discard(pgid)
+
+    lines, log = _logger()
+    result = mq.tick(state_path=_state(tmp_path), registry_path=registry,
+                     gh_runner=_no_runner, git_runner=_no_runner,
+                     kill_runner=fake_kill, pause=lambda _s: None, log=log)
+
+    assert result["recovered"] == ["alpha"]
+    assert [sig for _pgid, sig in calls if sig] == [
+        signal.SIGTERM, signal.SIGKILL], calls
+    assert all(pgid == 4242 for pgid, _sig in calls), calls
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [13]
+    assert "pgid" not in ps["queue"][0], ps["queue"][0]
+    assert any("gate process group 4242" in ln and "TERM" in ln
+               for ln in lines), lines
+    assert any("survived TERM" in ln and "KILL" in ln for ln in lines), lines
+
+
+def test_recovery_never_signals_our_own_group_or_an_already_dead_one():
+    """A live tick's ledger must not make the daemon kill itself, ever."""
+    def explode(pgid, sig):
+        raise AssertionError(f"signalled {pgid} with {sig}")
+
+    for pgid in (os.getpgrp(), os.getpid(), 1, 0, None):
+        assert mq._reclaim_orphan_gate({"pr": 1, "pgid": pgid},
+                                       kill_runner=explode) is False
+
+    def gone(pgid, sig):
+        raise ProcessLookupError(pgid)
+
+    assert mq._reclaim_orphan_gate({"pr": 1, "pgid": 4242},
+                                   kill_runner=gone) is False
+
+
 # ── pause ──────────────────────────────────────────────────────────────────
 
 def test_pause_leaves_the_queue_untouched(tmp_path):
@@ -1600,7 +1709,7 @@ def test_remove_during_gate_cancels_before_push_and_never_merges(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 7, card="t_removed", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
         return "pass", ""
 
@@ -1632,7 +1741,7 @@ def test_pause_or_disable_during_gate_stops_before_push_and_keeps_entry(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 8, card="t_hold", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         if action == "pause":
             mq.set_paused("alpha", True, path=_state(tmp_path))
         else:
@@ -1944,7 +2053,7 @@ def test_view_shows_the_live_gating_stage_while_the_gate_runs(tmp_path,
                     path=_state(tmp_path))
     seen = {}
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         seen.update(mq.view(state_path=_state(tmp_path),
                             registry_path=registry))
         return "fail", "gate exploded"
@@ -2923,7 +3032,7 @@ def test_gate_heartbeat_advances_the_stream_while_the_gate_runs(tmp_path,
     seen = []          # (timestamp, stamp) per DISTINCT stamp read in-leg
     leg = {}
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         leg["start"] = time.monotonic()
         deadline = leg["start"] + 10.0
         while time.monotonic() < deadline:
@@ -2979,11 +3088,13 @@ def test_heartbeat_stops_the_moment_the_gate_leg_ends(tmp_path, monkeypatch):
 
     interval = 0.2
     monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
-    # Stub matches the real `_run_gate` signature, `cancel_check` included: a
-    # stub that silently absorbed `**kwargs` would keep passing if the parameter
-    # were renamed, and the real caller would then be the only thing that knows.
+    # Stub matches the real `_run_gate` signature, `cancel_check` and `on_start`
+    # included: a stub that silently absorbed `**kwargs` would keep passing if a
+    # parameter were renamed, and the real caller would then be the only thing
+    # that knows.
     monkeypatch.setattr(mq, "_run_gate",
-                        lambda c, w, t, cancel_check=None: ("pass", ""))
+                        lambda c, w, t, cancel_check=None,
+                        on_start=None: ("pass", ""))
 
     result = mq.tick(state_path=_state(tmp_path),
                      root=str(tmp_path / "queue"), registry_path=registry,
@@ -3221,7 +3332,7 @@ def test_ci_pending_is_rechecked_in_place_without_rerunning_the_gates(
     mq.add_to_queue("alpha", 19, path=_state(tmp_path))
     gate_calls = []
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         gate_calls.append(command)
         return "pass", ""
 

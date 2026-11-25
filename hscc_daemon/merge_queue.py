@@ -93,6 +93,12 @@ DEFAULT_PROCESS_TIMEOUT_S = 120
 MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
 
+#: How long a gate group orphaned by a daemon restart gets to honour SIGTERM
+#: before it is SIGKILLed (see :func:`_reclaim_orphan_gate`).  The gate runs in
+#: its own session, so the kernel does not take it down with the daemon.
+ORPHAN_GATE_TERM_GRACE_S = 5.0
+ORPHAN_GATE_TERM_POLLS = 20
+
 #: Cap on the retry error kept in ``last_error``. The first line stays the
 #: exception type + message (what a surface renders), followed by the tail of
 #: the traceback; the cap keeps a pathological traceback out of the ledger.
@@ -1693,6 +1699,82 @@ def _kill_gate_group(proc, *, reap=True):
         pass
 
 
+def _gate_group_alive(pgid, kill_runner=None):
+    """True when process group ``pgid`` still has a live member.
+
+    Signal 0 asks the kernel without delivering anything.  ``kill_runner`` is
+    the same injection point :func:`_reclaim_orphan_gate` uses, so a test can
+    answer "alive" / "gone" without any real process existing.
+    """
+    kill = kill_runner or os.killpg
+    try:
+        kill(int(pgid), 0)
+    except ProcessLookupError:
+        return False
+    except Exception:
+        # PermissionError means the group exists but is not ours to signal;
+        # for an unreadable/odd error, trying the TERM is still the safer
+        # answer than declaring a possibly-running suite gone.
+        return True
+    return True
+
+
+def _reclaim_orphan_gate(flight, *, project=None, log=None, kill_runner=None,
+                         pause=None):
+    """TERM then KILL the gate group a PREVIOUS daemon left in the ledger.
+
+    ``launchctl bootout/bootstrap`` kills the daemon, but a gate it spawned runs
+    with ``start_new_session=True``: the kernel reparents it to launchd instead
+    of taking it down.  Measured on 2.17.6 (2026-11-25): after a daemon restart
+    ``bash scripts/run_tests.sh`` ran with ppid 1 and its pytest child kept the
+    gate worktree busy while the new daemon started its own gate in that same
+    checkout.
+
+    The ledger is the only thing that survives the restart, so the gate's pgid
+    is written there the moment the leg starts (``_run_gate(on_start=...)``).
+    This sends TERM, waits :data:`ORPHAN_GATE_TERM_GRACE_S` (bounded polls),
+    then KILL, and logs both steps.
+
+    It refuses to signal our OWN process group or pid: a ledger written by a
+    still-live tick must never make recovery kill the daemon itself.  Anything
+    that is not an integer, not a group (``<= 1``), or already gone is a no-op.
+
+    Returns True when the group was signalled (or TERMed to death).
+    """
+    log = log or (lambda *a, **k: None)
+    try:
+        pgid = int(flight.get("pgid") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if pgid <= 1 or pgid in (os.getpid(), os.getpgrp()):
+        return False
+    kill = kill_runner or os.killpg
+    if not _gate_group_alive(pgid, kill):
+        return False
+    pr = flight.get("pr")
+    log(f"merge-queue {project}: gate process group {pgid} from the previous "
+        f"daemon is still alive (PR #{pr}); sending TERM", "WARN")
+    try:
+        kill(pgid, signal.SIGTERM)
+    except Exception:
+        pass
+    pause = pause or time.sleep
+    polls = max(1, int(ORPHAN_GATE_TERM_POLLS))
+    for _ in range(polls):
+        if not _gate_group_alive(pgid, kill):
+            log(f"merge-queue {project}: orphaned gate group {pgid} exited on "
+                "TERM", "INFO")
+            return True
+        pause(ORPHAN_GATE_TERM_GRACE_S / polls)
+    log(f"merge-queue {project}: orphaned gate group {pgid} survived TERM; "
+        "sending KILL", "WARN")
+    try:
+        kill(pgid, signal.SIGKILL)
+    except Exception:
+        pass
+    return True
+
+
 class _GateCancelWatch:
     """Stop a gate leg whose entry has left the queue, group and all.
 
@@ -1785,7 +1867,7 @@ class _GateCancelWatch:
 
 
 def _run_gate(command, worktree, timeout_s, cancel_check=None,
-              *, cancel_poll_s=None):
+              *, cancel_poll_s=None, on_start=None):
     """Run one shell gate; returns ``(verdict, output)``.
 
     ``verdict`` is one of ``"pass"``, ``"fail"``, ``"timeout"`` or
@@ -1829,6 +1911,15 @@ def _run_gate(command, worktree, timeout_s, cancel_check=None,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
                                 start_new_session=True)
+        if on_start is not None:
+            # The pgid exists only once Popen ran, and a gate that later
+            # outlives the daemon can only be found through the ledger.  A
+            # bookkeeping failure must never stop the gate: the runner's
+            # cleanup is best-effort by the same rule as _kill_gate_group.
+            try:
+                on_start(int(proc.pid))
+            except Exception:
+                pass
         watch = _GateCancelWatch(proc, cancel_check, poll_s=cancel_poll_s)
         watch.start()
         try:
@@ -2634,11 +2725,33 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         # the predicate is handed IN and polled from beside the leg.  Same
         # function, same arguments as the checkpoints: a mid-leg answer cannot
         # disagree with the one the leg was started on.
-        with _GateLiveness(project, entry["pr"], command):
-            verdict, output = _run_gate(
-                command, worktree, timeout_s,
-                cancel_check=lambda: _cancel_reason(state_path, project,
-                                                    entry, cfg))
+        # The leg's pgid goes into the ledger the moment Popen returns it, and
+        # is removed in the finally.  A daemon restart kills the daemon but not
+        # this session (start_new_session=True), so the ledger is the only way
+        # the next tick can find and kill the orphan before re-gating
+        # (t_593c32a4).  Cleared on every way out of the leg, so a finished
+        # gate can never leave a recycled pgid behind for recovery to signal.
+        gate_pgids = []
+
+        def _record_gate_pgid(pid):
+            gate_pgids.append(int(pid))
+            _update_flight(state_path, project, entry["pr"],
+                           pgid=int(pid), gate=command)
+
+        try:
+            with _GateLiveness(project, entry["pr"], command):
+                verdict, output = _run_gate(
+                    command, worktree, timeout_s,
+                    cancel_check=lambda: _cancel_reason(state_path, project,
+                                                        entry, cfg),
+                    on_start=_record_gate_pgid)
+        finally:
+            if gate_pgids:
+                try:
+                    _update_flight(state_path, project, entry["pr"],
+                                   pgid=None)
+                except Exception:
+                    pass
         if verdict == "cancelled":
             # The entry left the queue while the leg ran. Resolve it through the
             # same `_stop_cancelled` a checkpoint uses — drop on `removed`,
@@ -3839,7 +3952,8 @@ def _outcome_line(log, project, entry, outcome):
 
 def tick(*, state_path=None, root=None, registry_path=None,
          git_runner=None, gh_runner=None, handback=None, auto_source=None,
-         config_loader=None, log=None, now=None):
+         config_loader=None, log=None, now=None, kill_runner=None,
+         pause=None):
     """One daemon tick: recover, auto-enqueue, process at most one PR per repo."""
     state_path = state_path or state_file()
     log = log or (lambda *a, **k: None)
@@ -3868,6 +3982,16 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 # re-rebase and re-gate work that is already pushed.
                 continue
             if flight:
+                # A launchd restart reparents the old gate to launchd instead
+                # of killing it (its own session survives the daemon), and this
+                # loop is the first thing a new daemon runs. Kill that group
+                # BEFORE the entry goes back to the head and re-gates in the
+                # same checkout, or two suites fight over one worktree.
+                _reclaim_orphan_gate(flight, project=name, log=log,
+                                     kill_runner=kill_runner, pause=pause)
+                # The recorded group belongs to the run that just died; the
+                # re-gated leg records its own.
+                flight.pop("pgid", None)
                 ps["in_flight"] = None
                 if not any(int(e.get("pr", 0)) == int(flight.get("pr", 0))
                            for e in ps["queue"]):
