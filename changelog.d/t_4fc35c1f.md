@@ -35,11 +35,25 @@ task: t_4fc35c1f
   child and immune to pid recycling, that the parent is either still running or exited
   `0`. The posture that measured 8/30 measures **0/30** after.
   `docs/audits/packed-roster-reds_t_4fc35c1f.md`.
+* runner: **the leg-log hygiene test stopped asserting on the whole host's
+  `/tmp`.** It snapshotted `/tmp/hscc-legs-*` before the pack and demanded the
+  same set afterwards, but that namespace is host-global: any other packed run on
+  the box — a second queue gate, a worker running its own suite — creates and
+  `rm -rf`s a dir inside the window, and a sibling run is indistinguishable from a
+  leak. Measured here: **3 serial copies of the test green, 6 launched at once red
+  2** (`AssertionError: tmp litter`), and the red is the diff the queue handed back
+  for this PR's gate — one dir present at `before` that vanished plus one absent at
+  `before` that appeared. `HSCC_LEG_TMP_ROOT` now moves the pack's log ROOT, so the
+  check runs in a namespace the run owns and the private root must be empty
+  afterwards — which still catches a dir the run never names, the leak the global
+  glob was written for. The default stays the literal `/tmp` and `$TMPDIR` is still
+  never consulted (a new test pins it). **6/6 green under the load that reddened
+  2/6.**
 ---
 kind: Verified
 task: t_4fc35c1f
 
-* runner: `scripts/tests/test_run_tests_leg_parallelism.py` — **25 tests**, green. The
+* runner: `scripts/tests/test_run_tests_leg_parallelism.py` — **26 tests**, green. The
   new one packs `.github/scripts` with a flat-named leg and requires the leg's block to
   be NON-EMPTY, because the runner prints the `━━━ <leg> ━━━` header whether or not the
   log opened: a header with nothing under it is this defect, and a green stub cannot

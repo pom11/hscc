@@ -85,13 +85,18 @@ def _plan(spec):
     return " ".join(f"{leg}:{secs}:{rc}" for leg, secs, rc in spec)
 
 
-def _run(tmp_path, *, plan, parallel=None, heartbeat=0, extra_argv=(), legs=THREE):
+def _run(tmp_path, *, plan, parallel=None, heartbeat=0, extra_argv=(), legs=THREE,
+         leg_root=None, env_extra=None):
     """Execute the shipped runner against the stub, output REDIRECTED to a file.
 
     Redirected, never captured: a watcher that outlives a leg holds the file's
     write end open and a captured pipe then blocks — the harness would hang in
     exactly the way a real leg hangs (see test_leg_heartbeat.py for the same
     choice).
+
+    ``leg_root`` pins where the pack's per-leg log dir is created
+    (``HSCC_LEG_TMP_ROOT``); it is popped when unset so a value inherited from
+    the invoking shell cannot quietly relocate every test in this file.
     """
     stub = tmp_path / "stub_py.sh"
     stub.write_text(STUB)
@@ -109,6 +114,11 @@ def _run(tmp_path, *, plan, parallel=None, heartbeat=0, extra_argv=(), legs=THRE
         "STUB_PLAN": plan,
         "HSCC_LEG_HEARTBEAT_SECONDS": str(heartbeat),
     })
+    if leg_root is None:
+        env.pop("HSCC_LEG_TMP_ROOT", None)
+    else:
+        env["HSCC_LEG_TMP_ROOT"] = str(leg_root)
+    env.update(env_extra or {})
     if parallel is None:
         env.pop("HSCC_TEST_PARALLEL", None)
     else:
@@ -458,38 +468,78 @@ def test_sigterm_names_the_live_legs_and_leaves_none_behind(tmp_path):
 
 
 def test_the_per_leg_logs_do_not_pile_up_in_tmp(tmp_path):
-    """A gate runs on a shared host; N files per run must not be left behind.
+    """The pack removes the dir it made — asserted in a namespace it OWNS.
 
-    Asserted about the directory THIS run caused — the one the runner names in its
-    own banner — not about a snapshot of every ``hscc-legs-*`` in /tmp. A pack's log
-    dir lives for the whole run, and several workers run this suite on one Mac, so a
-    sibling's pack dir is born between the two snapshots whenever the windows
-    overlap; the global ``before == after`` assert then failed on a run that littered
-    nothing (t_34c5a3ed: red inside a full shared-host run, green twice in a row
-    alone). A namespace this test does not own cannot carry a gate verdict — ambiguity
-    on a gate is what gets someone re-running until green.
+    The runner writes each leg's log into one `mktemp -d <root>/hscc-legs-XXXXXX`
+    dir and `rm -rf`s it on exit. The first version of this test snapshotted
+    `/tmp/hscc-legs-*` before the run and demanded the SAME set afterwards, which
+    is not a promise any runner can keep on a shared host: that namespace is
+    host-global, so every other packed run on the box — a second merge-queue gate,
+    a worker running its own suite — creates and removes a dir inside our window.
+    Measured 2026-11-25: three serial copies of this test passed, six copies
+    launched at once lost two with `AssertionError: tmp litter`, and the queue's
+    red for PR #786 was the same diff from both sides at once (one dir present at
+    `before` that vanished, one absent at `before` that appeared). The queue makes
+    the overlap normal rather than rare: #800 runs the local gate beside GitHub CI
+    and #801 gates a batch at a time.
 
-    The claim keeps its teeth, aimed at the directory it is actually about. Two pins
-    make "the dir it printed" the same set as "the dirs it caused", so scoping cannot
-    hide litter: exactly one creation site in the runner (nothing can make a second
-    dir it did not advertise), and exactly one banner per run. Per-leg logs are
-    written INSIDE that dir, so the single ``not exists()`` check is the whole
-    ``N files per run`` claim rather than a fraction of it.
+    Moving the root into `tmp_path` makes the check airtight rather than looser.
+    The private root can hold only dirs THIS run made, so "nothing is left" still
+    catches the leak the global glob was written for — a pack that mktemps a dir
+    per leg, or one the run never names and therefore nothing can clean.
     """
-    sites = RUNNER.read_text().count("mktemp -d /tmp/hscc-legs-")
+    # Main's pin (t_34c5a3ed): scoping only covers the dir the runner
+    # ADVERTISES if there is exactly one creation site and exactly one banner
+    # per run. A dir created somewhere else, or a second creation site, would
+    # escape the private-root check below without these.
+    sites = RUNNER.read_text().count('mktemp -d "$LEG_TMP_ROOT/hscc-legs-')
     assert sites == 1, (
         f"the runner has {sites} leg-log creation site(s). This test attributes "
         f"cleanup to the one dir the runner prints, so a second site needs its own "
         f"assertion here — otherwise a dir it never advertises can't be caught.")
 
-    r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]), parallel=2)
-    assert r["rc"] == 0, r["log"]
-    logs = re.findall(r"leg logs in (/tmp/hscc-legs-\S+)", r["log"])
-    assert len(logs) == 1, (
-        f"a pack names its log dir exactly once; saw {logs}. Empty means the pack "
+    root = tmp_path / "leg-tmp-root"
+    root.mkdir()
+    r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]),
+             parallel=2, leg_root=root)
+    named = re.findall(r"leg logs in (\S*hscc-legs-\S+)", r["log"])
+    assert named, (
+        "the pack never named its log dir — it did not run packed at all "
+        f"(no HSCC_LEG_TMP_ROOT handling, or mktemp refused):\n{r['log']}")
+    assert len(named) == 1, (
+        f"a pack names its log dir exactly once; saw {named}. Empty means the pack "
         f"never started (mktemp fell back to serial), so nothing was cleaned up "
         f"to check:\n{r['log']}")
-    assert not Path(logs[0]).exists(), f"left behind: {logs[0]}"
+    assert len(set(named)) == 1, (
+        f"the pack reported {sorted(set(named))} log dirs across one run; it must "
+        "name every dir it creates, because a dir it never names is a dir "
+        "nothing can clean up")
+    assert not Path(named[0]).exists(), f"left behind: {named[0]}"
+    left = sorted(p.name for p in root.glob("hscc-legs-*"))
+    assert not left, f"tmp litter in the run's own root: {left}"
+
+
+def test_the_default_leg_root_stays_tmp_even_with_a_tmpdir(tmp_path):
+    """`HSCC_LEG_TMP_ROOT` is a seam, not a second answer to `$TMPDIR`.
+
+    The runner's rule (see the WHY block at the mktemp in run_tests.sh) is that
+    suite scratch has exactly one home and it is not `$TMPDIR`, because a host
+    whose TMPDIR sits under the login home gets a `/Users`-shaped token back into
+    the posture — the same reason the sealed HOME refuses it
+    (test_run_tests_home_seal.py). This pins that adding the override did not
+    quietly turn `/tmp` into "whatever TMPDIR answered".
+    """
+    inside = tmp_path / "tmpdir"
+    inside.mkdir()
+    r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]),
+             parallel=2, env_extra={"TMPDIR": str(inside)})
+    m = re.search(r"leg logs in (/\S+)", r["log"])
+    assert m, r["log"]
+    assert m.group(1).startswith("/tmp/hscc-legs-"), (
+        f"the leg dir moved off the literal /tmp: {m.group(1)}")
+    assert not list(inside.glob("hscc-legs-*")), (
+        f"$TMPDIR moved the leg logs, which the sealed-HOME rule forbids: "
+        f"{sorted(p.name for p in inside.iterdir())}")
 
 
 def test_a_leg_whose_name_is_a_path_still_runs(tmp_path):
