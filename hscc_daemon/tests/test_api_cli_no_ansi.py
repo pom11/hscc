@@ -39,6 +39,13 @@ def _make_fake_api(host="127.0.0.1", port=8787, token="SECRETTOKEN",
                 raise RuntimeError("token file is unreadable")
             return token
 
+        # t_cc7b6023: `status` now reads the credential through `peek_token`
+        # (it must never create one). A fake standing in for a CURRENT payload
+        # answers both; a fake with only `load_token` models a payload so old it
+        # cannot read without minting, and `status` correctly prints no QR.
+        def peek_token(self):
+            return self.load_token()
+
     return _FakeApi()
 
 

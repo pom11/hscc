@@ -1181,6 +1181,15 @@ def _handle_status(argv, theme_name=None):
     configured bind address (loopback default honored); does not bind anything.
     Prints a scannable connection QR (suppressed by ``--no-qr``) when a token
     exists — if the token is missing/unreadable, says so and exits cleanly.
+
+    NEVER CREATES the token. The token file is a bearer credential for the whole
+    API, so it comes into existence only behind a verb that means it: `start`
+    (api_cli.py:946) and the serve boot path (api_server.py:1136) both call
+    ``load_token``, which generates on first run. This verb calls
+    ``peek_token``, which returns ``None`` instead (t_cc7b6023 — it used to call
+    ``load_token``, so a status read minted a credential with no operator intent
+    behind it, and ``hscc verify --json`` inherited the mint through its
+    ``hscc api status`` subprocess hop).
     """
     argv, theme_name_ = _strip_theme(argv)
     theme_name = theme_name_ if theme_name_ is not None else theme_name
@@ -1267,17 +1276,34 @@ def _handle_status(argv, theme_name=None):
     console.print(theme.make_status_panel(
         "\n".join(rows), status=status, title="api"))
 
-    # The QR is only useful when there is an endpoint AND a valid token. If
-    # the token is missing/unreadable, say so and exit cleanly (no QR). The
-    # token is passed straight into the QR payload (stdout only, never logged).
+    # The QR is only useful when there is an endpoint AND a token that ALREADY
+    # EXISTS. This is a read: it must never mint. `load_token` generates on first
+    # run (api_server.py:95), which is right for `start` and for the serve boot
+    # path and wrong here — a status line is not operator intent to create a
+    # bearer credential, and the file appearing silently changes what other
+    # verbs do (`hscc notify list` branches on its existence, notify_cli.py:334).
+    # So: `peek_token`, and an OLD installed hscc-api payload that predates it
+    # means NO QR — resolving through a `load_token` fallback would re-open the
+    # mint through the very compatibility path meant to prevent it (t_cc7b6023).
+    # The token is passed straight into the QR payload (stdout only, never logged).
     if not no_qr and host is not None:
-        try:
-            token = api.load_token()
-        except RuntimeError as exc:
-            # exc text embeds the token-file path — DATA.
-            console.print(f"No connection QR: could not read auth token ({theme.esc(exc)})")
+        peek = getattr(api, "peek_token", None)
+        if peek is None:
+            console.print("No connection QR: this hscc-api payload cannot read "
+                          "the auth token without creating one")
         else:
-            _print_api_qr(host, port, token, hosts=hosts, theme_name=theme_name)
+            try:
+                token = peek()
+            except RuntimeError as exc:
+                # exc text embeds the token-file path — DATA.
+                console.print(f"No connection QR: could not read auth token ({theme.esc(exc)})")
+            else:
+                if token is None:
+                    console.print("No connection QR: no auth token yet — run "
+                                  "'hscc api start' once to create ~/.hscc/api-token")
+                else:
+                    _print_api_qr(host, port, token, hosts=hosts,
+                                  theme_name=theme_name)
     return 0
 
 

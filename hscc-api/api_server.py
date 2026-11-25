@@ -139,6 +139,43 @@ def load_token(hscc_dir: str | os.PathLike | None = None) -> str:
     return token
 
 
+def peek_token(hscc_dir: str | os.PathLike | None = None) -> str | None:
+    """Return the auth token ONLY if it already exists; ``None`` when it does not.
+
+    The read-side twin of `load_token`, and the reason it exists: `load_token`
+    documents "generating it on first run", which is right for the two paths
+    that are about to *serve* (``_handle_start`` and ``create_servers``) and
+    wrong for a status report. A verb that advertises a read must not bring a
+    bearer credential into existence — it has no operator intent behind it, and
+    the file's mere presence changes what other verbs do (``hscc notify list``
+    branches on it, notify_cli.py:334).
+
+    Never creates, never mkdirs, never regenerates. The fail-closed distinction
+    for a file that EXISTS is kept identical to `load_token` — an unreadable or
+    empty token file raises rather than reading as "no token", because a corrupt
+    credential is a problem to report, not an absence to paper over. Callers
+    must still never log the return value.
+    """
+    hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
+    token_path = Path(hscc_dir) / TOKEN_FILE
+    if not token_path.exists():
+        return None
+    try:
+        token = token_path.read_text().strip()
+    except OSError as exc:  # unreadable / permission denied
+        raise RuntimeError(
+            f"api-token exists but is unreadable ({exc!r}); refusing to "
+            "start — fix permissions on {token_path}"
+        ) from exc
+    if not token:
+        raise RuntimeError(
+            f"api-token exists but is empty at {token_path}; refusing to "
+            "start unauthenticated — remove the file to regenerate a new "
+            "token, or restore the previous one"
+        )
+    return token
+
+
 def token_valid(supplied, expected) -> bool:
     """Constant-time comparison of a supplied token against the expected one."""
     if not supplied or not expected:
