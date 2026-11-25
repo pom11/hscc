@@ -105,6 +105,89 @@ def _load_watchdog():
     return module
 
 
+#: A process whose only job is to stay alive and stay identifiable. The
+#: harness identity self-check needs a subject whose lifetime THIS harness
+#: controls — see `_identity_self_check` for why the sandbox parent is not one.
+IDENTITY_PROBE_SRC = '''\
+import sys
+import time
+time.sleep(float(sys.argv[1]))
+'''
+
+
+def _identity_probe(sandbox: Path):
+    """Spawn the marker-bearing canary, wait for its argv to carry the marker.
+
+    Returns ``(ok, detail, probe)``. The probe is a direct child of the test
+    process, so it is reaped through its own ``Popen`` — never through a pid
+    lookup, which is the thing being tested here.
+    """
+    probe_py = sandbox / "identity_probe.py"
+    probe_py.write_text(IDENTITY_PROBE_SRC)
+    probe_py.chmod(0o755)
+    marker = str(probe_py)
+    # The FULL path in argv, not the basename: the marker IS the full path, and
+    # `ps` prints what argv holds. This is the clipped-column failure the check
+    # exists for, so the probe has to carry the same shape as the real thing.
+    probe = subprocess.Popen([sys.executable, str(probe_py), "30"],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    # A bounded wait, not a single read: between fork and exec a child still
+    # carries its parent's argv, so reading it immediately can legitimately see
+    # no marker yet. A platform whose answer NEVER carries it is the failure.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if _alive(probe.pid, marker):
+            return True, None, probe
+        if probe.poll() is not None:
+            return False, f"probe exited early with {probe.returncode}", probe
+        time.sleep(0.02)
+    return False, (f"probe pid {probe.pid} never answered as ours; "
+                   f"_state_and_command answered "
+                   f"{tuple(_state_and_command(probe.pid))!r}"), probe
+
+
+@pytest.fixture(scope="module", autouse=True)
+def identity_self_check(tmp_path_factory):
+    """Prove the pid-identity machinery works on THIS platform, before anything
+    that depends on its answer runs.
+
+    Why this is a fixture of its own and not a line inside ``sidecar``: the
+    check used to assert that the sandbox API parent was still alive and still
+    ours. In the ``stop`` mode that parent is TOLD to shut the sidecar down and
+    exit, so the assertion was asking which of the two — the fixture or the
+    scenario — won the scheduler. Under CPU pressure the scenario wins: measured
+    on this host, 8 red in 30 runs of the single node
+    ``test_cooperative_shutdown_still_takes_the_sidecar_down[stop]`` under twelve
+    bounded burners, and 0 in 25 at ordinary priority, with NO leg packing
+    involved at all (``HSCC_TEST_PARALLEL`` unset, one node per pytest). The
+    answer on the red runs was always ``('Z', '<defunct>')`` — a process this
+    test spawned and had not reaped yet, which is exactly what a zombie is, and
+    which ``_alive`` is correct to call not-alive.
+
+    So the concurrency work in ``scripts/run_tests.sh`` did not break this file;
+    it raised the box's load and made a race that had always been there lose
+    more often. The fix is not to drop the check — a broken identity answer
+    makes every pid assertion below silently answer "gone", and that is the
+    failure that cost a Linux runner a day — it is to point it at a process
+    whose lifetime the harness owns.
+    """
+    sandbox = tmp_path_factory.mktemp("identity-probe")
+    ok, detail, probe = _identity_probe(sandbox)
+    try:
+        assert ok, (
+            f"harness identity check broken on {sys.platform}: a marker-bearing "
+            f"child this fixture started itself never answered as ours; {detail}")
+    finally:
+        # Our own child: signalling it through its Popen cannot hit a recycled
+        # number, so this cleans up even when the check above just failed.
+        probe.kill()
+        try:
+            probe.wait(timeout=10)
+        except Exception:  # noqa: BLE001 — a child we cannot reap is not a leak we can fix
+            pass
+
+
 @pytest.fixture(autouse=True)
 def reset_bridge_state():
     """Same isolation the bridge's own tests use, plus the new fd state."""
@@ -629,15 +712,34 @@ def sidecar(request, tmp_path):
         if mode != "stop":
             assert _port_free(handle.port) is False, (
                 f"sidecar must really be listening; {diag()}")
-        # Harness self-check, and it earned its place the hard way: if the
-        # identity answer does not work on THIS platform, every pid assertion
-        # below silently answers "gone", "not ours to signal" turns into a 30 s
-        # wait, and the failure lands far from its cause. That is exactly what
-        # happened on the first Linux runner (procps clips ps's command= column).
-        assert _alive(proc.pid, handle.parent_marker), (
-            f"harness identity check broken on {sys.platform}: our own live "
-            f"parent pid {proc.pid} did not match its own argv marker; "
-            f"_state_and_command answered {tuple(_state_and_command(proc.pid))!r}")
+        # Harness identity self-check — see the `identity_self_check` fixture,
+        # which is where this proof now lives and WHY it moved there. What stays
+        # here is the half that is a statement about the SCENARIO: in the modes
+        # whose contract is "the parent serves until the harness stops it", the
+        # parent must still be alive and still be ours. It is not a statement
+        # about the scenario in `stop` — there the parent exits on its own once
+        # `shutdown()` returns, and asserting its liveness after READY is a race
+        # against that exit (t_4fc35c1f: 8/30 red under CPU pressure, `Z`).
+        # `stop_on_file` is NOT exempt: that mode gates the stop on a sentinel
+        # the harness writes later, so its parent is genuinely still serving
+        # here and its liveness is a real precondition. Only `stop` ends by
+        # design before this line can be reached.
+        if mode != "stop":
+            assert _alive(proc.pid, handle.parent_marker), (
+                f"harness identity check broken on {sys.platform}: our own live "
+                f"parent pid {proc.pid} did not match its own argv marker; "
+                f"_state_and_command answered "
+                f"{tuple(_state_and_command(proc.pid))!r}")
+        else:
+            # The exit is the design, but a pid we have not reaped must still be
+            # distinguishable from somebody else's: that is what the teardown's
+            # `_kill_soft` and the watchdog assertions below depend on. Our own
+            # Popen is the authority on whether it is gone, so ask it rather
+            # than `ps`, and require the exit to be the clean one the mode means.
+            rc = proc.poll()
+            assert rc is None or rc == 0, (
+                f"sandbox parent pid {proc.pid} died with rc={rc} before the "
+                f"case ran; {diag()}")
         yield handle
     finally:
         # Cleanup: never leak a process into the rest of the leg, whatever

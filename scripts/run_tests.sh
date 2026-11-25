@@ -846,7 +846,16 @@ else
   while [ "$P_REAPED" -lt "$P_N" ]; do
     while [ "$P_NEXT" -lt "$P_N" ] && [ "$P_LIVE" -lt "$PAR" ]; do
       d="${LEGS[$P_NEXT]}"
-      logf="$LEG_TMP/$P_NEXT-$d.log"
+      # A leg NAME is a PATH (`scripts`, `.github/scripts`), so it cannot be
+      # spliced raw into one filename. `…/1-.github/scripts.log` names a file in
+      # a directory that does not exist: the redirect fails before pytest is
+      # ever execed, the wrapper records nothing, and the leg reads red from a
+      # `wait` status — measured at p=2, the `.github/scripts` leg of the roster
+      # was red on every packed run for this reason alone and no FAILED line ever
+      # existed to capture (t_4fc35c1f). Flatten the `/`; the index prefix still
+      # carries roster order, and the leg's real name stays in the heartbeat TSV
+      # and the summary rows below, which is where a reader looks for it.
+      logf="$LEG_TMP/$P_NEXT-${d//\//_}.log"
       P_NAME[$P_NEXT]="$d"
       P_LOG[$P_NEXT]="$logf"
       P_T0S[$P_NEXT]="$(date +%s)"
