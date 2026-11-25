@@ -45,11 +45,15 @@ echo "== alone sweep (one process per file)"
 for f in "${FILES[@]}"; do
   b=$(basename "$f" .py)
   [ -f "$OUT/rc/$b.rc" ] && continue          # resumable
-  # -u list mirrors scripts/run_tests.sh SUITE_ENV_UNSET.
+  # -u list mirrors scripts/run_tests.sh SUITE_ENV_UNSET, and the pytest flags
+  # below mirror the runner's invocation flag for flag (both pinned by
+  # scripts/tests/test_alone_sweep_gate.py — keep the two sides moving together;
+  # `-rf` is what makes a red alone-run name its failing node id, same as t_d41c1668
+  # made it do on a leg).
   env -u HERMES_DELEGATED_CHILD_CONTEXT -u HERMES_KANBAN_DB \
       -u HERMES_KANBAN_BOARD -u HERMES_KANBAN_WORKSPACES_ROOT \
       -u HERMES_KANBAN_ATTACHMENTS_ROOT -u HSCC_REGISTRY \
-    "$PY" -m pytest -q -rs "$f" -p no:cacheprovider -m "not loadstress" \
+    "$PY" -m pytest -q -rs -rf "$f" -p no:cacheprovider -m "not loadstress" \
       --junitxml="$OUT/xml/$b.xml" > "$OUT/logs/$b.log" 2>&1
   echo $? > "$OUT/rc/$b.rc"
 done
