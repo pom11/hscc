@@ -448,39 +448,108 @@ def test_sigterm_names_the_live_legs_and_leaves_none_behind(tmp_path):
 # ── hygiene ─────────────────────────────────────────────────────────────────
 
 
+def _launch_pack(tmp_path, *, plan, parallel, legs):
+    """Start the shipped runner against the stub WITHOUT waiting for it, output
+    REDIRECTED to a file — the non-blocking twin of `_run`, for the same reason
+    (a watcher that outlives a leg holds a captured pipe's write end open).
+
+    It exists because one assertion here cannot be made after the fact: inside a
+    shared namespace, a path can only be attributed to THIS run while that run is
+    still holding it open. Afterwards the answer is indistinguishable from a
+    neighbour's.
+    """
+    stub = tmp_path / "stub_py.sh"
+    stub.write_text(STUB)
+    stub.chmod(0o755)
+    trace, argv, log = tmp_path / "trace.txt", tmp_path / "argv.tsv", tmp_path / "run.log"
+    trace.write_text("")
+    argv.write_text("")
+    env = dict(os.environ)
+    env.update({
+        "HSCC_TEST_PY": str(stub), "STUB_TRACE": str(trace), "STUB_ARGV": str(argv),
+        "STUB_PLAN": plan, "HSCC_LEG_HEARTBEAT_SECONDS": "0",
+        "HSCC_TEST_PARALLEL": str(parallel), "HSCC_TEST_LEGS": legs,
+    })
+    with open(log, "wb") as fh:
+        proc = subprocess.Popen(["bash", str(RUNNER)], stdout=fh,
+                                stderr=subprocess.STDOUT, env=env, cwd=str(REPO))
+    return proc, log
+
+
+def _until(peek, timeout=60.0, every=0.05):
+    """Poll `peek` until it answers truthy; the last answer, or None."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        found = peek()
+        if found:
+            return found
+        time.sleep(every)
+    return None
+
+
 def test_the_per_leg_logs_do_not_pile_up_in_tmp(tmp_path):
     """A gate runs on a shared host; N files per run must not be left behind.
 
-    Asserted about the directory THIS run caused — the one the runner names in its
-    own banner — not about a snapshot of every ``hscc-legs-*`` in /tmp. A pack's log
-    dir lives for the whole run, and several workers run this suite on one Mac, so a
-    sibling's pack dir is born between the two snapshots whenever the windows
-    overlap; the global ``before == after`` assert then failed on a run that littered
-    nothing (t_34c5a3ed: red inside a full shared-host run, green twice in a row
-    alone). A namespace this test does not own cannot carry a gate verdict — ambiguity
-    on a gate is what gets someone re-running until green.
+    WHAT IS ASSERTED. Two runs in a row, each with its own log dir, and every
+    file a run created inside its OWN dir is gone once that run is over — read
+    while the pack is in flight, which is the only moment those paths belong to
+    this run and to no one else.
 
-    The claim keeps its teeth, aimed at the directory it is actually about. Two pins
-    make "the dir it printed" the same set as "the dirs it caused", so scoping cannot
-    hide litter: exactly one creation site in the runner (nothing can make a second
-    dir it did not advertise), and exactly one banner per run. Per-leg logs are
-    written INSIDE that dir, so the single ``not exists()`` check is the whole
-    ``N files per run`` claim rather than a fraction of it.
+    WHY NOT `set(Path("/tmp").glob("hscc-legs-*")) == before`. That compared the
+    WHOLE shared namespace, so a third party creating or removing one of those
+    dirs inside the test's ~0.4 s window redded the gate — and this host almost
+    always has another pack live: the gate's own second leg runs tests that spawn
+    packs, a second PR's gate or a dispatched worker's local run can be live in
+    the same second, and a pack killed by a timeout leaves its dir behind for
+    hours. Measured on PR #792 (t_9f963ee3): the `scripts` leg failed here with
+    ONE extra dir in EACH set, which is churn, not a leak — the run's own dir had
+    already been proven gone by the assert above it. Reproduced at will: 3/3
+    passes on a quiet box, 1/1 fails with a second pack running concurrently.
     """
+    # Main's pin (t_34c5a3ed): there must be exactly one leg-log creation
+    # site, and each run must name the dir it made exactly once — otherwise a
+    # dir the runner never advertises escapes the per-run check below.
     sites = RUNNER.read_text().count("mktemp -d /tmp/hscc-legs-")
     assert sites == 1, (
         f"the runner has {sites} leg-log creation site(s). This test attributes "
         f"cleanup to the one dir the runner prints, so a second site needs its own "
         f"assertion here — otherwise a dir it never advertises can't be caught.")
 
-    r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]), parallel=2)
-    assert r["rc"] == 0, r["log"]
-    logs = re.findall(r"leg logs in (/tmp/hscc-legs-\S+)", r["log"])
-    assert len(logs) == 1, (
-        f"a pack names its log dir exactly once; saw {logs}. Empty means the pack "
-        f"never started (mktemp fell back to serial), so nothing was cleaned up "
-        f"to check:\n{r['log']}")
-    assert not Path(logs[0]).exists(), f"left behind: {logs[0]}"
+    dirs = []
+    for i in (0, 1):  # a pile-up is only visible across runs, never within one
+        run = tmp_path / f"run{i}"
+        run.mkdir()
+        proc, log = _launch_pack(
+            run, plan=_plan([(LEG_A, 1.0, 0), (LEG_B, 1.0, 0)]),
+            parallel=2, legs=f"{LEG_A} {LEG_B}")
+        try:
+            m = _until(lambda: re.search(r"leg logs in (/tmp/hscc-legs-\S+)",
+                                          log.read_text()))
+            assert m, f"the pack never named its log dir:\n{log.read_text()}"
+            banners = re.findall(r"leg logs in (/tmp/hscc-legs-\S+)",
+                                 log.read_text())
+            assert len(banners) == 1, (
+                f"a pack names its log dir exactly once; saw {banners}. Empty "
+                f"means the pack never started (mktemp fell back to serial), so "
+                f"nothing was cleaned up to check:\n{log.read_text()}")
+            d = Path(m.group(1))
+            # MID-FLIGHT, and only here can these N names be called THIS run's.
+            created = _until(
+                lambda: sorted(p.name for p in d.iterdir()) if d.is_dir() else None)
+            assert created, f"{d} never held a single per-leg log:\n{log.read_text()}"
+        finally:
+            try:
+                rc = proc.wait(timeout=180)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=30)
+                raise
+        assert rc == 0, f"rc={rc}\n{log.read_text()}"
+        assert not d.exists(), f"left behind: {d}"
+        assert not [n for n in created if (d / n).exists()], \
+            f"files outlived their run: {created}"
+        dirs.append(d)
+    assert len(set(dirs)) == 2, f"two runs shared one log dir: {dirs}"
 
 
 def test_heartbeat_seconds_zero_silences_the_watcher_in_a_pack(tmp_path):
