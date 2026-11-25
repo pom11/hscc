@@ -307,7 +307,7 @@ class TestFamilies:
         as deployed-plugins — the operator's conda shim's real code source."""
         f = tmp_path / "anything" / "hscc"
         f.parent.mkdir()
-        f.write_text("#!/home/op/.hermes/hermes-agent/venv/bin/python\n")
+        f.write_text("#!/home/hscc-fixture/.hermes/hermes-agent/venv/bin/python\n")
         f.chmod(0o755)
         assert uc._family_for(f, uc._read_shebang(f)) == uc.FAMILY_DEPLOYED
 

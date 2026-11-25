@@ -29,8 +29,8 @@ from flightdeck.core.registry import Project
 # A realistic wrapper pair (same shape as hscc-api/tests/test_repl_inject.py):
 # a launcher under ~/.hermes/bin (contains "hermes") invoked as `... chat`
 # with NO profile flag, plus the real profiled child underneath it.
-_LAUNCHER = "/Users/x/.hermes/bin/orch-launch chat --project alpha"
-_CHILD = "/Users/x/.hermes/hermes-agent/venv/bin/hermes -p kronos-orch chat"
+_LAUNCHER = "/Users/hscc-fixture/.hermes/bin/orch-launch chat --project alpha"
+_CHILD = "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/hermes -p kronos-orch chat"
 
 
 class Cp:

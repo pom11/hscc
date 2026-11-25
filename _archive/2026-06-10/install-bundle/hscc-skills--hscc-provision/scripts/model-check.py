@@ -84,7 +84,7 @@ def model_on_host(host, model_id):
     NOTE: Check for files (blobs), not directories. Empty dirs = not cached.
     """
     repo = hf_repo_name(model_id)
-    _, ok = ssh(host, f"find /home/spark/.cache/huggingface/hub/{repo}/blobs -type f | wc -l | grep -v '^0$'")
+    _, ok = ssh(host, f"find /home/<ssh_user>/.cache/huggingface/hub/{repo}/blobs -type f | wc -l | grep -v '^0$'")
     if ok:
         return "local"
     return "missing"
@@ -222,13 +222,13 @@ def do_sync(model_id):
 
         print(f"  {Y}→ Syncing to {ip}...{NC}")
         # Clean empty dirs and create fresh structure
-        ssh(ip, f"rm -rf /home/spark/.cache/huggingface/hub/{repo}/; mkdir -p /home/spark/.cache/huggingface/hub/{repo}/{{blobs,snapshots,refs}}")
+        ssh(ip, f"rm -rf /home/<ssh_user>/.cache/huggingface/hub/{repo}/; mkdir -p /home/<ssh_user>/.cache/huggingface/hub/{repo}/{{blobs,snapshots,refs}}")
 
         # Sync via ssh FROM NAS (local file access) TO target
         # macOS rsync does NOT support remote-to-remote transfers
         for section in ["blobs", "refs", "snapshots"]:
             src = f"/mnt/nas/hub/{repo}/{section}/"
-            dst = f"/home/spark/.cache/huggingface/hub/{repo}/{section}/"
+            dst = f"/home/<ssh_user>/.cache/huggingface/hub/{repo}/{section}/"
             cmd = f'rsync -avz --progress -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" {src} spark@{ip}:{dst}'
             result = subprocess.run(
                 [
@@ -264,10 +264,10 @@ def do_download(model_id, host):
 
     if model_on_nas(model_id):
         print(f"{B}Downloading {model_id} to {host} (from NAS)...{NC}")
-        ssh(host, f"rm -rf /home/spark/.cache/huggingface/hub/{repo}/; mkdir -p /home/spark/.cache/huggingface/hub/{repo}/{{blobs,snapshots,refs}}")
+        ssh(host, f"rm -rf /home/<ssh_user>/.cache/huggingface/hub/{repo}/; mkdir -p /home/<ssh_user>/.cache/huggingface/hub/{repo}/{{blobs,snapshots,refs}}")
         for section in ["blobs", "refs", "snapshots"]:
             src = f"/mnt/nas/hub/{repo}/{section}/"
-            dst = f"/home/spark/.cache/huggingface/hub/{repo}/{section}/"
+            dst = f"/home/<ssh_user>/.cache/huggingface/hub/{repo}/{section}/"
             cmd = f'rsync -avz -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" {src} spark@{host}:{dst}'
             subprocess.run(
                 [
@@ -309,10 +309,10 @@ def do_download_all():
             status = model_on_host(ip, model_id)
             if status != "local":
                 print(f"  Syncing to {ip}...")
-                ssh(ip, f"rm -rf /home/spark/.cache/huggingface/hub/{repo}/; mkdir -p /home/spark/.cache/huggingface/hub/{repo}/{{blobs,snapshots,refs}}")
+                ssh(ip, f"rm -rf /home/<ssh_user>/.cache/huggingface/hub/{repo}/; mkdir -p /home/<ssh_user>/.cache/huggingface/hub/{repo}/{{blobs,snapshots,refs}}")
                 for section in ["blobs", "refs", "snapshots"]:
                     src = f"/mnt/nas/hub/{repo}/{section}/"
-                    dst = f"/home/spark/.cache/huggingface/hub/{repo}/{section}/"
+                    dst = f"/home/<ssh_user>/.cache/huggingface/hub/{repo}/{section}/"
                     cmd = f'rsync -aq -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" {src} spark@{ip}:{dst}'
                     subprocess.run(
                         [

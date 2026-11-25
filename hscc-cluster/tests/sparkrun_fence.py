@@ -145,7 +145,7 @@ def _sparkrun_candidates(args, shell: bool) -> list:
 
     argv[0] alone is not enough: `sparkrun_bin.argv()` rewrites argv[0] to the
     resolved absolute CLI path, and a `timeout N <cli> ...` shell string puts
-    the CLI at index 2. A recipe path (`/Users/x/recipes/a.yaml`) is never a
+    the CLI at index 2. A recipe path (`/Users/hscc-fixture/recipes/a.yaml`) is never a
     sparkrun executable, so scanning every element costs no false positives —
     only elements NAMED sparkrun are candidates.
     """
