@@ -58,6 +58,12 @@ environment, so no tracked byte of this file carries it and the control cannot
 publish what it does not hold. The class is reported WITHOUT the name for the same
 reason — see ``OPERATOR_IDENTITIES_ENFORCE`` and the identity section below.
 
+Identity offenders are BLOCKING (``OPERATOR_IDENTITIES_ENFORCE``, flipped by
+t_d42e6d48 once ``blocking()`` over the tracked tree measured 0 on the host whose
+identity the branch derives). They were advisory at landing, for the same reason
+the home class was: a rule whose teeth depend on the machine running it must be
+measured there before it can fail the merge queue.
+
 100.64.0.0/10 is CGNAT, which is where Tailscale hands out addresses, so a real
 tailnet address lives somewhere in it. Rather than ban the whole range — tests
 legitimately need a tailnet-shaped host — 100.64.0.0/24 is reserved as the
@@ -492,21 +498,30 @@ def is_home_offender(offender):
     return offender.endswith(HOME_PATH_OFFENDER_SUFFIX)
 
 
-# ── the operator-identity class: ADVISORY (t_25f7a806) ────────────────────────
+# ── the operator-identity class: ENFORCED (t_25f7a806 → flipped by t_d42e6d48) ─
 #
-# Advisory at landing, and not because the tree is dirty — the scrub in this card
-# took `scan_tracked` to 0. A rule derived from the runtime identity is only as
-# predictable as the identity it derives from, and the merge queue runs this suite
-# on the operator's own host where the branch is live; a fork or a contributor's
-# checkout derives *their* name, which is a population nobody has measured. So:
-# report today, flip once `blocking()` has been measured at 0 on the tree that flips
-# (docs/audits/operator-identity-decision_t_25f7a806.md, "Decision 3").
+# Advisory at landing, enforced now, and the flip was taken on a measurement rather
+# than on a hope: `scan_tracked` / `blocking()` over every tracked file, run on the
+# host whose identity this branch derives (so the branch is LIVE, not inert), on the
+# tree that actually flips — `origin/main` merged with the #829 branch, because the
+# tree that landed #829 alone is not the tree the merge queue will test. Result:
+# 0 offenders in 2571 tracked files, so `blocking()` == 0 and the CLI exits 0 with an
+# empty report. That is the same gate `HOME_PATHS_ENFORCE` documents: a rule that
+# turns the suite red the moment it lands freezes every merge, because the merge
+# queue runs this suite on the operator's own host where this class has teeth.
+#
+# The honest asymmetry that stays after the flip: the verdict is machine-dependent.
+# On a GitHub-hosted runner the derived name is `runner`, which is sanctioned, so CI
+# stays blind to this class — the teeth are on the machine that commits. And a name
+# that is NOT the operator's (a third party's, in someone else's captured output) is
+# invisible by construction; no shape rule can catch it without the enumerated
+# deny-list the decision doc rejects.
 #
 # The env knob may ONLY STRENGTHEN, exactly like the home knob: an exported variable
 # in CI must never be able to mute a class, and `test_the_identity_knob_may_only_
 # strengthen` pins the enforced-plus-falsy-env case, which is the one that would
 # quietly turn a hard rule off.
-OPERATOR_IDENTITIES_ENFORCE = False
+OPERATOR_IDENTITIES_ENFORCE = True
 OPERATOR_IDENTITIES_ENFORCE_ENV = "HSCC_ADDRESS_GUARD_IDENTITY_ENFORCE"
 
 # Recognisable tail on an identity offender, same reason as the home suffix:
@@ -850,8 +865,10 @@ def report(offenders, scope="staged tree"):
                   "the commit is blocked.")
     elif identities:
         header = (f"OPERATOR IDENTITY in the {scope} — this repo is PUBLIC. "
-                  "ADVISORY: reported, not blocked (OPERATOR_IDENTITIES_ENFORCE is "
-                  "off until the flip is measured on the tree that flips it).")
+                  "ADVISORY: reported, not blocked — which means "
+                  "OPERATOR_IDENTITIES_ENFORCE has been turned back off from the "
+                  "True it ships with. Nothing in this repo asks for that; if you "
+                  "are reading this on a fork, the class is a hard rule upstream.")
     else:
         header = (f"OPERATOR HOME PATH in the {scope} — this repo is PUBLIC. "
                   "ADVISORY: reported, not blocked (HOME_PATHS_ENFORCE is off "
