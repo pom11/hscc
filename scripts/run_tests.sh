@@ -17,9 +17,11 @@
 #         HSCC_TEST_LEGS="hscc-api scripts"  run ONLY those legs (see the leg
 #         selection block below for the full contract; unknown names exit 64
 #         rather than running a subset silently).
-#         HSCC_TEST_PARALLEL=N  run N legs at a time. UNSET or 1 = the SERIAL
-#         path, byte-identical to the pre-concurrency runner; N>=2 packs. See
-#         the bounded leg concurrency block below for why the default is 1.
+#         HSCC_TEST_PARALLEL=N  run N legs at a time. UNSET or empty = the
+#         DEFAULT (2, since t_97013930); 1 or 0 = the SERIAL path, the
+#         pre-concurrency runner plus one self-reporting line; N>=2 packs to N.
+#         See the bounded leg concurrency block below for what the default is
+#         measured against and what would move it back to 1.
 #         HSCC_TEST_LEGS="loadstress"  the STRESS leg: re-runs every case
 #         pytest.ini marks `loadstress` N repeats deep under bounded CPU
 #         pressure owned by scripts/load_burners.sh (scripts/loadstress_leg.py
@@ -590,53 +592,79 @@ unset _pin
 # loss. Measured through this same runner at the gate's own priority
 # (`taskpolicy -b`, `ps -o pri` 4): five legs serial 188 s vs three-deep 96 s.
 #
-# WHY THE DEFAULT IS 1 AND NOT 2 — THE MEASUREMENT THAT DECIDED IT, AND THE
-# MEASUREMENT THAT UNBLOCKED MOVING IT. The card set the bar at "a full-roster
-# concurrent run must be green before the default goes above 1", so the roster was
-# run at p=2. The first run was NOT green: 12 legs, 3 red — `hscc-api` (an ERROR at
-# setup in `test_gateway_serve_watchdog.py:637`: `harness identity check broken on
-# darwin: our own live parent pid 3578 did not match its own argv marker;
-# _state_and_command answered ('Z', '<defunct>')`), plus `scripts` (1 failed) and
-# `.github/scripts`. All three were then root-caused, and NONE of them was the
-# mechanism this block used to blame: the zombie was the watchdog test's OWN child
-# (the sandbox parent its `stop` mode instructs to exit, which no runner tick can
-# reap — it is the pytest process's own child), the `.github/scripts` leg never ran
-# at all because its log path spliced the leg NAME (a path) into a FILENAME, and
-# `scripts` came back green. Both mechanisms this block used to name as the lead —
-# deferred reaping and the pack's own process groups — are disproven for all three;
-# `docs/audits/packed-roster-reds_t_4fc35c1f.md` carries the before/after numbers
-# (0 red in 25 at ordinary priority, 8 red in 30 under bounded burners, 0/30 after
-# the fixture fix — with HSCC_TEST_PARALLEL unset throughout, so no pack involved).
+# WHY THE DEFAULT IS 2 — WHAT MOVED IT, AND WHAT WOULD MOVE IT BACK
+# (t_97013930). It was 1 for two separate reasons and only one of them was ever
+# a measurement. The first was a red roster: the card that built the pack set the
+# bar at "a full-roster concurrent run must be green before the default goes above
+# 1", so the roster was run at p=2. The first run was NOT green: 12 legs, 3 red —
+# `hscc-api` (an ERROR at setup in `test_gateway_serve_watchdog.py:637`: `harness
+# identity check broken on darwin: our own live parent pid 3578 did not match its
+# own argv marker; _state_and_command answered ('Z', '<defunct>')`), plus `scripts`
+# (1 failed) and `.github/scripts`. All three were then root-caused by t_4fc35c1f,
+# and NONE of them was the mechanism this block used to blame: the zombie was the
+# watchdog test's OWN child (the sandbox parent its `stop` mode instructs to exit,
+# which no runner tick can reap — it is the pytest process's own child), the
+# `.github/scripts` leg never ran at all because its log path spliced the leg NAME
+# (a path) into a FILENAME, and `scripts` came back green. Both mechanisms this
+# block used to name as the lead — deferred reaping and the pack's own process
+# groups — are disproven for all three; `docs/audits/packed-roster-reds_t_4fc35c1f.md`
+# carries the before/after numbers (0 red in 25 at ordinary priority, 8 red in 30
+# under bounded burners, 0/30 after the fixture fix — with HSCC_TEST_PARALLEL unset
+# throughout, so no pack involved).
 #
-# THE BAR IS NOW MET: the full twelve-leg roster is green at p=2, 12/12, 713 s wall
-# against 1396 s of summed leg work = **1.96x** (t_4fc35c1f, this host, one clean
-# run). What keeps the default at 1 is no longer a red roster — it is that flipping
-# it is a CONTRACT change, not a green question. The serial stream is what two
-# readers were measured against (below), `test_the_default_is_the_serial_stream_and_
-# prints_nothing_new` pins unset as silent and byte-identical to the pre-concurrency
-# runner, and the narrowed `hscc_daemon scripts` gate has never been TIMED packed.
-# The flip needs those re-pinned and that number measured; it is one small slice,
-# unblocked, and deliberately not done half-verified here.
+# THE SECOND REASON WAS THE CONTRACT, NOT A RED, and it is what this card closed:
+# flipping what UNSET means moves the stream two readers anchor on (the SIGTERM
+# forensics' `during suite: $CURRENT_SUITE`, t_6bb29d46, and merge_queue's `^✗
+# <leg>` / `^FAILED <path>::<test>` digest anchors), and the narrowed `hscc_daemon
+# scripts` gate had never been TIMED packed. All three are closed and measured on
+# this host in `docs/audits/parallel-default-two_t_97013930.md`: the roster green
+# consecutively at the new default, the two-leg gate timed rather than derived, and
+# the default's stream pinned byte-identical to the explicit-2 stream below.
+#
+# WHAT WOULD MOVE IT BACK TO 1. Not one red leg: a pack shares this box with the
+# fleet control plane, so a packed red needs the same root-cause work a serial red
+# needs, and t_4fc35c1f is the precedent (three reds, none of them the pack). The
+# honest triggers are (a) a red that REPRODUCES serial and not packed — packing
+# itself changing an outcome; (b) the narrowed gate's measured wall clock no longer
+# beating serial by a clear margin, i.e. the cores are not free any more; (c) a
+# reader of the runner's stream that breaks on a packed shape and cannot be fixed at
+# its own end — re-read `test_red_leg_digest_matches_the_serial_shape` before
+# claiming (c), because that pin is what makes (c) hard to reach. Reverting is a
+# one-line default plus the pins below; what is expensive is finding a contract
+# break in a gate the operator is waiting on, which is why the default moved only
+# after the stream, the digest and the gate timing were measured together.
 #
 # CONTRACT (pinned by scripts/tests/test_run_tests_leg_parallelism.py):
-#   HSCC_TEST_PARALLEL unset or empty -> the SERIAL loop below, UNTOUCHED: no
-#       extra line, no new tmp dir, no job control. Two readers anchor on this
-#       stream rather than reading it — the SIGTERM forensics'
-#       `during suite: $CURRENT_SUITE` (t_6bb29d46) and merge_queue's
-#       `^✗ <leg>` / `^FAILED <path>::<test>` digest anchors — and both were
-#       measured against it.
-#   HSCC_TEST_PARALLEL=1 (or 0)       -> the same serial loop, with one line
-#       saying so.
+#   HSCC_TEST_PARALLEL unset or empty -> PACKED at the default 2, byte-identical
+#       to an explicit `HSCC_TEST_PARALLEL=2` run of the same plan (that equality
+#       IS the pin). The default adds no THIRD stream shape: a reader of a gate
+#       sees exactly the packed stream the pins below and t_6c2123f9/t_4fc35c1f
+#       already measured. What moves is only what UNSET used to mean.
+#   HSCC_TEST_PARALLEL=1 (or 0)       -> the SERIAL loop, unchanged and still one
+#       line away: peak 1, each leg's banner interleaved with its own output, and
+#       one self-reporting line. That is the posture the two readers were measured
+#       against — the SIGTERM forensics' `during suite: $CURRENT_SUITE`
+#       (t_6bb29d46) and merge_queue's `^✗ <leg>` / `^FAILED <path>::<test>` digest
+#       anchors — and `loadstress` always falls back to it.
 #   HSCC_TEST_PARALLEL=N (N>=2)       -> at most N legs in flight, launched in
 #       roster order, reaped as they FINISH (a slot is recycled the moment its
 #       leg ends — waiting for the oldest instead measured 1.0x, i.e. nothing).
 #   anything else (non-numeric, negative) -> SERIAL, with a printed note: a
 #       workflow that builds the value from a list must degrade to the posture it
 #       has always had, not to an unknown one.
+#   a ONE-LEG selection (CI's shape: .github/workflows/ci.yml picks one leg per
+#       job) -> SERIAL and SILENT even at the default, because the pack clamps to
+#       the roster size before it can print anything. The default therefore moves
+#       LOCAL gates only; CI never sees a pack (pinned:
+#       test_a_single_leg_selection_stays_serial_and_silent_at_the_default).
 #
-# WHY THE PACK CAP IS MODEST WHEN IT IS USED. This host also runs the fleet
-# control plane (the daemon, the gateway, the kanban dispatcher). Two is enough
-# to remove the serial queueing for the gate the queue actually runs.
+# WHY THE DEFAULT IS 2 AND NOT 3. The pack measured 1.96x at 2 on this 14-core
+# host; the headroom for a third slot is unmeasured, and the roster's two long
+# legs (hscc-api 449 s, hscc_daemon 331 s) are exactly what a third slot would
+# only partially absorb — with 12 legs the makespan floor is the longest leg, not
+# the queue. This host also runs the fleet control plane (the daemon, the gateway,
+# the kanban dispatcher), so a wider default pays control-plane latency for a
+# speedup nobody has measured. Raise it by measuring, per leg count and per host.
 #
 # WHY EACH LEG GETS ITS OWN FILE. With N legs writing to one stdout, their dot
 # bands interleave and the two ANCHORED reads above break: `FAILED path::test -
@@ -654,18 +682,27 @@ unset _pin
 # leg — see scripts/leg_heartbeat.sh) and one `parallel: done leg=… elapsed=…s
 # rc=… pack=…s` line the moment each leg is reaped. Together they still answer
 # the only question the heartbeat was written for — slow, or stopped.
-PAR_RAW="${HSCC_TEST_PARALLEL:-}"
-PAR=1
+#: THE DEFAULT IS A PACK OF 2 (t_97013930; it was 1 until the roster was green
+#: packed and the serial-stream contract was re-argued — see the block above).
+#: `${VAR-2}` and not `${VAR:-2}` so an explicitly-empty value is distinguishable
+#: here; the next line normalises it, because unset and empty are the same
+#: intention ("nobody chose") and must not be two postures.
+PAR_RAW="${HSCC_TEST_PARALLEL-2}"
+[ -n "$PAR_RAW" ] || PAR_RAW=2
+PAR="$PAR_RAW"
 case "$PAR_RAW" in
-  '') ;;                                    # unset/empty -> serial, silently
   *[!0-9]*)
     echo "parallel: HSCC_TEST_PARALLEL='$PAR_RAW' is not a non-negative integer — running SERIALLY"
+    PAR=1
     ;;
   *)
     if [ "$PAR_RAW" -lt 2 ]; then
+      # 1 and 0 are the serial posture ON DEMAND: the pre-concurrency stream, one
+      # self-reporting line, and the only way to ask for the stream the two readers
+      # were measured against. It never goes silent, because a log that cannot say
+      # which posture ran is how a serial run gets read as a packed one.
       echo "parallel: HSCC_TEST_PARALLEL=$PAR_RAW — running SERIALLY (the pre-concurrency path)"
-    else
-      PAR="$PAR_RAW"
+      PAR=1
     fi
     ;;
 esac

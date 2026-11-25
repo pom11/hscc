@@ -155,25 +155,113 @@ def test_the_pack_never_exceeds_the_bound(tmp_path, parallel, expected_peak):
         f"bound={parallel}\nlog={r['log']!r}")
 
 
-def test_the_default_is_the_serial_stream_and_prints_nothing_new(tmp_path):
-    """Unset must be the OLD run, line for line.
+#: The three tokens a packed stream legitimately carries that differ per run and
+#: say nothing about its SHAPE: the two mktemp dirs the banners name, and the two
+#: counters on a completion line. Folded narrowly — each pattern is anchored to the
+#: line that owns it, so the fold cannot swallow a real difference (pytest's own
+#: `7 passed in 0.5s`, the leg banners, the summary rows and every FAILED line all
+#: survive untouched, and a dropped or duplicated block is still caught).
+_NONCES = (
+    (re.compile(r"/tmp/hscc-legs-\w+"), "<LEG-TMP>"),
+    (re.compile(r"/tmp/hscc-suite-home-\w+"), "<SEAL-TMP>"),
+    (re.compile(r"^parallel: done leg=(\S+) elapsed=\d+s rc=(\d+) pack=\d+s$", re.M),
+     r"parallel: done leg=\1 rc=\2 <TIMING>"),
+)
 
-    The pack is opt-in (see the block's WHY THE DEFAULT IS 1 in run_tests.sh):
-    unset selects the serial loop and adds no line, no tmp dir and no job
-    control, so every consumer of this script keeps the stream it was measured
-    against until it asks for something else.
+
+def _fold_stream(log):
+    """The stream a READER sees, with the per-run nonces and counters folded.
+
+    Byte-identity pins below compare this. "Identical" is the claim being pinned;
+    including a mktemp nonce or a duration in it would only make the pin flaky —
+    and both folds are anchored to their own line, so neither can hide a block that
+    arrived twice, a block that never arrived, or a FAILED line that lost its
+    line-start.
     """
-    r = _run(tmp_path, plan=_plan([(LEG_A, 0.3, 0), (LEG_B, 0.3, 0), (LEG_C, 0.3, 0)]))
-    assert "parallel:" not in r["log"], f"unset must be silent:\\n{r['log']}"
+    for pat, repl in _NONCES:
+        log = pat.sub(repl, log)
+    return log
+
+
+def test_the_default_is_a_pack_of_two_and_is_the_explicit_two_stream_exactly(tmp_path):
+    """The default moved 1 -> 2 (t_97013930). Two things are pinned: the width, and
+    that the default introduces no THIRD stream.
+
+    This is the re-argument of `test_the_default_is_the_serial_stream_and_prints_
+    nothing_new`, whose value was that two readers were measured against the stream
+    an UNSET run produces: the SIGTERM forensics' `during suite:` line (t_6bb29d46)
+    and merge_queue's `^✗ <leg>` / `^FAILED <path>::<test>` digest anchors. That
+    claim cannot survive the flip as written, and deleting it would drop the only
+    guard on what the flip is allowed to change — so it becomes the claim that still
+    protects those readers: an unset run, an empty-valued run and an explicit
+    `HSCC_TEST_PARALLEL=2` run of the same plan emit the SAME STREAM. Everything that
+    was measured against a packed run — this file's digest, heartbeat and roster-
+    order pins, and t_4fc35c1f's green full-roster run — therefore sees exactly what
+    it has already been shown, and the only thing the flip changes is which knob a
+    reader turns to get serial (the next test).
+    """
+    plan = _plan([(LEG_A, 0.5, 0), (LEG_B, 0.5, 0), (LEG_C, 0.5, 0)])
+    unset = _run(tmp_path / _mk(tmp_path, "unset"), plan=plan)
+    empty = _run(tmp_path / _mk(tmp_path, "empty"), plan=plan, parallel="")
+    two = _run(tmp_path / _mk(tmp_path, "two"), plan=plan, parallel=2)
+    assert unset["rc"] == empty["rc"] == two["rc"] == 0, (
+        f"{unset['rc']} / {empty['rc']} / {two['rc']}")
+    for name, r in (("unset", unset), ("empty", empty)):
+        assert _fold_stream(r["log"]) == _fold_stream(two["log"]), (
+            f"{name} is its own stream shape — the readers were measured against "
+            f"the packed one, not a third:\n  {name}: {r['log']!r}\n  two:   "
+            f"{two['log']!r}")
+    peak, _ = _in_flight(unset["trace"])
+    assert peak == 2, f"the default must PACK (want peak 2): {unset['trace']}"
+    assert re.search(r"^parallel: 2 legs at a time", unset["log"], re.M), unset["log"]
+    # The block shape the digest anchors need, at the default, unasked for.
+    assert re.findall(r"^━━━ (\S+) ━━━$", unset["log"], re.M)[:3] == [LEG_A, LEG_B, LEG_C]
+
+
+@pytest.mark.parametrize("serial_value", ["1", "0"])
+def test_the_serial_posture_is_one_line_away_and_adds_nothing_else(tmp_path, serial_value):
+    """The half of the old default pin that keeps all its teeth after the flip.
+
+    `HSCC_TEST_PARALLEL=1` (and 0) is the stream the SIGTERM forensics and the
+    queue's digest anchors were MEASURED against, so it has to stay the old loop:
+    one leg in flight, each leg's banner interleaved with its own output rather
+    than printed above a captured block, no tmp dir, and exactly one line saying
+    which posture ran. The argv each leg is handed is identical across postures —
+    `test_pack_and_serial_hand_pytest_the_same_argv` holds that half.
+    """
+    r = _run(tmp_path, plan=_plan([(LEG_A, 0.3, 0), (LEG_B, 0.3, 0), (LEG_C, 0.3, 0)]),
+             parallel=serial_value)
+    assert r["log"].count("parallel:") == 1, (
+        f"the serial posture prints exactly one self-reporting line:\n{r['log']}")
+    assert "running SERIALLY (the pre-concurrency path)" in r["log"], r["log"]
     peak, _ = _in_flight(r["trace"])
     assert peak == 1, r["trace"]
-    # The serial stream interleaves each banner with its own leg's output (in a
-    # pack the banner sits immediately before the whole captured block instead).
+    # Interleaved banner+output: in a pack the banner sits before the whole block.
     assert re.search(rf"━━━ {LEG_A} ━━━\n\.", r["log"]), r["log"]
+    assert "leg logs in" not in r["log"], f"no tmp dir on the serial path:\n{r['log']}"
 
 
-def test_two_at_a_time_is_opt_in(tmp_path):
-    """And asking for a pack gets one, visibly."""
+def test_a_single_leg_selection_stays_serial_and_silent_at_the_default(tmp_path):
+    """CI's shape, unpinned until the default moved.
+
+    `.github/workflows/ci.yml` runs ONE leg per job, and the pack clamps to the
+    roster size before it can print anything — so a one-leg job keeps the serial
+    stream AND the silent one. That is why flipping the default needs no change in
+    CI: the workflows never set HSCC_TEST_PARALLEL, and this pins that they never
+    have to. A regression here would pack CI's legs and change what CI measures,
+    which no one asked for.
+    """
+    r = _run(tmp_path, plan=_plan([(LEG_A, 0.3, 0)]), legs=LEG_A)
+    assert "parallel:" not in r["log"], f"a one-leg run must stay silent:\n{r['log']}"
+    assert "leg logs in" not in r["log"], r["log"]
+    peak, _ = _in_flight(r["trace"])
+    assert peak == 1, r["trace"]
+
+
+def test_an_explicit_pack_width_is_honoured_and_announced(tmp_path):
+    """A width asked for is a width got, and the run says so (and says where the
+    leg logs went — the tmp dir is the one thing a reader needs to read a packed
+    run while it is still running)."""
     r = _run(tmp_path, plan=_plan([(LEG_A, 0.6, 0), (LEG_B, 0.6, 0), (LEG_C, 0.6, 0)]),
              parallel=2)
     assert re.search(r"^parallel: 2 legs at a time", r["log"], re.M), r["log"]
@@ -305,18 +393,27 @@ def test_every_legs_output_arrives_exactly_once(tmp_path):
         assert r["log"].count(f"━━━ {leg} ━━━") == 1, f"{leg} block printed twice"
 
 
-def test_red_leg_digest_matches_the_serial_shape(tmp_path):
+@pytest.mark.parametrize("packed_parallel", [3, None],
+                         ids=["asked-for-3", "the-default"])
+def test_red_leg_digest_matches_the_serial_shape(tmp_path, packed_parallel):
     """THE pin. The queue's digest of a packed run must name the same failures a
     serial run names — asserted against merge_queue's real regexes, not a copy.
 
     A pack that let another leg's dots land inside a short test summary would
     still print the FAILED text somewhere, so substring assertions would pass.
     These match at LINE START, which is how the queue reads them.
+
+    Run twice on purpose since t_97013930: once for a width someone asked for and
+    once for the SHIPPED DEFAULT (unset), because the default is what the queue's
+    gate actually runs — `merge_queue._selected_leg_gate` builds
+    `HSCC_TEST_LEGS=… bash scripts/run_tests.sh` and never sets a width, so this
+    is the only thing standing between a default flip and a handback digest that
+    silently names fewer failures than the run produced.
     """
     from hscc_daemon import merge_queue as mq
 
     plan = _plan([(LEG_A, 0.4, 0), (LEG_B, 0.9, 1), (LEG_C, 0.2, 0)])
-    pack = _run(tmp_path / _mk(tmp_path, "pack"), plan=plan, parallel=3)
+    pack = _run(tmp_path / _mk(tmp_path, "pack"), plan=plan, parallel=packed_parallel)
     serial = _run(tmp_path / _mk(tmp_path, "ser"), plan=plan, parallel=1)
 
     assert pack["rc"] == 1 and serial["rc"] == 1, "the red leg must fail the run"
@@ -401,9 +498,20 @@ def test_heartbeat_stops_when_the_pack_ends(tmp_path):
     assert "[leg-heartbeat]" not in tail, tail
 
 
-def test_sigterm_names_the_live_legs_and_leaves_none_behind(tmp_path):
+@pytest.mark.parametrize("parallel", ["2", None], ids=["asked-for-2", "the-default"])
+def test_sigterm_names_the_live_legs_and_leaves_none_behind(tmp_path, parallel):
     """t_6bb29d46 still holds: rc=143 must be explainable from the log alone, and
-    a pack must not survive its runner as N orphan pytests."""
+    a pack must not survive its runner as N orphan pytests.
+
+    The other reader in the pair, and the one the flip actually changes: with a
+    pack `during suite:` names the SET of legs in flight, not one suite. Nothing
+    in the repo parses that line (measured: `grep -rn "during suite"` lands the
+    writer, this pin, `scripts/audits/rc143_guard_selftest.sh`'s own echo and the
+    prose recipe in docs/audits/rc143-suite-reaper-t_6bb29d46.md — no reader), so
+    the shape change is safe; what is NOT safe is the default silently dropping
+    back to naming one arbitrary suite while two are burning. Hence both postures
+    here, and the assertion being a SET rather than a string.
+    """
     stub = tmp_path / "stub_py.sh"
     stub.write_text(STUB)
     stub.chmod(0o755)
@@ -414,9 +522,13 @@ def test_sigterm_names_the_live_legs_and_leaves_none_behind(tmp_path):
     env.update({
         "HSCC_TEST_PY": str(stub), "STUB_TRACE": str(trace), "STUB_ARGV": str(argv),
         "STUB_PLAN": _plan([(LEG_A, 30, 0), (LEG_B, 30, 0), (LEG_C, 30, 0)]),
-        "HSCC_TEST_LEGS": THREE, "HSCC_TEST_PARALLEL": "2",
+        "HSCC_TEST_LEGS": THREE,
         "HSCC_LEG_HEARTBEAT_SECONDS": "0",
     })
+    if parallel is None:
+        env.pop("HSCC_TEST_PARALLEL", None)
+    else:
+        env["HSCC_TEST_PARALLEL"] = parallel
     with open(log, "wb") as fh:
         p = subprocess.Popen(["bash", str(RUNNER)], stdout=fh, stderr=subprocess.STDOUT,
                              env=env, cwd=str(REPO), start_new_session=True)
