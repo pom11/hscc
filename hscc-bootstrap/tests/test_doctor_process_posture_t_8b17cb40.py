@@ -307,6 +307,117 @@ def test_systemd_defaults_are_ok_and_an_absent_unit_is_a_skip():
     assert res["ok"] is True and "skipped" in res["detail"]
 
 
+# ── the systemd half against REAL output (card t_011ae619) ─────────────────
+#
+# Byte-for-byte captures from `systemctl --user show hscc_daemon.service
+# -p Nice -p CPUWeight` on a live fleet node (Ubuntu 24.04.4, systemd 255.4,
+# 2026-11-25), against a throwaway user unit in four states. The unit did NOT
+# exist on any fleet node (the daemon has no Linux emitter), so the captures
+# come from a controlled unit created for the measurement. `od -c` verified:
+# every line is `\n`-terminated, no trailing whitespace, no carriage returns.
+
+SYSTEMD_CAPTURE_DEFAULT = "CPUWeight=[not set]\nNice=0\n"
+SYSTEMD_CAPTURE_DEPRIORITISED = "CPUWeight=20\nNice=5\n"
+SYSTEMD_CAPTURE_NEGATIVE_NICE = "CPUWeight=[not set]\nNice=-5\n"
+SYSTEMD_CAPTURE_NICE_ONLY = "CPUWeight=[not set]\nNice=5\n"
+
+
+def fake_systemctl(raw_show):
+    """A `_run_probe` for ``systemd_probe`` answering from one capture.
+
+    ``systemctl --version`` and ``is-active`` answer rc 0 for any unit, so the
+    probe runs its real argv and real parse; only the SHOW line is replayed.
+    """
+    def run(argv, timeout=10):
+        argv = [str(a) for a in argv]
+        if "--version" in argv:
+            return 0, "systemd 255 (255.4-1ubuntu8.16)\n"
+        if "is-active" in argv:
+            return 0, ""
+        if "show" in argv:
+            return 0, raw_show
+        raise AssertionError(f"unexpected argv: {argv}")
+    return run
+
+
+def test_real_output_default_unit_probe_contract():
+    """The probe contract, driven by the bytes a live systemd actually emits.
+
+    A DEFAULT unit (no Nice=, no CPUWeight= in the unit file) still REPORTS
+    both knobs: ``Nice=0`` and the literal ``CPUWeight=[not set]``. The row
+    renders its green posture, not a skip.
+    """
+    avail, active, props, note = pp.systemd_probe(
+        _run_probe=fake_systemctl(SYSTEMD_CAPTURE_DEFAULT))
+    assert (avail, active) == (True, True) and "hscc_daemon" in note
+    assert props == {"CPUWeight": pp.SYSTEMD_NOT_SET, "Nice": 0}
+    res = pp.verdict(None, "systemd", True, None, None, systemd_props=props,
+                     systemd_active=True, manager="systemd")
+    assert res["ok"] is True and "posture ok" in res["detail"]
+    assert "reported neither" not in res["detail"]
+
+
+def test_real_output_negative_nice_is_reported_not_skipped():
+    """THE measured silent-green (t_011ae619): a ``Nice=-5`` unit answers
+    ``CPUWeight=[not set]`` + ``Nice=-5``. The old ``(\\d+)`` matched NEITHER
+    line, so the row printed "systemd reported neither Nice= nor CPUWeight="
+    — green — on a unit that HAD answered both knobs. Now: the line parses,
+    the row says what it measured, and the skip cannot fire here."""
+    avail, active, props, _ = pp.systemd_probe(
+        _run_probe=fake_systemctl(SYSTEMD_CAPTURE_NEGATIVE_NICE))
+    assert props == {"CPUWeight": pp.SYSTEMD_NOT_SET, "Nice": -5}
+    res = pp.verdict(None, "systemd", True, None, None, systemd_props=props,
+                     systemd_active=True, manager="systemd")
+    assert "reported neither" not in res["detail"]
+    assert "Nice=-5" in res["detail"]  # over-prioritised is not the taxed
+    assert res["ok"] is True           # case by design: the row hunts LESS cpu
+
+
+def test_real_output_deprioritised_still_warns_from_real_bytes():
+    """The warn half on measured bytes: both knobs numeric, both low."""
+    _a, _b, props, _n = pp.systemd_probe(
+        _run_probe=fake_systemctl(SYSTEMD_CAPTURE_DEPRIORITISED))
+    assert props == {"CPUWeight": 20, "Nice": 5}
+    res = pp.verdict(None, "systemd", True, None, None, systemd_props=props,
+                     systemd_active=True, manager="systemd")
+    assert res["ok"] is False and res["fatal"] is False
+    assert "DEPRIORITISED" in res["detail"]
+    assert "Nice=5 (default 0)" in res["detail"]
+    assert "CPUWeight=20 (default 100)" in res["detail"]
+
+
+def test_real_output_half_reported_is_shown_wholly():
+    """``Nice=5`` alone (weight unset): the probe records BOTH reports and
+    the warn names the low knob while the shown list carries both."""
+    _a, _b, props, _n = pp.systemd_probe(
+        _run_probe=fake_systemctl(SYSTEMD_CAPTURE_NICE_ONLY))
+    res = pp.verdict(None, "systemd", True, None, None, systemd_props=props,
+                     systemd_active=True, manager="systemd")
+    assert res["ok"] is False and "Nice=5 (default 0)" in res["detail"]
+    assert "CPUWeight=[not set]" in res["detail"]  # the shown list tells all
+
+
+def test_reported_neither_skip_only_fires_when_both_properties_absent():
+    """The regression the card demands: the skip is for properties systemd
+    really did not report (measured: an unknown ``-p`` prints nothing, rc 0),
+    never for the ``[not set]`` / negative spellings it DID report. And an
+    output whose values cannot be parsed at all stays honest-as-skip, so the
+    branch is not dead either."""
+    for raw, must_skip in (
+            ("", True),                                     # printed nothing
+            ("MainPID=4242\n", True),                       # other props only
+            ("Nice=auto\nCPUWeight=huge\n", True),          # unparsable values
+            (SYSTEMD_CAPTURE_DEFAULT, False),               # reported both
+            (SYSTEMD_CAPTURE_NEGATIVE_NICE, False),         # negative parsed
+    ):
+        _a, _b, props, _n = pp.systemd_probe(_run_probe=fake_systemctl(raw))
+        res = pp.verdict(None, "systemd", True, None, None,
+                         systemd_props=props, systemd_active=True,
+                         manager="systemd")
+        fired = "reported neither" in res["detail"]
+        assert fired is must_skip, (raw, res["detail"])
+
+
 # ── the fence: no suite reads the operator's LaunchAgents ──────────────────
 
 def test_the_check_refuses_inside_pytest_with_nothing_injected(monkeypatch):

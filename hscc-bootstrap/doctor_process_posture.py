@@ -66,7 +66,11 @@ fleet's expected answer is systemd's own default: ``Nice=0`` / ``CPUWeight=100``
 The row therefore asks ``systemctl --user show <unit> -p Nice -p CPUWeight`` for
 the unit ``doctor_supervision`` already probes and warns when either knob says
 the daemon is being given LESS cpu than the default. This half is pinned by
-injected stubs only — there is no systemd on this host — and the tests say so.
+injected stubs AND by byte-for-byte captures taken off a live Ubuntu 24.04 /
+systemd 255 node (card t_011ae619): systemd prints ``Nice=`` signed (a
+``Nice=-5`` unit answers ``Nice=-5``) and prints the literal
+``CPUWeight=[not set]`` when no weight is configured — both facts came from
+measurement, not from the man page.
 
 READ-ONLY BY CONSTRUCTION: ``plistlib.load`` on the installed file,
 ``launchctl print`` and ``systemctl show``. No bootout, no bootstrap, no
@@ -119,8 +123,24 @@ _SPAWN_TYPE_RE = re.compile(r"^\s*spawn type\s*=\s*([a-zA-Z]+)", re.MULTILINE)
 #: row reads when the conventional one is not the one in use.
 _PLIST_PATH_RE = re.compile(r"^\s*path\s*=\s*(\S+\.plist)\s*$", re.MULTILINE)
 
-#: ``systemctl show -p Nice -p CPUWeight`` answers ``Key=value`` lines.
-_SYSTEMD_PROP_RE = re.compile(r"^(Nice|CPUWeight)=(\d+)\s*$", re.MULTILINE)
+#: ``systemctl show -p Nice -p CPUWeight`` answers ``Key=value`` lines, measured
+#: on Ubuntu 24.04 / systemd 255 (card t_011ae619, byte-for-byte captures in
+#: ``tests/test_doctor_process_posture_t_8b17cb40.py``): ``Nice=0``,
+#: ``Nice=5``, ``Nice=-5`` and — when no weight is configured — the LITERAL
+#: ``CPUWeight=[not set]``, never a bare ``CPUWeight=``. The signed group is
+#: load-bearing: ``Nice=-N`` is a real unit directive, and with the old
+#: ``(\d+)`` it matched nothing while the unset CPUWeight line matched nothing
+#: either, so the row fell to "reported neither Nice= nor CPUWeight=" — the
+#: silent-green skip — on a unit that HAD reported both knobs.
+_SYSTEMD_PROP_RE = re.compile(r"^(Nice|CPUWeight)=(-?\d+|\[not set\])\s*$",
+                              re.MULTILINE)
+
+#: What systemd 255 prints as the whole value of an UNSET ``CPUWeight=`` (and
+#: any cgroup-resource knob with no numeric default). It is a REPORT of the
+#: property — not an absent line — so the probe records it: the verdict's
+#: "reported neither" skip must fire only when systemd answered without either
+#: property at all, never when it answered and the answer happens to be this.
+SYSTEMD_NOT_SET = "[not set]"
 
 
 def _launchd_label() -> str:
@@ -236,8 +256,15 @@ def systemd_probe(_run_probe=None):
                             "-p", "Nice", "-p", "CPUWeight"])
         props = {}
         if rc2 == 0:
+            # int() on the match, NOT on the raw value: a systemd that prints
+            # something unnumeric here (a future spelling we have not measured)
+            # must leave the property UNRECORDED — "systemd reported neither"
+            # is the honest reading of output whose values we cannot parse,
+            # and it stays reachable for that case.
             for m in _SYSTEMD_PROP_RE.finditer(out2 or ""):
-                props[m.group(1)] = int(m.group(2))
+                raw = m.group(2)
+                props[m.group(1)] = (raw if raw == SYSTEMD_NOT_SET
+                                     else int(raw))
         return True, True, props, f"unit {unit} active"
     return True, False, {}, "no daemon unit active"
 
@@ -266,13 +293,18 @@ def verdict(declared, declared_note, loaded, spawn, plist_path,
                              "daemon, so there is no scheduling posture to read")
         nice = systemd_props.get("Nice")
         weight = systemd_props.get("CPUWeight")
-        if nice is None and weight is None:
+        if not systemd_props:
+            # Only reachable when systemd answered WITHOUT either property
+            # line (an unknown unit prints none, measured) or printed values
+            # too strange to parse. A unit that printed
+            # ``CPUWeight=[not set]`` / ``Nice=-5`` is NOT this case: measured
+            # (t_011ae619) systemd reports both knobs even when unset.
             return row(True, "skipped — systemctl show reported neither Nice= "
                              "nor CPUWeight= for the daemon unit")
         low = []
-        if nice is not None and nice > 0:
+        if isinstance(nice, int) and nice > 0:
             low.append(f"Nice={nice} (default 0)")
-        if weight is not None and weight < 100:
+        if isinstance(weight, int) and weight < 100:
             low.append(f"CPUWeight={weight} (default 100)")
         shown = ", ".join(f"{k}={v}" for k, v in sorted(systemd_props.items()))
         if low:
