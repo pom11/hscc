@@ -1,0 +1,13 @@
+repo=/Users/desac/.hermes/kanban/boards/hscc/workspaces/t_b94a2b39/hscc runner_exists=True repeats=3
+TERM   leaked 0/3  mean_orphans=0.0  rc=[143,143,143]
+INT    leaked 0/3  mean_orphans=0.0  rc=[130,130,130]
+HUP    leaked 0/3  mean_orphans=2.0  rc=[-1,-1,-1]
+QUIT   leaked 3/3  mean_orphans=2.0  rc=[-3,-3,-3]
+        /tmp/hscc-legs-KlgsXC -> {'0-hscc-commands.log': 0, '1-sparkrun-hermes.log': 0, 'legs.tsv': 64}
+        /tmp/hscc-legs-7kiW35 -> {'0-hscc-commands.log': 0, '1-sparkrun-hermes.log': 0, 'legs.tsv': 64}
+        /tmp/hscc-legs-dCJSwv -> {'0-hscc-commands.log': 0, '1-sparkrun-hermes.log': 0, 'legs.tsv': 64}
+KILL   leaked 3/3  mean_orphans=2.0  rc=[-9,-9,-9]
+        /tmp/hscc-legs-44BxL0 -> {'0-hscc-commands.log': 0, '1-sparkrun-hermes.log': 0, 'legs.tsv': 64}
+        /tmp/hscc-legs-zFALol -> {'0-hscc-commands.log': 0, '1-sparkrun-hermes.log': 0, 'legs.tsv': 64}
+        /tmp/hscc-legs-wia56t -> {'0-hscc-commands.log': 0, '1-sparkrun-hermes.log': 0, 'legs.tsv': 64}
+PIPE   leaked 0/3  mean_orphans=2.0  rc=[-13,-13,-13]

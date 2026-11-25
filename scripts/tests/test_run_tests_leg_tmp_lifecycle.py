@@ -236,8 +236,15 @@ class Pack:
             except (ProcessLookupError, PermissionError):
                 pass
         for d in self.own_dirs + self.faked:
-            if d.exists():
-                shutil.rmtree(d, ignore_errors=True)
+            # A planted symlink must be unlinked, not rmtree'd (rmtree refuses
+            # one and would strand every dir later in this list).
+            try:
+                if d.is_symlink():
+                    d.unlink()
+                elif d.exists():
+                    shutil.rmtree(d)
+            except OSError:
+                pass
         try:
             self._fh.close()
         except Exception:

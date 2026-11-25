@@ -124,4 +124,65 @@ change to any assertion in `t_34c5a3ed`'s test.
 
 ## 5. Proof
 
-(red-before / green-after / mutation teeth)
+**Red-before is the measured table**, produced by
+`docs/audits/support/t_b94a2b39/leg_tmp_signal_probe.py` against the shipped
+runner (`SIGPROBE_REPEATS=3`, raw output in `signal_matrix_before.txt`):
+
+| signal | dir leaked | mean legs orphaned | runner rc |
+|---|---|---|---|
+| TERM | 0/3 | 0.0 | 143 |
+| INT | 0/3 | 0.0 | 130 |
+| HUP | 0/3 | 2.0 | −1 |
+| **QUIT** | **3/3** | 2.0 | −3 |
+| **KILL** | **3/3** | 2.0 | −9 |
+| PIPE | 0/3 (1 leak in the earlier single run) | 2.0 | −13 |
+
+and the arm shells (`exit_trap_signal_arm.sh`, `exit_trap_signal_arm2.sh`) show an
+`EXIT` trap alone cleaning up under TERM/INT/HUP/QUIT/PIPE and **not** under KILL.
+That pairing — arm cleans up on QUIT, shipped runner does not — is why QUIT is
+pinned as shipped behaviour rather than explained as a bash rule.
+
+**Green-after.** `scripts/tests/test_run_tests_leg_tmp_lifecycle.py`, 11 passed
+(13.5 s). It keeps the `SIGKILL` leak asserted as a *shipped fact*
+(`test_sigkill_leaves_the_dir_because_no_handler_can_run`): the leak is not a bug
+to make green, it is the reason the sweep exists, and deleting the sweep turns the
+sibling tests red instead.
+
+**Mutation teeth.**
+
+| mutant | result |
+|---|---|
+| sweep's age test replaced with `if true` | **red**: `test_a_pack_still_running_is_never_swept` → *"the sweep deleted a leg-log dir that is still in use"*, while `test_the_sweep_is_not_on_the_serial_path` stayed green (3.48 s, restored clean after) |
+| sweep disabled (`HSCC_LEG_SWEEP_MIN_AGE_SECONDS=0`) | **green as a mutant**: `test_the_sweep_is_off_when_its_floor_says_off` — the same run leaves the dir behind, so the reclaim above is caused by the sweep and not by luck |
+
+Two claims this card does **not** make, recorded rather than papered over:
+
+* the `-L` symlink guard has no killing test. Dropping it leaves the target alive
+  anyway, because `rm -rf` on a symlink does not traverse — the guard is
+  defence-in-depth against a future `rm -rf "$d"/*` form, not the load-bearing
+  part of the test suite.
+* the sweep skips a planted `hscc-legs-*` symlink for real, observed: two dangling
+  links from the card's own test runs survived several swept packed runs untouched.
+
+**In the wild.** The sweep reclaimed the two dirs this card inherited
+(`hscc-legs-2MIxna`, `hscc-legs-AiHLjx`, ~7 h old at the time) on the first packed
+run after the change. Their bytes are preserved in
+`docs/audits/support/t_b94a2b39/pre_existing_pair.txt` — including the one line in
+each log, `7 passed in 0.2s`, which is what shows §1's claim that they were stub
+residue and not a gate run.
+
+## 6. LEFT (deliberate scope lines, for the orchestrator to card)
+
+1. **`SIGPIPE` orphans the legs in flight** (measured 2.0 mean orphans, dir clean).
+   Same class as what this card fixed for QUIT/HUP, but trapping `SIGPIPE` in a
+   967-line script that pipes through `head`/`tr` is a decision with its own
+   evidence needs. Not done here.
+2. **`trap - INT` at the end of the pack** restores the default `SIGINT`
+   disposition for the concat/summary phase, so a Ctrl-C there kills the shell with
+   no handler. Narrow (seconds-long) and not measured to leak; widening the handler
+   to that window would change `INT`'s rc semantics on the post-pack path.
+3. **Serial hosts never sweep.** Deliberate: the serial path creates no such dir,
+   and giving the serial stream a new line is a separate decision with its own
+   parsing evidence. The consequence is honest — a host that only ever runs
+   `HSCC_TEST_PARALLEL=1` accumulates litter created earlier by packed runs.
+
