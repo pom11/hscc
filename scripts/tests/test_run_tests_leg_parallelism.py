@@ -313,11 +313,18 @@ def test_red_leg_digest_matches_the_serial_shape(tmp_path):
     assert pack["rc"] == 1 and serial["rc"] == 1, "the red leg must fail the run"
     assert "FAILURES ABOVE" in pack["log"] and "ALL GREEN" not in pack["log"]
 
-    row = f"✗ {LEG_B} (pytest exit 1)"
-    assert any(l.strip() == row for l in pack["log"].splitlines()), pack["log"]
+    row = re.compile(rf"^\s*✗ {re.escape(LEG_B)} \(pytest exit 1, \d+s\)$", re.M)
+    assert row.search(pack["log"]), pack["log"]
 
-    packed = mq._failure_lines(pack["log"])
-    unrolled = mq._failure_lines(serial["log"])
+    def _untimed(lines):
+        # The per-leg wall time is a real difference between two runs of the same
+        # plan (t_fdc2bff0), so the parity claim is about the failure IDENTITY:
+        # drop only the `, <N>s` timing tail from the leg rows before comparing.
+        return [re.sub(r"(pytest exit \d+), \d+s\)$", r"\1)", ln)
+                for ln in lines]
+
+    packed = _untimed(mq._failure_lines(pack["log"]))
+    unrolled = _untimed(mq._failure_lines(serial["log"]))
     assert packed == unrolled, (
         "the digest a packed gate hands back differs from the serial one:\n"
         f"  packed: {packed}\n  serial: {unrolled}")
@@ -327,13 +334,15 @@ def test_red_leg_digest_matches_the_serial_shape(tmp_path):
 
 
 def test_summary_rows_keep_the_serial_wording(tmp_path):
-    """`  ✓ <leg>` / `  ✗ <leg> (pytest exit N)` verbatim — the queue anchors `^✗`."""
+    """`  ✓ <leg> (<N>s)` / `  ✗ <leg> (pytest exit N, <N>s)` — the queue
+    anchors `^✗`, so the row's prefix and leg name are what must stay stable."""
     r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 1), (LEG_C, 0.2, 0)]),
              parallel=3)
     summary = r["log"].split("━━━ Summary ━━━")[1]
-    assert f"  ✓ {LEG_A}" in summary
-    assert f"  ✗ {LEG_B} (pytest exit 1)" in summary
-    assert f"  ✓ {LEG_C}" in summary
+    assert re.search(rf"^  ✓ {LEG_A} \(\d+s\)$", summary, re.M), summary
+    assert re.search(
+        rf"^  ✗ {LEG_B} \(pytest exit 1, \d+s\)$", summary, re.M), summary
+    assert re.search(rf"^  ✓ {LEG_C} \(\d+s\)$", summary, re.M), summary
 
 
 def test_pack_and_serial_hand_pytest_the_same_argv(tmp_path):
