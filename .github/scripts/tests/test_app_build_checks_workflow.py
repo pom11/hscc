@@ -226,6 +226,7 @@ def test_a_push_always_compiles():
         (["ios-app/scripts/widget_registry.py"], (), "true"),
         ([".github/workflows/app-build-checks.yml"], (), "true"),
         (["scripts/release_apps.sh"], (), "true"),                   # read by carplay_check.sh
+        (["docs/WIDGET_COVERAGE.md"], (), "true"),                   # read by widget_registry.py --check
         (["hscc-api/routes.py"], ["ios-app/Sources/New.swift"], "false"),  # three dots
     ],
 )

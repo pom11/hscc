@@ -40,6 +40,9 @@ APPLE_PATHS=(
   ".github/workflows/app-build-checks.yml"
   ".github/scripts/decide_app_build.sh"
   "scripts/release_apps.sh"
+  # ios-app/scripts/widget_registry.py --check reads this doc from outside
+  # the app trees; an edit to it must still run the registry check.
+  "docs/WIDGET_COVERAGE.md"
 )
 
 is_apple() {
