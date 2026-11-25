@@ -199,3 +199,11 @@ Derived, not measured, from the durations above: the two legs the local queue ac
 runs (`hscc_daemon` 331 s + `scripts` 248 s = 579 s serial) pack to roughly 340 s at
 p=2, about 1.7×. Labelled derived on purpose — nobody has run that gate packed and
 timed it, and the card asks for a measured number.
+
+> **Superseded on this point by t_97013930.** The default is now **2**: that card
+> measured this gate and two consecutive full-roster runs, and re-argued
+> `test_the_default_is_the_serial_stream_and_prints_nothing_new` (now
+> `test_the_default_is_a_pack_of_two_and_is_the_explicit_two_stream_exactly`, plus
+> a serial-posture pin and a one-leg/CI pin). See
+> `docs/audits/parallel-default-two_t_97013930.md` for the measured numbers and for
+> what would move the default back to 1.
