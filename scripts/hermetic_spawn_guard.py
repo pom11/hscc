@@ -277,7 +277,7 @@ def _resolve_text(node, bindings, _seen=frozenset()):
             yield found
         return
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        # "python" + "3" and "/Users" + "/desac/x" — concatenation of literals
+        # "python" + "3" and "/Users" + "/<operator>/x" — concatenation of literals
         # is still a literal for our purposes.
         left = [t for t, _, _ in _resolve_text(node.left, bindings, _seen)]
         right = [t for t, _, _ in _resolve_text(node.right, bindings, _seen)]

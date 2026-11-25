@@ -67,9 +67,11 @@ if str(_SCRIPTS) not in sys.path:
 
 from address_guard import (  # noqa: E402  the ONE detector, imported not re-derived
     FORBIDDEN,
+    IDENTITY_PLACEHOLDER,
     LAN_PLACEHOLDER,
     TAILNET_PLACEHOLDER,
     find_in_text,
+    is_identity_occurrence,
 )
 
 # Which placeholder a match becomes. Every CGNAT match FORBIDDEN can make starts
@@ -87,6 +89,11 @@ def _placeholder_for(match):
     addr = match.group(0)
     if addr.startswith(_CGNAT_PREFIX):
         return TAILNET_PLACEHOLDER
+    if is_identity_occurrence(addr):
+        # A person's name, not an address: the identity branch of FORBIDDEN matches
+        # the operator's own short name, and an address placeholder standing in for
+        # a human would be a wrong fix written into a ledger tick (t_25f7a806).
+        return IDENTITY_PLACEHOLDER
     return LAN_PLACEHOLDER
 
 

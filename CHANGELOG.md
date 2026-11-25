@@ -19705,7 +19705,7 @@ assumption is tested rather than commented.
   `hscc-proxy-watchdog` `every 5m` and `06c8e22d00f1` `hscc-nas-watchdog`
   `every 240m`, both `[paused]`, last run `2026-06-20`, and 11 jobs total. Bare
   `hermes cron list` (this profile) shows `No scheduled jobs`, which is why the
-  retire commands carry `-p default`. `crontab -l` → `no crontab for desac`.
+  retire commands carry `-p default`. `crontab -l` → `no crontab for <user>`.
 - `hscc-api/tests/test_repl_inject.py`: 44 -> **50** cases pinning the
   public canonical matcher (prefer-profiled-sibling, `default` only
   when no line names a profile, gateway/non-chat rejected,

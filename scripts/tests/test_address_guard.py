@@ -168,11 +168,18 @@ def test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required
     # this file and must not find a second copy of the detector's literal.)
     naive = re.compile(_addr("192", r"\.168\.88\.\d{1,3}"))
     assert naive.findall(text), "naive scan should see it"
-    # (2) ...the shipping detector does not
-    assert address_guard.find_in_text(text) == [], (
-        "FORBIDDEN unexpectedly matched the compiled blob — if this ever goes red,"
-        " the boundary-context finding is stale and extract-and-scan becomes"
-        " arguable again; re-measure before believing it")
+    # (2) ...the shipping detector does not — for the ADDRESS class, which is the
+    # one whose `\b` boundaries assume a delimited, text-shaped occurrence. Asked
+    # as `address_hits` rather than `find_in_text` since t_25f7a806 added the
+    # identity branch, and the reason is measured rather than argued: this blob
+    # embeds the test's own tmp path (`pytest-of-<user>`), whose `-` and `/` are
+    # delimiters the identity branch accepts, so FORBIDDEN now returns exactly that
+    # one hit. It is a finding, not the blindness this pin is about — the address
+    # class stays blind, and the address class is what the refusal exists for.
+    assert address_guard.address_hits(text) == [], (
+        "FORBIDDEN's ADDRESS branch unexpectedly matched the compiled blob — if this"
+        " ever goes red, the boundary-context finding is stale and extract-and-scan"
+        " becomes arguable again; re-measure before believing it")
     # (3) the refusal is blind to that blindness, and still refuses
     got = address_guard.scan_blob("hscc-provision/__pycache__/hscc.cpython-313.pyc", blob)
     assert got == ["hscc-provision/__pycache__/hscc.cpython-313.pyc:0: "
@@ -273,10 +280,12 @@ def test_a_genuinely_compiled_pyc_on_the_hatch_is_still_refused(
     blind, which the first assertion re-pins from the inside rather than trusting.
     """
     monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS", frozenset({"pkg/leak.pyc"}))
-    assert address_guard.find_in_text(
+    assert address_guard.address_hits(
         genuine_leaky_pyc.decode("utf-8", errors="ignore")) == [], (
-        "FORBIDDEN now sees a compiled blob: the hatch's justification changed,"
-        " re-measure before touching the two-tier rule")
+        "FORBIDDEN's ADDRESS branch now sees a compiled blob: the hatch's"
+        " justification changed, re-measure before touching the two-tier rule"
+        " (the identity branch may legitimately match a name in the blob — see"
+        " test_a_genuine_compiled_pyc_defeats_the_text_detector)")
     got = address_guard.scan_blob("pkg/leak.pyc", genuine_leaky_pyc)
     assert got == ["pkg/leak.pyc:0: build artefact must not be tracked"], (
         "the hatch let a compiled artefact through — the blind blob is now tracked"
@@ -805,6 +814,268 @@ def test_the_backslash_form_is_a_named_limit_not_a_claim():
     assert address_guard.find_in_text(windows) == [], (
         "the backslash form is now matched — delete this test or move it to the"
         " verdict list; do not leave a passing 'limit' pin masking coverage")
+
+
+# ── the operator-identity class (t_25f7a806) ─────────────────────────────────
+#
+# A name has no SHAPE, so these fixtures inject one rather than hold a literal:
+# `hscc-fixture` is a sanctioned name nobody owns, and the probes compile the GUARD'S
+# OWN builder with it (`forbidden_pattern`) so the one-pattern rule stays true while
+# the semantics still run on a GitHub runner, where the shipped branch is inert by
+# design. The tests that need the class live — the CLI flip and the no-echo proof —
+# skip on such a host and say why, rather than passing vacuously.
+
+_IDENTITY_PROBE_NAME = address_guard.FIXTURE_HOME_USER
+_PROBE_PATTERN = re.compile(address_guard.forbidden_pattern([_IDENTITY_PROBE_NAME]))
+_PROBE_LOOKUP = address_guard.identity_lookup([_IDENTITY_PROBE_NAME])
+_LIVE_NAME = next(iter(address_guard.IDENTITY_NAMES), None)
+_NO_LIVE_IDENTITY = ("this host's account names nobody (a service account, or a "
+                     "sanctioned CI user), so the identity branch is inert here")
+
+
+def _identity_shapes(name):
+    """The three shapes the card published, plus two more of the same family."""
+    return [
+        f"`crontab -l` → no crontab for {name}",                    # captured output
+        f"role {name}_hermes already exists",                       # in an identifier
+        f"/private/tmp/claude-501/-Users-{name}/abc/scratchpad/x.md",   # the slug
+        f'entity: "{name}"',                                        # quoted, bare
+        f"profiles/{name}/state.db",                                # path component
+    ]
+
+
+@pytest.mark.parametrize("shape", _identity_shapes(_IDENTITY_PROBE_NAME))
+def test_the_published_identity_shapes_trip_the_branch(shape):
+    m = _PROBE_PATTERN.search(shape)
+    assert m, f"the identity branch went blind on {shape!r}"
+    assert _PROBE_LOOKUP.match(m.group(0)), f"matched something that is not the name: {m!r}"
+
+
+@pytest.mark.parametrize("shape", _identity_shapes(_IDENTITY_PROBE_NAME))
+def test_a_name_nobody_owns_is_still_invisible_to_the_shipped_pattern(shape):
+    """The card's claim, re-pinned from the other side.
+
+    `FORBIDDEN` as compiled on THIS host carries no literal username, so a name that
+    is not this host's is invisible — which is exactly why 21 tracked occurrences of
+    the operator's own name measured 0 findings. A guard that flagged every name in
+    every document would be a guard nobody could run.
+    """
+    assert address_guard.FORBIDDEN.search(shape) is None, (
+        f"the shipped pattern flagged a name it was never told about: {shape!r}")
+
+
+def test_a_name_glued_into_a_word_is_not_an_identity():
+    """The delimiter floor — why the branch has boundaries and what they refuse.
+
+    The two refusals are the false-positive floor this rule needs (a machine owned by
+    `test` or `root` would otherwise drown), and the accepted contexts are the shapes
+    the class actually arrives in: `_` for an identifier, `-` for a flattened path,
+    `/` for a path component.
+    """
+    n = _IDENTITY_PROBE_NAME
+    for text, label in ((f"desk{n}", "prefix glued"), (f"{n}yard", "suffix glued"),
+                        (f"{n.upper()}X", "glued, upper-cased")):
+        assert _PROBE_PATTERN.search(text) is None, f"{label}: a name became a word"
+    for ctx, label in ((f"for {n}", "space"), (f'"{n}"', "double quote"),
+                       (f"({n})", "paren"), (f"{n},", "comma"),
+                       (f"user={n}", "equals"), (f"-Users-{n}/x", "slug join"),
+                       (f"{n}_hermes", "identifier join"), (f"{n}@example.com", "at sign"),
+                       (f"{n}.bak", "dot join"), (f"a\n{n}\nb", "own line")):
+        assert _PROBE_PATTERN.search(ctx), f"{label}: the branch went blind"
+
+
+def test_the_documented_identity_replacements_are_clean():
+    """Every target this card scrubs TO must itself be invisible, or the scrub has
+    nowhere to go and every fix becomes a new finding."""
+    for text in ("`crontab -l` → no crontab for <user>",
+                 "no crontab for <operator>",
+                 "memori_entity id=3 `hermes_role`, date_created 2026-08-14",
+                 '{ "entityId": "hermes_role", "projectId": "hermes_cluster" }',
+                 "/private/tmp/…/scratchpad/hermes-notes/v0.21.6.md"):
+        assert _PROBE_PATTERN.search(text) is None, f"the replacement is an offender: {text!r}"
+
+
+def test_the_identity_classifier_cannot_widen_a_match():
+    """The classifier compares whole names and nothing else — an unanchored one would
+    re-open the exemption-by-prefix the fixture allowlist already refuses."""
+    n = _IDENTITY_PROBE_NAME
+    assert _PROBE_LOOKUP.match(n) and _PROBE_LOOKUP.match(n.upper())
+    assert not _PROBE_LOOKUP.match(f"x{n}") and not _PROBE_LOOKUP.match(f"{n}-2")
+    assert not _PROBE_LOOKUP.match("role " + n + " here")
+    assert address_guard.identity_lookup([]) is None
+
+
+def test_an_identity_offender_never_carries_the_name_it_matched():
+    """THE reason this class may live inside FORBIDDEN.
+
+    `.github/scripts/redact_guard_report.py` masks the public job log with the pattern
+    ITS OWN environment derives: a report generated on the operator's machine and
+    redacted on a runner has no name in common to mask, so an offender that echoed the
+    match would publish the leak from the backstop. Echo the placeholder instead and
+    the guarantee stops depending on where the redactor happens to run.
+    """
+    got = address_guard.identity_offender("docs/audit.md", 7)
+    assert got.startswith("docs/audit.md:7: ")
+    assert address_guard.IDENTITY_PLACEHOLDER in got
+    assert address_guard.is_identity_offender(got)
+    assert address_guard.advisory([got]) == [got]           # the shipped posture
+    assert address_guard.blocking([got]) == []
+    if _LIVE_NAME:
+        assert _LIVE_NAME not in got, "the offender echoed the name it found"
+
+
+def test_the_identity_knob_may_only_strengthen(monkeypatch):
+    """Advisory at landing, and provably turnable-on — the `HOME_PATHS_ENFORCE` habit.
+
+    The falsy-env half is the one that matters: a variable exported in CI must never
+    be able to mute a class, so `identity_enforced()` ORs the knob and never ANDs it.
+    """
+    planted = address_guard.identity_offender("a.md", 1)
+    assert address_guard.advisory([planted]) == [planted]
+    assert address_guard.blocking([planted]) == []
+
+    monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
+    assert address_guard.blocking([planted]) == [planted], (
+        "OPERATOR_IDENTITIES_ENFORCE=True did not block: the rule can never be turned on")
+    assert address_guard.advisory([planted]) == []
+
+    monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", False)
+    monkeypatch.setenv(address_guard.OPERATOR_IDENTITIES_ENFORCE_ENV, "1")
+    assert address_guard.identity_enforced(), "the env knob failed to strengthen the rule"
+    monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
+    monkeypatch.setenv(address_guard.OPERATOR_IDENTITIES_ENFORCE_ENV, "0")
+    assert address_guard.identity_enforced(), (
+        "the env var became an OFF switch: an exported value in CI could mute the class")
+
+
+def test_report_explains_an_identity_finding_without_echoing_the_name(monkeypatch):
+    """The fix for a name is not `10.0.0.x`, and the header must say which posture
+    fired — the same reason the home class has its own text (t_34de41c3)."""
+    planted = address_guard.identity_offender("docs/x.md", 3)
+
+    adv = address_guard.report([planted])
+    assert "docs/x.md:3" in adv and "OPERATOR IDENTITY" in adv
+    assert address_guard.IDENTITY_PLACEHOLDER in adv
+    assert "ADVISORY" in adv, "advisory must be stated, not left to the exit code"
+    assert "the commit is blocked" not in adv
+
+    monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
+    hard = address_guard.report([planted])
+    assert "the commit is blocked" in hard and "ADVISORY" not in hard, (
+        "an enforced finding must not be described as advisory")
+
+    mixed = address_guard.report([planted, "b.md:1: " + REAL_LAN])
+    assert "b.md:1" in mixed and "10.0.0.x" in mixed, mixed
+    assert "docs/x.md:3" in mixed and "Scrub the name" in mixed, (
+        "a mixed report must carry BOTH fixes: the address header wins the title, so"
+        " the identity section is the only thing telling the reader what to do with"
+        " the name — and its fix is not `10.0.0.x`")
+
+    if _LIVE_NAME:
+        assert _LIVE_NAME not in adv and _LIVE_NAME not in hard, (
+            "the report echoed the name — a public job log would carry it")
+
+
+def test_the_shipped_identity_branch_is_the_one_the_pattern_uses():
+    """No drift, and no second pattern: `FORBIDDEN` IS `forbidden_pattern()`, and the
+    identity rule is inside it — the one regex the CI redactor loads."""
+    assert address_guard.FORBIDDEN.pattern == address_guard.forbidden_pattern()
+    branch = address_guard.identity_branch_for([_IDENTITY_PROBE_NAME])
+    assert branch in address_guard.forbidden_pattern([_IDENTITY_PROBE_NAME])
+    assert re.compile(address_guard.forbidden_pattern([_IDENTITY_PROBE_NAME])).search(
+        f"no crontab for {_IDENTITY_PROBE_NAME}"), (
+        "the identity rule is not inside FORBIDDEN: the redactor loads only FORBIDDEN"
+        " and would print the value into a public job log")
+    assert address_guard.identity_branch_for([]) is None, (
+        "an empty name set must decline the branch, not match every token")
+
+
+def test_the_guard_and_its_tests_carry_no_identity_literal():
+    """The control cannot publish what it does not hold.
+
+    The objection t_3480956c raised against a username rule was that it writes the
+    name into the security control. A rule derived from the runtime environment does
+    not, and this is the machine-checked version of that claim: on a host that HAS an
+    identity, the detector and this file still do not contain it.
+    """
+    if not _LIVE_NAME:
+        pytest.skip(_NO_LIVE_IDENTITY)
+    for rel in ("scripts/address_guard.py", "scripts/tests/test_address_guard.py"):
+        text = (REPO / rel).read_text(errors="ignore").lower()
+        assert _LIVE_NAME.lower() not in text, f"{rel} carries the operator's name"
+
+
+def test_an_address_never_hides_behind_a_name_on_the_same_line(monkeypatch):
+    """The advisory-interaction hazard, re-pinned for the third class (both orders).
+
+    With first-match-wins, an address sitting after a name on one line would have been
+    reported as identity-only — identity is advisory, so the BLOCKING address left the
+    gate unseen and the commit passed. `all_hits` is what stops that, and this is the
+    test that would have caught it.
+    """
+    if not _LIVE_NAME:
+        pytest.skip(_NO_LIVE_IDENTITY)
+    addr = "10" + ".0.0.5"
+    addr_only = f"d.md:1: {addr}"
+    for line, label in ((f"host {addr}: no crontab for {_LIVE_NAME}", "address first"),
+                        (f"no crontab for {_LIVE_NAME} — host {addr}", "name first")):
+        assert [v for _, v in address_guard.address_hits(line)] == [addr], label
+        assert [v for _, v in address_guard.identity_hits(line)] == [_LIVE_NAME], label
+        offenders = address_guard.scan_blob("d.md", line.encode())
+        assert len(offenders) == 2, (label, offenders)
+        # shipped posture: identity is advisory, the address blocks on its own.
+        assert address_guard.blocking(offenders) == [addr_only], (
+            f"{label}: the address escaped the blocking subset")
+        # enforced: both block, and the identity arm still carries no name.
+        monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", True)
+        blocked = address_guard.blocking(offenders)
+        assert len(blocked) == 2 and addr_only in blocked, (label, blocked)
+        assert all(_LIVE_NAME not in o for o in blocked), blocked
+        monkeypatch.setattr(address_guard, "OPERATOR_IDENTITIES_ENFORCE", False)
+
+
+def test_cli_reports_an_identity_finding_and_blocks_once_the_knob_is_set(tmp_path):
+    """The flip, through the CLI the hook and CI both call — the shape of
+    `test_cli_blocks_a_home_path_now_that_home_is_enforced`, inverted for a class that
+    ships advisory: rc 0 with the finding REPORTED today, rc 1 when the knob is set.
+
+    Skipped where the branch is inert, because there the CLI has nothing to bite on;
+    the in-process tests above cover the mechanism on every host.
+    """
+    if not _LIVE_NAME:
+        pytest.skip(_NO_LIVE_IDENTITY)
+    r = _repo(tmp_path)
+    (r / "audit.md").write_text(f"`crontab -l` → no crontab for {_LIVE_NAME}\n",
+                                encoding="utf-8")
+    _git(r, "add", "audit.md")
+
+    def run(**env):
+        import os
+        return subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "address_guard.py"),
+             "--staged", "--repo", str(r)],
+            capture_output=True, env={**os.environ, **env})
+
+    default = run()
+    assert default.returncode == 0, (
+        "OPERATOR_IDENTITIES_ENFORCE is False, so an identity finding must REPORT and "
+        "not block — a hard rule that turns the merge queue red on landing is how the "
+        "scrub cards get frozen out")
+    err = default.stderr.decode()
+    assert "audit.md:1" in err and "ADVISORY" in err and "OPERATOR IDENTITY" in err
+    assert _LIVE_NAME not in err, "the report echoed the name into the terminal/log"
+
+    forced = run(**{address_guard.OPERATOR_IDENTITIES_ENFORCE_ENV: "1"})
+    assert forced.returncode == 1, (
+        "the env knob did not make the class block: the flip cannot be turned on, so "
+        "advisory is permanent")
+    assert "the commit is blocked" in forced.stderr.decode()
+    assert _LIVE_NAME not in forced.stderr.decode()
+
+    # a real address still blocks whatever the identity knob says
+    (r / "leak.md").write_text("host " + REAL_LAN + "\n", encoding="utf-8")
+    _git(r, "add", "leak.md")
+    assert run().returncode == 1
 
 
 # keep pytest import light: imported late so the module-under-test load order is explicit
