@@ -118,6 +118,30 @@ def test_home_class_is_advisory_now_and_blocking_when_enforced(monkeypatch):
 
 
 
+def test_this_gate_reports_a_planted_machine_hostname(tmp_path):
+    """t_68ccc902: a concrete macOS LocalHostName must reach this gate's verdict.
+
+    The name is assembled at runtime and rides a reserved `.invalid` TLD: the
+    shape trips the rule, the bytes never name a real machine, and this tracked
+    file cannot become its own finding.
+    """
+    trip = "Alices-" + "Mac-Studio.invalid"
+    (tmp_path / "docs").mkdir()
+    leaky = tmp_path / "docs" / "audit.md"
+
+    leaky.write_text(f"host: {trip} (macOS)\n", encoding="utf-8")
+    offenders = address_guard.scan_paths(tmp_path, ["docs/audit.md"])
+    assert offenders and address_guard.is_hostname_offender(offenders[0]), (
+        f"a planted machine hostname was invisible to the gate: {offenders!r}")
+    assert address_guard.blocking(offenders) == offenders, (
+        "the hostname class landed advisory although its baseline is clean")
+
+    for clean in ("<host>.local", "host: macOS"):
+        leaky.write_text(f"{clean}\n", encoding="utf-8")
+        assert address_guard.scan_paths(tmp_path, ["docs/audit.md"]) == [], (
+            f"the documented replacement {clean!r} was itself flagged")
+
+
 # ── single-implementation guarantees ─────────────────────────────────────────
 # The card's core requirement: test and hook share ONE detector. These assert it
 # structurally, so a future edit cannot quietly fork the pattern again.
