@@ -78,6 +78,69 @@ def _pyyaml_ok() -> Check:
                      fatal=True)
 
 
+# ── base-row in-suite fence (t_0d991e1d) ─────────────────────────────────────
+# The rows in ``run_doctor()``'s opening ``checks`` list are plain ``Check`` calls:
+# they never pass ``doctor_rows.build_row``, so the feature-row fence (t_eb768c2a)
+# never applied to them and they carried NO in-suite fence at all. Measured with the
+# door spawned as a child of a pytest item (HOME sealed, fake fleet binaries on PATH):
+# ``gateway`` reached the machine's service manager, ``sparkrun`` exec'd ``uv python
+# find``, ``sparkrun cluster``/``nas`` shelled out to ``sparkrun cluster list``,
+# ``models served`` opened its configured endpoints, and the two skill rows walked the
+# profile trees.
+#
+# The ruling is per row and it is about the SEAM a row crosses, not about it being a
+# check:
+#
+#   ACCEPTED — ``python``/``pyyaml`` (the interpreter itself), ``disk space`` (a
+#     statvfs), ``hermes`` (a stat under a root the CALLER named), and ``sparkrun``'s
+#     PATH lookup (the row's own subject). Cheap, read-only, a property of the machine
+#     the door runs on, and nothing a suite verdict can depend on.
+#   REFUSED — anything crossing a boundary a suite cannot be trusted with: the fleet
+#     CLI (``sparkrun cluster``, ``nas``), the service manager and process table
+#     (``gateway``), a socket (``models served``), an operator-owned toolchain binary
+#     (``sparkrun``'s uv probe), or a tree whose ROOT came from the environment rather
+#     than from a caller (the two skill rows — ``_skills_home()`` walks a
+#     profile-scoped HERMES_HOME UP to the shared root, so a suite child would walk
+#     every profile on the machine).
+#
+# A refusal has one shape in this file: an honest ERROR naming the seam a caller must
+# inject, ``fatal=False`` (an unverified row is not a broken install), never a silent
+# pass and never the real read. The predicate is the ONE shared, child-visible one —
+# ``doctor_rows.under_pytest()`` — because a fence that reads only ``sys.modules``
+# guards the process nobody is asking about.
+def _base_row_fence(injected, name: str, what: str, seam: str,
+                    fix: str) -> Optional["Check"]:
+    """The shared in-suite fence for a BASE doctor row.
+
+    Returns the refusal when the row would otherwise cross its live seam from inside a
+    suite — including from the door a suite SPAWNS, which is why the predicate reads
+    the marker pytest exports per item and not just ``sys.modules`` — and ``None``
+    when the row may proceed (a seam was injected, or this is the operator's own run).
+    """
+    if injected is not None or not doctor_rows.under_pytest():
+        return None
+    return Check(name, False, fatal=False,
+                 detail=f"{what} refused inside a pytest process — inject {seam}",
+                 fix=fix)
+
+
+def _root_is_ambient(hermes_home) -> bool:
+    """True when a row's Hermes root came from the environment, not from a caller.
+
+    A fixture dir or ``--home PATH`` is the caller's own tree: scanning it is what the
+    skill rows exist to do, and ``doctor.py --skills --home <tmp>`` is a supported
+    hermetic acceptance run. ``HERMES_HOME`` / ``~/.hermes`` are the operator's, and in
+    the CI shape (HOME sealed by scripts/run_tests.sh, HERMES_HOME left pointing at the
+    running profile) they are live profile state.
+    """
+    ambient = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    try:
+        return (os.path.realpath(_skills_home(hermes_home))
+                == os.path.realpath(_skills_home(ambient)))
+    except OSError:
+        return True          # cannot tell: treat it as the operator's and refuse
+
+
 def _uv_default_python(_runner=None):
     """(major, minor) uv resolves for `uv python find` OUTSIDE any project.
 
@@ -115,6 +178,18 @@ def _sparkrun_ok(_uv_runner=None) -> Check:
     if not path:
         return Check("sparkrun", False, detail="not on PATH",
                      fix="Install sparkrun and ensure it's on PATH.", fatal=True)
+    # RULING (t_0d991e1d): the PATH lookup above is ACCEPTED — it is the row's own
+    # subject and a property of the machine the door runs on. The uv probe below is
+    # REFUSED: it execs an operator-owned toolchain binary (`uv python find`, with a
+    # 15 s budget) and reports a machine-global setting the suite did not plant. The
+    # row keeps the verdict it DID earn (sparkrun is on PATH) and says out loud which
+    # half it could not check — dropping to `ok` with no note would be the silent pass
+    # this fence exists to prevent.
+    if _uv_runner is None and doctor_rows.under_pytest():
+        return Check(
+            "sparkrun", True,
+            detail=f"{path} — uv default probe refused inside a pytest process — "
+                   "inject _uv_runner")
     uv_py = _uv_default_python(_uv_runner)
     if uv_py is not None and uv_py >= (3, 14):
         return Check(
@@ -130,6 +205,16 @@ def _sparkrun_ok(_uv_runner=None) -> Check:
 
 
 def _sparkrun_cluster_ok(_runner=None) -> Check:
+    # RULING (t_0d991e1d): REFUSE. Uninjected the row shells out to `sparkrun cluster
+    # list --json`, i.e. the live fleet CLI and the operator's cluster config — the
+    # exact thing hscc-cluster/tests/sparkrun_fence.py exists to stop in a test child,
+    # except that fence cannot see across a spawn.
+    refused = _base_row_fence(
+        _runner, "sparkrun cluster", "cluster listing", "_cluster_runner",
+        "Pass run_doctor(_cluster_runner=lambda: ...) built from fixture cluster "
+        "state; a suite must never shell out to the live sparkrun CLI.")
+    if refused is not None:
+        return refused
     runner = _runner or _run_cluster_list
     raw = runner()
     if not raw:
@@ -325,10 +410,28 @@ def _skill_findings(hermes_home) -> tuple[list, list]:
     return dup_lines, reviewer_lines
 
 
-def _skills_duplicates_ok(hermes_home) -> "Check":
-    """Doctor finding (i): no skill NAME resolves twice within any home."""
+def _skills_duplicates_ok(hermes_home, *, _scan=None) -> "Check":
+    """Doctor finding (i): no skill NAME resolves twice within any home.
+
+    RULING (t_0d991e1d): the scan is ACCEPTED when the root is the caller's own tree
+    (a fixture dir, ``--home PATH``) — reading it is what the row exists to do — and
+    REFUSED when the root came from the environment, because ``_skills_home()`` walks a
+    profile-scoped ``HERMES_HOME`` UP to the shared root and a suite child would then
+    walk every profile of the operator's install. One seam (``_scan``) covers both skill
+    rows, because they share the ONE scan.
+    """
+    if _scan is None and _root_is_ambient(hermes_home):
+        refused = _base_row_fence(
+            None, "skill names (duplicates)",
+            "skill-tree scan of the ambient Hermes home", "_scan",
+            "Pass _skills_duplicates_ok(home, _scan=lambda home: (dups, rev)) built "
+            "from fixture trees, or point the door at --home <tmp>; a suite must "
+            "never walk the operator's profile trees.")
+        if refused is not None:
+            return refused
+    scan = _scan or _skill_findings
     try:
-        dup_lines, _ = _skill_findings(hermes_home)
+        dup_lines, _ = scan(hermes_home)
     except Exception as exc:  # noqa: BLE001 - doctor must never crash preflight
         return Check("skill names (duplicates)", True, fatal=False,
                      detail=f"scan skipped ({type(exc).__name__}: {exc})")
@@ -347,11 +450,25 @@ def _skills_duplicates_ok(hermes_home) -> "Check":
             "the backed-up move of HSCC's own stale flat copies.")
 
 
-def _reviewer_readiness_ok(hermes_home) -> "Check":
+def _reviewer_readiness_ok(hermes_home, *, _scan=None) -> "Check":
     """Doctor finding (ii): every reviewer-capable profile resolves
-    ``sdlc-review`` exactly once (the skill the dispatcher force-injects)."""
+    ``sdlc-review`` exactly once (the skill the dispatcher force-injects).
+
+    Same seam and same ruling as :func:`_skills_duplicates_ok` above — they are two
+    renderings of one scan (t_0d991e1d).
+    """
+    if _scan is None and _root_is_ambient(hermes_home):
+        refused = _base_row_fence(
+            None, "reviewer readiness (sdlc-review)",
+            "skill-tree scan of the ambient Hermes home", "_scan",
+            "Pass _reviewer_readiness_ok(home, _scan=lambda home: (dups, rev)) built "
+            "from fixture trees, or point the door at --home <tmp>; a suite must "
+            "never walk the operator's profile trees.")
+        if refused is not None:
+            return refused
+    scan = _scan or _skill_findings
     try:
-        _, rev_lines = _skill_findings(hermes_home)
+        _, rev_lines = scan(hermes_home)
     except Exception as exc:  # noqa: BLE001 - doctor must never crash preflight
         return Check("reviewer readiness (sdlc-review)", True, fatal=False,
                      detail=f"scan skipped ({type(exc).__name__}: {exc})")
@@ -413,6 +530,15 @@ def _nas_ok(_runner=None, _cluster_raw=None) -> Check:
     caller that already injects the cluster runner can stop that subprocess
     reaching the live fleet config — see ``run_doctor``.
     """
+    # RULING (t_0d991e1d): REFUSE. Uninjected this row re-derives the NAS identifier
+    # from `sparkrun cluster list` — the same live fleet CLI the cluster row refuses.
+    refused = _base_row_fence(
+        _runner if _runner is not None else _cluster_raw, "nas",
+        "NAS lookup (sparkrun cluster list)", "_cluster_runner/_cluster_raw",
+        "Pass run_doctor(_cluster_runner=...) (or _nas_ok(_cluster_raw=...)) with "
+        "fixture cluster state; a suite must never read the live fleet config.")
+    if refused is not None:
+        return refused
     nas = _runner() if _runner else _detect_nas(_cluster_raw)
     if not nas:
         return Check("nas", True, detail="none configured (optional)", fatal=False)
@@ -484,6 +610,17 @@ def _gateway_running(*, _run=None, _ps_lines=None) -> Check:
     ``ps`` argv for when no supervisor can answer. pgrep is never invoked — it
     cannot see this process, which is the whole GAP-F-3 failure.
     """
+    # RULING (t_0d991e1d): REFUSE — this is the row the card measured. Uninjected it
+    # asks the SERVICE MANAGER and the process table (launchctl list / systemctl
+    # is-active / ps -axww) and prints what it gets back: from a suite-spawned door
+    # that is the operator's live gateway pid inside a test payload.
+    refused = _base_row_fence(
+        _run if _run is not None else _ps_lines, "gateway",
+        "gateway liveness probe (launchctl/systemctl/ps)", "_run/_ps_lines",
+        "Pass _gateway_running(_run=...) or (_ps_lines=...) built from fixture probe "
+        "output; a suite must never ask the machine's service manager.")
+    if refused is not None:
+        return refused
     alive, detail, fix = _gateway_liveness.gateway_verdict(
         _run=_run, _ps_lines=_ps_lines)
     return Check("gateway", alive, detail=detail, fix=fix, fatal=False)
@@ -870,6 +1007,16 @@ def _check_models_served(hermes_home=None, *, _http_get=None) -> Check:
                      detail="no configured model ids; nothing to verify",
                      fatal=False)
 
+    # RULING (t_0d991e1d): REFUSE. Reading the caller's config.yaml is fine; the row
+    # then opens a SOCKET to every endpoint in it (and through the curl fallback, execs
+    # a binary) — from a suite child that is a live probe of the operator's serving
+    # endpoints. Without a getter there is no answer to give, so the row says so.
+    refused = _base_row_fence(
+        _http_get, "models served", "endpoint /models probe", "_http_get",
+        "Pass run_doctor(_http_get=lambda url, api_key=None: ...) returning fixture "
+        "body text; a suite must never open a socket to a configured endpoint.")
+    if refused is not None:
+        return refused
     getter = _http_get or _http_get_default
 
     # Group by resolved probe URL, deduping duplicate endpoints and keeping
