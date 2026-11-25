@@ -43,6 +43,12 @@ task: t_6c4c17fc
   "no unit installed" is a fact of the run, not of the host), and `20 passed`
   with `HSCC_LAUNCHD_PROBE=1` forcing the question while the live unit sits
   loaded.
+- Full `hscc_daemon` leg, gate-shaped (`HSCC_TEST_LEGS=hscc_daemon
+  bash scripts/run_tests.sh`, so `-m "not loadstress"` applies and the runner
+  seals HOME), measured at `fe1f702c`: `5394 passed, 1 skipped, 9 deselected in
+  355.29s`, exit 0, ALL GREEN. This diff adds no cases — the two changed files
+  still collect their same 13 + 7 — so the total is main's, not this lane's, and
+  the only commit after that sha is this fragment's own wording.
 - Four mutation plants on the new pins, each self-proved by the run that went
   red and each leaving the file byte-identical: a canned answer that says the
   unit is loaded and running bites all four `status` cases (never aimed at a
