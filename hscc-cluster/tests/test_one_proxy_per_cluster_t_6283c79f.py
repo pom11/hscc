@@ -20,11 +20,14 @@ per port — it keeps ONE per cache dir:
     ``ProxyAlreadyRunning`` for the second family's start *before* comparing
     ports, and ``sparkrun/cli/_proxy.py`` answers that with ``sys.exit(1)``.
 
-So the second proxy family's ``install_proxy`` returns ``loaded=False``, apply's
-``proxies/`` step still says ``"status": "ok"``
-(``cluster_template.py`` Step 4 appends it unconditionally) and the apply result
-is ``success: True`` — while ``_proxy_front_for_target`` writes
-``http://localhost:<refused port>/v1`` into consumer configs.
+So the second proxy family's ``install_proxy`` returns ``loaded=False`` and
+``_proxy_front_for_target`` writes ``http://localhost:<refused port>/v1`` into
+consumer configs. That DEAD-PORT half is the open bug this file pins, and what
+option (c) below still has to fix. The REPORTING half was fixed by t_4a15fb46:
+apply's ``proxies/`` status is now DERIVED from those per-family results
+(``cluster_template._proxy_step_report``) instead of being appended as a
+hardcoded ``"status": "ok"``, so the step says ``warn`` and the apply is
+``success: False`` rather than printing success over a proxy that never loaded.
 
 WHY THE OBVIOUS FIXES ARE WRONG.
   (a) "validate: at most one ``proxy: true`` family" — implemented, measured,
@@ -224,13 +227,16 @@ class TestSparkrunKeepsOneGateway:
         assert state.read_text() == "4000", "no gateway ever bound 4001"
 
 
-# ── 2. the hazard pin: apply reports success over the dead port ─────────────
+# ── 2. the hazard pin: apply over a dead port (reporting half fixed) ────────
 
 class TestApplyOverADeadProxyPort:
-    """WHAT TODAY'S APPLY DOES, pinned so the fix cannot land silently.
+    """The DEAD-PORT half of the hazard, still open and still pinned as a BUG.
 
-    Every assertion here is a BUG (see the module docstring, option (c)). When
-    the one-gateway-per-cluster fix lands, this class is expected to change:
+    t_4a15fb46 fixed only the REPORTING half (see the module docstring): the
+    ``proxies/`` status is derived now, so an apply over an unserved port says
+    ``warn`` and comes back ``success: False``. The assertions marked ``BUG``
+    below are the rest of option (c) and still hold. When the
+    one-gateway-per-cluster fix lands, this class is expected to change again:
     one ``proxy start`` argv, no ``loaded=False``, and ``family-fast`` resolving
     to the single live port. If it passes unchanged after that change, the fix
     did not reach the apply path."""
@@ -274,22 +280,34 @@ class TestApplyOverADeadProxyPort:
     def _proxy_step(self, res):
         return next(s for s in res["steps"] if s["step"] == "proxies/")
 
-    def test_apply_reports_success_though_the_second_proxy_never_loaded(
+    def test_apply_no_longer_reports_success_over_the_second_dead_proxy(
             self, tmp_path, monkeypatch):
+        """The reporting half: pinned FIXED by t_4a15fb46.
+
+        This case used to read ``assert res["success"] is True`` under a
+        ``# BUG`` comment until t_4a15fb46 derived the ``proxies/`` status from
+        the family reports — if it still came back ``success is True``, the fix
+        had not reached the apply path. The dead-port assertions below stay
+        ``BUG``: option (c) has not landed.
+        """
         ct_mod, rig = self._setup(tmp_path, monkeypatch, "two-proxy",
                                   TWO_PROXY_YAML)
         res = ct_mod.apply_template("two-proxy", confirm=True)
 
-        # BUG: the apply succeeds.
-        assert res["success"] is True, res
+        # FIXED (t_4a15fb46): the apply no longer succeeds over a dead port.
+        assert res["success"] is False, res
         starts = [a for a in rig["calls"]
                   if a[:3] == ["sparkrun", "proxy", "start"]]
         # BUG: two starts for one gateway, on two distinct ports.
         assert [a[a.index("--port") + 1] for a in starts] == ["4000", "4001"]
         step = self._proxy_step(res)
-        # BUG: the step calls itself ok while a family did not load.
-        assert step["status"] == "ok", step
+        # FIXED (t_4a15fb46): the step says what the families reported and
+        # names the one that did not load.
+        assert step["status"] == "warn", step
+        assert step["failed"] and step["failed"][0]["family"] == "fast", step
+        assert step["failed"][0]["port"] == 4001, step
         loaded = {d["port"]: d["loaded"] for d in step["details"]}
+        # BUG: this family's port is served by nothing.
         assert loaded == {4000: True, 4001: False}, step
         assert any(d["port"] == 4001 and "already running"
                    in (d["error"] or "").lower() for d in step["details"]), step
