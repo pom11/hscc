@@ -18,16 +18,18 @@ No real ``launchctl`` is ever EXECED anywhere in this file: the fence in
 ``launchd_status`` refuses to ask inside a pytest process, so an unsheamed verb
 gets a visible refusal row rather than a fork.
 
-What is NOT hermetic, stated plainly because it is the sentence the next reader
-acts on: only the THREE lifecycle cases below declare a supervisor posture
-(``test_status_not_running_no_ansi``, ``test_stop_no_ansi``,
-``test_stop_running_no_ansi`` — see ``_supervisor_has_no_unit``). The other four
-that drive these verbs — ``test_no_raw_markup_leak``, ``test_status_no_ansi_with_qr``,
-``test_status_running_no_ansi``, ``test_status_stale_pid_no_ansi`` — still call them
-unsheamed, and ``_launchd_matters()`` stats the operator's real
-``~/Library/LaunchAgents/com.hscc.api.plist`` for each. They stay green only
-because the fence answers and their assertions never read a supervisor row.
-Residual tracked in t_6c4c17fc; do not copy the unsheamed shape into a new case.
+Every case here that drives ``status`` or ``stop`` DECLARES a supervisor posture
+(``_supervisor_has_no_unit``), so none of them reads the host's launchd state and
+none of them stats the operator's ``~/Library/LaunchAgents``. That is the
+invariant, and it is measured rather than claimed: a seam-attribution pass over
+this file (t_6c4c17fc) records eight supervisor questions and eight injected
+``_run_probe`` answers — zero fence refusals. Four of those eight were the
+residual t_db4d8a74 left behind (``test_no_raw_markup_leak``,
+``test_status_no_ansi_with_qr``, ``test_status_running_no_ansi``,
+``test_status_stale_pid_no_ansi``): they were green only because their
+assertions never read a supervisor row, which is how a case passes for the wrong
+reason. Do not copy the unsheamed shape into a new case — a case that drives
+these verbs without a posture is asserting whatever the host happens to be doing.
 """
 
 import io
@@ -126,12 +128,12 @@ def no_fork(monkeypatch):
 # SIGTERM about, and pins the two ambient inputs that decide whether the seam is
 # consulted at all. Same shape as test_api_cli_launchd.py::_run_status.
 #
-# So the verdict of THESE THREE cases no longer moves with the host: one canned
+# So the verdict of every case here no longer moves with the host: one canned
 # `launchctl print` answer is the fact under test, and the cases that want the
 # supervised (bootout) path are the ones in test_api_cli_launchd.py that declare
-# it. The four status/markup cases that drive these verbs without a seam are the
-# residual named in the module docstring (t_6c4c17fc) — they are green on the
-# fence's refusal, not on a declared posture.
+# it. The four status/markup cases that used to drive these verbs without a seam
+# (the residual t_db4d8a74 left, named in the module docstring) declare a posture
+# too as of t_6c4c17fc — attribution over this file answers 0 refusals.
 
 #: Measured on this box: `launchctl print gui/<uid>/com.hscc.api` for a job that
 #: is not loaded answers rc 113 with `Bad request.` plus a could-not-find-service
@@ -220,41 +222,71 @@ def test_status_not_running_no_ansi(api_env, monkeypatch, tmp_path):
 
 def test_status_running_no_ansi(api_env, monkeypatch, tmp_path):
     import os
+    # Declared posture: a live pid file AND an answered "no such job" from
+    # launchd. The pid file alone is not a posture — on the operator's box the
+    # gate opens on the real unit, the fence refuses, and the panel grows a
+    # `Supervisor: launchd probe refused` row this case never asked for.
+    probe = _supervisor_has_no_unit(monkeypatch, tmp_path)
     monkeypatch.setattr(api_cli_mod, "API_PID_FILE",
                         str(tmp_path / "api.pid"))
     (tmp_path / "api.pid").write_text(str(os.getpid()))
     out, rc = _capture(cmd_api, ["status", "--no-qr"])
     assert rc == 0
     assert NO_ANSI not in out, f"status leaked ANSI: {out!r}"
-    assert "running" in out
+    # The verdict is named WITH the pid, not just the word "running": if the verb
+    # ever took the verdict from the supervisor instead of from this case's pid
+    # file it would print "HSCC API is running under launchd (pid …)", which
+    # depicts a supervised box this case does not declare.
+    assert f"HSCC API is running (PID {os.getpid()})" in out
+    assert "launchd probe refused" not in out  # the seam answered, not the fence
+    assert "Supervisor:" not in out  # asked, and the answer was "no such job"
     assert "╭─ api" in out
     assert "127.0.0.1:8787" in out
+    assert [c[1] for c in probe.calls] == PRINT_ONLY
 
 
 def test_status_stale_pid_no_ansi(api_env, monkeypatch, tmp_path):
     # A PID file whose process no longer exists -> stale (warn) state. We can't
     # reliably pick a dead real PID, so exercise the stale branch by pointing
     # API_PID_FILE at a path that exists but whose pid is not running.
-    import os
     pid_file = str(tmp_path / "api.pid")
     # Write an impossibly-high PID that cannot belong to a live process.
     (tmp_path / "api.pid").write_text("99999999")
     monkeypatch.setattr(api_cli_mod, "API_PID_FILE", pid_file)
+    # Declared posture: the supervisor ANSWERED that no unit is loaded. That is
+    # what makes "stale PID file (not running)" the truth rather than a guess —
+    # and it is the difference between this case and the refusal shape, which
+    # prints "stale PID file; state unknown (supervisor not consulted)" and still
+    # contains the phrase this case used to assert. The two lines below are what
+    # tell them apart; without them the case passes on the fence's refusal.
+    probe = _supervisor_has_no_unit(monkeypatch, tmp_path)
     out, rc = _capture(cmd_api, ["status", "--no-qr"])
     assert rc == 0
     assert NO_ANSI not in out, f"status leaked ANSI: {out!r}"
-    assert "stale PID file" in out
+    assert "stale PID file (not running)" in out
+    assert "unknown" not in out  # answered, not refused
+    assert "Supervisor:" not in out
     assert "127.0.0.1:8787" in out
+    assert [c[1] for c in probe.calls] == PRINT_ONLY
 
 
-def test_status_no_ansi_with_qr(api_env):
+def test_status_no_ansi_with_qr(api_env, monkeypatch, tmp_path):
     """The QR (block art) + themed prose must be ANSI-free on a non-tty."""
+    # Declared posture: no pid file, and launchd ANSWERED "no such job" — the
+    # unsupervised box whose QR this renders. Under the fence the same call
+    # prints the refusal row instead, so a QR that stays ANSI-free there proves
+    # nothing about the QR this case is for.
+    probe = _supervisor_has_no_unit(monkeypatch, tmp_path)
     out, rc = _capture(cmd_api, ["status"])
     assert rc == 0
     assert NO_ANSI not in out, f"status leaked ANSI: {out!r}"
     assert "Scan to connect" in out
     assert "\u2588" in out or "\u2584" in out or "\u2580" in out  # QR rendered
     assert "SECRETTOKEN" not in out  # token stays encoded, never literal
+    assert "not running" in out  # the answered posture's verdict
+    assert "launchd probe refused" not in out
+    assert "Supervisor:" not in out
+    assert [c[1] for c in probe.calls] == PRINT_ONLY
 
 
 # ── start ──────────────────────────────────────────────────────────────────
@@ -341,12 +373,24 @@ def test_unknown_subcommand_no_ansi(api_env):
 
 # ── markup integrity: piped output must never leak literal Rich markup ──────
 
-def test_no_raw_markup_leak(api_env, no_fork):
-    outs = []
+def test_no_raw_markup_leak(api_env, no_fork, monkeypatch, tmp_path):
+    # Declared posture for the whole sweep: this case runs THREE verbs, and
+    # `stop` is the one the fence answers fail-closed (rc 1, an error on stderr
+    # this case never captures) when no posture is declared. So a markup-clean
+    # sweep used to be green on refusals it never looked at. The rc list and the
+    # call count below are what make "no markup leaked" a statement about the
+    # reports rather than about the fence.
+    probe = _supervisor_has_no_unit(monkeypatch, tmp_path)
+    outs, rcs = [], []
     for argv in (["status", "--no-qr"], ["start", "--no-qr"], ["stop"]):
-        out, _ = _capture(cmd_api, argv)
+        out, rc = _capture(cmd_api, argv)
         outs.append(out)
+        rcs.append(rc)
+    assert rcs == [0, 0, 0], f"a verb did not report normally: {rcs}"
+    # status and stop each ask the supervisor once; `start` never asks.
+    assert [c[1] for c in probe.calls] == ["print", "print"]
     for text in outs:
+        assert "launchd probe refused" not in text
         for tag in ("[ok]", "[/ok]", "[warn]", "[/warn]",
                     "[error]", "[/error]", "[title]", "[/title]"):
             assert tag not in text, f"markup leak {tag!r} in {text!r}"
