@@ -37,13 +37,85 @@ import address_guard  # noqa: E402
 
 
 def test_no_real_operator_address_in_tracked_files():
+    """The gate's verdict: the BLOCKING subset of everything git tracks.
+
+    `blocking()` is the one predicate that decides fail-vs-report for both gates
+    and the CI job, and this assertion asks it rather than the raw scan — that is
+    what keeps the hook, this suite and the CI backstop from disagreeing about the
+    same tree. Today the subset is addresses + build artefacts; the home class
+    joins it when HOME_PATHS_ENFORCE flips (see
+    ``test_home_class_is_advisory_now_and_blocking_when_enforced``).
+    """
     offenders = address_guard.scan_tracked(REPO)
 
-    assert not offenders, (
+    assert not address_guard.blocking(offenders), (
         "Real operator addresses found in tracked files — this repo is PUBLIC.\n"
-        "Use the documented placeholders (10.0.0.x for LAN, 100.64.0.1 for tailnet).\n"
+        "Use the documented placeholders (10.0.0.x for LAN, 100.64.0.1 for tailnet,"
+        f" {address_guard.HOME_PLACEHOLDER} for a home path).\n"
         + "\n".join(offenders[:20])
     )
+
+
+# ── the home-path class is judged by THIS gate too (t_3480956c) ──────────────
+# PR #724 reached origin carrying an interpreter path in changelog.d/t_b0bcc49c.md
+# and docs/testing/loadstress-leg.md because this gate had no home-path concept at
+# all: a scan for addresses cannot see /Users/<real-user>, and neither could a
+# reviewer grepping for addresses. These two tests are anti-vacuity in both
+# directions — a planted concrete path must appear in the gate's OWN scan, and the
+# shapes the scrub will replace it with must not.
+#
+# The names are assembled at runtime for the same reason the addresses in
+# scripts/tests/test_address_guard.py are: this file is tracked, so the gate scans
+# it, and a contiguous real-shaped path here would be the offence it tests for.
+
+_HOME_TRIP = "/Users/" + "hscc-realuser"
+_HOME_FIXTURE = "/Users/" + address_guard.FIXTURE_HOME_USER
+_HOME_PLACEHOLDER = "/Users/<operator>"
+
+
+def test_this_gate_reports_a_planted_home_path(tmp_path):
+    """The gate is no longer blind: a concrete home path shows up in its scan."""
+    (tmp_path / "docs").mkdir()
+    leaky = tmp_path / "docs" / "leak.md"
+
+    leaky.write_text(f"venv: {_HOME_TRIP}/.hermes/venv/bin/python\n", encoding="utf-8")
+    offenders = address_guard.scan_paths(tmp_path, ["docs/leak.md"])
+    assert offenders and address_guard.is_home_offender(offenders[0]), (
+        "a planted absolute home path was invisible to the gate — the PR #724 "
+        f"class is uncaught again: {offenders!r}")
+    assert f"docs/leak.md:1: {_HOME_TRIP}" in offenders[0]
+
+    # ...and both documented replacements stay clean, or the scrub has nowhere
+    # to scrub TO and every fix becomes a new finding.
+    for clean in (_HOME_PLACEHOLDER, _HOME_FIXTURE, "/home" + "/<operator>/x"):
+        leaky.write_text(f"venv: {clean}/.hermes/venv/bin/python\n", encoding="utf-8")
+        assert address_guard.scan_paths(tmp_path, ["docs/leak.md"]) == [], (
+            f"the documented replacement {clean!r} was itself flagged")
+
+
+def test_home_class_is_advisory_now_and_blocking_when_enforced(monkeypatch):
+    """The advisory knob is the only thing between report and block — pin both.
+
+    Advisory by default is not a weakening: it is the merge queue running this
+    very suite with 180 tracked files still carrying concrete home paths. What
+    must never regress is that enforcement actually bites when asked, because an
+    advisory rule that cannot be turned on is just a detector with extra steps.
+    """
+    (found,) = address_guard.scan_blob(
+        "docs/x.md", f"run {_HOME_TRIP}/bin/python\n".encode())
+    assert address_guard.is_home_offender(found)
+
+    monkeypatch.setattr(address_guard, "HOME_PATHS_ENFORCE", False)
+    assert address_guard.advisory([found]) == [found]
+    assert address_guard.blocking([found]) == [], (
+        "the home class blocked while advisory — the suite would have gone red on "
+        "the existing baseline, which is the thing this posture exists to avoid")
+
+    monkeypatch.setattr(address_guard, "HOME_PATHS_ENFORCE", True)
+    assert address_guard.blocking([found]) == [found], (
+        "HOME_PATHS_ENFORCE=True did not block: the rule can never be turned on")
+    assert address_guard.advisory([found]) == []
+
 
 
 # ── single-implementation guarantees ─────────────────────────────────────────
