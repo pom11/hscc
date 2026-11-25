@@ -98,7 +98,7 @@ enum FleetServing {
     /// The model name a workload row shows.
     ///
     /// The live feed reports a sparkrun job by its RECIPE PATH — e.g.
-    /// `/home/devuser/.sparkrun-local/recipes/local-fixed/qwen3.8-max-fp8-hscc.yaml`
+    /// `/home/hscc-fixture/.sparkrun-local/recipes/local-fixed/qwen3.8-max-fp8-hscc.yaml`
     /// (verified against `scripts/model_decode_check/fixtures/v1_cluster_status.json`
     /// and a live `hscc cluster status`). A path is unreadable as a headline and
     /// is also the only place a personal home directory can enter the screen, so

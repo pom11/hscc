@@ -45,7 +45,7 @@
     "workloads": [
      {
       "workload_id": "workload-a",
-      "recipe": "/home/devuser/.sparkrun/recipes/model-a.yaml",
+      "recipe": "/home/hscc-fixture/.sparkrun/recipes/model-a.yaml",
       "runtime": "vllm-distributed",
       "ranks_on_host": 1,
       "containers": [

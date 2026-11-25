@@ -16,7 +16,7 @@ cluster:
 
 models:
   primary: "Qwen/Qwen3.6-35B-A3B-FP8"
-  cache_path: "/home/spark/.cache/huggingface/hub"
+  cache_path: "/home/<ssh_user>/.cache/huggingface/hub"
   # Model ID in HF Hub format
   repo_id: "models--Qwen--Qwen3.6-35B-A3B-FP8"
   min_gpu_gb: 40

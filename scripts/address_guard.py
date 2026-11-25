@@ -40,11 +40,11 @@ could not see ``/Users/<real-user>/.hermes/...`` any better than a gate could.
     appears in CI-shape code (``scripts/hermetic_spawn_guard.py``) and in a Linux
     runner's pytest tmp paths, and names no operator machine.
 
-Home offenders are ADVISORY on landing (see ``HOME_PATHS_ENFORCE``): the tracked
-tree already carries concrete home paths in ~180 files, and a rule that turns the
-suite red the moment it lands blocks the merge queue instead of fixing the files.
-That is the same posture the ``ADDRESS_GUARD_ENFORCE`` repository variable
-documents for the CI job — advisory first, blocking once the baseline is clean.
+Home offenders are BLOCKING (``HOME_PATHS_ENFORCE``, flipped by t_34de41c3 once
+the tracked-tree baseline was measured and scrubbed). They were advisory at
+first, for the reason ``ADDRESS_GUARD_ENFORCE`` documents for the CI job: a rule
+that turns the suite red the moment it lands blocks the merge queue instead of
+fixing the files.
 
 100.64.0.0/10 is CGNAT, which is where Tailscale hands out addresses, so a real
 tailnet address lives somewhere in it. Rather than ban the whole range — tests
@@ -112,6 +112,24 @@ _HOME_USER_CHARS = "A-Za-z0-9._-"
 # the ``/Users/<user>`` prefix, and a shorter match never UNDER-reports.
 _HOME_TAIL_STOP = r"\s'\"`<>|;,)()\[\]{}"
 
+# A user-name component must START alphanumeric. This kills the two shapes the
+# strictness above manufactures as findings — a prose ellipsis (`/Users/` plus
+# `...`) and a dotfile mistaken for an account (`/home/.local/bin` in a test's
+# docstring) — and no real POSIX account name begins with `.`.
+#
+# It is a LOOKAHEAD, and that is the whole reason it is allowed here. A lookahead
+# can only shorten or decline a match at a position the engine already reached;
+# it cannot stop the engine from *reaching* the `/Users/` that starts the offence.
+# A left-boundary LOOKBEHIND (`(?<![A-Za-z0-9._-])`) was measured over the tracked
+# tree on t_34de41c3 as the fix for three relative-path false positives, and it
+# costs a blind spot: a home path written after a `\n` escape inside a string
+# literal (`".../bin/zsh\n/Users/<user>/.ssh/id_rsa"`) has a word char in front of
+# the slash in the FILE BYTES, so the lookbehind declines it and every gate — the
+# hook, the pytest gate and the CI backstop — passes a real leak. That is the
+# `.pyc` boundary trap one layer up, and the same reason this branch refuses `\b`.
+# Pinned by test_a_newline_escaped_home_path_still_trips_the_branch.
+_HOME_USER_START = r"(?=[A-Za-z0-9])"
+
 
 def _unsanctioned_home_lookahead():
     """Lookaheads that skip a sanctioned fixture user and match every other one.
@@ -131,6 +149,7 @@ def _unsanctioned_home_lookahead():
 _HOME_BRANCH = (
     r"(?:/Users|/home)/"
     + _unsanctioned_home_lookahead()
+    + _HOME_USER_START
     + "[" + _HOME_USER_CHARS + "]+"
     r"(?:/[^" + _HOME_TAIL_STOP + r"]*)?"
 )
@@ -267,19 +286,27 @@ def home_hits(text):
     return [(i, v) for i, v in all_hits(text) if is_home_occurrence(v)]
 
 
-# ── the home class: advisory first, then blocking (t_3480956c) ───────────────
+# ── the home class: BLOCKING (t_34de41c3) ────────────────────────────────────
 #
-# Why advisory at landing, stated plainly because "the gate is blind" is the
-# complaint this card answers and "the gate now screams" is not the fix:
-# the tracked tree carries concrete home paths in 180 files (measured on
-# origin/main), so a hard rule turns `test_no_real_addresses_committed.py` red
-# immediately, and the merge queue runs that suite — every merge in the repo
-# would stop, including the scrub cards that would clear it. Same posture as the
-# `ADDRESS_GUARD_ENFORCE` repository variable in .github/workflows/address-guard.yml.
+# This was advisory since t_3480956c landed, because the tracked tree carried
+# concrete home paths in 180+ files and a hard rule turns
+# `test_no_real_addresses_committed.py` red the moment it lands — which freezes
+# the merge queue (it runs that suite), including the cards that would have
+# cleared the baseline. t_34de41c3 measured the baseline at 198 offenders / 87
+# files, classified every one of them (docs/audits/home-path-enforcement-
+# decision_t_34de41c3.md), and scrubbed all 198: generic fixture users to
+# `hscc-fixture`, the fleet's real service account to `<ssh_user>`, prose about
+# the operator's machine to `/Users/<operator>`, and the shapes that were never
+# accounts (a prose ellipsis, a dotfile) by tightening this branch instead of
+# the files. `scan_tracked` on the tree that flips this returns 0.
 #
-# Flipping it is a one-line diff here (or the env var, to prove the rule bites
-# before the flip). The scrub cards are the prerequisite, not this constant.
-HOME_PATHS_ENFORCE = False
+# The knob below stays, and it is the only way to prove the rule bites before a
+# change to it ships: `HSCC_ADDRESS_GUARD_HOME_ENFORCE=1` on a tree with a
+# planted path must exit 1. Do not "temporarily" set HOME_PATHS_ENFORCE back to
+# False to get a suite green — an advisory home class is how the PR #724 class
+# reached origin, and a rule nobody can turn off is also a rule nobody notices
+# when it silently stops matching.
+HOME_PATHS_ENFORCE = True
 HOME_PATHS_ENFORCE_ENV = "HSCC_ADDRESS_GUARD_HOME_ENFORCE"
 
 # Recognisable tail on a home offender, so `report()` can explain the two classes

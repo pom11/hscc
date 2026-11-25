@@ -131,9 +131,9 @@ def test_fallback_ladder_matches_the_shared_module(tmp_path):
     if hp is None:  # pragma: no cover - hscc_daemon absent in a standalone install
         pytest.skip("hscc_daemon not importable — nothing to pin against")
     for env, home in [
-        ({"HERMES_HOME": "/r/profiles/w"}, "/home/op"),
-        ({"HERMES_HOME": "/srv/custom"}, "/home/op"),
-        ({}, "/home/op"),
+        ({"HERMES_HOME": "/r/profiles/w"}, "/home/hscc-fixture"),
+        ({"HERMES_HOME": "/srv/custom"}, "/home/hscc-fixture"),
+        ({}, "/home/hscc-fixture"),
         ({"HERMES_HOME": "/r"}, "/r"),
     ]:
         assert erf._fallback_homes(env, home=home) == [
