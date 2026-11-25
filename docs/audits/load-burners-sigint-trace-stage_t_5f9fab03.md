@@ -175,4 +175,147 @@ disproved behaviour change does not ship.
    SIGINT arm 4/4 suite-runs before the polling experiment and 2/2 after
    it — the race is reliably present under that shape on this host.
 
+## t_44a09412 — the lldb signal-mask readout: what this host can and cannot answer
+
+The card asked for one lldb attach to a stalled harness reading the blocked mask
+and the pending set, to separate "SIGINT blocked in the process signal mask
+(never delivered)" from "queued internally and stuck". **Neither of the two ways
+to read that state exists on this host**, and both were measured rather than
+assumed (`docs/audits/support/t_44a09412/`).
+
+### N1 — a debugger cannot attach here at all, so the card's method is not runnable
+
+* `lldb -p <pid>` on the harness's interpreter (`/bin/sh`, a harden platform
+  binary): `attach failed (Not allowed to attach to process)`.
+* `lldb -p <pid>` on a third-party, non-platform `python3` (the venv build):
+  no output for 240 s — the attach never completes either. So this is not
+  platform-hardening alone.
+* Why: `csrutil status` → *enabled*; `DevToolsSecurity --status` → **Developer
+  mode is currently disabled**; `sudo -n` → password required. Without a
+  debugger entitlement or developer-mode authorisation, `task_for_pid` is
+  refused for every target.
+* Even a successful attach would not have yielded bash's own state: `/bin/bash`
+  ships stripped (612 dynamic symbols; no `sigstate`, `blocked_set`,
+  `caught_set` or `pending_traps`), so bash's internal queue is not addressable
+  by name.
+
+So the two-state question must be answered from outside the process, and the
+mask/pending *values* the card asked for are unobtainable as numbers. What
+follows is the strongest substitute this host supports, plus the calibration that
+says whether that substitute is worth anything.
+
+### N2 — the kernel's own mask/pending fields are dead; the disposition fields are live
+
+`sysctl KERN_PROC_PID` exposes `p_sigmask` (blocked), `p_siglist` (pending),
+`p_sigignore`, `p_sigcatch`. `sigprobe --selftest` puts a *known* state in a
+child (SIGINT blocked, HUP+TERM ignored, USR1 caught) and reads it back from
+outside:
+
+```
+known: blocked{INT} ignored{HUP,TERM} caught{USR1}
+  blocked  bits0=0x00000000  INT=0        <- p_sigmask: does not track reality
+  pending  bits0=0x00000000  INT=0
+  ignored  bits0=0x1848c001  INT=0 TERM=1 HUP=1     <- live
+  caught   bits0=0x20000000  USR1=1                  <- live
+```
+
+and `--selftest-pending` sends a SIGINT to a child that has SIGINT blocked —
+where XNU must retain it — and `pending` still reads `0x00000000` on all three
+samples. **`p_sigmask` and `p_siglist` are deprecated and unpopulated on this
+XNU; `p_sigignore`/`p_sigcatch` are populated and trustworthy.** Any "blocked"
+or "pending" claim read off those two fields would have been an artefact — which
+is why the selftest ships with the tool.
+
+### N3 — the disposition fields *do* discriminate the card's two states
+
+A process cannot trap a signal it inherited as `SIG_IGN` (POSIX; bash 3.2 obeys
+it). That makes `p_sigignore`/`p_sigcatch` a direct read of the two hypotheses
+for a stalled harness, and it is measured with no debugger and no perturbation:
+
+| reading on a stalled harness | meaning |
+|---|---|
+| `ignored INT=1`, `caught INT=0` | bash never had an INT handler → the kernel **discarded** the SIGINT → *never delivered* (state A) |
+| `caught INT=1`, `ignored INT=0` | the handler was installed → the kernel would deliver on an unblocked mask → the loss is **inside bash** (state B) |
+
+### N4 — the two calibration traps this instrument fell into first (recorded so they are not re-trod)
+
+1. **A non-interactive launcher shell makes the harness permanently deaf to
+   INT.** My first synthetic states were launched from this worker's shell and
+   all read the same; the readout said why: `ignored INT=1 TERM=0`, `caught
+   INT=0` — the harness had inherited `SIG_IGN` for INT/QUIT/TSTP and bash 3.2
+   could not install its `trap … INT`. This is the parent card's killed
+   hypothesis, *reborn on the launcher side*: it says the fix candidate in the
+   sibling card (a python3 signal-proxy that `sigprocmask`s and then `exec`s the
+   script) **must reset those dispositions before exec**, or the proxy itself
+   will hand the harness an INT it can never trap.
+2. **SIGTSTP is not a canary against bash.** `caught` shows bit 20 set: bash 3.2
+   installs a SIGTSTP handler even in a non-interactive script, so "TSTP did not
+   stop it" says nothing about the mask. QUIT (bit 3) and TTIN/TTOU are in
+   neither `caught` nor `ignored`, so their default action (terminate / stop) is
+   the observable canary.
+3. Related: `sigprobe --prep u2,u3,u20,b2,b3,b20` builds a child whose mask
+   *provably* blocks INT+QUIT+TSTP before `execve` (exec preserves the mask) —
+   and the harness it execs then behaved exactly like a clean-mask harness. So
+   bash 3.2 clears the inherited blocked mask on startup, and the parent's
+   "left-over `sig_block()` window" hypothesis cannot be reproduced by
+   *inheriting* a mask: if that state is real in the stalled runs, bash itself
+   must be creating it inside the running script.
+
+### N6 — the live verdict: the stalled harness had NO INT handler (state A, never delivered)
+
+`pair_chase.sh` (the parent's pair shape, `MINAGE=5`) caught a stalled harness in
+**each** suite on the first run; both were probed inside the ~10 s window
+(`stalled-harness-signal-state-A.log`, `stalled-harness-signal-state-B.log`):
+
+```
+pid=2056 ppid=89307 pgid=2056 stat=2 comm=bash
+  blocked  bits0=0x00000000     <- unreadable field (N2), says nothing
+  pending  bits0=0x00000000     <- unreadable field (N2), says nothing
+  ignored  bits0=0x18408006  INT=1  TERM=0 HUP=0
+  caught   bits0=0x63887ef9  INT=0  TERM=1 HUP=1 USR1=1 CHLD=1
+... same on all three samples, and on the sibling suite's harness (pid 2249)
+TSTP NOT DELIVERED ; SECOND SIGINT NOT DELIVERED ; QUIT DELIVERED (died)
+```
+
+So, for the card's binary: **neither of its two arms, and closer to the first.**
+The SIGINT was not blocked in the mask and was not queued inside bash — it was
+**discarded by the kernel as ignored**, because bash 3.2 never had an INT handler
+to run: `caught INT=0, ignored INT=1`. The same harness has live TERM and HUP
+handlers (`caught TERM=1 HUP=1`), which is exactly why the parent saw the rescue
+TERM trap work and the INT trap never fire; and `QUIT DELIVERED` proves the
+process was alive and responsive to a signal it had neither handler nor ignore
+for, so this is signal-specific, not a deaf process. The whole trace carries
+**zero `int-trap` markers across 6 signal-arm harnesses in each suite**, with
+`1 failed, 738 passed, 4 skipped` per suite (the only failure being this arm).
+
+The control that makes this a cause and not a coincidence is N4.1: the *same*
+harness script, launched from the *same* non-interactive chain but with the
+dispositions reset to `SIG_DFL` first (`sigprobe --prep u2,u3,u20`), reads
+`caught INT=1` and traps INT normally (exit 130). So no wait shape, trap shape or
+timeout in the harness can recover a signal the kernel was never allowed to
+deliver — the parent's conclusion stands, but its mechanism was wrong: the state
+to chase is an **inherited `SIG_IGN`**, which `t_f8e6fe38` F6 declared dead after
+measuring the *suite* process rather than the harness it produced.
+
+### Left for the next worker (t_44a09412)
+
+1. **Name the link that hands down the ignore.** `chain_walk.sh <repo> <sigprobe>
+   <out>` reads SIGINT's disposition at every link of the real launch chain
+   (worker shell → `sh` → python → `/bin/sh` harness) from outside; the first link
+   reading `ignored INT=1` owns it. CPython only installs its SIGINT handler when
+   the inherited disposition is `SIG_DFL`, and `execve` preserves an ignore, so an
+   ignore set anywhere upstream is sticky all the way into bash — which then is
+   not permitted to `trap` it. This run did not capture that link (a key-name bug
+   in the first version of `chain_walk.sh` read pid 0; fixed after the capture).
+2. **Reconcile with the "passes alone" fact** (`t_f8e6fe38` F4: 0/60 stalls
+   alone, and 4/4 + 2/2 paired): if the ignore were inherited unconditionally from
+   the worker shell, the arm would fail every time, paired or not. So either the
+   ignore is set *conditionally* (a test earlier in `scripts/tests` that leaves
+   SIGINT ignored in the suite process — which is what the sibling suite changes),
+   or the paired/alone difference lies elsewhere. Item 1 answers which.
+3. **Then decide the fix on `t_8bb39d12`** — and note for whoever designs the
+   python3 signal-proxy candidate there: it must reset INT/QUIT/TSTP to
+   `SIG_DFL` before `exec`, or it will hand the harness the very ignore this
+   section measured. Do not raise the test timeout (`t_f8e6fe38` F4, parent F4).
+
 

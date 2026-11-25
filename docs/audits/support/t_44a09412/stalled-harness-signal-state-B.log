@@ -1,0 +1,31 @@
+1795620031.201008000 probe_stalled start trace=/Users/<operator>/.hermes/kanban/boards/hscc/workspaces/t_44a09412/scratch/chase1/traceB.txt maxhits=1 minage=5
+1795620125.073063000 STALL pid=2249 etime=00:05 stat=Ss first_seen_delta=na
+1795620125.075176000 --- sysctl readout pid=2249 (x3, over ~1s) ---
+=== t=1795620125.077
+pid=2249 ppid=89309 pgid=2249 stat=2 comm=bash
+  blocked    bits0=0x00000000  INT=0 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  pending    bits0=0x00000000  INT=0 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  ignored    bits0=0x18408006  INT=1 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  caught     bits0=0x63887ef9  INT=0 TERM=1 HUP=1 USR1=1 CHLD=1 CONT=0
+=== t=1795620125.510
+pid=2249 ppid=89309 pgid=2249 stat=2 comm=bash
+  blocked    bits0=0x00000000  INT=0 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  pending    bits0=0x00000000  INT=0 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  ignored    bits0=0x18408006  INT=1 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  caught     bits0=0x63887ef9  INT=0 TERM=1 HUP=1 USR1=1 CHLD=1 CONT=0
+=== t=1795620126.013
+pid=2249 ppid=89309 pgid=2249 stat=2 comm=bash
+  blocked    bits0=0x00000000  INT=0 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  pending    bits0=0x00000000  INT=0 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  ignored    bits0=0x18408006  INT=1 TERM=0 HUP=0 USR1=0 CHLD=0 CONT=0
+  caught     bits0=0x63887ef9  INT=0 TERM=1 HUP=1 USR1=1 CHLD=1 CONT=0
+1795620126.549441000 --- TSTP probe pid=2249 (in bash block_ints set; default=stop) ---
+1795620129.098380000 TSTP NOT DELIVERED pid=2249 stat=Ss (blocked?)
+1795620129.103505000 CONT sent pid=2249 stat=Ss
+1795620129.105927000 --- second SIGINT pid=2249 (late delivery test) ---
+1795620130.730954000 SECOND SIGINT NOT DELIVERED pid=2249 stat=Z
+1795620130.733229000 --- QUIT probe pid=2249 (same blocked set; default=terminate) ---
+1795620132.371421000 QUIT DELIVERED pid=2249 (harness died to QUIT)
+1795620132.374397000 --- stack sample pid=2249 (last-ditch corroboration) ---
+1795620132.376437000 probe done pid=2249
+1795620132.378914000 probe_stalled exit hits=1
