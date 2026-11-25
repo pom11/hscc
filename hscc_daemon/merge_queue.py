@@ -23,8 +23,11 @@ mid-flight is recovered to the head of its project's queue on the next tick.
 
 A PR that is not green yet sits in ``waiting``; EVERY tick re-checks that list
 (one cheap ``gh pr view`` per entry) and returns the green ones to the FIFO,
-whether or not the active queue is empty.  A wait-listed PR whose checks are
-``red`` (or ``cancelled``) gets its branch updated onto the current base with
+whether or not the active queue is empty.  That drain is the ONLY door back:
+the claim step never takes an entry out of ``waiting`` itself, because anything
+still there was probed on this same tick and found not green.  A wait-listed
+PR whose checks are ``red`` (or ``cancelled``) gets its branch updated onto
+the current base with
 ``gh pr update-branch``, which re-runs CI on a base that may since have been
 fixed; the entry records the base sha it was refreshed onto, so this happens
 at most once per base commit per PR and cannot loop.  After a push the new
@@ -148,8 +151,13 @@ CI_PENDING_STAGE = "ci-pending"
 
 #: How long a pushed head may keep the claim while CI stays silent.  Past this
 #: the entry goes back to the wait list (which every tick rechecks), never
-#: terminal: a CI that never reported is not a verdict about the code.
-CI_PENDING_TIMEOUT_S = 1800
+#: terminal: a CI that never reported is not a verdict about the code.  A
+#: project overrides it with ``ci_pending_timeout_s`` in its registry
+#: ``merge_queue`` block (seconds).  The default is deliberately generous:
+#: GitHub's macOS runners are regularly backlogged for 30+ minutes, and a
+#: shorter budget only re-claims and re-gates the same PR.
+CI_PENDING_TIMEOUT_S = 3600
+CI_PENDING_TIMEOUT_KEY = "ci_pending_timeout_s"
 
 #: How long an entry may stay in the wait list before the queue drops it.  The
 #: wait list re-reads every waiting PR on every tick and, since cards 1 and 2,
@@ -2178,6 +2186,20 @@ def _card_on_board(card, board, runner=None):
     return True, status, who
 
 
+def _fix_card_policy(cfg):
+    """``(park, assignee)`` from the registry's ``merge_queue.fix_card`` block.
+
+    ``park`` cuts the fix card BLOCKED under an ``[opencode]`` title so the
+    cluster dispatcher cannot claim it; ``assignee`` overrides the hand-back's
+    fallback (``<board>-orch``) for the card the queue creates. Both default to
+    today's behaviour when the block is absent.
+    """
+    raw = (cfg or {}).get("fix_card")
+    block = raw if isinstance(raw, dict) else {}
+    assignee = str(block.get("assignee") or "").strip() or None
+    return bool(block.get("park")), assignee
+
+
 def _fix_card_reason(body):
     """The title suffix for a queue-cut fix card: the body's first line."""
     first = next((line.strip() for line in (body or "").splitlines()
@@ -2291,22 +2313,30 @@ def _ensure_fix_card(entry, cfg, body, reason=None, *, state_path=None,
                 _remember_fix_card(entry, cfg, candidate, resolved,
                                    state_path=state_path, project=project)
             return candidate, resolved
+    park, fix_card_assignee = _fix_card_policy(cfg)
     assignee = assignee or card_assignee or remembered_who or f"{board}-orch"
+    if fix_card_assignee:
+        assignee = fix_card_assignee
 
     reason = str(reason or _fix_card_reason(body)).strip() or "needs a fix"
     title = f"PR #{pr} red in merge queue: {reason}"
+    if park:
+        title = f"[opencode] {title}"
     text = _fix_card_body(body, project or board, pr,
                           branch=entry.get("branch"))
     fd, path = tempfile.mkstemp(prefix="merge-queue-fix-", suffix=".md")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
-        proc = _kanban_run([
+        create = [
             "--board", board, "create", title,
             "--body-file", path,
             "--assignee", str(assignee),
-            "--priority", str(FIX_CARD_PRIORITY),
-            "--json"], runner=runner)
+            "--priority", str(FIX_CARD_PRIORITY)]
+        if park:
+            create += ["--initial-status", "blocked"]
+        create.append("--json")
+        proc = _kanban_run(create, runner=runner)
     finally:
         with contextlib.suppress(OSError):
             os.unlink(path)
@@ -2327,10 +2357,21 @@ def _ensure_fix_card(entry, cfg, body, reason=None, *, state_path=None,
         return card, entry.get("assignee")
 
     new_card = str(new_card)
+    if park:
+        typed = _kanban_run([
+            "--board", board, "block", "--kind", "capability", new_card,
+            "parked for an OpenCode pane; do not dispatch"], runner=runner)
+        if typed is None or typed.returncode != 0:
+            detail = _tail(getattr(typed, "stderr", "") if typed is not None
+                           else "hermes not found", 3)
+            log(f"merge-queue: fix card {new_card} for PR #{pr} was created "
+                f"blocked but not typed capability: "
+                f"{detail or 'unknown error'}", "WARN")
     _remember_fix_card(entry, cfg, new_card, assignee,
                        state_path=state_path, project=project)
     log(f"merge-queue: PR #{pr} had no live card; created fix card "
-        f"{new_card} on board {board!r} for {assignee}", "WARN")
+        f"{new_card} on board {board!r} for {assignee}"
+        f"{' (parked)' if park else ''}", "WARN")
     return new_card, assignee
 
 
@@ -2359,14 +2400,16 @@ def _accepts_kwarg(fn, name):
     return False
 
 
-def default_handback(card, assignee, message, *, board=None):
+def default_handback(card, assignee, message, *, board=None, parked=False):
     """Comment + reassign (+ unblock) through the sanctioned hermes CLI.
 
     Mirrors ``escalate_watcher._default_reassign``: the daemon never writes a
     board directly for a handback. ``board`` names the project's board
     explicitly — the same one the fix card was created on — because the
-    daemon's current hermes board is not necessarily that board. Returns True
-    when the comment landed.
+    daemon's current hermes board is not necessarily that board. ``parked``
+    cards stay blocked for an OpenCode pane: they are never unblocked here, or
+    the cluster dispatcher would claim the card the queue meant to park.
+    Returns True when the comment landed.
     """
     if not card:
         return False
@@ -2390,7 +2433,9 @@ def default_handback(card, assignee, message, *, board=None):
         run(["reassign", str(card), str(assignee), "--reclaim"])
     # A card parked in blocked/scheduled by the failure resumes with the
     # worker; a ready/running card just gets an error from the CLI, harmless.
-    run(["unblock", str(card)])
+    # A card the queue parked for OpenCode must stay blocked.
+    if not parked:
+        run(["unblock", str(card)])
     return True
 
 
@@ -2638,8 +2683,10 @@ def _handback(entry, cfg, body, handback, gh_runner, log=None, *,
     nothing for a fix card's worker to do, so the queue must not cut one.
     """
     log = log or (lambda *a, **k: None)
-    _comment_pr(cfg["repo"], entry["pr"], body, gh_runner, log=log)
+    parked, _ = _fix_card_policy(cfg)
     card, assignee = entry.get("card"), entry.get("assignee")
+    if not parked:
+        _comment_pr(cfg["repo"], entry["pr"], body, gh_runner, log=log)
     if create:
         try:
             card, assignee = _ensure_fix_card(
@@ -2649,11 +2696,21 @@ def _handback(entry, cfg, body, handback, gh_runner, log=None, *,
         except Exception as exc:
             log(f"merge-queue: PR #{entry.get('pr')} card hand-back failed: "
                 f"{type(exc).__name__}: {exc}", "WARN")
+    if parked:
+        pr_body = body
+        if card:
+            pr_body = (f"{body.rstrip()}\n\n"
+                       f"Parked for an OpenCode pane as `{card}`: the card is "
+                       "blocked and will not be dispatched to a cluster "
+                       "worker.\n")
+        _comment_pr(cfg["repo"], entry["pr"], pr_body, gh_runner, log=log)
     try:
+        kwargs = {}
         if _accepts_kwarg(handback, "board"):
-            handback(card, assignee, body, board=(cfg or {}).get("board"))
-        else:
-            handback(card, assignee, body)
+            kwargs["board"] = (cfg or {}).get("board")
+        if _accepts_kwarg(handback, "parked"):
+            kwargs["parked"] = parked
+        handback(card, assignee, body, **kwargs)
     except Exception:
         pass
 
@@ -3841,11 +3898,36 @@ def _retry_or_drop(doc, state_path, project, entry, error):
     return {"pr": entry.get("pr"), "result": result, "error": error}
 
 
-def _ci_pending_expired(since_iso):
+def ci_pending_budget_s(cfg, log=None):
+    """Seconds a pushed head may hold the claim while CI stays silent.
+
+    ``ci_pending_timeout_s`` in the registry's ``merge_queue`` block overrides
+    the default.  A value that is not a positive number — a typo, ``0``, a
+    ``"30m"`` string, a YAML ``true`` — falls back to the default with a WARN
+    line rather than releasing every pushed head on one bad registry line.
+    """
+    raw = (cfg or {}).get(CI_PENDING_TIMEOUT_KEY)
+    if raw is None or isinstance(raw, bool):
+        return CI_PENDING_TIMEOUT_S
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = 0
+    if value > 0:
+        return value
+    if log is not None:
+        log(f"merge-queue {(cfg or {}).get('name') or '?'}: ignoring invalid "
+            f"merge_queue.{CI_PENDING_TIMEOUT_KEY}={raw!r}; using "
+            f"{CI_PENDING_TIMEOUT_S}s", "WARN")
+    return CI_PENDING_TIMEOUT_S
+
+
+def _ci_pending_expired(since_iso, budget_s=None):
     """True when a held pushed head has outlived the CI-pending budget."""
     since = _epoch(since_iso)
+    budget = CI_PENDING_TIMEOUT_S if budget_s is None else budget_s
     return (since is not None
-            and time.time() - since >= max(1, int(CI_PENDING_TIMEOUT_S)))
+            and time.time() - since >= max(1, int(budget)))
 
 
 def _hold_ci_pending(state_path, project, entry, *, head_sha, base, since,
@@ -3930,11 +4012,12 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
     """
     pr = entry["pr"]
     since = ci_since or _now_iso()
+    budget_s = ci_pending_budget_s(cfg, log)
     if not isinstance(info, dict):
-        if _ci_pending_expired(since):
+        if _ci_pending_expired(since, budget_s):
             _requeue_waiting(state_path, project, entry)
             log(f"merge-queue {project}: PR #{pr} CI still unknown after "
-                f"{CI_PENDING_TIMEOUT_S}s and gh pr view failed; released to "
+                f"{budget_s}s and gh pr view failed; released to "
                 "the wait list", "WARN")
             return {"pr": pr, "result": "ci-timeout",
                     "error": "gh pr view failed"}
@@ -3965,13 +4048,13 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             # caught up (or has stopped answering).  Nothing here says anyone
             # else pushed, and the claim carries a gate that already passed, so
             # hold it — the next tick looks again, and `since` bounds the hold.
-            if _ci_pending_expired(since):
+            if _ci_pending_expired(since, budget_s):
                 _requeue_waiting(state_path, project, entry)
                 log(f"merge-queue {project}: PR #{pr} still reported the "
-                    f"pre-push head after {CI_PENDING_TIMEOUT_S}s; released to "
+                    f"pre-push head after {budget_s}s; released to "
                     "the wait list", "WARN")
                 return {"pr": pr, "result": "ci-timeout",
-                        "timeout_s": CI_PENDING_TIMEOUT_S}
+                        "timeout_s": budget_s}
             log(f"merge-queue {project}: PR #{pr} head read still reports the "
                 f"pre-push head {(pre_push_sha or '?')[:12]} after "
                 f"{max(1, int(HEAD_READ_POLL_ATTEMPTS))} re-read(s); holding "
@@ -4006,13 +4089,16 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
 
     if verdict == "pending" or not _pr_ready(info, required_checks=required):
         if verdict == "pending":
-            if _ci_pending_expired(since):
+            if _ci_pending_expired(since, budget_s):
                 _requeue_waiting(state_path, project, entry)
-                log(f"merge-queue {project}: PR #{pr} CI pending for "
-                    f"{CI_PENDING_TIMEOUT_S}s; released to the wait list",
+                # Pending here is the checks' own answer (QUEUED/IN_PROGRESS,
+                # not red), so name the runner backlog: a real hang and a
+                # backlogged macOS runner look identical without it.
+                log(f"merge-queue {project}: PR #{pr} CI still running after "
+                    f"{budget_s}s (runner backlog); released to the wait list",
                     "WARN")
                 return {"pr": pr, "result": "ci-timeout",
-                        "timeout_s": CI_PENDING_TIMEOUT_S}
+                        "timeout_s": budget_s}
             _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
                              base=base, since=since, log=log,
                              pre_push_sha=pre_push_sha)
@@ -4021,13 +4107,13 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             # Checks are green but GitHub has not recomputed mergeability yet:
             # "not decided" is still not "not ready", so keep the claim rather
             # than parking a validated, pushed head in the wait list.
-            if _ci_pending_expired(since):
+            if _ci_pending_expired(since, budget_s):
                 _requeue_waiting(state_path, project, entry)
                 log(f"merge-queue {project}: PR #{pr} mergeable still UNKNOWN "
-                    f"after {CI_PENDING_TIMEOUT_S}s; released to the wait list",
+                    f"after {budget_s}s; released to the wait list",
                     "WARN")
                 return {"pr": pr, "result": "ci-timeout",
-                        "timeout_s": CI_PENDING_TIMEOUT_S}
+                        "timeout_s": budget_s}
             _hold_ci_pending(state_path, project, entry, head_sha=head_sha,
                              base=base, since=since, log=log,
                              pre_push_sha=pre_push_sha)
@@ -4729,7 +4815,6 @@ def tick(*, state_path=None, root=None, registry_path=None,
             with _file_lock():
                 doc = load_state(state_path)
                 best = None
-                source = "queue"
                 for idx, name in enumerate(members):
                     cfg = cfgs.get(name)
                     ps = _project_state(doc, name)
@@ -4749,30 +4834,30 @@ def tick(*, state_path=None, root=None, registry_path=None,
                         if best is None or rank < best[0]:
                             best = (rank, name, pos, entry)
                 if best is None:
-                    # The active FIFO is empty: retry one wait-listed PR. They
-                    # are appended on the way in, so this round-robins instead
-                    # of letting one permanently non-green PR starve the rest.
-                    source = "waiting"
-                    for idx, name in enumerate(members):
-                        cfg = cfgs.get(name)
-                        ps = _project_state(doc, name)
-                        if (cfg is None or not effective_enabled(cfg, ps)
-                                or ps.get("paused")):
-                            _note_decline(declined, name, ps, cfg)
-                            continue
-                        for pos, entry in enumerate(ps.get("waiting") or []):
-                            if _hold_of(ps, entry.get("pr")) is not None:
-                                continue
-                            rank = (str(entry.get("enqueued_at") or ""), idx,
-                                    pos)
-                            if best is None or rank < best[0]:
-                                best = (rank, name, pos, entry)
-                if best is not None:
+                    # Nothing is queued, so this repo group is idle for this
+                    # tick. The claim step deliberately does NOT reach into
+                    # `waiting`.
+                    #
+                    # `_drain_waiting` ran above, on THIS tick, and probed every
+                    # waiting entry with the same predicate `process_entry` uses
+                    # (`_pr_ready`), so anything still in the wait list here was
+                    # just proved not green. Reaching for it could only end one
+                    # way: `process_entry` re-reads the PR, calls it not green,
+                    # and bounces the entry straight back — a `checks not green;
+                    # moved to the wait list` pair per tick, forever (PR #710 on
+                    # 2.17.5 burned 16 of them, and the "round-robins to the
+                    # back" this used to claim never happened: the entry keeps
+                    # its `enqueued_at`, so the same oldest PR won every tick).
+                    # The wait list has one door back into the FIFO — a green
+                    # rollup in `_drain_waiting` — plus an explicit
+                    # `hscc merge-queue add`, which is an operator retry.
+                    pass
+                else:
                     _, claim_name, pos, entry = best
                     ps = _project_state(doc, claim_name)
                     cfg = cfgs.get(claim_name) or {}
                     size = _batch_size(cfg)
-                    if source == "queue" and pos == 0 and size > 1:
+                    if pos == 0 and size > 1:
                         # Opt-in batch: claim the first N eligible FIFO entries
                         # as ONE in-flight record. A held entry at the head
                         # keeps the ordinary single-claim path.
@@ -4791,7 +4876,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
                             }
                             ps["in_flight"] = batch
                     if batch is None:
-                        entry = ps[source].pop(pos)
+                        entry = ps["queue"].pop(pos)
                         ps["in_flight"] = entry
                     save_state(doc, state_path)
             # Outside the file lock: a log write must not extend how long the

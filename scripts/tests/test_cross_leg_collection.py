@@ -103,6 +103,31 @@ def test_leg_still_green_alone(solo):
     assert proc.returncode == 0, f"{solo} alone did not pass:\n" + _tail(proc)
 
 
+def test_daemon_conftest_import_survives_a_host_without_kqueue():
+    """The daemon conftest must import where ``select.kqueue`` does not exist.
+
+    GitHub runs this leg on Linux, and the child pytest above collects
+    ``hscc_daemon/tests``, whose autouse conftest imports ``event_driven``.
+    That module exposes a ``select.kqueue`` annotation; Python 3.13 (CI's
+    interpreter) evaluates annotations at definition time, so on Linux the
+    child died during collection before a single test ran. Delete the
+    attribute to reproduce a Linux ``select`` from macOS, then import the
+    module the conftest imports.
+    """
+    code = (
+        "import select\n"
+        "if hasattr(select, 'kqueue'):\n"
+        "    del select.kqueue\n"
+        "from hscc_daemon import event_driven\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], cwd=REPO,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        "hscc_daemon.event_driven no longer imports on a host without "
+        "select.kqueue (i.e. Linux), so the daemon conftest turns the "
+        "cross-leg run red during collection:\n" + _tail(proc))
+
+
 def test_payload_dir_is_a_dir_and_the_real_package_is_still_a_package(
         tmp_path):
     """Both directions of the guard's scope, read off the child's own tree.
