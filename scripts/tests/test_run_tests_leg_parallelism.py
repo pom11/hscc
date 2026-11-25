@@ -449,13 +449,38 @@ def test_sigterm_names_the_live_legs_and_leaves_none_behind(tmp_path):
 
 
 def test_the_per_leg_logs_do_not_pile_up_in_tmp(tmp_path):
-    """A gate runs on a shared host; N files per run must not be left behind."""
-    before = set(Path("/tmp").glob("hscc-legs-*"))
+    """A gate runs on a shared host; N files per run must not be left behind.
+
+    Asserted about the directory THIS run caused — the one the runner names in its
+    own banner — not about a snapshot of every ``hscc-legs-*`` in /tmp. A pack's log
+    dir lives for the whole run, and several workers run this suite on one Mac, so a
+    sibling's pack dir is born between the two snapshots whenever the windows
+    overlap; the global ``before == after`` assert then failed on a run that littered
+    nothing (t_34c5a3ed: red inside a full shared-host run, green twice in a row
+    alone). A namespace this test does not own cannot carry a gate verdict — ambiguity
+    on a gate is what gets someone re-running until green.
+
+    The claim keeps its teeth, aimed at the directory it is actually about. Two pins
+    make "the dir it printed" the same set as "the dirs it caused", so scoping cannot
+    hide litter: exactly one creation site in the runner (nothing can make a second
+    dir it did not advertise), and exactly one banner per run. Per-leg logs are
+    written INSIDE that dir, so the single ``not exists()`` check is the whole
+    ``N files per run`` claim rather than a fraction of it.
+    """
+    sites = RUNNER.read_text().count("mktemp -d /tmp/hscc-legs-")
+    assert sites == 1, (
+        f"the runner has {sites} leg-log creation site(s). This test attributes "
+        f"cleanup to the one dir the runner prints, so a second site needs its own "
+        f"assertion here — otherwise a dir it never advertises can't be caught.")
+
     r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)]), parallel=2)
-    m = re.search(r"leg logs in (/tmp/hscc-legs-\S+)", r["log"])
-    assert m, r["log"]
-    assert not Path(m.group(1)).exists(), f"left behind: {m.group(1)}"
-    assert set(Path("/tmp").glob("hscc-legs-*")) == before, "tmp litter"
+    assert r["rc"] == 0, r["log"]
+    logs = re.findall(r"leg logs in (/tmp/hscc-legs-\S+)", r["log"])
+    assert len(logs) == 1, (
+        f"a pack names its log dir exactly once; saw {logs}. Empty means the pack "
+        f"never started (mktemp fell back to serial), so nothing was cleaned up "
+        f"to check:\n{r['log']}")
+    assert not Path(logs[0]).exists(), f"left behind: {logs[0]}"
 
 
 def test_heartbeat_seconds_zero_silences_the_watcher_in_a_pack(tmp_path):
