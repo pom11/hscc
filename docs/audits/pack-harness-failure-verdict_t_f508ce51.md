@@ -108,6 +108,34 @@ After the change:
     12 passed   .github/scripts/tests/test_leg_verdict.py   (9 pre-existing + 3 new)
     34 passed   test_run_tests_leg_log_path.py + _leg_parallelism.py + _leg_duration.py
 
+## The pair this card asked for, as executed (redirect instance)
+
+The card asked specifically for: *a leg whose log cannot be written yields the new
+harness-failure verdict, not the ordinary test-red — and must still exit non-zero.*
+Executed by re-applying the pre-flatten `logf=` concat to the shipped runner (scratch
+probe, restored; `git status --porcelain` reported CLEAN after the run), packing the
+REAL roster leg `.github/scripts` alongside a healthy one:
+
+    --- BROKEN (pre-flatten logf): rc=1
+        ✓ hscc-commands (1s)
+        ✗ .github/scripts (no leg output — harness failure, pytest exit 1, 0s)
+        phrase_present=True   no_such_file_line=True   verdict=FAILURES ABOVE
+    --- FIXED (shipped logf): rc=0
+        ✓ hscc-commands (1s)
+        ✓ .github/scripts (1s)
+        phrase_present=False  no_such_file_line=False  verdict=ALL GREEN
+
+Three things worth reading off that pair. The victim leg carries **`pytest exit 1`** —
+the exact code that, before this change, made the class indistinguishable from a red
+test and that `leg_verdict.sh` still calls a test failure; only the phrase separates
+them now. The stray `No such file or directory` line is still in the stream (the fix is
+a verdict, not a suppression — the underlying message is left alone). And the healthy
+leg in the same pack is unaffected, which is what makes this a per-leg verdict rather
+than a pack-level panic.
+
+The probe is scratch, deliberately not committed: it patches a tracked file in place,
+and a test that mutates its own checkout cannot be run twice concurrently.
+
 ## Where the class leaked, and by how much
 
 `leg_verdict.sh`'s `pytest exit (0|[2-9]|[1-9][0-9]+)` rule is the only thing in CI that
@@ -121,5 +149,22 @@ is its red-before: against the old script that log yields rc 0.
 
 ## LEFT / risks
 
-- Base choice: rebases onto #825 or #827 as soon as either lands; my hunks are in the
-  reap classification (`:925-950`) and the summary (`:964-979`), NOT in `_cleanup_leg_tmp`.
+- **Base choice.** Branch `devops/t_f508ce51` is cut from `devops/t_692814f5` (PR #828),
+  because this card's repro file lives there. None of #825 / #827 / #828 had landed when
+  this was written, so "rebase onto whichever has landed" could not be honoured at
+  authoring time. My hunks are the reap classification and the summary block
+  (`scripts/run_tests.sh`), which is *adjacent to* but not inside `_cleanup_leg_tmp`
+  (#825) or `_on_fatal_signal` (#827) — expect a textual conflict in the same region,
+  not a semantic one. Re-implementing the cleanup was deliberately not done.
+- **A docstring in another lane's hot file.** `hscc_daemon/merge_queue.py:1301` still
+  describes the leg row as `` `  ✗ <leg> (pytest exit N)` ``, which now understates the
+  parenthetical. Behaviour is unchanged (`^✗\s` still matches), so this is prose only;
+  left alone rather than touching a 4.9k-line file four cards are sitting on. Worth a
+  one-line follow-up.
+- **The phrase is a contract now.** `no leg output` on a `✗` summary row is read by
+  `.github/scripts/leg_verdict.sh`. Renaming it means changing the runner, the runner
+  test, `leg_verdict.sh` and its test in the same diff — the four are pinned to each
+  other, and the source pin in
+  `scripts/tests/test_run_tests_leg_harness_verdict.py::test_the_verdict_is_derived_from_the_two_reap_facts_at_one_site`
+  fails if a second rendering site appears.
+
