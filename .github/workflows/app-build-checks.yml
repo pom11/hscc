@@ -16,13 +16,23 @@ name: app-build-checks
 # and nothing queue-merged for 4 h. A Python-only PR cannot affect the Apple
 # clients, so the ubuntu `changes` job decides from the diff and the heavy steps
 # live in `apple`, which is skipped when nothing Apple-related moved. A push to
-# main always compiles: that is the backstop for a wrong touched-path decision.
+# main always compiles: that is the backstop for a wrong touched-path decision,
+# and the `push` trigger below is filtered to `main` (pytest-legs.yml's form)
+# because that filter is what makes the sentence true rather than aspirational.
+# Measured on PR #836 (t_1ecf9acc) while the trigger was unfiltered: every push
+# to a PR branch paid for a second, full run — `decide_app_build.sh` answers
+# `apps=true` for any push event — and the next push to the same ref cancelled
+# the in-flight `apple` job under `cancel-in-progress: true`, which `compile`
+# (`if: always()`) turned into a FAILURE stamped on that head SHA forever: run
+# 45688152056 (event push) apple CANCELLED + compile red, run 45688163856 (event
+# pull_request, same SHA) apple SKIPPED + compile green.
 # `compile` is the stable check name and now aggregates: green on a legitimate
 # skip, red when the compile failed or did not run, or when the selector itself
 # broke. Never green because nothing ran.
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
