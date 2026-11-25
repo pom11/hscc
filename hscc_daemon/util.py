@@ -3,11 +3,33 @@
 import ipaddress
 import json
 import os
+import signal
 import subprocess
 import socket
 import urllib.request
 import urllib.error
 import urllib.parse
+
+
+def unblock_stop_signals():
+    """Clear an inherited BLOCK on SIGTERM/SIGINT.
+
+    ``signal.signal()`` installs a DISPOSITION; it does not clear the calling
+    thread's signal MASK, and a mask survives fork/exec (``subprocess``
+    restores ignored dispositions, never the mask). A daemon started by a
+    process that runs with SIGINT or SIGTERM blocked therefore installs its
+    handler, is sent the signal, and never dispatches it: the stop stays
+    pending and the only exit left is SIGKILL.
+
+    ``pthread_sigmask`` is POSIX-only; where it is absent there is no
+    inherited pthread mask to clear. Every step is best-effort by design — a
+    process that cannot clear its mask must still start.
+    """
+    try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK,
+                               {signal.SIGTERM, signal.SIGINT})
+    except (AttributeError, OSError, ValueError):
+        pass
 
 
 def _ready_says_go(ready):
