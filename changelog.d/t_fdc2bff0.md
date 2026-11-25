@@ -18,6 +18,19 @@ task: t_fdc2bff0
   moving the priority. Recorded in `docs/audits/` with every A/B, so the next
   gate-speed card starts from the measurement instead of re-deriving it.
 ---
+kind: Added
+task: t_fdc2bff0
+
+* **`scripts/run_tests.sh` now prints the wall time of every leg on its summary
+  row** — `✓ hscc_daemon (315s)`, `✗ hscc-api (pytest exit 1, 456s)`. The runner
+  already started a per-leg clock for the heartbeat and threw the value away, so
+  the roster's cost was never readable from anything the runner, the queue or a
+  worker emitted: the local gate existed only as one ~75 min block, and the
+  per-leg table in `docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md` had
+  to be reconstructed by hand from twelve separate `HSCC_TEST_LEGS=<leg>` runs.
+  The red row keeps the `✗ ` anchor `merge_queue._LEG_FAILURE_RES` matches on,
+  so a leg that goes red still leads the handback digest — now with its cost.
+---
 kind: Verified
 task: t_fdc2bff0
 

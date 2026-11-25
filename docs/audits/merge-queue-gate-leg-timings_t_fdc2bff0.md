@@ -23,15 +23,17 @@ This run's own shell is an ordinary process — `ps -o pri` **20**.
 | `hscc-project` | 7 |
 | `hscc_daemon` | 315 |
 | `sparkrun-hermes` | 3 |
-| `hscc-api` | _pending_ |
-| `memori_byodb` | _pending_ |
-| `scripts` | _pending_ |
-| `.github/scripts` | _pending_ |
-| `comfyui-sparkrun` | _pending_ |
+| `hscc-api` | 456 |
+| `memori_byodb` | 1 |
+| `scripts` | 192 |
+| `.github/scripts` | 16 |
+| `comfyui-sparkrun` | 37 |
+| **roster** | **1323 s (22 min), every leg green** |
 
-Seven legs measured so far: **621 s**. The two expensive legs
-(`hscc_daemon` 315 s, `hscc-bootstrap` 232 s) are 88 % of that, and the rest of
-the roster is a rounding error: five legs sum to 74 s.
+The distribution is the finding: `hscc-api` + `hscc_daemon` + `hscc-bootstrap`
+are 1003 s = **76 % of the suite**, those three plus `scripts` are 90 %, and the
+other seven legs together cost 128 s. Any change that only touches "the rest of
+the roster" cannot move this gate.
 
 ## 2. The same suite inside the queue's gate
 
@@ -101,4 +103,63 @@ _Backed by `parallel_ab.sh`: five legs, each launched through the canonical
 runner under `taskpolicy -b` (the measured equivalent of the live gate's
 priority), serial vs three-deep._
 
-_PENDING_
+### 5.1 The gate's own tax, leg by leg
+
+The `scripts` leg is the clean comparison, because both sides ran exactly it:
+
+| | `scripts` leg |
+| --- | --- |
+| this repo's runner at pri 20 (§1) | **192 s** |
+| the live queue gate at pri 4 (§2) | **≥ 1362 s and still running** |
+
+≥ **7.1x** on one leg, from the execution environment alone. The two-leg gate
+PR #761 was holding (`hscc_daemon scripts`, 424 s of suite at pri 20) had burned
+**1871 s** — the same ≥4x. And the twelve-leg roster extrapolates to ~5900 s at
+that ratio, which is the ~75 min the queue has been spending.
+
+### 5.2 Concurrency does pay at the gate's priority, but is capped by one leg
+
+Five legs, each run through the canonical runner under `taskpolicy -b` (the
+measured equivalent of the live gate's priority, pri 4), one arm serial and one
+three-deep, same machine, same moment:
+
+| arm | wall |
+| --- | --- |
+| serial (what `run_tests.sh` does today) | 188 s |
+| three-deep | **96 s (1.96x)** |
+
+Every leg was green in both arms (`rc=0` ×5 ×2), so these five legs do not
+interfere when concurrent, and no leg slowed down when its neighbours ran: the
+worst leg took 93 s parallel against 107 s serial. The box had headroom — load
+2–3 on 14 cores while a gate ran.
+
+What that bounds, applied to the real roster: a p=3 pack can never beat the
+longest leg, and `hscc-api` at pri 4 is ~456 × 4 ≈ **30 min on its own**. So
+leg-level concurrency alone does **not** get a full-twelve-leg gate under 30
+min. It does get the *narrowed* gate there: the gate observed in §2 is two
+legs (`hscc_daemon` + `scripts` ≈ 2280 s serial at pri 4), and the best possible
+two-deep pack is the larger of them ≈ **24 min < 30 min** — which is the target,
+for the shape of PR the queue actually processes.
+
+### 5.3 The ranking that follows from the measurement
+
+1. **The launchd job's background role is the biggest single tax** (≥4–7x) and
+   it is not reachable from the code that spawns the gate (§3). It is one line
+   of operator-owned plist (`ProcessType`), and it puts the whole roster at the
+   measured 22 min without touching a test. This is a finding **for the
+   operator**, not a PR: this repo deliberately never edits that plist.
+2. **Bounded leg concurrency** is the biggest win that *is* in code: ~2x
+   measured, and enough to bring a typical narrowed gate inside 30 min. It needs
+   three things this audit could not settle in its own budget, each of which is
+   a verification rather than a guess: per-leg output to separate files so the
+   `FAILED path::test` digest stays parseable, the heartbeat's
+   "pytest is a child of the runner" discovery reworked for N concurrent legs
+   (t_ecb84764 built that signal for a reason), and an interference run over the
+   *whole* roster — the five legs above are green, but `hscc-api` and
+   `hscc_daemon` bind loopback sockets and must be shown to still be green with
+   neighbours.
+3. **Narrowing** (`MAX_LOCAL_TEST_LEGS = 3`, `merge_queue.py:219`) is already
+   live and already being used by the gates observed here; raising it only helps
+   the diffs that touch four or more leg directories, and cannot beat §5.2's
+   longest-leg ceiling either.
+
