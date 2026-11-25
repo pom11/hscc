@@ -50,7 +50,7 @@
 # non-numeric value disables it). Output is one printf per line on the runner's
 # stdout, so it lands in the same redirected file as the leg.
 #
-# Usage: leg_heartbeat.sh <leg-name> <runner_pid> <leg_start_epoch> [interval_s]
+# Usage: leg_heartbeat.sh <leg-name> <runner_pid> <leg_start_epoch> [interval_s] [legs_file]
 #
 # The runner passes its OWN pid, not pytest's, because run_tests.sh must keep
 # pytest in the FOREGROUND: backgrounding it would make a non-interactive shell
@@ -58,12 +58,23 @@
 # script discovers the leg's pytest as a child of the runner, excluding itself
 # (it is a child too, and an older pid, so a naive `pgrep | head -1` would
 # report the heartbeat watching itself).
+#
+# MULTI-LEG MODE (t_6c2123f9). With bounded leg concurrency the runner has N
+# legs in flight, so "the leg's pytest" is no longer a unique answer to
+# `pgrep -P <runner>` — the naive generalisation prints one line about whichever
+# child happens to sort first, which is worse than nothing: a reader would see a
+# leg that is not the slow one reported as THE leg. So the runner passes a
+# fifth argument, a TSV of `<leg>\t<pid>\t<start_epoch>` it appends to as each
+# leg launches, and this script prints one line PER LIVE leg, each carrying
+# that leg's own elapsed clock and pytest. The single-leg mode above is
+# unchanged, because that is what the serial path (HSCC_TEST_PARALLEL=1) runs.
 set -u
 
-LEG="${1:?usage: leg_heartbeat.sh <leg> <runner_pid> <leg_start_epoch> [interval_s]}"
+LEG="${1:?usage: leg_heartbeat.sh <leg> <runner_pid> <leg_start_epoch> [interval_s] [legs_file]}"
 RUNNER="${2:?missing runner pid}"
 T0="${3:?missing leg start epoch}"
 INTERVAL="${4:-30}"
+LEGS_FILE="${5:-}"
 
 case "$INTERVAL" in
   ''|*[!0-9]*) exit 0 ;;          # disabled / not an integer interval
@@ -81,9 +92,40 @@ alive() {
   return 0
 }
 
+# One line in the ONE format every reader of this script greps, for one leg whose
+# wrapper pid is $2 and whose clock started at $3. `pgrep -P <wrapper>` is the
+# same discovery the single-leg mode does, one level down: the wrapper is a
+# subshell whose only child is the leg's pytest (`env` execs into it), so the
+# "exclude the watcher" concern does not exist here — the watcher is a child of
+# the runner, not of the wrapper.
+report_leg() {
+  py_pid="$(pgrep -P "$2" 2>/dev/null | head -1)"
+  [ -n "$py_pid" ] || return 0          # pytest has not exec'd yet this tick
+  CPU="$(ps -o time= -p "$py_pid" 2>/dev/null | tr -d ' ')"
+  KIDS="$(pgrep -P "$py_pid" 2>/dev/null | wc -l | tr -d ' ')"
+  FIRST_KID="none"
+  FIRST="$(pgrep -P "$py_pid" 2>/dev/null | head -1)"
+  [ -n "$FIRST" ] && FIRST_KID="$(ps -o comm=,etime= -p "$FIRST" 2>/dev/null | tr -s ' ')"
+  printf '[leg-heartbeat] leg=%s elapsed=%ss pytest_pid=%s cpu=%s children=%s first_child=%s\n' \
+    "$1" "$(( $(date +%s) - $3 ))" "$py_pid" "${CPU:-?}" "${KIDS:-0}" "$FIRST_KID"
+}
+
 while alive "$RUNNER"; do
   sleep "$INTERVAL"
   alive "$RUNNER" || break
+  if [ -n "$LEGS_FILE" ] && [ -f "$LEGS_FILE" ]; then
+    # Multi-leg mode (t_6c2123f9): one line per LIVE leg, each with its own
+    # elapsed clock — the pair of numbers that separates slow from stopped has to
+    # belong to the leg being asked about. A finished leg is skipped: the runner
+    # has not reaped it yet, so it is a zombie, and `alive` says gone.
+    while IFS=$'\t' read -r l_name l_pid l_t0; do
+      case "${l_pid:-}" in ''|*[!0-9]*) continue ;; esac
+      case "${l_t0:-}"  in ''|*[!0-9]*) l_t0="$(date +%s)" ;; esac
+      alive "$l_pid" || continue
+      report_leg "$l_name" "$l_pid" "$l_t0"
+    done < "$LEGS_FILE"
+    continue
+  fi
   # self ($$) is a child of the runner too — never report the watcher.
   PY_PID="$(pgrep -P "$RUNNER" 2>/dev/null | grep -vx "$$" | head -1)"
   [ -n "$PY_PID" ] || continue

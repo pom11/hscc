@@ -174,3 +174,66 @@ def test_runner_wires_the_heartbeat():
     assert "&\n" not in invocation and not invocation.rstrip().endswith("&"), (
         "something in the pytest invocation is backgrounded: Ctrl-C stops "
         "reaching the suite, which is what this pin exists for")
+
+
+# ── the multi-leg watcher (t_6c2123f9) ──────────────────────────────────────
+# A pack has N legs in flight, so "the leg's pytest" is no longer one answer to
+# `pgrep -P <runner>`. The mode the runner now uses names every live leg; these
+# two pins keep the seam from silently collapsing back to one.
+
+
+def test_pack_wires_the_watcher_to_the_leg_file():
+    """Pin BOTH sides of the fifth argument. A runner that packs legs but still
+    calls the watcher with four gets one line about whichever child `pgrep`
+    returns first — which reads as a healthy leg while the slow one is unnamed.
+    """
+    src = RUNNER.read_text()
+    calls = re.findall(r'bash "\$ROOT/scripts/leg_heartbeat\.sh"[^\n]*', src)
+    assert len(calls) == 2, f"expected one serial and one pack call, got {calls}"
+    assert [c for c in calls if "LEG_PIDFILE" in c], f"the pack passes no leg file: {calls}"
+    assert [c for c in calls if '"$d"' in c], f"the serial path lost its leg name: {calls}"
+    hb = HEARTBEAT.read_text()
+    assert 'LEGS_FILE="${5:-}"' in hb, "leg_heartbeat.sh lost its 5th argument"
+    assert 'done < "$LEGS_FILE"' in hb, "the watcher no longer iterates the leg file"
+
+
+def test_multi_leg_mode_reports_each_live_leg_once(tmp_path):
+    """Two real concurrent legs, one watcher, output REDIRECTED to a file.
+
+    Both leg names must appear, each with exactly one pytest pid, and no line may
+    name the watcher — the ambiguity this mode exists to remove, asserted rather
+    than described.
+
+    Each leg is a SCRIPT WITH A CHILD, the way the real leg is a subshell whose
+    child is pytest: the watcher names a leg by its CHILD, so a bare `sleep`
+    would test the parsing and not the discovery.
+    """
+    log = tmp_path / "multi.log"
+    legs_file = tmp_path / "legs.tsv"
+    legs_file.write_text("")
+    (tmp_path / "leg.sh").write_text("#!/usr/bin/env bash\nsleep 4\n")
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "#!/usr/bin/env bash\n"
+        f"bash {HEARTBEAT} roster $$ \"$(date +%s)\" 1 {legs_file} & hb=$!\n"
+        "bash L1 & printf 'alpha\\t%s\\t%s\\n' \"$!\" \"$(date +%s)\" >> LOGS\n"
+        "bash L2 & printf 'beta\\t%s\\t%s\\n' \"$!\" \"$(date +%s)\" >> LOGS\n"
+        "sleep 3; kill $hb 2>/dev/null; true\n"
+        .replace("L1", str(tmp_path / "leg.sh"))
+        .replace("L2", str(tmp_path / "leg.sh"))
+        .replace("LOGS", str(legs_file))
+    )
+    with open(log, "wb") as fh:
+        subprocess.run(["bash", str(runner)], stdout=fh,
+                       stderr=subprocess.STDOUT, timeout=60)
+    out = log.read_text()
+    ms = [m for m in (LINE.match(l) for l in out.splitlines()) if m]
+    by_leg = {}
+    for m in ms:
+        by_leg.setdefault(m["leg"], set()).add(m["pid"])
+    assert set(by_leg) == {"alpha", "beta"}, f"expected both legs, got {out!r}"
+    for leg, pids in by_leg.items():
+        assert len(pids) == 1, f"{leg} reported two pids: {pids}"
+    assert all("leg_heartbeat" not in m["kid"] for m in ms), out
+    # Each leg's elapsed clock is its OWN, measured from when THAT leg started.
+    assert all(int(m["elapsed"]) >= 1 for m in ms), out
