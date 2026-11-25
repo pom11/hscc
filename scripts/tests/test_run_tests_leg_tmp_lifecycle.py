@@ -429,3 +429,99 @@ def test_the_sweep_line_cannot_join_the_handback_digest(pack):
     lines = pack.text().splitlines()
     assert any(l.startswith("parallel: swept ") for l in lines), pack.text()
     assert not [l for l in mq._failure_lines(pack.text()) if "swept" in l], pack.text()
+
+
+# ── the sweep must be proven to DELETE, not merely to refrain ───────────────
+# Both red gates of PR #825 were this file's two positive sweep tests, and the
+# reason they were the ONLY two that failed is the reason these exist: a sweep
+# that deletes nothing passes every test that expects a dir to survive.
+# `test_a_pack_still_running_is_never_swept` and `test_the_sweep_is_off_when_its_
+# floor_says_off` stayed green the whole time the reclaim did nothing at all.
+# These attack that asymmetry at the two places it actually broke, on the host
+# running them, without needing a mounted `/tmp` to reproduce.
+
+OWNER_HELPER = SCRIPTS / "leg_tmp_sweep_owner.sh"
+
+
+def _owner_probe(tmp_path):
+    """Source the helper and call it the way run_tests.sh does.
+
+    Deliberately NOT `_leg_tmp_sweep_owner` inside `$(…)`: the helper answers
+    through shell variables and a command substitution is a subshell, so the
+    probed stat format would die with the subshell and the caller would run a
+    bare `stat` for every candidate. That mistake is one of the two this pins.
+    """
+    script = tmp_path / "call_helper.sh"
+    script.write_text(
+        "set -u\n"
+        f'. "{OWNER_HELPER}"\n'
+        "_leg_tmp_sweep_owner >/dev/null 2>&1 || true\n"
+        "printf 'owner=%s\\nfmt=[%s]\\n' "
+        '"$_leg_tmp_probe_owner_out" "$_leg_tmp_uid_fmt"\n'
+    )
+    out = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                         env={**os.environ, "HOME": str(tmp_path)})
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+def test_the_owner_helper_is_asked_who_owns_our_own_tmp_dir(tmp_path):
+    """The sweep's one question — whose dirs may we take — answered on THIS host.
+
+    Answered by making a dir in the leg-log namespace and asking the filesystem
+    who owns it, never by comparing a candidate against `id -u`: on a runner
+    whose `/tmp` is a mount whose owner is not the mounter those two answers
+    differ for the SAME directory, and the second files our own litter under
+    "another account" forever. Measured on the `leg scripts` leg of PR #825.
+    """
+    probe = _owner_probe(tmp_path)
+    owner = probe.splitlines()[0].split("=", 1)[1]
+    assert owner == str(os.getuid()), (
+        f"the probe answered {owner!r} for a dir this process creates itself; "
+        f"the sweep would skip every candidate: {probe}")
+    assert "fmt=[-c %u]" in probe or "fmt=[-f %u]" in probe, (
+        f"no stat format answered with a uid, so the sweep has nothing to ask "
+        f"the candidates with: {probe}")
+
+
+@pytest.mark.parametrize("fmt", ["-c %Y", "-f %m", "-c %u", "-f %u"])
+def test_no_stat_format_this_sweep_considers_answers_with_prose(fmt):
+    """The mechanism of both failures, asserted on whatever host runs this.
+
+    `stat` has two flag pairs this sweep could ask with, and on the host where
+    each is NOT the native one it does not fail — it exits 0 and answers prose.
+    GNU `stat -f %m` prints a filesystem-info block; BSD `stat -c %Y` prints the
+    whole traditional listing. A `stat -f %m … || stat -c %Y …` chain therefore
+    never reaches its fallback, hands the prose to a numeric guard, and skips
+    every candidate in silence. So: a format is either unusable (non-zero) or it
+    answers with a number. Never both.
+    """
+    out = subprocess.run(["stat"] + fmt.split() + [str(REPO)],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return  # this host's stat does not speak this format: honest, and safe
+    assert out.stdout.strip().isdigit(), (
+        f"`stat {fmt}` exits 0 but answers {out.stdout[:70]!r} — prose, not a "
+        f"number. Any sweep that trusts this format without probing it reads "
+        f"every dir as unreadable and deletes nothing, quietly.")
+
+
+def test_the_sweep_never_compares_a_candidate_against_id_u():
+    """The rule the first version of this sweep broke, written down.
+
+    It read `stat -f %u … || stat -c %u …` and compared the answer to `id -u`.
+    Both halves were wrong on a Linux runner, and wrong in the direction that
+    reads as a pass. Ask the helper instead.
+    """
+    src = RUNNER.read_text()
+    start = src.index("reclaim the dirs a killed pack")
+    end = src.index('leg logs in $LEG_TMP', start)
+    sweep = src[start:end]
+    assert "id -u" not in sweep, (
+        "the sweep is comparing an owner against `id -u` again — on a mounted "
+        "/tmp that is not the number `stat` reports for a dir we own")
+    assert "_leg_tmp_sweep_owner" in sweep, "the sweep stopped asking the helper"
+    assert "$(_leg_tmp_sweep_owner" not in sweep, (
+        "the helper was called inside a command substitution: it answers through "
+        "shell variables, which die with the subshell, and the caller then runs a "
+        "bare `stat` whose prose output skips every candidate silently")

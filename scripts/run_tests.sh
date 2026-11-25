@@ -762,7 +762,11 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
     # runner while passing every test that expects a dir to survive.
     # shellcheck source=leg_tmp_sweep_owner.sh
     . "$ROOT/scripts/leg_tmp_sweep_owner.sh" 2>/dev/null || true
-    _sweep_uid="$(type _leg_tmp_sweep_owner >/dev/null 2>&1 && _leg_tmp_sweep_owner || true)"
+    # `_leg_tmp_sweep_owner` runs INSIDE a command substitution, i.e. a subshell:
+    # anything it sets is gone the moment the substitution closes. Call it once so
+    # the probe runs, then read the format it exports in THIS shell.
+    _leg_tmp_sweep_owner >/dev/null 2>&1 || true
+    _sweep_uid="$_leg_tmp_probe_owner_out"
     case "$_sweep_uid" in ''|*[!0-9]*) _sweep_uid="" ;; esac
     # The mtime format is probed for the same reason: GNU `stat -f %m` prints a
     # filesystem-info block and exits 0, so the `BSD || GNU` chain this replaced
