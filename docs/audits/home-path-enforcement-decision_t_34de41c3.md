@@ -1,41 +1,135 @@
 # Home-path enforcement: the decision (t_34de41c3)
 
-Status: **IN PROGRESS** — measurement phase. This file is the card's real
-deliverable (the posture decision) plus the evidence behind it.
+Parent: `t_c927b73e` (which shipped the home branch advisory). Guard measured at
+`origin/main` @ `21da34a8`, using the **shipping guard** over `git ls-files`
+(`HSCC_ADDRESS_GUARD_HOME_ENFORCE=1`), not `git grep`.
 
-## Context
+## Measured baseline
 
-`scripts/address_guard.py` @ `origin/main` 21da34a8 detects home paths inside the
-ONE `FORBIDDEN` pattern but reports them ADVISORY (`HOME_PATHS_ENFORCE = False`).
-This card decides how to get to `HOME_PATHS_ENFORCE = True` without reddening the
-merge queue, and lands it.
+| | |
+|---|---|
+| home offenders | **198** |
+| files | **87** |
+| non-home (address/artefact) offenders | 0 |
+| tracked files scanned | 2545 |
+| `len(FORBIDDEN.pattern)` | **264** vs `MAX_PATTERN_CHARS = 4096` |
 
-Baseline facts to re-measure (numbers in the card body are from the parent card):
+The card body said 197/86; the extra finding is `changelog.d/t_49827b5d.md:24`,
+the one genuine operator path. **PR #812 that scrubs it is still OPEN**, so this
+branch carries it too — it is scrubbed here as well (same one-line placeholder),
+and if #812 lands first this diff is empty for that file.
 
-* home offenders across tracked files: TBD
-* files affected: TBD
-* operator-path offenders (genuine PII): TBD
+Per-user (measured): `devuser` 53, `operator` 29, `u` 25, `spark` 23, `example`
+19, `op` 15, `x` 14, `user` 5, `...` 4, `hooks` 3, `dev` 3, `<operator>` 1,
+`you` 1, `.local` 1, `.hermes` 1, `someone` 1. Per-area: `ios-app` 61,
+`hscc-bootstrap` 37, `hscc_daemon` 27, `scripts` 18, `_archive` 12, `install` 11,
+then a long tail of 1–8.
 
-## Measurement
+## Decision 1 — do NOT widen `SANCTIONED_HOME_USERS` (option 2 rejected)
 
-TBD — per-user and per-area breakdown, produced by the shipping guard over
-`git ls-files` (not `git grep`), with `HSCC_ADDRESS_GUARD_HOME_ENFORCE=1`.
+Every candidate name fails the card's own bar ("only if a name is provably not a
+real account"):
 
-## Classification
+* **`spark` is provably a real fleet account.** It is the ssh-user *default* in
+  shipping code — `install/hscc-skills/hscc-model-onboard/scripts/onboard.py:441`
+  reads `cfg.get("ssh_user", "spark")` — and the HF cache path under that
+  account's home is the live path a production tool `cat`s on a real node
+  (`onboard.py:503`, `:518`, `:532`). Sanctioning it would exempt the one name in
+  this set that names a real machine account, and would exempt it in the
+  operational docs where a real leak would most plausibly hide.
+* `operator`, `example`, `x`, `u`, `op`, `dev`, `you`, `someone`, `user`,
+  `devuser` are generic *shapes*, and the shape is the point: a real account
+  could carry any of them. `t_3480956c` refused them because "banning every
+  concrete user is strictly stronger"; nothing measured here overturns that.
 
-Each offender is one of:
+Consequence: **all 198 are scrubbed, not exempted** (option 1).
 
-* **FP** — not a home path at all (relative-path substring, prose ellipsis,
-  dot-prefixed junk). Fix: the pattern (option 3), not the file.
-* **FIXTURE** — a genuine-shaped home path used as test/doc fiction. Fix: scrub
-  to the sanctioned fixture user (option 1).
-* **PII** — names the operator's real machine/account. Fix: scrub to
-  `/Users/<operator>` and it must never have been advisory.
+## Decision 2 — the left-boundary lookbehind (option 3) is REJECTED
 
-## The decision
+The card proposes a left-boundary lookbehind to kill relative-path false
+positives, with the caveat that it must be "proven not to under-report". It
+cannot be. The natural form `(?<![A-Za-z0-9._-])` was measured over the whole
+tracked tree; it drops 10 findings, and **one of them is not a false positive**:
 
-TBD
+```
+hscc-api/tests/test_repl_inject.py:67  '/Users/x/.hermes/bin/hermes'
+    preceding text: 'tty: "/bin/zsh\\n'
+```
 
-## Evidence that the flip bites
+That is a home path sitting immediately after a `\n` escape inside a Python
+string literal. In the *rendered* string it is at line start and is a genuine
+home-path occurrence; in the *file bytes* the preceding char is `n`, a word
+char, so the lookbehind refuses to match. A real leak committed as
+`".../bin/zsh\n/Users/<operator>/.ssh/id_rsa\n"` would pass every gate — the
+guard, the hook and the CI backstop alike. That is the same failure family as
+the `.pyc` boundary trap this module already documents, and it is exactly why
+`t_3480956c` refused `\b` on this branch. A lookbehind over the path-name class
+is `\b` wearing a different hat.
 
-TBD
+**Rejected.** The 3 `/home/hooks` findings are worth less than one blind spot.
+
+## Decision 3 — keep the one boundary tightening that cannot blind the guard
+
+`(?=[A-Za-z0-9])` before the user component: a user-name component must start
+with an alphanumeric. This is a *lookahead*, and a lookahead can only shorten
+the reported match — it cannot make the guard skip a line it would otherwise
+see, because the offence is still the `/Users/<user>` prefix that starts the
+match. Measured: drops exactly 5 findings, all provably not accounts:
+
+```
+hscc-project/docs/COMMANDS.md:947            '/Users/.../.worktrees/t_x'
+hscc-project/flightdeck/core/self_update.py:109  '/Users/...'
+hscc-project/tests/test_sync.py:796          '/Users/.../dev/eco'
+hscc_daemon/tests/test_update_check_shadow.py:84  '/home/.local/bin/hscc'
+hscc_daemon/tests/test_update_check_shadow.py:85  '/home/.hermes/plugins/hscc/hscc'
+```
+
+— a prose ellipsis (`. ` is a user-name char) and two malformed `<tmp>/home/.local`
+fixture strings. No real POSIX account starts with `.`. Findings gained: 0.
+Pattern grows 264 → 298 chars, against a cap of 4096.
+
+## Decision 4 — the remaining false positives are scrubbed with the placeholder convention
+
+4 findings are false positives in *shape* but are not killable by a safe
+lookahead. They are rewritten rather than exempted, using the repo's documented
+angle-bracket convention (`<` and `>` are not path-name chars, so the
+placeholder cannot match — same mechanism that makes `/Users/<operator>` safe):
+
+* `…/t_9462260b/<home>/hooks` ×3 (`docs/audits/backup-retain-atomicity_t_9462260b.md:13,190`,
+  `docs/audits/GOAL_LEDGER_2026-09-26.md:3113`) — the scratch tree's fake-home
+  directory. The measured facts (entry counts, the false alarm) are untouched;
+  only the literal segment becomes a placeholder.
+* `/tmp/Users/<x>` in `scripts/tests/test_hermetic_spawn_guard.py:192` — a
+  *negative* fixture ("this must not be treated as home-prefixed"); it keeps its
+  meaning with the fixture user.
+
+## Decision 5 — scrub targets, by audience
+
+Not one replacement string: the right placeholder depends on whether a human or
+a test consumes the path.
+
+| context | replacement | why |
+|---|---|---|
+| test / fixture data | `/Users/hscc-fixture`, `/home/hscc-fixture` | the sanctioned fixture user |
+| operational doc/template where the path is *used* | `/home/<ssh_user>/…` | keeps the instruction true; the reader substitutes their own account |
+| live code that builds the path | derive it: `f"/home/{ssh_user}/.cache/huggingface"` | removes the literal AND fixes the hardcoded-user bug it was hiding |
+| prose about the operator's machine | `/Users/<operator>` | the documented placeholder |
+
+`_archive/` is scrubbed with the `<ssh_user>` form too: it is a frozen snapshot,
+but it is also public and it names a real account.
+
+## Known limitation this card does NOT close
+
+`_HOME_TAIL_STOP` includes `)` — deliberate, so a Markdown link
+`[x](/Users/real/path)` still matches (proven: it does). The cost is that a
+*closing paren is also a stop char*, so `/home/u/own)` truncates rather than
+fails. Unchanged by this card.
+
+## Status / plan
+
+* [x] baseline measured with the shipping guard (198 / 87)
+* [x] decision recorded (this file)
+* [ ] pattern tightening `(?=[A-Za-z0-9])` + tests
+* [ ] scrub sweep + `HOME_PATHS_ENFORCE = True` flip
+* [ ] redactor-side home coverage (the gap `t_c927b73e` left)
+* [ ] cross-file `MAX_PATTERN_CHARS` pin
