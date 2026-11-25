@@ -762,10 +762,28 @@ for d in "${LEGS[@]}"; do
   fi
   code=$?
   [ -n "$HB_PID" ] && kill "$HB_PID" 2>/dev/null
+  # ── the wall time of THIS leg, on its own summary row ─────────────────────
+  # WHY. Until now the runner carried a per-leg clock (`LEG_T0`, started for the
+  # heartbeat) and threw it away: the summary said only `✓ <leg>`, so the one
+  # number a reader needs — which of the twelve legs costs what — existed nowhere
+  # a human or the queue could read it. Measured consequence (t_fdc2bff0,
+  # docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md): the queue's local
+  # gate was reported as a single ~75 min block, and the diagnosis (two legs are
+  # 88 % of the cost; the rest of the roster is 7 s each) had to be rebuilt by
+  # hand from twelve separate `HSCC_TEST_LEGS=<leg>` invocations.
+  # WHY ON THE ROW, AND WHY HERE. The heartbeat already answers "is it slow or
+  # stopped" for the leg in flight; this answers "what did it cost" once it is
+  # over, in the same redirected file, for every leg — including legs that
+  # passed, which no failure digest ever mentions.
+  # COMPATIBILITY: `merge_queue._LEG_FAILURE_RES` matches the red row on `^✗\s`
+  # only, so widening the parenthetical keeps the leg in the handback digest and
+  # now carries its cost with it. Pinned by
+  # scripts/tests/test_run_tests_leg_duration.py.
+  LEG_SECS=$(( $(date +%s) - LEG_T0 ))
   if [ $code -eq 0 ]; then
-    summary+=("  ✓ $d")
+    summary+=("  ✓ $d (${LEG_SECS}s)")
   else
-    summary+=("  ✗ $d (pytest exit $code)")
+    summary+=("  ✗ $d (pytest exit $code, ${LEG_SECS}s)")
     rc=1
   fi
 done
@@ -928,10 +946,14 @@ else
   while [ "$P_I" -lt "$P_N" ]; do
     echo "━━━ ${P_NAME[$P_I]} ━━━"
     cat "${P_LOG[$P_I]}" 2>/dev/null
+    # Same per-leg wall time the serial row carries (t_fdc2bff0): a packed gate
+    # is still a gate whose cost a reader needs to see, and the queue's digest
+    # takes the row verbatim.
+    LEG_SECS=$(( ${P_END[$P_I]} - ${P_T0S[$P_I]} ))
     if [ "${P_CODE[$P_I]}" -eq 0 ]; then
-      summary+=("  ✓ ${P_NAME[$P_I]}")
+      summary+=("  ✓ ${P_NAME[$P_I]} (${LEG_SECS}s)")
     else
-      summary+=("  ✗ ${P_NAME[$P_I]} (pytest exit ${P_CODE[$P_I]})")
+      summary+=("  ✗ ${P_NAME[$P_I]} (pytest exit ${P_CODE[$P_I]}, ${LEG_SECS}s)")
       rc=1
     fi
     P_I=$((P_I+1))

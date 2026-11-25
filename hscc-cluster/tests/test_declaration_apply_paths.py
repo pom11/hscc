@@ -113,16 +113,40 @@ class TestEndpointsDecision:
 
     def test_declared_delegation_overrides_the_pool_default(self):
         """A declared delegation to a DIFFERENT family must win — if the leg
-        ignored the block and used the default family, the URL would be the same
-        as chat's and the test would pass for the wrong reason. Two distinct
-        proxied families make the difference observable."""
+        ignored the block and used the default family, the test would pass for
+        the wrong reason.
+
+        Under the ONE gateway (sparkrun keeps one per cache dir) two proxy
+        families resolve to the SAME front, so the URL alone can no longer tell
+        them apart: the declared `target` is what proves the block was read, and
+        a second variant with a NON-proxy family keeps the difference observable
+        end to end (a declared non-proxy target resolves to that family's node,
+        which no default can produce). The shared front for two proxy families
+        is itself pinned in test_one_proxy_per_cluster_t_6283c79f.py.
+        """
         _, plan = _plan(_v4_nonuniform(endpoints={
             "chat": "family-coding", "delegation": "family-reasoning"}))
         d = ct._endpoints_decision(plan)
-        assert d["delegation"]["source"] == "declared"
-        assert d["delegation"]["url"] != d["chat"]["url"], (
+        decl, chat = d["delegation"], d["chat"]
+        assert decl is not None and chat is not None
+        assert decl["source"] == "declared"
+        assert decl["target"] == "family-reasoning"
+        assert chat["target"] == "family-coding"
+        # Both declared proxy families name the live gateway — never a per-family
+        # port whose start could only have been refused.
+        assert decl["url"] == "http://localhost:4000/v1"
+        assert chat["url"] == "http://localhost:4000/v1"
+
+        # Same declaration, but the delegation target has no proxy: the resolved
+        # URL moves, so the leg demonstrably follows the DECLARED target.
+        tpl = _v4_nonuniform(endpoints={
+            "chat": "family-coding", "delegation": "family-reasoning"})
+        tpl["families"][1]["proxy"] = False
+        _, plan2 = _plan(tpl)
+        d2 = ct._endpoints_decision(plan2)
+        assert d2["delegation"] is not None and d2["chat"] is not None
+        assert d2["delegation"]["url"] != d2["chat"]["url"], (
             "delegation resolved to chat's front — the block was ignored")
-        assert d["delegation"]["target"] == "family-reasoning"
 
     def test_a_v3_template_gets_no_decision_at_all(self):
         """The §1.3 exemption door. Widening it (returning a dict for a v3
@@ -394,10 +418,13 @@ class TestDeclaredProfileWrites:
                                   _http_get=_serving("orchestrator-model",
                                                      "worker-model"))
         orch = self._written(pd, "reviewer-orch")
-        # reasoning is the plan's SECOND family, so its proxy is :4001 — pinning
-        # the exact port is what proves the selector routed to the DECLARED
-        # family and not to chat's (coding, :4000).
-        assert orch["model"]["base_url"] == "http://localhost:4001/v1"
+        # Both families are proxy families, and one gateway serves them all
+        # (sparkrun keeps one per cache dir), so the port can no longer tell the
+        # two targets apart — what this pins is that the selector routed through
+        # the GATEWAY for the declared family instead of falling back to the
+        # concrete node pin, and that the id moved with the URL.
+        assert orch["model"]["base_url"] == "http://localhost:4000/v1"
+        assert "192.0.2." not in orch["model"]["base_url"]
         assert orch["model"]["default"] != "stale-id"
         assert "profiles/reviewer-orch/config.yaml:model" in res["keys_written"]
 

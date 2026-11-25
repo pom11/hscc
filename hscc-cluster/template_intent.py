@@ -454,6 +454,14 @@ class ResolvedUnit:
 @dataclass
 class ResolvedFamily:
     name: str
+    # ``base_proxy_port`` when this family routes through the sparkrun gateway,
+    # else None. NOT a per-family port: sparkrun keeps ONE gateway per cache dir
+    # (its state dir has no port in it and its liveness check is port-agnostic,
+    # so a second ``proxy start`` is refused whatever ``--port`` it names), hence
+    # every proxy family in a plan resolves to the SAME port — the live gateway's.
+    # ``None`` means "no gateway for this family": its consumers fall back to a
+    # concrete endpoint. Readers must treat the value as the gateway's address,
+    # never as a per-family instance discriminator.
     proxy_port: Optional[int]
     units: List[ResolvedUnit]
 
@@ -516,6 +524,10 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
     or solo unit). A node NOT in `reserved` is free and assignable to any unit.
     This replaces the blunt exclude-every-tp-peer approach, which emptied the
     pool on a re-apply of the same template.
+    base_proxy_port: the port of the ONE sparkrun gateway. sparkrun keeps one
+    gateway per cache dir (not one per port), so EVERY family that declares a
+    proxy resolves to this same port — there is no second port to mint, and a
+    start on one would only ever be refused. See ResolvedFamily.proxy_port.
     Raises TemplateIntentError when it can't fit / no workers / etc.
     """
     coster = _coster or _rc.recipe_cost
@@ -582,7 +594,12 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
         # which is never handed to a worker anyway — peers are what matter).
         claimed = set(orch_span)
     resolved_families: List[ResolvedFamily] = []
-    proxy_port = base_proxy_port
+    # ONE gateway per cluster, so ONE gateway port: `base_proxy_port` is what
+    # every proxy family resolves to. This is deliberately NOT a counter — an
+    # incremented port here minted a port per proxy family whose start sparkrun
+    # could only refuse (one gateway per cache dir), and consumers of the losing
+    # family then got a URL on a port nothing ever bound. Both mint sites below
+    # (explicit-`nodes:` families and resolved ones) must stay identical.
 
     for fam in tpl.families:
         # ── v3: explicit family nodes BYPASS the resolver — verbatim span. ──
@@ -614,10 +631,9 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
             for ip in explicit:
                 claimed.add(ip)
             resolved_families.append(ResolvedFamily(
-                name=fam.name, proxy_port=proxy_port if fam.proxy else None,
+                name=fam.name,
+                proxy_port=base_proxy_port if fam.proxy else None,
                 units=units))
-            if fam.proxy:
-                proxy_port += 1
             continue
 
         # Unit-aware avail: FREE nodes + nodes already serving THIS family
@@ -706,10 +722,9 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                 claimed.add(ip)
 
         resolved_families.append(ResolvedFamily(
-            name=fam.name, proxy_port=proxy_port if fam.proxy else None,
+            name=fam.name,
+            proxy_port=base_proxy_port if fam.proxy else None,
             units=units))
-        if fam.proxy:
-            proxy_port += 1
 
     plan = ResolvedPlan(template=tpl.name, orchestrator=orchestrator,
                         families=resolved_families,
