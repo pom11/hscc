@@ -1188,6 +1188,18 @@ def _worker_profiles_without_spec(profiles_dir, spec_names=None):
     return missing
 
 
+def _host_profiles_root(leg_seal):
+    """The profiles root of THIS machine, i.e. the path the leg's seal moved.
+
+    `PRE_SEAL_HOME` is the login home captured by the leg's conftest before it
+    sealed. A host whose hermes root is not `<login home>/.hermes` is not
+    reachable from inside a sealed leg — that host is covered by the unsealed
+    census surface (`hscc.py list`, `doctor`), which prints
+    `VACUOUS … NOT an all-clear` rather than pretending (t_00d9581d).
+    """
+    return os.path.join(leg_seal["pre_seal_home"], ".hermes", "profiles")
+
+
 def _census_roots(leg_seal):
     """Every profiles root this census can actually open, most authoritative first.
 
@@ -1207,7 +1219,7 @@ def _census_roots(leg_seal):
         "the emptiness cannot be attributed to the seal — the guard has no root and "
         "cannot tell 'nothing to check' from 'the backstop went blind' (t_738d9557)."
     )
-    host = os.path.join(login, ".hermes", "profiles")
+    host = _host_profiles_root(leg_seal)
     return [host] if os.path.isdir(host) else []
 
 
@@ -1284,6 +1296,16 @@ def test_every_hscc_owned_worker_profile_has_role_spec(leg_seal, tmp_path):
               "<name> \"…\"`, or remove the profile if the role was retired]"
         )
     if not roots:
+        # Tripwire on the emptiness claim itself, because that claim is what this
+        # card was filed against: a census that says "nothing to check" while a
+        # profiles dir sits right there is the t_738d9557 failure mode, and it is
+        # one refactor of `_census_roots` away from returning here again.
+        for candidate in (rolelib.PROFILES_DIR, _host_profiles_root(leg_seal)):
+            assert not os.path.isdir(candidate), (
+                f"the census declared itself vacuous but {candidate} exists — "
+                "'nothing to audit' and 'the backstop cannot see the tree' are "
+                "different facts and this case may not confuse them (t_738d9557)."
+            )
         # This host has no profiles dir at all (a fresh CI runner). The census is
         # vacuous, so it says so AND exercises itself on a tree it CAN see: a guard
         # whose predicate no longer bites must not read green here either.
