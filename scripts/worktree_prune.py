@@ -7,7 +7,7 @@ keep + log. Nothing is ever force-removed and branches are deleted with -d
 only, never -D.
 
 Hard scope:
-- worktrees: only /Users/desac/dev/hscc/.worktrees/t_* dirs registered in
+- worktrees: only <primary>/.worktrees/t_* dirs registered in
   `git worktree list` (task constraint).
 - branches: only refs matching wt/*.
 - origin/main is re-resolved fresh; ancestry re-checked per branch.
@@ -17,11 +17,15 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
-PRIMARY = "/Users/desac/dev/hscc"
-WT_ROOT = "/Users/desac/dev/hscc/.worktrees/"
-CLASSIFY = "/Users/desac/.hermes/profiles/backend-engineer/cache/scratch/t_ad5dd538/classify.json"
-LOG = "/Users/desac/.hermes/profiles/backend-engineer/cache/scratch/t_ad5dd538/prune_log.json"
+_HOME = Path.home()
+PRIMARY = str(_HOME / "dev" / "hscc")
+WT_ROOT = str(_HOME / "dev" / "hscc" / ".worktrees") + "/"
+CLASSIFY = str(_HOME / ".hermes" / "profiles" / "backend-engineer" / "cache"
+               / "scratch" / "t_ad5dd538" / "classify.json")
+LOG = str(_HOME / ".hermes" / "profiles" / "backend-engineer" / "cache"
+          / "scratch" / "t_ad5dd538" / "prune_log.json")
 
 
 def git(*args, cwd=PRIMARY):

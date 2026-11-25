@@ -19,7 +19,7 @@ is the entire point of the check.
 Mapping applied (value → replacement):
 - private node IPs  →  `192.0.2.x` (one distinct TEST-NET address per real node)
 - private tailnet IP → `100.64.0.1`
-- operator home dir  →  `/home/devuser`
+- operator home dir  →  `/home/hscc-fixture`
 - ssh username       →  `node`
 - node hostnames     →  `node-N` / `gateway-1`
 - token-file path reference → `~/.hscc/sample-token-path`
@@ -249,7 +249,7 @@ through the recorder's own write path (`MetricsRecorder.tick`, which rolls tiers
 1 and 2 with its own `rollup`), pins the route's clock seam, and calls
 `routes_cluster.handle_cluster_history`. The JSON committed here is what the
 handler returned. Sanitisation is one key — `store.path` is rewritten to
-`/Users/example/.hscc/metrics/history.db`, because the generator's temp dir would
+`/Users/hscc-fixture/.hscc/metrics/history.db`, because the generator's temp dir would
 otherwise be machine-specific — and `ClusterHistoryStore` declares no `path`, so
 the model can never carry a server filesystem location into the App Group. The
 hosts are TEST-NET-1 `192.0.2.10`/`.11` by construction.

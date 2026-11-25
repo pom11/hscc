@@ -99,11 +99,11 @@ def _msg(session_id, role, content, ts, **kw):
 
 
 PROJECTS = [
-    {"name": "hscc", "repo": "/Users/desac/dev/hscc", "topic": 2046},
-    {"name": "ecofire-app", "repo": "/Users/desac/dev/ecofire", "topic": 2257},
-    {"name": "ecofire-bc", "repo": "/Users/desac/dev/EcoFire_customizations_bc",
+    {"name": "hscc", "repo": "/Users/hscc-fixture/dev/hscc", "topic": 2046},
+    {"name": "ecofire-app", "repo": "/Users/hscc-fixture/dev/ecofire", "topic": 2257},
+    {"name": "ecofire-bc", "repo": "/Users/hscc-fixture/dev/EcoFire_customizations_bc",
      "topic": 3899},
-    {"name": "sphoin", "repo": "/Users/desac/dev/sphoin_engine", "topic": 2},
+    {"name": "sphoin", "repo": "/Users/hscc-fixture/dev/sphoin_engine", "topic": 2},
 ]
 
 
@@ -119,10 +119,10 @@ def db_and_registry(tmp_path):
         _session("s_threaded", thread_id="2046", title="HSCC Chat"),  # excluded
     ]
     messages = [
-        _msg("s_hscc", "user", "working on repo /Users/desac/dev/hscc anyway", 1001.0),
+        _msg("s_hscc", "user", "working on repo /Users/hscc-fixture/dev/hscc anyway", 1001.0),
         _msg("s_hscc", "assistant", "hscc daemon at ~/.hermes/plugins/hscc-daemon", 1002.0),
         _msg("s_bc", "user", "use repo ~/dev/EcoFire_customizations_bc (BC 23.4)", 1101.0),
-        _msg("s_ambig", "user", "compare /Users/desac/dev/hscc and ~/dev/ecofire", 1201.0),
+        _msg("s_ambig", "user", "compare /Users/hscc-fixture/dev/hscc and ~/dev/ecofire", 1201.0),
         _msg("s_sphoin", "assistant", "Create /tmp/sphoin_engine/bin/train.py", 1301.0),
         # s_unknown has user words but NO repo-path signal
         _msg("s_unknown", "user", "hey can you help with a quick thing", 1401.0),

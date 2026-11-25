@@ -879,6 +879,63 @@ _LAUNCHCTL_PID_RE = re.compile(r"^\s*pid\s*=\s*(\d+)\s*$", re.MULTILINE)
 _LAUNCHCTL_STATE_RE = re.compile(r"^\tstate\s*=\s*(.+?)\s*$", re.MULTILINE)
 
 
+#: The phrase every refusal in this repo carries — ``doctor_rows``,
+#: ``doctor_supervision._refused_supervision_check``, ``_refused_launchd_status``,
+#: ``_refused_transport``. Kept as a constant so a test can pin the WHOLE phrase
+#: rather than a fragment that a rewording can drift out from under.
+REFUSAL = "refused inside a pytest process"
+
+
+def _refused_launchctl_run(argv):
+    """In-suite stand-in for a launchctl command no runner was installed for.
+
+    THE HOLE THIS CLOSES (t_e1c7c925). ``launchd_status`` refuses to ask the
+    operator's live gui domain without an injected seam (``_refused_launchd_status``,
+    t_8bf34130), but the STOP verb's WRITE never went through that seam:
+    ``_stop_launchd`` calls ``_launchctl_run(["launchctl", "bootout", ...])``
+    directly. So a case that injected only ``launchd_status(_run_probe=...)``
+    answering ``loaded: True`` and drove ``_handle_stop`` exec'd a REAL
+    ``launchctl bootout gui/<uid>/com.hscc.api`` — against the operator's running
+    unit, the same API the merge queue talks through. The only defence was a
+    per-file convention in three test files, which nothing enforces.
+
+    WHY HERE AND NOT IN ``hscc_daemon/tests/conftest.py``: the read-side fence is a
+    PRODUCTION guard that asks ``suite_fence.under_pytest()``, and that is exactly
+    what makes it reach (a) a fresh interpreter a suite item SPAWNED — pytest was
+    never imported there, only ``PYTEST_CURRENT_TEST`` crossed the fork, which is
+    the whole finding of t_251cd84f — and (b) every other test dir in the repo. An
+    autouse fixture in this package's conftest reaches neither. And per
+    ``hscc-daemon-ambient-seam-stub``, a fence that REFUSES must not be
+    default-stubbed away: every case that forgot the seam would then pass for the
+    wrong reason.
+
+    THE SHAPE: ``(None, msg)`` — the channel this function already reserves for
+    "the supervisor could not be asked", which its contract forbids reading as a
+    statement about the unit. ``_stop_launchd``'s ``rc is None`` branch turns it
+    into ``error: could not run launchctl: ...`` on stderr with exit 1: VISIBLE,
+    non-zero, and no fork — the same fail-closed posture the read fence took, and
+    never the silent "not loaded" that t_8bf34130 rules out. Not a raise:
+    ``cmd_api`` is documented to never raise.
+
+    DELIBERATELY AVOIDS the words "could not find" and "not found":
+    ``_stop_launchd``'s rc!=0 branch reads those as "unit already unloaded" and
+    returns 0, so a refusal worded that way would fail OPEN.
+
+    INSTALLING A RUNNER (the escape hatch, and how the existing cases pass
+    untouched): ``monkeypatch.setattr(api_cli, "_launchctl_run", my_runner)``
+    REPLACES this function, so the fence is simply not on the path — installing a
+    runner is the declaration of posture, and no operator-side call ever reaches
+    it (``under_pytest()`` is false for a real ``hscc api stop``).
+    """
+    verbs = " ".join(str(a) for a in argv[1:2])
+    return None, (
+        f"launchctl {verbs} {REFUSAL}: this process is driven by a test suite and "
+        "the command would have reached the operator's live gui domain. Install a "
+        'runner for the case — monkeypatch.setattr(api_cli, "_launchctl_run", '
+        "my_runner) — and assert what it was called with."
+    )
+
+
 def _launchctl_run(argv, timeout=10):
     """Run one launchctl command; (returncode, output) or (None, error).
 
@@ -886,7 +943,15 @@ def _launchctl_run(argv, timeout=10):
     launchctl binary — a non-macOS host, or a container). The caller must read
     that as "the supervisor could not be asked", NEVER as a statement about
     the unit, which is the same rule doctor_supervision._run follows.
+
+    FENCED (t_e1c7c925): under pytest, and with no runner installed over this
+    function, it answers ``_refused_launchctl_run`` instead of forking — the write
+    half of the read-side fence at ``launchd_status``, because ``bootout`` is the
+    one command here that can tear down the operator's live API. The operator path
+    is byte-for-byte the code below: the guard cannot fire outside a suite.
     """
+    if suite_fence.under_pytest():
+        return _refused_launchctl_run(argv)
     try:
         cp = subprocess.run([str(a) for a in argv], capture_output=True,
                             text=True, timeout=timeout)

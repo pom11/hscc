@@ -1,0 +1,515 @@
+From 38874ddc964b5741f9cd148fecd0d8548f62a794 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Wed, 25 Nov 2026 10:05:28 +0200
+Subject: [PATCH] fix(kanban): resolve a card whose active_pr PR is already
+ merged
+
+The dispatcher's active_pr respawn guard never asked GitHub anything, so a
+card whose PR was already MERGED sat ready forever, burning a tick and
+appending a respawn_guarded event every ~62 s (286-tick class, PR #703).
+
+Add kanban_pr_acceptance.pr_merge_state(): one assignee-profile GraphQL read
+of pullRequest{state mergedAt mergeCommit{oid}}, any failure -> UNKNOWN. The
+dispatcher resolves a guarded card only on MERGED: complete it (or block
+needs_input if completion is refused), append active_pr_resolved as a
+terminal hold, and cache the probe per PR URL for 15 minutes. Dry runs never
+probe or mutate, and the per-tick respawn_guarded row is deduped while the
+in-memory bucket keeps reporting. OPEN/CLOSED/UNKNOWN keep holding exactly
+as before; describe_suppression now also names the three skipped buckets so
+a stuck warning is never reasonless.
+---
+ hermes_cli/kanban_db_dispatch.py              | 129 ++++++++-
+ hermes_cli/kanban_pr_acceptance.py            |  29 ++
+ .../test_kanban_active_pr_merge_resolve.py    | 259 ++++++++++++++++++
+ 3 files changed, 414 insertions(+), 3 deletions(-)
+ create mode 100644 tests/hermes_cli/test_kanban_active_pr_merge_resolve.py
+
+diff --git a/hermes_cli/kanban_db_dispatch.py b/hermes_cli/kanban_db_dispatch.py
+index 72a779c7c7..123dd2bfb2 100644
+--- a/hermes_cli/kanban_db_dispatch.py
++++ b/hermes_cli/kanban_db_dispatch.py
+@@ -84,6 +84,12 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
+     re.IGNORECASE,
+ )
+ 
++# How long one PR's merge state is reused across ticks. The guard fires every
++# tick (~62 s), so an uncached ``gh`` read would be one network round-trip per
++# held card per minute; 15 minutes still resolves a merge promptly.
++_PR_STATE_TTL_SECONDS = 900
++_PR_STATE_TTL_CACHE: dict[str, tuple[float, str]] = {}
++
+ 
+ @dataclass
+ class DispatchResult:
+@@ -168,6 +174,16 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
+             continue
+         for _task_id, reason in res.respawn_guarded:
+             counts[reason] = counts.get(reason, 0) + 1
++        # Non-guard holds: without these the warning is a bare zero-spawn count
++        # with no "held back by" clause, the blind spot the operator had to work
++        # around by hand (measured live 2026-11-23).
++        if res.skipped_nonspawnable:
++            counts["skipped_nonspawnable"] = counts.get("skipped_nonspawnable", 0) + len(res.skipped_nonspawnable)
++        if res.skipped_unassigned:
++            counts["skipped_unassigned"] = counts.get("skipped_unassigned", 0) + len(res.skipped_unassigned)
++        if res.skipped_per_profile_capped:
++            counts["skipped_per_profile_capped"] = (
++                counts.get("skipped_per_profile_capped", 0) + len(res.skipped_per_profile_capped))
+         if res.rate_limited:
+             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
+         if res.skipped_locked:
+@@ -1570,8 +1586,10 @@ def check_respawn_guard(
+     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
+     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
+     handoff event followed the comment: the named profile must work on that
+-    PR). The review lane skips the last two: they are the *inputs* to a review
+-    handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
++    PR). Once a tick proved that PR MERGED and wrote ``active_pr_resolved``,
++    that event is a terminal hold: completion failed, so the card still must
++    not re-enter the spawn path. The review lane skips the last two: they are
++    the *inputs* to a review handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
+     passes own those.
+     """
+     row = conn.execute(
+@@ -1647,6 +1665,12 @@ def check_respawn_guard(
+                                           cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
+                 if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
+     if pr_times:
++        # A prior tick proved this PR MERGED and tried to resolve the card. That
++        # is terminal even when completion was refused: the PR is done, so the
++        # card must never re-enter the spawn path.
++        if any(_rows_since(conn, "task_events", task_id, max(pr_times),
++                           "AND kind = 'active_pr_resolved'")):
++            return "active_pr_resolved"
+         # Strictly after: a same-second tie stays guarded (fail closed).
+         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
+                 conn, "task_events", task_id, max(pr_times),
+@@ -1719,6 +1743,88 @@ def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
+     return _gated
+ 
+ 
++def _pr_state_fn() -> Optional[Callable[..., str]]:
++    """``kanban_pr_acceptance.pr_merge_state``, or ``None`` when it cannot be
++    imported (local import avoids a cycle; callers treat that as ``UNKNOWN``
++    and keep holding the card). Tests monkeypatch this seam, so no test ever
++    shells out to ``gh``."""
++    try:
++        from hermes_cli.kanban_pr_acceptance import pr_merge_state
++    except Exception:
++        return None
++    return pr_merge_state
++
++
++def _guarded_pr_url(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
++    """Newest PR URL that made :func:`check_respawn_guard` return ``active_pr``,
++    read under exactly that function's window/unreadable-time rules."""
++    now = int(time.time())
++    newest: Optional[tuple[int, str]] = None
++    for t, comment in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
++                                  cols=", body", unreadable=now):
++        match = _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(comment["body"]) or "")
++        if match and (newest is None or t >= newest[0]):
++            newest = (t, match.group(0))
++    return newest[1] if newest is not None else None
++
++
++def _pr_merge_state(url: str, *, assignee: Optional[str]) -> str:
++    """Cached :func:`pr_merge_state` for ``url``; ``UNKNOWN`` when unavailable.
++
++    ``UNKNOWN`` is cached too: the guard holds either way, and a broken login
++    must not be hammered once per tick. Fail closed — only ``MERGED`` resolves.
++    """
++    now = time.time()
++    hit = _PR_STATE_TTL_CACHE.get(url)
++    if hit is not None and now - hit[0] < _PR_STATE_TTL_SECONDS:
++        return hit[1]
++    state_fn = _pr_state_fn()
++    if state_fn is None:
++        return "UNKNOWN"
++    try:
++        state = state_fn(url, assignee=assignee)
++    except Exception:
++        state = "UNKNOWN"
++    if state not in ("MERGED", "OPEN", "CLOSED"):
++        state = "UNKNOWN"
++    _PR_STATE_TTL_CACHE[url] = (now, state)
++    return state
++
++
++def _resolve_merged_active_pr(conn: sqlite3.Connection, task_id: str, url: str,
++                              assignee: Optional[str]) -> bool:
++    """Resolve a card the ``active_pr`` guard is holding whose PR is MERGED.
++
++    Completes it (``done means merged``); if completion is refused or raises,
++    blocks it ``needs_input`` — never ``dependency``, which ``recompute_ready``
++    could promote back into the spawn path. Either way writes
++    ``active_pr_resolved`` so :func:`check_respawn_guard` holds it terminally.
++    True when the card left the spawn path this tick.
++    """
++    if _pr_merge_state(url, assignee=assignee) != "MERGED":
++        return False
++    action = "completed"
++    try:
++        completed = _kb.complete_task(
++            conn, task_id, summary=f"PR {url} merged (sha unavailable) — dispatcher closed "
++                                   "the card instead of re-spawning against a merged PR.",
++            metadata={"resolved_by": "dispatcher_active_pr_merged", "pr": url},
++        )
++    except Exception:
++        completed = False
++    if not completed:
++        action = "blocked"
++        try:
++            _kb.block_task(conn, task_id, kind="needs_input",
++                           reason=f"active_pr: PR {url} is MERGED; card left for an operator to close")
++        except Exception:
++            pass
++    with _kb.write_txn(conn):
++        _kb._append_event(conn, task_id, "active_pr_resolved",
++                          {"pr": url, "state": "MERGED", "action": action})
++    return True
++
++
+ def _dispatch_profile_allowlist(normalize_profile_name) -> Optional[frozenset]:
+     """Per-home claim allowlist ``kanban.dispatch_profiles`` (#110995).
+ 
+@@ -2099,6 +2205,13 @@ def _dispatch_lane_task(
+             return False
+     guard_reason = check_respawn_guard(conn, task_id, lane=lane)
+     if guard_reason is not None:
++        # A held PR can still be provably done. Resolve it instead of holding
++        # forever; dry runs never probe and never mutate (D3). Every other
++        # state (OPEN/CLOSED/UNKNOWN) keeps the guard exactly as today.
++        if guard_reason == "active_pr" and not dry_run:
++            pr_url = _guarded_pr_url(conn, task_id)
++            if pr_url is not None and _resolve_merged_active_pr(conn, task_id, pr_url, assignee):
++                return False
+         result.respawn_guarded.append((task_id, guard_reason))
+         # Event so ``hermes kanban tail`` shows why the task looks stuck.
+         # Honour kanban.default_assignee: when the dispatcher hits an unassigned ready task and an
+@@ -2107,9 +2220,19 @@ def _dispatch_lane_task(
+         # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
+         # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
+         # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
++        # Write the diagnostic once, not once per tick forever: a repeat only when
++        # something else happened on the card since (same dedupe as the
++        # skipped_nonspawnable row above). The in-memory bucket still reports
++        # every tick.
+         if not dry_run:
+             with _kb.write_txn(conn):
+-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
++                payload = _kb._json_or_null({"reason": guard_reason})
++                last = conn.execute(
++                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
++                    "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
++                if (last is None or last["kind"] != "respawn_guarded"
++                        or last["payload"] != payload):
++                    _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+         return False
+ 
+     def _count_spawn(name: str) -> None:
+diff --git a/hermes_cli/kanban_pr_acceptance.py b/hermes_cli/kanban_pr_acceptance.py
+index 7a060c2467..364d0def17 100644
+--- a/hermes_cli/kanban_pr_acceptance.py
++++ b/hermes_cli/kanban_pr_acceptance.py
+@@ -104,6 +104,35 @@ def _assignee_profile_home(assignee: str | None) -> str | None:
+         raise _GateAuthError(f"assignee profile {assignee!r} cannot be resolved") from None
+ 
+ 
++def pr_merge_state(url: str, *, assignee: str | None = None) -> str:
++    """``MERGED``/``OPEN``/``CLOSED`` for an exact PR URL, else ``UNKNOWN``.
++
++    Dispatcher evidence for the ``active_pr`` respawn guard, not an acceptance
++    gate: one cheapest-possible GraphQL read (state + merge evidence) through
++    this module's ``gh`` transport, so it runs as the card's assignee profile
++    (:func:`_assignee_profile_home`) and inherits the 30 s timeout. Every
++    failure — auth, transport, shape, unparseable state — collapses to
++    ``UNKNOWN``: the caller must fail closed and keep holding the card, never
++    resolve one on evidence it could not read.
++    """
++    match = _PR.fullmatch(url or "")
++    if not match:
++        return "UNKNOWN"
++    repo, number = match[1], int(match[2])
++    owner, name = repo.split("/")
++    query = (f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)})'
++             f'{{pullRequest(number:{number:d}){{state mergedAt mergeCommit{{oid}}}}}}}}')
++    try:
++        data = _api("graphql", query=query, profile_home=_assignee_profile_home(assignee))
++        state = data["data"]["repository"]["pullRequest"]["state"]
++    except Exception:
++        return "UNKNOWN"
++    if not isinstance(state, str):
++        return "UNKNOWN"
++    state = state.upper()
++    return state if state in {"MERGED", "OPEN", "CLOSED"} else "UNKNOWN"
++
++
+ def collect_acceptance(contract: str, published_pr: str | None,
+                        assignee: str | None = None) -> dict:
+     receipt = {"ok": False, "classification": "missing", "head_sha": None,
+diff --git a/tests/hermes_cli/test_kanban_active_pr_merge_resolve.py b/tests/hermes_cli/test_kanban_active_pr_merge_resolve.py
+new file mode 100644
+index 0000000000..6e3c1afc6a
+--- /dev/null
++++ b/tests/hermes_cli/test_kanban_active_pr_merge_resolve.py
+@@ -0,0 +1,259 @@
++"""``active_pr`` respawn guard resolves a MERGED PR instead of holding forever.
++
++The guard is deliberately DB-only; this file pins the dispatcher-side
++resolution: a held card whose PR GitHub reports ``MERGED`` is completed (or
++blocked ``needs_input`` when completion is refused), ``OPEN``/``CLOSED``/
++``UNKNOWN`` keep holding, dry runs never probe, the probe is TTL-cached, and
++the ``respawn_guarded`` diagnostic is written once instead of once per tick.
++
++``gh`` is never invoked: every case fakes the ``_pr_state_fn`` seam (or the
++acceptance module's ``_api`` for D1's own mapping).
++"""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++
++from hermes_cli import kanban_db as kb
++from hermes_cli import kanban_db_connect as kbc
++from hermes_cli import kanban_db_dispatch as kbd
++from hermes_cli import kanban_pr_acceptance as kpa
++
++PR = "https://github.com/example/repo/pull/44"
++
++
++@pytest.fixture
++def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
++    """Isolated HERMES_HOME with an empty kanban DB and a clean probe cache."""
++    home = tmp_path / ".hermes"
++    home.mkdir()
++    monkeypatch.setenv("HERMES_HOME", str(home))
++    monkeypatch.setattr(Path, "home", lambda: tmp_path)
++    kb.init_db()
++    kbd._PR_STATE_TTL_CACHE.clear()
++    yield home
++    kbd._PR_STATE_TTL_CACHE.clear()
++
++
++@pytest.fixture(autouse=True)
++def _profile_ok(monkeypatch: pytest.MonkeyPatch) -> None:
++    import hermes_cli.config as cfgmod
++    import hermes_cli.profiles as profmod
++
++    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
++    monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {})
++
++
++def _install_state(monkeypatch: pytest.MonkeyPatch, state, calls: list) -> None:
++    def _fn(url: str, *, assignee=None):
++        calls.append((url, assignee))
++        if isinstance(state, Exception):
++            raise state
++        return state
++
++    monkeypatch.setattr(kbd, "_pr_state_fn", lambda: _fn)
++
++
++def _card_with_pr(conn, title: str = "already PRed") -> str:
++    tid = kb.create_task(conn, title=title, assignee="dev")
++    kb.add_comment(conn, tid, author="dev", body=f"Opened {PR} for review.")
++    return tid
++
++
++def _events(conn, tid: str, kind: str | None = None) -> list[tuple[str, dict | None]]:
++    rows = conn.execute(
++        "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id", (tid,)
++    ).fetchall()
++    out = [(r["kind"], json.loads(r["payload"]) if r["payload"] else None) for r in rows]
++    return out if kind is None else [e for e in out if e[0] == kind]
++
++
++def _status(conn, tid: str) -> str:
++    return conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()["status"]
++
++
++def _tick(conn, **kwargs):
++    return kbd.dispatch_once(conn, **kwargs)
++
++
++def test_merged_pr_completes_the_ready_card(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    calls: list = []
++    _install_state(monkeypatch, "MERGED", calls)
++    spawned: list = []
++
++    with kbc.connect() as conn:
++        tid = _card_with_pr(conn)
++        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
++
++        res = _tick(conn, spawn_fn=lambda *a, **k: spawned.append(a))
++
++        assert spawned == []
++        assert tid not in [s[0] for s in res.spawned]
++        assert _status(conn, tid) == "done"
++        resolved = _events(conn, tid, "active_pr_resolved")
++        assert len(resolved) == 1
++        assert resolved[0][1] == {"pr": PR, "state": "MERGED", "action": "completed"}
++
++
++def test_second_tick_after_resolution_writes_nothing(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    calls: list = []
++    _install_state(monkeypatch, "MERGED", calls)
++
++    with kbc.connect() as conn:
++        tid = _card_with_pr(conn)
++        assert _tick(conn).spawned == []
++        before = _events(conn, tid)
++
++        res = _tick(conn)
++        assert res.spawned == []
++        assert _events(conn, tid) == before
++        assert len(_events(conn, tid, "active_pr_resolved")) == 1
++
++
++def test_open_pr_keeps_holding(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    calls: list = []
++    _install_state(monkeypatch, "OPEN", calls)
++
++    with kbc.connect() as conn:
++        tid = _card_with_pr(conn)
++        res = _tick(conn)
++
++        assert res.spawned == []
++        assert dict(res.respawn_guarded).get(tid) == "active_pr"
++        assert _status(conn, tid) == "ready"
++        assert _events(conn, tid, "active_pr_resolved") == []
++
++
++@pytest.mark.parametrize("state", ["WAT", RuntimeError("gh exploded")])
++def test_unreadable_pr_state_fails_closed(
++    kanban_home: Path, monkeypatch: pytest.MonkeyPatch, state
++) -> None:
++    """Fail closed: ``UNKNOWN`` must never resolve a card.
++
++    A garbage answer and a raising seam stand in for the real function's
++    ``UNKNOWN`` (auth/transport/shape). The seam-unavailable case (``None``)
++    is covered separately below.
++    """
++    calls: list = []
++    _install_state(monkeypatch, state, calls)
++
++    with kbc.connect() as conn:
++        tid = _card_with_pr(conn)
++        res = _tick(conn)
++
++        assert res.spawned == []
++        assert dict(res.respawn_guarded).get(tid) == "active_pr"
++        assert _status(conn, tid) == "ready"
++        assert _events(conn, tid, "active_pr_resolved") == []
++
++
++def test_seam_unavailable_fails_closed(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    monkeypatch.setattr(kbd, "_pr_state_fn", lambda: None)
++
++    with kbc.connect() as conn:
++        tid = _card_with_pr(conn)
++        res = _tick(conn)
++
++        assert res.spawned == []
++        assert dict(res.respawn_guarded).get(tid) == "active_pr"
++        assert _status(conn, tid) == "ready"
++        assert _events(conn, tid, "active_pr_resolved") == []
++
++
++def test_resolved_event_is_a_terminal_hold(kanban_home: Path) -> None:
++    """D5: a failed resolution can never re-enter the spawn path.
++
++    The card keeps a fresh PR comment (inside the guard window) and carries an
++    ``active_pr_resolved`` event at/after it — e.g. the completion failed and
++    the block did not stick. The guard must name the new terminal reason, and
++    no tick may spawn it even if the PR now reads MERGED again.
++    """
++    calls: list = []
++    with kbc.connect() as conn:
++        tid = _card_with_pr(conn)
++        with kb.write_txn(conn):
++            kb._append_event(conn, tid, "active_pr_resolved",
++                             {"pr": PR, "state": "MERGED", "action": "blocked"})
++
++        assert kbd.check_respawn_guard(conn, tid) == "active_pr_resolved"
++        res = _tick(conn, spawn_fn=lambda *a, **k: calls.append(a))
++        assert res.spawned == []
++        assert dict(res.respawn_guarded).get(tid) == "active_pr_resolved"
++
++
++def test_dry_run_never_probes_or_mutates(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    calls: list = []
++    _install_state(monkeypatch, "MERGED", calls)
++
++    with kbc.connect() as conn:
++        tid = _card_with_pr(conn)
++        before = _events(conn, tid)
++
++        res = _tick(conn, dry_run=True)
++
++        assert calls == []
++        assert tid not in [s[0] for s in res.spawned]
++        assert dict(res.respawn_guarded).get(tid) == "active_pr"
++        assert _status(conn, tid) == "ready"
++        assert _events(conn, tid) == before
++
++
++def test_probe_is_cached_across_ticks(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    calls: list = []
++    _install_state(monkeypatch, "OPEN", calls)
++
++    with kbc.connect() as conn:
++        _card_with_pr(conn)
++        assert _tick(conn).spawned == []
++        assert _tick(conn).spawned == []
++
++        assert [c[0] for c in calls] == [PR]
++
++
++def test_guarded_event_is_written_once_not_per_tick(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
++    """D6: the DB diagnostic is deduped; the in-memory bucket still reports."""
++    calls: list = []
++    _install_state(monkeypatch, "CLOSED", calls)
++
++    with kbc.connect() as conn:
++        tid = _card_with_pr(conn)
++        first = _tick(conn)
++        second = _tick(conn)
++
++        assert dict(first.respawn_guarded).get(tid) == "active_pr"
++        assert dict(second.respawn_guarded).get(tid) == "active_pr"
++        assert len(_events(conn, tid, "respawn_guarded")) == 1
++
++
++def test_pr_merge_state_maps_github_answer_and_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
++    """D1: the evidence read returns only known states; anything else is UNKNOWN."""
++    seen: dict = {}
++
++    def _fake_api(endpoint, *, query=None, paginate=False, profile_home=None):
++        seen.update(endpoint=endpoint, query=query, profile_home=profile_home)
++        return {"data": {"repository": {"pullRequest": {
++            "state": "MERGED", "mergedAt": "2026-11-23T12:00:00Z",
++            "mergeCommit": {"oid": "a" * 40},
++        }}}}
++
++    monkeypatch.setattr(kpa, "_assignee_profile_home", lambda assignee: "/profile/home")
++    monkeypatch.setattr(kpa, "_api", _fake_api)
++
++    assert kpa.pr_merge_state(PR, assignee="dev") == "MERGED"
++    assert seen["endpoint"] == "graphql"
++    assert "mergeCommit" in seen["query"] and "example" in seen["query"]
++    assert seen["profile_home"] == "/profile/home"
++
++    monkeypatch.setattr(kpa, "_api", lambda *a, **k: {"data": {"repository": None}})
++    assert kpa.pr_merge_state(PR, assignee="dev") == "UNKNOWN"
++
++    def _denied(*a, **k):
++        raise kpa._GateAuthError("HTTP 403 on graphql")
++
++    monkeypatch.setattr(kpa, "_api", _denied)
++    assert kpa.pr_merge_state(PR, assignee="dev") == "UNKNOWN"
++
++    assert kpa.pr_merge_state("https://github.com/example/repo/issues/44") == "UNKNOWN"

@@ -180,7 +180,7 @@ an unreadable token exits **1**, so an operator can tell a misconfigured root fr
 a transport problem. Every boot also prints the root it will write:
 
 ```console
-hscc-api: profiles root /Users/you/.hermes/profiles (intent: none)
+hscc-api: profiles root /Users/hscc-fixture/.hermes/profiles (intent: none)
 ```
 
 The last line startup prints before the accept loops start is `hscc-api: ready`,

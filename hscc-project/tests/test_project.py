@@ -82,7 +82,12 @@ class FakeRun:
 
         if cmd[0] == "git":
             if cmd[1] == "rev-parse":
-                # rev-parse --is-inside-work-tree
+                # rev-parse --is-inside-work-tree / --verify HEAD
+                if "--verify" in cmd:
+                    return self._proc(
+                        cmd, 0 if self.committed else 128,
+                        "abc1234" if self.committed else "",
+                    )
                 return self._proc(cmd, 0 if self.is_repo else 128,
                                   "true" if self.is_repo else "")
             if cmd[1] == "init":
@@ -652,6 +657,54 @@ def test_new_with_github_creates_remote(tmp_path, capsys):
     gh_calls = [c for c in run.calls if c[0] == "gh"]
     assert gh_calls and "--private" in gh_calls[0]
     assert "--push" in gh_calls[0]
+
+
+def _gh_runner(*, committed):
+    """Record calls; answer the HEAD probe and one successful `gh repo create`."""
+    calls = []
+
+    def run(cmd, cwd):
+        calls.append(list(cmd))
+        if cmd[:3] == ["git", "rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(
+                cmd, 0 if committed else 128,
+                "abc1234" if committed else "", "")
+        if cmd[0] == "gh":
+            return subprocess.CompletedProcess(cmd, 0, "created repository", "")
+        raise AssertionError(f"unexpected command: {cmd!r}")
+
+    return run, calls
+
+
+def _visibility_flags(gh_call):
+    return [a for a in gh_call if a in ("--public", "--private")]
+
+
+def test_ensure_github_passes_exactly_one_visibility_flag():
+    """Non-interactive `gh repo create` requires an explicit visibility."""
+    run, calls = _gh_runner(committed=True)
+    assert project_lifecycle.ensure_github("/repo/x", _run=run) == "created"
+    gh_call = [c for c in calls if c[0] == "gh"][0]
+    assert _visibility_flags(gh_call) == ["--public"]
+    assert "--push" in gh_call
+
+
+def test_ensure_github_private_passes_only_private():
+    run, calls = _gh_runner(committed=True)
+    assert project_lifecycle.ensure_github(
+        "/repo/x", _run=run, private=True) == "created"
+    gh_call = [c for c in calls if c[0] == "gh"][0]
+    assert _visibility_flags(gh_call) == ["--private"]
+
+
+def test_ensure_github_on_unborn_head_skips_push():
+    """An empty repo has no commit to push: create the remote, do not push."""
+    run, calls = _gh_runner(committed=False)
+    status = project_lifecycle.ensure_github("/repo/x", _run=run)
+    assert status == "created, nothing to push"
+    gh_call = [c for c in calls if c[0] == "gh"][0]
+    assert "--push" not in gh_call
+    assert _visibility_flags(gh_call) == ["--public"]
 
 
 def test_ensure_github_is_idempotent_when_remote_exists():

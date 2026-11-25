@@ -16,8 +16,9 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-PRIMARY = "/Users/desac/dev/hscc"
+PRIMARY = str(Path.home() / "dev" / "hscc")
 PREFIX = "wt/"
 
 

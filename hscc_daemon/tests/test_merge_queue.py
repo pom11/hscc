@@ -82,7 +82,8 @@ def _repo_pair(tmp_path, *, shared=False, base="main"):
 
 
 def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
-              base_branch=None, timeout_s=None, waiting_max_age_s=None):
+              base_branch=None, timeout_s=None, waiting_max_age_s=None,
+              ci_pending_timeout_s=None):
     path = tmp_path / "registry.yaml"
     mq_cfg = {}
     if enabled is not None:
@@ -95,6 +96,8 @@ def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
         mq_cfg["timeout_s"] = timeout_s
     if waiting_max_age_s is not None:
         mq_cfg["waiting_max_age_s"] = waiting_max_age_s
+    if ci_pending_timeout_s is not None:
+        mq_cfg["ci_pending_timeout_s"] = ci_pending_timeout_s
     body = {
         "projects": [{
             "name": name,
@@ -2635,15 +2638,66 @@ def test_non_green_head_moves_to_the_wait_list_so_the_fifo_proceeds(tmp_path):
     assert second["processed"][0]["result"] == "merged", second
     assert gh.merged == [8]
 
-    # The wait-listed PR is retried once the active FIFO is empty (still
-    # pending, so it goes back to the wait list rather than blocking again).
+    # The wait-listed PR is NOT retried by the claim step. With the FIFO empty
+    # nothing is claimed at all: `_drain_waiting` probed #7 on this same tick,
+    # found its checks still pending, and left it in the wait list. Claiming it
+    # anyway is exactly the #710 churn — `process_entry` would call it not green
+    # and bounce it back, once per tick, forever.
     third = mq.tick(state_path=_state(tmp_path),
                     root=str(tmp_path / "queue"), registry_path=registry,
                     gh_runner=gh, git_runner=subprocess.run)
-    assert third["processed"][0]["pr"] == 7, third
-    assert third["processed"][0]["result"] == "waiting", third
+    assert third["processed"] == [], third
     ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
     assert ps["queue"] == [] and [e["pr"] for e in ps["waiting"]] == [7]
+
+
+def test_a_pending_waiting_pr_is_not_claimed_again_every_tick(tmp_path):
+    """A wait-listed PR whose checks are still running must be LEFT alone.
+
+    Live churn, PR #710 on 2.17.5: 16 ticks in a row each logged
+    `checks not green; moved to the wait list` then `-> waiting`. The claim step
+    reached into `waiting` whenever the active FIFO was empty — with no
+    readiness check of its own — so it popped an entry `_drain_waiting` had
+    already probed and found not green, handed it to `process_entry`, and got it
+    bounced straight back. The drain is the only door back into the FIFO, and it
+    admits a green rollup and nothing else; three ticks after this PR is parked
+    there must be zero claims, zero queue moves and zero log lines.
+    """
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                "conclusion": None}]
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}}, rollup=pending)
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    logged = []
+    run_tick = lambda: mq.tick(
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        log=lambda msg, *a, **k: logged.append(msg))
+
+    # Tick 1 is a legitimate claim: the entry was in the FIFO, its checks are
+    # pending, so it goes to the wait list. That is the ONE move.
+    first = run_tick()
+    assert first["processed"][0]["pr"] == 7, first
+    assert first["processed"][0]["result"] == "waiting", first
+    parked = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in parked["waiting"]] == [7], parked
+
+    # Ticks 2, 3 and 4: still pending, so nothing may be claimed at all. The
+    # old code processed #7 again on every one of these.
+    for tick_no in (2, 3, 4):
+        del logged[:]
+        result = run_tick()
+        assert result["processed"] == [], (tick_no, result)
+        assert not [line for line in logged if "moved to the wait list" in line], \
+            (tick_no, logged)
+        ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+        assert ps["queue"] == [] and ps["in_flight"] is None, (tick_no, ps)
+        assert [e["pr"] for e in ps["waiting"]] == [7], (tick_no, ps)
+        assert (ps["waiting"][0]["enqueued_at"]
+                == parked["waiting"][0]["enqueued_at"]), (tick_no, ps)
+    assert gh.merged == []
 
 
 # ── generated_at is the ledger write time, not the read time (F14) ─────────
@@ -3452,6 +3506,82 @@ def test_ci_pending_timeout_releases_to_the_rechecked_wait_list(tmp_path):
     assert ps["in_flight"] is None
     assert [e["pr"] for e in ps["waiting"]] == [21]
     assert mq.outcome_state("ci-timeout") == "waiting"
+
+
+def test_ci_pending_budget_defaults_and_is_the_projects_to_set():
+    """The CI-pending budget is 3600 s unless a valid registry line moves it."""
+    assert mq.CI_PENDING_TIMEOUT_S == 3600
+    for cfg, want in (({}, 3600), (None, 3600),
+                      ({"ci_pending_timeout_s": 900}, 900),
+                      ({"ci_pending_timeout_s": "900"}, 900),
+                      ({"ci_pending_timeout_s": 900.9}, 900),
+                      ({"ci_pending_timeout_s": 0}, 3600),
+                      ({"ci_pending_timeout_s": -1}, 3600),
+                      ({"ci_pending_timeout_s": "30m"}, 3600),
+                      ({"ci_pending_timeout_s": ""}, 3600),
+                      ({"ci_pending_timeout_s": True}, 3600),
+                      ({"ci_pending_timeout_s": None}, 3600),
+                      ({"ci_pending_timeout_s": []}, 3600)):
+        assert mq.ci_pending_budget_s(cfg) == want, cfg
+
+    # The expiry predicate reads the budget it is handed, not the constant.
+    old = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                        time.gmtime(time.time() - 120))
+    assert mq._ci_pending_expired(old, 60)
+    assert not mq._ci_pending_expired(old, 3600)
+
+    warned = []
+
+    def log(msg, level="INFO"):
+        warned.append((msg, level))
+
+    assert mq.ci_pending_budget_s(
+        {"name": "alpha", "ci_pending_timeout_s": "30m"}, log=log) == 3600
+    assert warned and warned[0][1] == "WARN"
+    assert "ignoring invalid merge_queue.ci_pending_timeout_s='30m'" in \
+        warned[0][0]
+    warned.clear()
+    assert mq.ci_pending_budget_s({"ci_pending_timeout_s": 60}, log=log) == 60
+    assert warned == []          # a good value is silent
+
+
+def test_ci_pending_expiry_uses_the_registry_budget_and_names_a_backlog(tmp_path):
+    """A 60 s override expires where 120 s of pending CI would otherwise hold."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"],
+                         ci_pending_timeout_s=60)
+    pending = [{"__typename": "CheckRun", "status": "QUEUED",
+                "conclusion": None}]
+    gh = FakeGh(
+        {21: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={21: [{"statusCheckRollup": pending}]})
+    state = _state(tmp_path)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    ps["in_flight"] = {
+        "pr": 21, "card": "t_ci_timeout", "assignee": "worker",
+        "branch": pair["branch"], "stage": "ci-pending",
+        "pushed_sha": pair["head"], "ci_base": "main",
+        "ci_since": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                  time.gmtime(time.time() - 120)),
+        "enqueued_at": "2020-01-01T00:00:00+00:00",
+    }
+    mq.save_state(doc, state)
+    lines = []
+
+    result = mq.tick(state_path=state,
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     log=lambda msg, *a, **k: lines.append(msg))
+
+    assert result["processed"][0]["result"] == "ci-timeout", result
+    assert result["processed"][0]["timeout_s"] == 60
+    assert gh.merged == []
+    assert any("CI still running after 60s (runner backlog)" in line
+               for line in lines), lines
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert [e["pr"] for e in ps["waiting"]] == [21]
 
 
 def test_checks_verdict_separates_pending_from_red():
@@ -5362,11 +5492,20 @@ class _FakeKanbanRunner:
             body_path = argv[argv.index("--body-file") + 1]
             self.bodies[card] = pathlib.Path(body_path).read_text(
                 encoding="utf-8")
+            initial = (argv[argv.index("--initial-status") + 1]
+                       if "--initial-status" in argv else "ready")
             self.cards[card] = {
-                "status": "ready",
+                "status": initial,
                 "assignee": argv[argv.index("--assignee") + 1]}
             return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
-                {"id": card, "status": "ready"}))
+                {"id": card, "status": initial}))
+        if verb == "block":
+            card = argv[5]
+            info = self.cards.setdefault(card, {})
+            info.update(status="blocked",
+                        block_kind=argv[argv.index("--kind") + 1])
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                {"id": card}))
         raise AssertionError(f"unexpected kanban call: {argv}")
 
 
@@ -5414,6 +5553,9 @@ def test_a_red_handback_with_no_card_creates_a_fix_card(tmp_path, monkeypatch):
     assert create[5] == "PR #12 red in merge queue: gate failed"
     assert create[create.index("--assignee") + 1] == "worker"
     assert create[create.index("--priority") + 1] == "2"
+    # No fix_card block in this registry row: the card is dispatchable.
+    assert "--initial-status" not in create
+    assert not create[5].startswith("[opencode]")
     body = runner.bodies["t_fix_1"]
     # The queue's failure evidence leads; the rule is on the card.
     assert "FAILED hscc_daemon/tests/test_x.py::test_y" in body
@@ -5559,3 +5701,85 @@ def test_an_unreadable_board_does_not_cut_a_duplicate(tmp_path, monkeypatch):
 
     assert [c[4] for c in runner.calls] == ["show"], runner.calls
     assert handed[0][0] == "t_open"
+
+
+def _gh_comment_runner(seen):
+    def run(argv, cwd=None, **kwargs):
+        argv = list(argv)
+        if argv[:3] == ["gh", "pr", "comment"]:
+            seen.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    return run
+
+
+def _parked_cfg(**fix_card):
+    return {"name": "alpha", "repo": "/tmp/project", "board": "alpha",
+            "fix_card": {"assignee": "coder", "park": True, **fix_card}}
+
+
+def test_a_parked_fix_card_is_blocked_typed_and_assigned_to_the_pane(
+        tmp_path, monkeypatch):
+    """park=true cuts an [opencode] card no cluster worker can claim."""
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner()
+    entry = {"pr": 19, "card": None, "assignee": "worker",
+             "branch": "wt/t_card"}
+    handed, comments = [], []
+
+    mq._handback(entry, _parked_cfg(), _QUEUE_RED_BODY, _handed(handed),
+                 _gh_comment_runner(comments),
+                 reason="gate failed",
+                 state_path=str(tmp_path / "merge-queue-state.json"),
+                 project="alpha", kanban_runner=runner)
+
+    assert [c[4] for c in runner.calls] == ["create", "block"], runner.calls
+    create = runner.calls[0]
+    assert create[5] == ("[opencode] PR #19 red in merge queue: gate failed")
+    assert create[create.index("--assignee") + 1] == "coder"
+    assert create[create.index("--initial-status") + 1] == "blocked"
+    block = runner.calls[1]
+    assert "t_fix_1" in block and block.index("--kind") < block.index("t_fix_1")
+    assert block[block.index("--kind") + 1] == "capability"
+    assert handed[0][0] == "t_fix_1" and handed[0][1] == "coder"
+    assert entry["card"] == "t_fix_1"
+    # The PR's handback comment names the parked card the driver must run.
+    assert comments, "no PR comment"
+    body = comments[-1][comments[-1].index("--body") + 1]
+    assert "t_fix_1" in body and "OpenCode" in body
+    state = mq.load_state(str(tmp_path / "merge-queue-state.json"))
+    assert state["projects"]["alpha"]["fix_cards"]["19"]["card"] == "t_fix_1"
+
+
+def test_a_parked_fix_card_reuses_an_open_card_without_cutting_another(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner({"t_open": {"status": "blocked",
+                                           "assignee": "coder",
+                                           "block_kind": "capability"}})
+    entry = {"pr": 20, "card": "t_open", "assignee": None,
+             "branch": "wt/t_card"}
+    handed = []
+
+    _red_handback(tmp_path, entry, runner, handed, cfg=_parked_cfg())
+
+    assert [c[4] for c in runner.calls] == ["show"], runner.calls
+    assert handed[0][0] == "t_open" and handed[0][1] == "coder"
+    assert entry["card"] == "t_open"
+
+
+def test_the_default_handback_never_unblocks_a_parked_card(monkeypatch):
+    """An unblock would hand the parked card straight to the cluster."""
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    monkeypatch.setattr(mq.subprocess, "run", run)
+
+    assert mq.default_handback("t_x", "coder", "msg", board="alpha",
+                               parked=True) is True
+    verbs = [call[4] for call in calls]
+    assert verbs == ["comment", "reassign"], calls
+    assert not any("unblock" in call for call in calls), calls

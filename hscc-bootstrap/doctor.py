@@ -2362,6 +2362,43 @@ def _refused_orch_wake_subs_check() -> dict:
                    "open a live board or a live active-session registry."}
 
 
+def _load_doctor_process_posture():
+    """Import ``hscc-bootstrap/doctor_process_posture.py`` for the t_8b17cb40 row.
+
+    Same rule as :func:`_load_orch_waker`: the verdict lives with the feature, and
+    a module that cannot be imported is reported UNVERIFIABLE rather than dropped.
+    """
+    try:
+        import doctor_process_posture
+    except ImportError:
+        return None
+    return doctor_process_posture
+
+
+#: Fallback for the posture row's name when the module cannot be imported — the
+#: same trick as ``_ORCH_WAKE_SUBS_CHECK_NAME`` so the row still prints. Must stay
+#: equal to ``doctor_process_posture.CHECK_NAME`` (pinned by
+#: test_doctor_process_posture_t_8b17cb40.py, and the equality pin in
+#: test_doctor_row_registry.py).
+_PROCESS_POSTURE_CHECK_NAME = "daemon scheduling posture (launchd ProcessType=Standard)"
+
+
+def _refused_process_posture_check() -> dict:
+    """In-suite stand-in for the posture check when no seam was injected.
+
+    Its real targets are the OPERATOR's installed launchd plist
+    (``~/Library/LaunchAgents/com.hermes.hscc_daemon.plist``) and the live
+    service manager. Same fence shape as ``_refused_supervision_check``: an ERROR
+    naming the missing seam, never a silent pass and never a real read.
+    """
+    return {"name": _PROCESS_POSTURE_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "scheduling-posture check refused inside a pytest "
+                      "process — inject _process_posture_check",
+            "fix": "Pass _process_posture_check=lambda: {...} built from a tmp "
+                   "plist fixture plus stubbed _launchd/_systemd probes; a suite "
+                   "must never read ~/Library/LaunchAgents or ask launchd."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -2623,6 +2660,40 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
         missing_detail="hscc-bootstrap/doctor_orch_subs.py not importable — "
                        "whether any notify+wake subscription points off its "
                        "owner's live pane session cannot be verified",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
+    # t_8b17cb40 (the half of t_ae87b783 / PR #791 that the emitters cannot
+    # cover): is the INSTALLED job actually running the daemon in the Standard
+    # posture? The three plist emitters are pinned by
+    # hscc_daemon/tests/test_daemon_process_type_standard_t_ae87b783.py, but a
+    # pin on an emitter says nothing about the file on the node — and the fleet
+    # ran Background until 2026-11-25, a posture any node keeps until it
+    # re-bootstraps. While it does, every merge-queue gate leg pays ~7.6x
+    # silently (measured `ps -o pri` 4 vs 20, 4.96 M vs 37.7 M it/s through the
+    # real merge_queue._run_gate). The row reads the installed plist with
+    # plistlib (launchctl print has NO process-type line — measured: its
+    # `jetsam priority` is 40 for every posture) and corroborates with the
+    # loaded job's `spawn type`, which measured able to tell the postures
+    # apart and is the only way to catch a file already fixed but not yet
+    # re-bootstrapped.
+    # WARN on every non-skip, never fatal (the card's ruling, and the same
+    # Stage-1 reasoning as the supervision row): a node may legitimately run
+    # another posture, and doctor must not abort an install over that choice.
+    # NO row_kwargs (t_be690204): the file this row reads lives under
+    # ``~/Library/LaunchAgents`` and is written by install.py /
+    # daemon_install.py / launchd-setup.sh, none of which honours HSCC_DIR, so a
+    # handed root is a directory no emitter can reach — and a live job would
+    # read back as "nothing installed". The feature module keeps a
+    # ``plist_path=`` caller seam for tests instead.
+    doctor_rows.FeatureCheckRow(
+        key="process_posture", seam_kwarg="_process_posture_check",
+        row_kwargs=(),
+        loader="_load_doctor_process_posture",
+        refusal="_refused_process_posture_check",
+        fallback_name="_PROCESS_POSTURE_CHECK_NAME",
+        missing_detail="hscc-bootstrap/doctor_process_posture.py not importable "
+                       "— the scheduling posture of the installed daemon job "
+                       "cannot be verified",
         missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
                     "(re-run bootstrap)."),
 ]

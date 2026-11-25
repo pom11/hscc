@@ -1,0 +1,22 @@
+== snapshot at 14:51:09 for pid 68900 etime=00:04
+ps: argv: keyword not found
+  PID  PPID  PGID STAT   WQ ELAPSED
+68900 57376 68900 Ss      -   00:04
+-- children of harness:
+ps: argv: keyword not found
+68904 68900 Rs         00:04
+68905 68900 Rs         00:04
+68906 68900 Ss         00:04
+68907 68900 Ss         00:04
+-- tagged burners alive:
+68892 sh -c while :; do :; done hscc-load-test-360d94f3c7b745d7a13d3618846373c9
+68893 sh -c while :; do :; done hscc-load-test-360d94f3c7b745d7a13d3618846373c9
+68904 sh -c while :; do :; done hscc-load-test-58c0e7f0fea642e487380a048553ccb0
+68905 sh -c while :; do :; done hscc-load-test-58c0e7f0fea642e487380a048553ccb0
+-- load:
+14:51  up 19 days,  6:14, 2 users, load averages: 3.62 3.65 3.55
+Traceback (most recent call last):
+  File "/Users/<operator>/miniconda3/envs/p313/bin/sample", line 3, in <module>
+    from sample import main
+ModuleNotFoundError: No module named 'sample'
+sample failed rc=1

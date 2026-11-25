@@ -49,7 +49,7 @@ class FakeWaker:
         return dict(self.block)
 
     def config_path(self):
-        return "/home/u/.hscc/config.json"
+        return "/home/hscc-fixture/.hscc/config.json"
 
     def load_config(self, path=None):
         return {"enabled": True, "debounce_s": 90, "min_gap_s": 300,
@@ -138,7 +138,7 @@ def test_enable_disable_receipts(waker, verb, expect):
     assert waker.enabled_calls == [expect], "the flip goes through the module"
     assert r["verb"] == f"waker {verb}"
     assert r["enabled"] is expect
-    assert r["config"] == "/home/u/.hscc/config.json"
+    assert r["config"] == "/home/hscc-fixture/.hscc/config.json"
     assert r["note"], "the receipt must tell the operator what happens next"
 
 

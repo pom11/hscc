@@ -152,8 +152,8 @@ def test_running_hermes_venv_is_used_when_the_homes_have_none(tmp_path):
 @pytest.mark.parametrize("exe", [
     NOT_A_HERMES_VENV,                                    # brew / system python
     "/opt/x/venv/bin/python3",                            # a venv, not hermes-agent's
-    "/Users/op/.hermes/hermes-agent/venv/lib/python3.13/site-packages/x.py",
-    "/Users/op/.hermes/hermes-agent/venv/bin/pypy3",      # not an accepted name
+    "/Users/hscc-fixture/.hermes/hermes-agent/venv/lib/python3.13/site-packages/x.py",
+    "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/pypy3",      # not an accepted name
     "",                                                   # nothing
 ])
 def test_non_hermes_venv_executables_are_rejected(exe):

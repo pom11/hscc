@@ -9,6 +9,10 @@ only its enablement was.").
 **Kind:** READ-ONLY audit. No fix is implemented on this card; §7 recommends the atomic
 cards to cut from it after the operator reviews. nolive — nothing under `~/.hermes` or
 `~/.hscc` was written to produce this doc; live state was read, never touched.
+**Anchors re-verified:** 2026-11-25 against `origin/main` @ `21da34a8`; the §8 gate
+legs re-ran **5 / 18 / 16 / 13 / 30 passed (82 total), RC=0 each**. Three line-number
+anchors drifted on `main` since first publication (§4/§6/§7) and are re-pointed; no
+finding changed.
 
 ---
 
@@ -123,7 +127,7 @@ a control (parent §6 rule 2; QA reaffirmed).
 unlike `hscc-cluster`, which must stay enabled everywhere for its six hooks (D-C).
 Nothing in the `hscc-cluster` hook set, the cluster-guard shell hooks, or
 `hscc_daemon` calls `sparkrun_exec`: the guard shells `sparkrun status` itself
-(`hscc-bootstrap/hooks/cluster-guard.py:54-59`) and the daemon drives sparkrun through
+(`hscc-bootstrap/hooks/cluster-guard.py:54-62`) and the daemon drives sparkrun through
 sparkrun's own venv (`hscc_daemon/health.py`, fleet rule). The tool surface and the
 hook/subprocess surface are independent — which is exactly what F1 below is about.
 
@@ -154,7 +158,7 @@ invariants each future card must preserve:
    tool; `*-orch` home → no tool; root → no tool; main → tool; stub ctx → fail-open; a
    no-local-name-check source pin).
 2. **Bootstrap writes the tier per home** (`hscc-bootstrap/enable_plugins.py`):
-   `HSCC_PLUGINS` includes `sparkrun-hermes` (line 49);
+   `HSCC_PLUGINS` includes `sparkrun-hermes` (line 56);
    `ensure_plugins_tier_everywhere` / `..._for_home` / `..._for_new_home` seed explicit
    `plugins.enabled` (hooks-only tier `(hscc-cluster,)` off-main —
    `main_orch.py:218` `HOOKS_ONLY_PLUGINS`), prune HSCC-owned cluster plugins from
@@ -181,7 +185,7 @@ argv, not runtime model calls.
 --all`, cluster-define removal) before subprocess, append the same audit line for every
 `sparkrun_exec` call. The implementer must first measure how a config `hooks:` `matcher`
 value selects the firing toolset (the wired entry is `matcher: hscc-cluster`,
-`enable_plugins.py:1354-1367`) and add a second matcher entry or broaden the payload
+`enable_plugins.py:1414-1423`) and add a second matcher entry or broaden the payload
 check as the measurement dictates. Fail-open behaviour must stay (a guard bug must not
 brick the tool).
 

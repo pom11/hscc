@@ -3,7 +3,7 @@
 against the scratch home to confirm the corrected provider config answers."""
 import os, subprocess, sys
 from pathlib import Path
-sys.path.insert(0, "/Users/desac/dev/hscc/.worktrees/t_59cc6714/hscc-api")
+sys.path.insert(0, os.path.expanduser("~/dev/hscc/.worktrees/t_59cc6714/hscc-api"))
 from hermes_state import SessionDB
 
 HOME = Path("/tmp/hscc_e2e_home")
