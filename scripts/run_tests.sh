@@ -590,21 +590,33 @@ unset _pin
 # loss. Measured through this same runner at the gate's own priority
 # (`taskpolicy -b`, `ps -o pri` 4): five legs serial 188 s vs three-deep 96 s.
 #
-# WHY THE DEFAULT IS 1 AND NOT 2 — THE MEASUREMENT THAT DECIDED IT. The card set
-# the bar at "a full-roster concurrent run must be green before the default goes
-# above 1", so the roster was run at p=2. It is **not green**: 12 legs, 3 red —
-# `hscc-api` (an ERROR at setup in `test_gateway_serve_watchdog.py:637`:
-# `harness identity check broken on darwin: our own live parent pid 3578 did not
-# match its own argv marker; _state_and_command answered ('Z', '<defunct>')`),
-# plus `scripts` (1 failed) and `.github/scripts`. Five legs packed were green and
-# a narrowed two-leg gate (`hscc_daemon` + `scripts`) is the case the speedup was
-# measured on, but a mechanism that reddens three legs of the twelve-leg roster
-# cannot become the posture every gate takes by default. So the pack is OPT-IN
-# until `hscc-api`'s harness identity check stops tripping when its leg is packed
-# — the zombie/`<defunct>` parent is the lead, and the two candidate mechanisms
-# are named in scripts/tests/test_run_tests_leg_parallelism.py's module docstring
-# (deferred reaping leaves a finished child unreaped for up to one poll tick; and
-# `set -m` puts a packed leg in its own process group).
+# WHY THE DEFAULT IS 1 AND NOT 2 — THE MEASUREMENT THAT DECIDED IT, AND THE
+# MEASUREMENT THAT UNBLOCKED MOVING IT. The card set the bar at "a full-roster
+# concurrent run must be green before the default goes above 1", so the roster was
+# run at p=2. The first run was NOT green: 12 legs, 3 red — `hscc-api` (an ERROR at
+# setup in `test_gateway_serve_watchdog.py:637`: `harness identity check broken on
+# darwin: our own live parent pid 3578 did not match its own argv marker;
+# _state_and_command answered ('Z', '<defunct>')`), plus `scripts` (1 failed) and
+# `.github/scripts`. All three were then root-caused, and NONE of them was the
+# mechanism this block used to blame: the zombie was the watchdog test's OWN child
+# (the sandbox parent its `stop` mode instructs to exit, which no runner tick can
+# reap — it is the pytest process's own child), the `.github/scripts` leg never ran
+# at all because its log path spliced the leg NAME (a path) into a FILENAME, and
+# `scripts` came back green. Both mechanisms this block used to name as the lead —
+# deferred reaping and the pack's own process groups — are disproven for all three;
+# `docs/audits/packed-roster-reds_t_4fc35c1f.md` carries the before/after numbers
+# (0 red in 25 at ordinary priority, 8 red in 30 under bounded burners, 0/30 after
+# the fixture fix — with HSCC_TEST_PARALLEL unset throughout, so no pack involved).
+#
+# THE BAR IS NOW MET: the full twelve-leg roster is green at p=2, 12/12, 713 s wall
+# against 1396 s of summed leg work = **1.96x** (t_4fc35c1f, this host, one clean
+# run). What keeps the default at 1 is no longer a red roster — it is that flipping
+# it is a CONTRACT change, not a green question. The serial stream is what two
+# readers were measured against (below), `test_the_default_is_the_serial_stream_and_
+# prints_nothing_new` pins unset as silent and byte-identical to the pre-concurrency
+# runner, and the narrowed `hscc_daemon scripts` gate has never been TIMED packed.
+# The flip needs those re-pinned and that number measured; it is one small slice,
+# unblocked, and deliberately not done half-verified here.
 #
 # CONTRACT (pinned by scripts/tests/test_run_tests_leg_parallelism.py):
 #   HSCC_TEST_PARALLEL unset or empty -> the SERIAL loop below, UNTOUCHED: no
