@@ -47,6 +47,7 @@ CHECK_NAMES = [
     "worker budget hook ([budget] note)",
     "node pauses (operator overlay)",
     "daemon scheduling posture (launchd ProcessType=Standard)",
+    "orchpad plugin on orchestrator profiles",
 ]
 
 FAKE_CLUSTER = json.dumps([{"name": "hscc", "hosts": ["192.0.2.1"]}])
@@ -93,7 +94,7 @@ def test_registry_exists_and_covers_the_feature_rows():
                     "kanban_enforce", "main_board", "main_wakeups",
                     "budget_hook", "node_pauses",
                     "node_pause_expiry", "main_only_surface",
-                    "orch_wake_subs", "process_posture"], \
+                    "orch_wake_subs", "process_posture", "orchpad"], \
         "registry order is row order"
 
 
@@ -135,7 +136,8 @@ def test_registry_seam_names_match_the_run_doctor_signature():
                                      "_node_pause_expiry_check",
                                      "_main_only_surface_check",
                                      "_orch_wake_subs_check",
-                                     "_process_posture_check"}
+                                     "_process_posture_check",
+                                     "_orchpad_check"}
     assert "_main_board_check" not in declared, \
         "a new row must not add a keyword to run_doctor()'s signature"
 
