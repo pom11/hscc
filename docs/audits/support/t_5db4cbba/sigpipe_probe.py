@@ -44,6 +44,15 @@ WORK.mkdir(parents=True, exist_ok=True)
 LEG_A, LEG_B, LEG_C = "hscc-commands", "sparkrun-hermes", "memori_byodb"
 THREE = f"{LEG_A} {LEG_B} {LEG_C}"
 HEAD_BYTES = int(os.environ.get("SIGPROBE_HEAD_BYTES", "200"))
+#: The per-leg (seconds, rc) plan. The default is uniform and DELIBERATELY NOT
+#: what to read for the closed-reader posture: with every leg the same length,
+#: the runner's next write to stdout falls exactly when those legs have just
+#: finished, so `head_live` scores a vacuous 0 orphans. `SIGPROBE_PLAN` with a
+#: short first leg makes the runner write to a closed pipe while the OTHER two
+#: are still in flight — which is the posture that can orphan legs.
+#:   SIGPROBE_PLAN='hscc-commands:2:0 sparkrun-hermes:30:0 memori_byodb:30:0'
+DEFAULT_PLAN = f"{LEG_A}:30:0 {LEG_B}:30:0 {LEG_C}:30:0"
+PLAN = os.environ.get("SIGPROBE_PLAN", DEFAULT_PLAN)
 
 STUB = """#!/usr/bin/env bash
 set -u
@@ -85,7 +94,7 @@ def env_for(tag):
         "HSCC_TEST_PY": str(stub),
         "STUB_TRACE": str(trace),
         "STUB_ARGV": str(argv),
-        "STUB_PLAN": f"{LEG_A}:30:0 {LEG_B}:30:0 {LEG_C}:30:0",
+        "STUB_PLAN": PLAN,
         "HSCC_TEST_LEGS": THREE,
         "HSCC_TEST_PARALLEL": "2",
         "HSCC_LEG_HEARTBEAT_SECONDS": "0",
@@ -133,26 +142,36 @@ def watch(p, log, fh, trace, n=2, timeout=60):
 
 def trial(posture, tag):
     before = set(Path("/tmp").glob("hscc-legs-*"))
-    pipe = posture in ("head",)
+    pipe = posture in ("head", "head_live")
     p, trace, log, fh = launch(tag, pipe_stdout=pipe)
     banner = None
     drained = b""
     try:
         if pipe:
-            # the consumer: take a little, then close the read end for good —
-            # exactly what `| head -c N` does when it exits.
-            deadline = time.time() + 40
+            # Drain continuously so the runner is never blocked on a full pipe —
+            # the reader stays OPEN until the pack is genuinely mid-flight, and
+            # only then goes away. `head` closes as soon as it has its bytes
+            # (which, measured, is BEFORE any leg launches — so it scores a
+            # vacuous zero orphans); `head_live` is the posture that can
+            # actually orphan legs.
+            os.set_blocking(p.stdout.fileno(), False)
+            deadline = time.time() + 60
             while time.time() < deadline:
-                chunk = p.stdout.read(1)
-                if not chunk:
+                chunk = p.stdout.read(4096)
+                if chunk:
+                    drained += chunk
+                    continue
+                if posture == "head" and len(drained) >= HEAD_BYTES:
                     break
-                drained += chunk
-                if len(drained) >= HEAD_BYTES:
+                if posture == "head_live" and len(trace.read_text().splitlines()) >= 2:
+                    time.sleep(1.0)     # let the launches land in the trace
                     break
-            # legs are live by now (the banner + per-leg lines are in `drained`);
-            # give them a beat to be recorded as started, then close.
+                if p.poll() is not None:
+                    break
+                time.sleep(0.05)
             time.sleep(1.0)
             os.close(p.stdout.fileno())
+            p.stdout = None          # the finalizer must not close it twice
         else:
             banner = watch(p, log, fh, trace)
             time.sleep(6.0)

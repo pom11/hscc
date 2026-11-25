@@ -9,14 +9,15 @@ certain ways leaves its leg-log dir behind. The measurement is in
     TERM     143         no                0
     INT      130         no                0
     HUP      129         no                2
-    PIPE     141         sometimes         2
+    PIPE     141         no                2   <- t_5db4cbba closed this
     QUIT     131         YES (3/3)         2
     KILL     137         YES               2
 
 `SIGKILL` is the one death no handler in a shell can beat, so *no* trap can be
 the whole answer; the fix that closes it is the bounded sweep at runner start.
-The trap family closes the catchable half (QUIT) and stops the untrapped fatal
-signals orphaning N pytests on a host that runs the fleet control plane.
+The trap family closes the catchable half (QUIT, and per t_5db4cbba also PIPE)
+and stops the untrapped fatal signals orphaning N pytests on a host that runs the
+fleet control plane.
 
 Two rules this file holds, both learned the expensive way:
 
@@ -382,15 +383,23 @@ def test_the_sweep_is_not_on_the_serial_path(pack):
 # ── the catchable half: signals the runner does not trap today ──────────────
 
 
-@pytest.mark.parametrize("signame,expect_rc", [("QUIT", 131), ("HUP", 129)])
+@pytest.mark.parametrize("signame,expect_rc", [("QUIT", 131), ("HUP", 129), ("PIPE", 141)])
 def test_a_fatal_signal_the_runner_does_not_trap_still_cleans_up(pack, signame, expect_rc):
     """QUIT leaked its dir in 3/3 measured trials; QUIT/HUP/PIPE orphaned both legs.
 
     Each handler must keep the `128+N` code a shell would have reported — every
     consumer of this script reads `$?`, and rc=143 being explainable is a
-    standing contract (t_6bb29d46). SIGPIPE is NOT in this table on purpose: it
-    measured 0/4 dir leaks, and trapping it is a separate decision (see the
-    handler's comment and the card's LEFT list).
+    standing contract (t_6bb29d46).
+
+    `SIGPIPE` was NOT in this table until t_5db4cbba. `t_b94a2b39` had left it out
+    because trapping it in a script that pipes through `head`/`tr` changes error
+    paths it had not measured; t_5db4cbba measured them (every pipe site in the
+    runner, the closed-reader posture, and the handler's own banner into the
+    closed pipe) and found the feared benign case does not exist — `| head`
+    already kills the pack today with rc 141. See
+    `docs/audits/sigpipe-orphan-legs_t_5db4cbba.md`. The two numbers that decided
+    it, both against the pre-fix runner: `kill -PIPE` orphaned 2.0 legs and an
+    early-closing reader orphaned 1.0, with the pack still mid-flight.
     """
     pack.launch(_plan([(LEG_A, 30, 0), (LEG_B, 30, 0), (LEG_C, 30, 0)]))
     d = pack.wait_for_live_legs(2)
@@ -429,3 +438,77 @@ def test_the_sweep_line_cannot_join_the_handback_digest(pack):
     lines = pack.text().splitlines()
     assert any(l.startswith("parallel: swept ") for l in lines), pack.text()
     assert not [l for l in mq._failure_lines(pack.text()) if "swept" in l], pack.text()
+
+
+# ── why trapping SIGPIPE is safe, as a pin rather than as a paragraph ────────
+#
+# t_b94a2b39 left SIGPIPE out because `run_tests.sh` pipes through `head`/`tr` and
+# nobody had measured what a PIPE trap does at those sites. t_5db4cbba measured
+# them (docs/audits/sigpipe-orphan-legs_t_5db4cbba.md) and the safety of the trap
+# rests on ONE structural fact: a self-inflicted SIGPIPE needs the SHELL to be the
+# writer, and no pipe in this script has one. Freeze the fact, so that the day
+# someone adds `… | head` to a 1000-line script the answer is a re-measurement and
+# not a surprise at 3 a.m. in a gate.
+
+#: Builtin writers that perform their own write in the shell process, so a closed
+#: reader raises SIGPIPE *in the shell* rather than in a child.
+_SHELL_WRITERS = r"\b(echo|printf|read)\b"
+
+#: Consumers that are entitled to stop reading before the writer is done.
+_EARLY_CLOSERS = r"(head|wc|grep|sed|awk)\b"
+
+
+def _code_lines(script):
+    """`run_tests.sh` minus comment-only lines — a `#` cannot write to a pipe."""
+    return [l for l in script.splitlines() if not l.lstrip().startswith("#")]
+
+
+def test_no_pipe_in_the_runner_has_a_builtin_writer_and_an_early_closer():
+    """The measured safety property behind `trap … PIPE` (t_5db4cbba).
+
+    Every pipe that exists in the runner is `$(ps … | tr -s ' ')`: the writer is
+    the EXTERNAL `ps`, so a closed reader kills `ps` and not the shell. Measured:
+    that site is rc 0 with the trap installed and rc 0 without it.
+
+    The combination this pins — a builtin writing into a consumer that may close
+    early — is the one that would make the trap fatal at a site nobody
+    enumerated. It is asserted to be empty, and the pin has teeth: inserting
+    `echo x | head -1` into the script turns this test red by name.
+    """
+    src = RUNNER.read_text()
+    hits = [
+        (n, l.strip()) for n, l in enumerate(_code_lines(src), 1)
+        if re.search(_SHELL_WRITERS + r"[^|]*\|\s*" + _EARLY_CLOSERS, l)
+    ]
+    assert hits == [], (
+        "a pipe with a SHELL writer and an early-closing consumer appeared in "
+        f"run_tests.sh: {hits}\n"
+        "That is exactly the site t_5db4cbba measured away before trapping "
+        "SIGPIPE. Re-run docs/audits/support/t_5db4cbba/sigpipe_probe.py and the "
+        "arms in the audit before changing the trap family, rather than editing "
+        "this assertion.")
+
+
+def test_the_fatal_trap_family_is_term_int_hup_quit_pipe_with_128n_codes():
+    """The family, its codes, and the reason each member is there.
+
+    The codes are not decoration: a dispatcher and the merge queue parse them, so
+    `128+N` per signal is pinned here rather than trusted to a re-raise nobody
+    re-checks. `PIPE` is the member t_b94a2b39 declined and t_5db4cbba added — if
+    it disappears again the orphans come back with it, which is what
+    `test_a_fatal_signal_the_runner_does_not_trap_still_cleans_up[PIPE]` catches
+    behaviourally; this catches it structurally, naming the signal.
+    """
+    src = RUNNER.read_text()
+    routed = re.findall(r"trap '_on_fatal_signal (\w+) (\d+)' (\w+)", src)
+    assert {sig: int(code) for sig, code, _trap in routed} == {
+        "HUP": 129, "QUIT": 131, "PIPE": 141}, (
+        f"the fatal-signal family drifted: {routed}\n"
+        "Each fallback must be 128+N for its own signal — the dispatcher and the "
+        "queue read those numbers (rc=143 explainability, t_6bb29d46).")
+    # Each handler must be installed for the signal it names, not just mention it.
+    assert sorted(sig for _, _, sig in routed) == ["HUP", "PIPE", "QUIT"], (
+        f"a routed handler is installed for the wrong signal: {routed}")
+    # TERM and INT are handled by their own named handlers, not this family.
+    assert "trap on_sigterm TERM" in src, "the TERM handler was the original reason"
+    assert "trap on_sigint INT" in src, "INT belongs to the pack's own Ctrl-C path"

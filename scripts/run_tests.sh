@@ -493,9 +493,25 @@ _on_fatal_signal() {
   # So the handler does both, then RE-RAISES with the default disposition — the
   # exit code a shell reads in `$?` stays exactly `128+N`, which is what the
   # dispatcher and the queue already parse (rc=143 being explainable is a
-  # standing contract, t_6bb29d46). SIGPIPE is deliberately NOT routed here: it
-  # measured never to leak the dir, and trapping it in a 967-line script that
-  # pipes through `head`/`tr` changes error paths this card has no evidence for.
+  # standing contract, t_6bb29d46).
+  #
+  # Why SIGPIPE IS routed here (t_5db4cbba, which decided this with measurement
+  # rather than by leaving it out — docs/audits/sigpipe-orphan-legs_t_5db4cbba.md):
+  # the fear was that a `trap … PIPE` turns a BENIGN early-closing consumer into a
+  # teardown. Measured against the shipped bash 3.2.57, the benign case does not
+  # exist: `bash scripts/run_tests.sh | head -c 200` already kills the pack today,
+  # with rc 141, BEFORE any leg launches. The trap cannot make that worse — it
+  # only adds the reap and the dir removal the pack was already owed. And the
+  # three pipes that are actually IN this script are all `$(ps … | tr -s ' ')`,
+  # where the writer is the external `ps` and the consumer is the command
+  # substitution reading to EOF: trapped and untrapped, that site is rc 0 and
+  # unchanged. The one thing the trap does change is the thing this handler is
+  # for: an external `kill -PIPE` stopped orphaning both legs in flight (2.0 mean
+  # measured before, 0.0 after).
+  #
+  # The handler's OWN banner writes into the very pipe that may have closed, and
+  # that is measured safe too (same arm): bash reports `echo: write error: Broken
+  # pipe` on stderr and keeps going, so the reap and the cleanup still run.
   local _sig="$1" _fallback="$2"
   echo
   echo "!! run_tests.sh RECEIVED SIG${_sig} at $(date '+%Y-%m-%d %H:%M:%S') — elapsed ${SECONDS}s, during suite: ${CURRENT_SUITE:-unknown}"
@@ -550,6 +566,15 @@ trap on_sigterm TERM
 # orphaned both legs in flight, because only on_sigterm reaped them.
 trap '_on_fatal_signal HUP 129' HUP
 trap '_on_fatal_signal QUIT 131' QUIT
+# t_5db4cbba: the third member of that family, decided by measurement rather than
+# by leaving it out. `kill -PIPE` orphaned both legs in flight (2.0 mean, 3/3
+# trials) and an early-closing reader — the ordinary `run_tests.sh | head` —
+# orphaned one (1.0 mean, 3/3) while the runner was still mid-pack. Both kept
+# their `128+N` code here: the handler re-raises, so a dispatcher and the queue
+# read 141 exactly as before. Full evidence, including the enumeration of every
+# pipe site in this script, is in
+# docs/audits/sigpipe-orphan-legs_t_5db4cbba.md.
+trap '_on_fatal_signal PIPE 141' PIPE
 
 # ━━━ no worker/dispatcher Kanban pin may reach a leg (t_7e143e04) ━──────────
 # Every leg runs with the vars in SUITE_ENV_UNSET REMOVED from its environment.
