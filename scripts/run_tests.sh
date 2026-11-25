@@ -851,6 +851,16 @@ for d in "${LEGS[@]}"; do
   # leg genuinely skips, the next reader has to be able to see WHY from the
   # canonical runner's output without re-running anything — a bare "N skipped"
   # does not tell an operator whether the guard ran or never got a tap.
+  # `-rf` is its counterpart for a RED leg, and the reason it is pinned rather
+  # than assumed (t_d41c1668): without it pytest suppresses the `FAILED <node
+  # id>` lines of its own short summary, so a red gate handed the reader a dot
+  # band and a FAILURES section and left them to reconstruct which tests failed.
+  # That reconstruction was measured being paid three times inside one card
+  # (t_00d9581d), whose mutation battery had to add `-rf` to its OWN pytest
+  # command while recording this very suppression as a known trap.
+  # Both flags are pinned on the argv pytest is actually handed by
+  # scripts/tests/test_run_tests_reporting_flags.py; the packed branch below
+  # carries the identical command, flag for flag.
   # Heartbeat per leg (see the HSCC_LEG_HEARTBEAT_SECONDS block above for the
   # why). Started BEFORE pytest and reaped right after, so its elapsed clock is
   # the leg's own, and the runner's $$ is passed rather than a pytest pid so
@@ -878,7 +888,7 @@ for d in "${LEGS[@]}"; do
       "$PY" "$ROOT/scripts/loadstress_leg.py" "$@"
   else
     env "${ENV_UNSET_ARGS[@]}" \
-      "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider \
+      "$PY" -m pytest -q -rs -rf "$ROOT/$d/tests" -p no:cacheprovider \
       -m "not loadstress" "$@"
   fi
   code=$?
@@ -1030,7 +1040,7 @@ else
             "$PY" "$ROOT/scripts/loadstress_leg.py" "$@"
         else
           env "${ENV_UNSET_ARGS[@]}" \
-            "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider \
+            "$PY" -m pytest -q -rs -rf "$ROOT/$d/tests" -p no:cacheprovider \
             -m "not loadstress" "$@"
         fi
         rc_inner=$?
