@@ -17,7 +17,9 @@ Two things the harness has to get right, both learned the hard way here:
     then blocks until it closes — a test-shaped version of the very "leg that
     cannot finish" failure mode this file is about.
 """
+import os
 import re
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -30,6 +32,29 @@ RUNNER = SCRIPTS / "run_tests.sh"
 
 # The "leg": a script with a child, i.e. what pytest looks like to a watcher.
 LEG_SH = "#!/usr/bin/env bash\nsleep {leg}\n"
+
+# ── the live leg is OBSERVER-driven, not timer-driven (t_49827b5d) ──────────
+# The `live` fixture used to be `sleep 3` at a 1 s cadence and the two
+# `>= 2 heartbeat lines` assertions read the log after that fixed 3 s. Under
+# the queue gate's background QoS that shape broke twice (#734 reported
+# "expected >=2 heartbeat lines in 3s at 1s cadence: got [1]"): a heartbeat
+# tick is not one sleep, it is `sleep 1` PLUS the `date`/`ps`/`pgrep` forks it
+# runs to build the line, and those forks are CPU work — exactly what a
+# throttled scheduler stretches. A fixed wall-clock window therefore measures
+# the scheduler, not the watcher, and a leg made longer to compensate is a
+# slower suite for everyone.
+#
+# So the leg now runs long (LEG_LIVE_CAP) and the TEST decides when it is done:
+# poll the redirected log, and as soon as it holds MIN_LIVE_LINES heartbeat
+# lines, terminate the leg's process group. Same on a fast box (it stops after
+# ~2 s instead of 3), bounded under throttle (it waits as long as the
+# scheduler needs, up to OBSERVE_DEADLINE_SECONDS), and the assertion is then
+# about the watcher's OUTPUT, not about winning a race with the CPU allocator.
+# Killing the whole group is also what keeps a throttled run from leaking a
+# `sleep 40` past the test.
+MIN_LIVE_LINES = 2
+OBSERVE_DEADLINE_SECONDS = 90.0
+LEG_LIVE_CAP_SECONDS = 40
 # The runner: heartbeat as its own child + a foreground leg + reap. Mirrors the
 # loop body of scripts/run_tests.sh.
 RUNNER_SH = (
@@ -72,15 +97,59 @@ def _run(tmp_path, interval, leg_seconds, name="runner"):
     return log.read_text()
 
 
+def _run_until_lines(tmp_path, interval, min_lines, name="hb_live"):
+    """Run a long fake leg and STOP it once its log has `min_lines` heartbeats.
+
+    The leg's length is a ceiling, not a schedule: the observer ends it. That
+    is what makes the cadence assertions scheduler-independent — a background
+    QoS run just takes longer to reach the same two lines, it does not take
+    fewer of them. Returns the log as the dispatcher would read it.
+    """
+    log = tmp_path / f"{name}.log"
+    with open(log, "wb") as fh:
+        proc = subprocess.Popen(
+            ["bash", str(_runner_script(tmp_path, interval,
+                                        LEG_LIVE_CAP_SECONDS, name))],
+            stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.time() + OBSERVE_DEADLINE_SECONDS
+        seen = 0
+        while time.time() < deadline:
+            seen = len(_lines(log.read_text()))
+            if seen >= min_lines:
+                break
+            time.sleep(0.1)
+        # Terminate the whole group (runner + leg + heartbeat) so a leg that
+        # was never reaped cannot outlive the test holding the log's write end.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:                 # pragma: no cover
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait(timeout=30)
+    out = log.read_text()
+    assert len(_lines(out)) >= min_lines or seen >= min_lines, (
+        f"the watcher printed {seen} line(s) in {OBSERVE_DEADLINE_SECONDS}s at "
+        f"a {interval}s cadence — it is not ticking at all:\n{out!r}")
+    return out
+
+
 def _lines(out):
     return [m for m in (LINE.match(l) for l in out.splitlines()) if m]
 
 
 @pytest.fixture(scope="module")
 def live(tmp_path_factory):
-    """One real leg, asserted on by several tests (each run costs leg_seconds)."""
+    """One real leg, asserted on by several tests.
+
+    The leg runs until this fixture has SEEN `MIN_LIVE_LINES` heartbeat lines
+    (see the OBSERVE block above) — so the cost is ~2 s on a normal box and
+    however long a throttled scheduler needs, never a fixed wall-clock gamble.
+    """
     d = tmp_path_factory.mktemp("hb_live")
-    return _run(d, interval=1, leg_seconds=3)
+    return _run_until_lines(d, interval=1, min_lines=MIN_LIVE_LINES)
 
 
 def test_streams_elapsed_and_cpu_to_a_redirected_file(live):
