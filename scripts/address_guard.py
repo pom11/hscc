@@ -307,11 +307,11 @@ def is_hostname_occurrence(matched):
 def address_hits(text):
     """The address-only view of ``all_hits``.
 
-    For the places that must reason about an *address* specifically while the home
-    and hostname classes are still advisory: ``report``'s fix text, and the
-    compiled-`.pyc` test, whose blob legitimately carries its own ``co_filename`` —
-    which on a Linux runner lives inside that user's home directory, and is not
-    the thing that test is blind to.
+    For the places that must reason about an *address* specifically while a class
+    is still advisory: ``report``'s fix text, and the compiled-`.pyc` test, whose
+    blob legitimately carries its own ``co_filename`` — which on a Linux runner
+    lives inside that user's home directory, and is not the thing that test is
+    blind to.
     """
     return [(i, v) for i, v in all_hits(text)
             if not is_home_occurrence(v) and not is_hostname_occurrence(v)]
@@ -381,7 +381,7 @@ def is_home_offender(offender):
 # measures zero, so blocking does not freeze the merge queue. Set it False to
 # land the detector advisory-first on a tree that has not been measured, exactly
 # the posture HOME_PATHS_ENFORCE documents.
-HOSTNAMES_ENFORCE = False
+HOSTNAMES_ENFORCE = True
 HOSTNAMES_ENFORCE_ENV = "HSCC_ADDRESS_GUARD_HOSTNAME_ENFORCE"
 
 # Recognisable tail on a hostname offender, same reason as the home suffix:

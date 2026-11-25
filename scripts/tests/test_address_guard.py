@@ -721,6 +721,9 @@ def test_hostname_class_blocks_by_default_and_can_be_switched_off(monkeypatch):
     """Both halves of the posture: the class is ON now that the baseline is clean,
     and the switch still turns it advisory without turning the DETECTOR off."""
     (found,) = address_guard.scan_blob("docs/x.md", f"host {_HOST_TRIP}\n".encode())
+    assert address_guard.HOSTNAMES_ENFORCE is True, (
+        "the hostname class landed advisory although its tracked-tree baseline was"
+        " scrubbed to zero — that is the blind gate this card replaces")
 
     monkeypatch.setattr(address_guard, "HOSTNAMES_ENFORCE", False)
     assert address_guard.advisory([found]) == [found]
@@ -730,6 +733,21 @@ def test_hostname_class_blocks_by_default_and_can_be_switched_off(monkeypatch):
     assert address_guard.blocking([found]) == [found], (
         "HOSTNAMES_ENFORCE=True did not block: the rule can never be turned on")
     assert address_guard.advisory([found]) == []
+
+
+def test_report_explains_a_hostname_differently_from_an_address(monkeypatch):
+    """The fix is `<host>`, not an address placeholder; advisory states itself."""
+    planted = address_guard.hostname_offender(
+        "docs/audit.md", 4, _HOST_TRIP.split(".")[0])
+    text = address_guard.report([planted])
+    assert "docs/audit.md:4" in text
+    assert address_guard.HOSTNAME_PLACEHOLDER in text
+    assert "PUBLIC" in text and "blocked" in text
+    assert "10.0.0.x" not in text, "the hostname fix text suggested an address scrub"
+
+    monkeypatch.setattr(address_guard, "HOSTNAMES_ENFORCE", False)
+    advisory_text = address_guard.report([planted])
+    assert "ADVISORY" in advisory_text and "HOSTNAMES_ENFORCE" in advisory_text
 
 
 def test_an_address_never_hides_behind_a_hostname_on_the_same_line(monkeypatch):
