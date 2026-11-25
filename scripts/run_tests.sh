@@ -818,7 +818,24 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
   # "where does suite scratch live" is how a run stops being reproducible), and
   # never inside the sealed HOME. A tmp dir it cannot make is a reason to run
   # serially, not a reason to fail a gate.
-  LEG_TMP="$(mktemp -d /tmp/hscc-legs-XXXXXX 2>/dev/null || true)"
+  #
+  # `HSCC_LEG_TMP_ROOT` moves the ROOT, never the mechanism: the default is the
+  # literal `/tmp` and `$TMPDIR` is still not consulted (guarded by
+  # test_the_default_leg_root_stays_tmp_even_with_a_tmpdir). The seam exists
+  # because `/tmp/hscc-legs-XXXXXX` is a HOST-GLOBAL namespace and a gate no
+  # longer has the box to itself — since #800/#801 two packed runs overlap on
+  # one host (a queue gate plus CI-overlap, a gate plus a worker's suite), and
+  # each creates and `rm -rf`s a dir there during the other's window. While the
+  # root was unmovable, no test could tell "this run leaked" from "a sibling run
+  # existed" — that is what red-gated PR #786's gate on 2026-11-25. Nothing in
+  # production sets it; it is a test seam.
+  LEG_TMP_ROOT="${HSCC_LEG_TMP_ROOT:-/tmp}"
+  case "$LEG_TMP_ROOT" in
+    /*) ;;
+    *) echo "parallel: HSCC_LEG_TMP_ROOT='$LEG_TMP_ROOT' is not an absolute path — using /tmp"
+       LEG_TMP_ROOT=/tmp ;;
+  esac
+  LEG_TMP="$(mktemp -d "$LEG_TMP_ROOT/hscc-legs-XXXXXX" 2>/dev/null || true)"
   if [ -n "$LEG_TMP" ] && [ -d "$LEG_TMP" ]; then
     LEG_PIDFILE="$LEG_TMP/legs.tsv"
     : > "$LEG_PIDFILE"
@@ -828,7 +845,7 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
   else
     LEG_TMP=""
     PAR=1
-    echo "parallel: cannot create /tmp/hscc-legs-XXXXXX — running SERIALLY"
+    echo "parallel: cannot create $LEG_TMP_ROOT/hscc-legs-XXXXXX — running SERIALLY"
   fi
 fi
 
