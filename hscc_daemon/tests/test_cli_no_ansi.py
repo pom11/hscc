@@ -180,13 +180,11 @@ class TestNoAnsiInstall:
     """install/uninstall/plist confirmations — disk + subprocess patched to tmp."""
 
     def _patch_install_paths(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(install_mod, "PLIST_DIR", str(tmp_path / "plists"))
-        monkeypatch.setattr(install_mod, "PLIST_FILE",
-                            str(tmp_path / "plists" / "com.hermes.hscc_daemon.plist"))
-        monkeypatch.setattr(install_mod, "SYSTEMD_USER_DIR",
-                            tmp_path / "systemd")
-        monkeypatch.setattr(install_mod, "SYSTEMD_UNIT_FILE",
-                            tmp_path / "systemd" / "com.hermes.hscc_daemon.service")
+        # PLIST_DIR / PLIST_FILE / SYSTEMD_* are NOT patched here: the autouse
+        # _isolate_hscc seal (t_2f09d480) already redirects them under this
+        # test's tmp dir, and leaving them alone is what makes the seal
+        # load-bearing (a test that patches its own path stays green even if
+        # the seal is deleted).
         # install.py holds its OWN module-level HSCC_DIR/PID_FILE — patching
         # daemon_ops.PID_FILE (what _patch_state_dir does) does NOT cover it.
         # Both cmd_install and cmd_uninstall call _stop_running_daemon(), which
@@ -216,10 +214,9 @@ class TestNoAnsiInstall:
 
     def test_uninstall_launchd(self, monkeypatch, tmp_path, fake_subprocess):
         self._patch_install_paths(monkeypatch, tmp_path)
-        monkeypatch.setattr(install_mod, "PLIST_FILE",
-                            str(tmp_path / "plists" / "com.hermes.hscc_daemon.plist"))
-        (tmp_path / "plists").mkdir(parents=True, exist_ok=True)
-        Path(tmp_path / "plists" / "com.hermes.hscc_daemon.plist").write_text("x")
+        plist = Path(install_mod.PLIST_FILE)
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text("x")
         monkeypatch.setattr(install_mod, "_service_manager", lambda: "launchd")
         fake_subprocess.set_result(returncode=0)
         _no_ansi(install_mod.cmd_uninstall)

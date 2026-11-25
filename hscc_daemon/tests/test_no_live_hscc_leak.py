@@ -154,11 +154,12 @@ def test_suite_never_writes_live_hscc(tmp_path):
     for fn in planted_plists:
         _plant_at(os.path.join(ws, "Library", "LaunchAgents", fn),
                   _PLANTED_PLIST)
-    # The two other $HOME-rooted plist readers in this package (unsealed as of
-    # this card, tracked as a follow-up): install.py writes/removes
-    # com.hermes.hscc_daemon.plist, api_launchd.py writes/removes
-    # com.hscc.api.plist. Planting them costs nothing and turns the planted
-    # tree into the whole directory a forgetful test could damage.
+    # The two other $HOME-rooted plist surfaces in this package, sealed by
+    # t_2f09d480: install.py writes/removes com.hermes.hscc_daemon.plist,
+    # api_launchd.py writes/removes com.hscc.api.plist. Planting them turns
+    # the planted tree into the whole directory a forgetful test could damage,
+    # and test_plist_seal_install_api_t_2f09d480.py drives both paths here
+    # without patching them.
     from hscc_daemon import api_launchd as _api_launchd
     from hscc_daemon import install as _install
 
@@ -216,6 +217,16 @@ def test_suite_never_writes_live_hscc(tmp_path):
         # manifest diff below fails. No fence or fork-spy can catch that class
         # of leak — it is a bare ``os.remove``.
         "test_event_driven_cli_no_ansi.py",
+        # t_2f09d480: install.py and api_launchd.py WRITE and bare-``os.remove``
+        # their launchd plists (and install.py's systemd units). This file
+        # patches no path of its own, so it is the sandboxed proof that both
+        # new seal entries are load-bearing: with either entry removed, the
+        # planted com.hermes.hscc_daemon.plist / com.hscc.api.plist is
+        # rewritten or deleted and the manifest diff below goes red.
+        # Only the write/remove class: its seal-constant cases self-assert the
+        # tmp redirect, which is the fixture pin's job, not this sandbox's.
+        "test_plist_seal_install_api_t_2f09d480.py"
+        "::TestWriteRemoveLandsInsideTheSeal",
     ]
     paths = [os.path.join(tests_dir, t) for t in targets]
 
