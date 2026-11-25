@@ -139,6 +139,63 @@ the fix reverted it reproduces `✗ .github/scripts (pytest exit 1)` exactly.
 parent card measured `1 failed of 702`; that failure line was never captured and this
 run did not reproduce it. Not yet explained — see LEFT.
 
-## 4. Clean full-roster run at p=2
+## 4. Clean full-roster run at p=2, with both fixes
 
-(pending at the time of this commit — see the card's completion handoff)
+The card's bar, run on the committed tree (`86f45108`, i.e. `0e7fe466` plus the two
+fixes), nothing else of mine on the box, load 3.5 (a sibling merge-queue gate was in
+flight for part of it — it is not the flake's variable any more, but it is stated):
+
+```
+legs: FULL SUITE (12 legs)
+parallel: 2 legs at a time; leg logs in /tmp/hscc-legs-ZNUui5
+...
+  ✓ hscc-bootstrap  ✓ hscc-commands  ✓ hscc-roles   ✓ hscc-cluster
+  ✓ hscc-project    ✓ hscc_daemon    ✓ sparkrun-hermes  ✓ hscc-api
+  ✓ memori_byodb    ✓ scripts        ✓ .github/scripts  ✓ comfyui-sparkrun
+ALL GREEN
+LEGEXIT=0
+```
+
+**12/12 green. Wall 713 s.** The per-leg `parallel: done` lines sum to **1396 s of leg
+work in 713 s of wall = 1.96×**, i.e. the pack is close to the ceiling p=2 allows on
+this 14-core host.
+
+Recycling is what buys it, and the log shows it directly rather than by inference. The
+leg that proves the point is `sparkrun-hermes`: `elapsed=4s rc=0 pack=241s`. It did not
+wait its turn behind whatever was oldest — it launched into a slot the moment
+`hscc-bootstrap` (237 s) vacated one and finished 4 s later, 163 s before the pack ended.
+The same shape recurs across the run (`memori_byodb` 4 s at pack=408s, `hscc-project`
+7 s at 72s). Under the pre-recycling loop measured by the parent card these four-second
+legs each sat queued behind a multi-minute neighbour, which is exactly why that loop
+printed **1.0x** for seven legs of 627 s work in 615 s of wall. The `pack=` column is a
+recycling trace, and it is worth keeping for that reason alone.
+
+Per-leg durations from this run, for anyone re-deriving the schedule:
+`hscc-api 449 s, hscc_daemon 331 s, scripts 248 s, hscc-bootstrap 237 s,
+hscc-cluster 54 s, comfyui-sparkrun 38 s, .github/scripts 16 s, hscc-roles 8 s,
+hscc-project 7 s, sparkrun-hermes 4 s, memori_byodb 4 s, hscc-commands 0 s`.
+
+Note `hscc-commands elapsed=0s rc=0` is genuine, not the section-2 defect: its log
+holds `93 passed in 0.25s`. `elapsed=0s` is only a defect when the block under the
+banner is empty — which is precisely the distinction the new pin test asserts on.
+
+### What this does NOT establish
+
+One clean run. The `hscc-api` fix is backed by 30 packed-posture repeats at the node
+level (0 red, against 8 red before), but the roster bar is one green run and that is
+what this is. A second and third run are cheap now and belong on the flip.
+
+## 5. Status of the default
+
+The roster is green packed, which was the stated precondition for moving the default
+off 1. The default is **still 1 in this commit**: `test_the_default_is_the_serial_stream_and_prints_nothing_new`
+pins the current contract ("unset is silent, byte-identical to the pre-concurrency
+runner"), and moving the default is a contract change — that pin has to be re-argued,
+the `WHY THE DEFAULT IS 1 AND NOT 2` block rewritten against the new measurement, and
+the narrowed `hscc_daemon scripts` gate timed at the new posture. That is a distinct
+slice, not a leftover of this one, and it is now unblocked rather than blocked.
+
+Derived, not measured, from the durations above: the two legs the local queue actually
+runs (`hscc_daemon` 331 s + `scripts` 248 s = 579 s serial) pack to roughly 340 s at
+p=2, about 1.7×. Labelled derived on purpose — nobody has run that gate packed and
+timed it, and the card asks for a measured number.

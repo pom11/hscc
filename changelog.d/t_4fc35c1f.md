@@ -49,7 +49,19 @@ task: t_4fc35c1f
   xfailed** unchanged from before the fix at the file level (the flake is invisible in a
   single quiet run, which is the point), plus the repeat evidence above: 30 runs of the
   racing node under the same burner load, red 8 → green 0.
-* runner: `scripts` measured **green packed** — 699 passed, 4 skipped in 246.22 s at
-  `p=2` beside `.github/scripts`. The `1 failed of 702` the parent card recorded did not
-  reproduce and its failure line is still un-captured; recorded as unresolved rather
-  than absorbed.
+* runner: **the full twelve-leg roster is GREEN packed**, which is the bar the
+  parent card set for moving the default and had not been met. `HSCC_TEST_PARALLEL=2`
+  on the committed tree with both fixes: **12/12 legs green, `LEGEXIT=0`, 713 s wall
+  against 1396 s of summed leg work = 1.96×**, on this host at load 3.5. The `pack=`
+  column is the recycling trace that buys it: `sparkrun-hermes` `elapsed=4s pack=241s`
+  — launched into the slot `hscc-bootstrap` (237 s) vacated, finished 4 s later, 163 s
+  before the pack ended; same shape for `memori_byodb` (4 s) and `hscc-project` (7 s).
+  Those are the legs the pre-recycling loop left queued behind a multi-minute
+  neighbour, which is exactly why that loop measured **1.0x**.
+* runner: the narrowed `hscc_daemon scripts` gate at p=2 is **derived, not measured**
+  (~340 s packed vs 579 s serial from this run's per-leg durations). Stated as derived
+  because nobody has timed that gate packed, and the card asks for a measured number.
+* runner: `scripts` measured **green packed** twice — 699 passed, 4 skipped in 246.22 s
+  beside `.github/scripts`, and again inside the full roster at 248 s. The `1 failed of
+  702` the parent card recorded did not reproduce and its failure line is still
+  un-captured; recorded as unresolved rather than absorbed.
