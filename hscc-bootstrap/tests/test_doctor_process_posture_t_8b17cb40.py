@@ -35,11 +35,12 @@ CHECK = pp.CHECK_NAME
 
 # A probe output for a loaded job, in the shape `launchctl print` really prints
 # (verified against `launchctl print gui/<uid>/com.hermes.hscc_daemon` on this
-# host). It carries NO process-type line — the card measured that too, and the
-# whole design rests on it: the plist is the authority, `spawn type` corroborates.
+# host, with the home replaced by the sanctioned fixture user). It carries NO
+# process-type line — the card measured that too, and the whole design rests on
+# it: the plist is the authority, `spawn type` corroborates.
 LAUNCHCTL_LOADED = """gui/501/com.hermes.hscc_daemon = {
 \tactive count = 1
-\tpath = /Users/u/Library/LaunchAgents/com.hermes.hscc_daemon.plist
+\tpath = /Users/hscc-fixture/Library/LaunchAgents/com.hermes.hscc_daemon.plist
 \ttype = LaunchAgent
 \tstate = running
 \tpid = 45663
@@ -48,6 +49,38 @@ LAUNCHCTL_LOADED = """gui/501/com.hermes.hscc_daemon = {
 \tjetsamproperties category = daemon
 }
 """
+
+
+def test_the_probe_pulls_spawn_type_and_plist_path_out_of_real_print_output():
+    """The two regexes, driven by the text `launchctl print` really emits.
+
+    ``spawn type`` is what tells the loaded posture apart and ``path`` is which
+    plist launchd read; both are parsed out of a dump that contains no
+    process-type line at all, which is the fact the design rests on.
+    """
+    seen = []
+
+    def runner(argv, timeout=10):
+        seen.append(list(argv))
+        return 0, LAUNCHCTL_LOADED
+
+    available, loaded, spawn, path, _note = pp.launchd_probe(_run_probe=runner)
+    assert (available, loaded, spawn) == (True, True, "daemon")
+    assert path.endswith("Library/LaunchAgents/com.hermes.hscc_daemon.plist")
+    assert len(seen) == 1 and seen[0][0] == "launchctl"
+    assert seen[0][1] == "print" and seen[0][2].startswith("gui/")
+    assert "com.hermes.hscc_daemon" in seen[0][2]
+
+    # rc != 0 is "not loaded", not "broken": the caller must not call a missing
+    # job a posture fault. (The runner's contract is (returncode, output), the
+    # same shape doctor_supervision._run returns.)
+    assert pp.launchd_probe(
+        _run_probe=lambda argv, timeout=10: (3, "Could not find service")
+    )[:2] == (True, False)
+    # and a missing binary is an unavailable probe, not a verdict.
+    assert pp.launchd_probe(
+        _run_probe=lambda argv, timeout=10: (None, "command not found: launchctl")
+    )[0] is False
 
 
 def write_plist(path, **keys):
