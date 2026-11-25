@@ -554,7 +554,7 @@ class TestServeCmdMismatchRefused:
     def test_wrong_recipe_is_refused(self):
         from hscc_daemon import serving
         bad = self._good_serve_cmd()
-        bad[2] = "/Users/desac/recipes/orch.yaml"   # wrong recipe
+        bad[2] = "/Users/hscc-fixture/recipes/orch.yaml"   # wrong recipe
         u = self._unit(serve_cmd=bad)
         assert serving._serve_cmd_mismatch(u, bad) != ""
 

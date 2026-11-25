@@ -40,7 +40,7 @@
 
 set -u
 PROXY_URL="http://localhost:4000/v1/models"
-SPARKRUN="/Users/desac/.local/bin/sparkrun"
+SPARKRUN="${SPARKRUN:-$HOME/.local/bin/sparkrun}"
 CLUSTER="hscc"
 PORT=4000
 

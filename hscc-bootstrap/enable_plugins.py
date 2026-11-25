@@ -294,15 +294,13 @@ SINGLE_QUERY_MODE = os.environ.get("HSCC_SINGLE_QUERY_MODE", "approve")
 # topology.
 OUT_OF_TREE_WORKTREE_ROOT = os.environ.get(
     "HSCC_OUT_OF_TREE_WORKTREE_ROOT", "~/dev/.worktrees")
+# There is deliberately NO default repo list: hardcoding one operator's
+# compiler-root projects here would publish their names in a public repo. An
+# install that needs out-of-tree worktrees sets HSCC_OUT_OF_TREE_WORKTREE_REPOS
+# (comma-separated absolute paths) explicitly.
 OUT_OF_TREE_WORKTREE_REPOS = [
     r.strip() for r in os.environ.get(
-        "HSCC_OUT_OF_TREE_WORKTREE_REPOS",
-        ",".join([
-            "/Users/desac/dev/EcoFire_customizations_bc",  # Microsoft AL root
-            "/Users/desac/dev/ecofire",                    # Flutter app
-            "/Users/desac/dev/efsdriver",                  # Flutter app
-        ]),
-    ).split(",") if r.strip()
+        "HSCC_OUT_OF_TREE_WORKTREE_REPOS", "").split(",") if r.strip()
 ]
 
 

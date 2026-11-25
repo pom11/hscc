@@ -10,7 +10,7 @@ dirs with known config.yaml, inject a KNOWN effective dict at the
 ``hscc._load_effective_config`` seam (the point that spawns Hermes' real
 loader), and assert the command's output reports those effective values and
 flags a discrepancy whenever the injected effective value differs from the raw
-yaml. They never touch live /Users/desac/.hermes profiles.
+yaml. They never touch live ~/.hermes profiles.
 
 Invariants pinned (mirroring test_hscc_theme.py):
 - --json stdout stays PURE JSON: raw print(json.dumps), never ANSI, never

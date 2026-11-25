@@ -546,14 +546,14 @@ def test_shared_board_splits_cards_across_projects_by_workspace():
     """A shared board holding cards from three projects splits each card to its
     own project by workspace_path, not by board (all three share the board)."""
     projects = [
-        _proj("flightdeck", "/Users/desac/dev/flightdeck"),
-        _proj("hscc", "/Users/desac/dev/hscc"),
-        _proj("sphoin", "/Users/desac/dev/sphoin_engine"),
+        _proj("flightdeck", "/Users/hscc-fixture/dev/flightdeck"),
+        _proj("hscc", "/Users/hscc-fixture/dev/hscc"),
+        _proj("sphoin", "/Users/hscc-fixture/dev/sphoin_engine"),
     ]
     cards = [
-        _att("a", "/Users/desac/dev/flightdeck"),
-        _att("b", "/Users/desac/dev/hscc/.worktrees/t_b"),
-        _att("c", "/Users/desac/dev/sphoin_engine/.worktrees/t_c"),
+        _att("a", "/Users/hscc-fixture/dev/flightdeck"),
+        _att("b", "/Users/hscc-fixture/dev/hscc/.worktrees/t_b"),
+        _att("c", "/Users/hscc-fixture/dev/sphoin_engine/.worktrees/t_c"),
     ]
     by_id = {c["id"]: kanban.project_for_card(c, projects) for c in cards}
     assert by_id["a"] is projects[0]
@@ -564,9 +564,9 @@ def test_shared_board_splits_cards_across_projects_by_workspace():
 def test_worktree_path_attributes_to_parent_repo():
     """A card whose workspace is a worktree under a repo belongs to that repo's
     project — the common live case (`<repo>/.worktrees/<card>`)."""
-    projects = [_proj("hscc", "/Users/desac/dev/hscc")]
+    projects = [_proj("hscc", "/Users/hscc-fixture/dev/hscc")]
     result = kanban.project_for_card(
-        _att("t", "/Users/desac/dev/hscc/.worktrees/t_X"), projects
+        _att("t", "/Users/hscc-fixture/dev/hscc/.worktrees/t_X"), projects
     )
     assert result is projects[0]
 
@@ -574,7 +574,7 @@ def test_worktree_path_attributes_to_parent_repo():
 def test_null_and_empty_workspace_path_are_unattributed():
     """A card with NULL/empty workspace_path lands in UNATTRIBUTED rather than
     vanishing or being guessed into a project."""
-    projects = [_proj("hscc", "/Users/desac/dev/hscc")]
+    projects = [_proj("hscc", "/Users/hscc-fixture/dev/hscc")]
     assert kanban.project_for_card(_att("a", None), projects) is kanban.UNATTRIBUTED
     assert kanban.project_for_card(_att("b", ""), projects) is kanban.UNATTRIBUTED
     # a card dict missing the key entirely is also unattributed
@@ -584,9 +584,9 @@ def test_null_and_empty_workspace_path_are_unattributed():
 def test_unrecognized_workspace_path_is_unattributed():
     """A workspace_path that resolves to no registered repo is UNATTRIBUTED,
     never silently dropped and never guessed into a project."""
-    projects = [_proj("hscc", "/Users/desac/dev/hscc")]
+    projects = [_proj("hscc", "/Users/hscc-fixture/dev/hscc")]
     result = kanban.project_for_card(
-        _att("t", "/Users/desac/dev/other-project/.worktrees/t_X"), projects
+        _att("t", "/Users/hscc-fixture/dev/other-project/.worktrees/t_X"), projects
     )
     assert result is kanban.UNATTRIBUTED
 
@@ -594,32 +594,32 @@ def test_unrecognized_workspace_path_is_unattributed():
 def test_board_is_never_the_attribution_rule():
     """Attribution ignores board entirely: a card from another board whose
     workspace_path matches a project's repo is still attributed BY PATH."""
-    projects = [_proj("hscc", "/Users/desac/dev/hscc")]
-    card_h = _att("t", "/Users/desac/dev/hscc")
+    projects = [_proj("hscc", "/Users/hscc-fixture/dev/hscc")]
+    card_h = _att("t", "/Users/hscc-fixture/dev/hscc")
     card_h["board"] = "unrelated-board"
     assert kanban.project_for_card(card_h, projects) is projects[0]
 
 
 def test_path_comparison_trailing_slash_insensitive():
     """A trailing slash on either side does not change the attribution."""
-    projects = [_proj("hscc", "/Users/desac/dev/hscc/")]
+    projects = [_proj("hscc", "/Users/hscc-fixture/dev/hscc/")]
     assert kanban.project_for_card(
-        _att("a", "/Users/desac/dev/hscc/"), projects
+        _att("a", "/Users/hscc-fixture/dev/hscc/"), projects
     ) is projects[0]
     assert kanban.project_for_card(
-        _att("b", "/Users/desac/dev/hscc"), projects
+        _att("b", "/Users/hscc-fixture/dev/hscc"), projects
     ) is projects[0]
 
 
 def test_path_comparison_rejects_sibling_prefix():
     """`/dev/hscc-evil` and `/dev/hscc-2` must NOT match `/dev/hscc` — prefix
     matching is segment-based, so a sibling project is never folded in."""
-    projects = [_proj("hscc", "/Users/desac/dev/hscc")]
+    projects = [_proj("hscc", "/Users/hscc-fixture/dev/hscc")]
     assert kanban.project_for_card(
-        _att("a", "/Users/desac/dev/hscc-evil/.worktrees/t_a"), projects
+        _att("a", "/Users/hscc-fixture/dev/hscc-evil/.worktrees/t_a"), projects
     ) is kanban.UNATTRIBUTED
     assert kanban.project_for_card(
-        _att("b", "/Users/desac/dev/hscc2"), projects
+        _att("b", "/Users/hscc-fixture/dev/hscc2"), projects
     ) is kanban.UNATTRIBUTED
 
 

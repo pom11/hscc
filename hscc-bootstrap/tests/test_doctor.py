@@ -453,12 +453,12 @@ class TestGatewayCheck:
 
     # The gateway's real argv on this fleet, read back verbatim from the launchd
     # job's ProgramArguments (`launchctl list ai.hermes.gateway`).
-    REAL_ARGV = ("/Users/desac/.hermes/hermes-agent/venv/bin/python "
+    REAL_ARGV = ("/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python "
                  "-m hermes_cli.main gateway run --replace")
     LAUNCHD_OUT = (
         '{\n\t"Label" = "ai.hermes.gateway";\n\t"OnDemand" = true;\n'
         '\t"LastExitStatus" = 9;\n\t"PID" = 74857;\n'
-        '\t"Program" = "/Users/desac/.hermes/hermes-agent/venv/bin/python";\n};\n')
+        '\t"Program" = "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python";\n};\n')
 
     @pytest.fixture(autouse=True)
     def _darwin_launchd(self, monkeypatch):
@@ -535,7 +535,7 @@ class TestGatewayCheck:
     @pytest.mark.parametrize("argv", [
         # A python running doctor (or any hermes CLI work) — must NOT match,
         # or doctor would report a gateway it is itself pretending to be.
-        "python /Users/desac/.hermes/plugins/hscc_daemon/doctor.py --json",
+        "python /Users/hscc-fixture/.hermes/plugins/hscc_daemon/doctor.py --json",
         "/venv/bin/python -m hermes_cli.main -p qa --cli chat -q work kanban task t_x",
         # A prompt that merely says the words: every token is present and
         # adjacent, but a gateway server never takes a chat prompt.
@@ -546,7 +546,7 @@ class TestGatewayCheck:
         # Unrelated processes that share one token.
         "/usr/sbin/httpd -D FOREGROUND",
         "python -m venv /tmp/gateway",
-        "/Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest hscc-bootstrap",
+        "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python -m pytest hscc-bootstrap",
         "",
         "   ",
     ])

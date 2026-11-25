@@ -105,13 +105,13 @@ def test_round_trip_save_load(tmp_path):
     projects = [
         Project(
             name="hscc",
-            repo="/Users/desac/dev/hscc",
+            repo="/Users/hscc-fixture/dev/hscc",
             board="hscc",
             topic=140,
-            verify="cd /Users/desac/dev/hscc && ./scripts/run_tests.sh",
+            verify="cd /Users/hscc-fixture/dev/hscc && ./scripts/run_tests.sh",
             roadmap="docs/ROADMAP.md",
         ),
-        Project(name="bare", repo="/Users/desac/dev/bare"),
+        Project(name="bare", repo="/Users/hscc-fixture/dev/bare"),
     ]
 
     save_registry(projects, str(reg))
@@ -134,12 +134,12 @@ def test_deploy_fields_round_trip(tmp_path):
     projects = [
         Project(
             name="svc",
-            repo="/Users/desac/dev/svc",
+            repo="/Users/hscc-fixture/dev/svc",
             installed_version_cmd="cat /opt/svc/version",
             version_file="VERSION",
             deployed_at_cmd="stat -c %Y /opt/svc/binary",
         ),
-        Project(name="plain", repo="/Users/desac/dev/plain"),
+        Project(name="plain", repo="/Users/hscc-fixture/dev/plain"),
     ]
 
     save_registry(projects, str(reg))

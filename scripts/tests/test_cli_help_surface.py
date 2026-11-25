@@ -119,7 +119,6 @@ _SIBLING_PY_NAMES = ("python3.11", "python3.12", "python3.13")
 _SIBLING_CANDIDATES = (
     "~/.hermes/hermes-agent/venv/bin/python",
     "~/miniconda3/envs/p313/bin/python",
-    "/Users/desac/miniconda3/envs/p313/bin/python",
     *_SIBLING_PY_NAMES,
 )
 
@@ -508,8 +507,8 @@ _A_RECEIPT_RE = None
 # by the sibling. Measured in the 2.17.5 queue gate (PR #767, 02:46Z) and
 # reproduced here at background QoS: **334.69 s** of the leg's 1009 s, with the
 # leg's `[leg-heartbeat]` naming exactly this child —
-# `first_child=/Users/desac/min... 02:56`, i.e. the whole leg parked on
-# `~/miniconda3/envs/p313/bin/python` while it re-launched the CLI 329 times.
+# `first_child=~/miniconda3/envs/p313/bin/python 02:56`, i.e. the whole leg
+# parked on that interpreter while it re-launched the CLI 329 times.
 # That is 33 % of the leg spent re-proving, on a second CPython, a property the
 # sibling cannot vary except through argparse's own rendering.
 #

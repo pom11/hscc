@@ -2,8 +2,9 @@
 """Edge case: ring-buffer eviction (oldest_seq > 1). Prove paging still
 converges with no gaps/dups even when frames fell off retention.
 """
+import os
 import sys
-sys.path.insert(0, '/Users/desac/.hermes/kanban/boards/hscc/workspaces/t_3359b983/hscc/hscc-api')
+sys.path.insert(0, os.path.expanduser('~/.hermes/kanban/boards/hscc/workspaces/t_3359b983/hscc/hscc-api'))
 import session_event
 
 session_event.reset_stores()

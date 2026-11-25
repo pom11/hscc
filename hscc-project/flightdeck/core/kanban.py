@@ -863,7 +863,7 @@ def _resolve_path(path) -> str:
     """Normalise a filesystem path for comparison.
 
     Expands a leading ``~``, resolves symlinks (``realpath``), and strips
-    trailing slashes, so ``~/dev/flightdeck``, ``/Users/desac/dev/flightdeck/``
+    trailing slashes, so ``~/dev/flightdeck``, ``$HOME/dev/flightdeck/``
     and a symlinked checkout all reduce to the same canonical string. Returns
     ``""`` for empty/None input. ``realpath`` also normalises a path that does
     not exist on disk (it collapses ``.``/``..`` and ``//`` segments), which is
