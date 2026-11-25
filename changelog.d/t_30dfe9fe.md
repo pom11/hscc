@@ -44,5 +44,8 @@ task: t_30dfe9fe
   `no such task: …`. The module's `_ensure_fix_card` was then run end to end
   against that temp home: it created `t_6fdd11d3`, recorded it in the project
   map, and the second call reused the same id with no second create.
+- The suite's autouse board-handback fence now also stubs `_hermes_cli`, so the
+  new probe/create route cannot reach the operator's boards from any test —
+  not only from the ones that inject a `handback=`.
 - `python3 scripts/changelog_fragments.py check` → pointer block intact.
   `python3 scripts/address_guard.py --tracked` clean.

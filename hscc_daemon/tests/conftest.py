@@ -757,6 +757,10 @@ def _hermetic_board_handback(monkeypatch):
 
     monkeypatch.setattr(merge_queue, "default_handback",
                         lambda card, assignee, message: False)
+    # The hand-back's fix-card probe/create is a second route to the CLI
+    # (t_30dfe9fe): a test that parks a red PR on a board-named project must
+    # not run `hermes kanban show/create` against the operator's boards either.
+    monkeypatch.setattr(merge_queue, "_hermes_cli", lambda: None)
     yield
 
 
