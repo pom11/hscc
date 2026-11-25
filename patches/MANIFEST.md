@@ -24,6 +24,7 @@ below). What remains carried is the unabsorbed delta:
 | 0010 | test(kanban): prove caps resolve live each tick (`tests/gateway/test_kanban_caps_live_reload.py`) |
 | 0011 | fix(kanban): reset started_at on reclaim and set fresh on each claim (`hermes_cli/kanban_db.py`) |
 | 0012 | feat(kanban): configurable out-of-tree worktree root for compiler-root repos (`hermes_cli/kanban_db_workspace.py` + `tests/hermes_cli/test_kanban_worktree_isolation.py`) |
+| 0013 | fix(kanban): resolve a card whose `active_pr` PR is already MERGED; terminal `active_pr_resolved` hold, cached merge-state probe, deduped guarded event (`hermes_cli/kanban_pr_acceptance.py` + `hermes_cli/kanban_db_dispatch.py` + `tests/hermes_cli/test_kanban_active_pr_merge_resolve.py`) |
 
 Notes on the re-base:
 
