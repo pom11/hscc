@@ -30,11 +30,19 @@
 #     cleanup cannot kill only half the burners.
 #   * HARD TIMEOUT. A watchdog subshell holds a `sleep <timeout>`, then writes
 #     a marker and TERMs this script. That is why the command runs in the
-#     BACKGROUND and is awaited with `wait`: a POSIX shell defers a trap while
-#     it waits for a FOREGROUND child (measured here: TERM was held for the
-#     full 30 s of a foreground `sleep`), so a hung command would otherwise
-#     run past the timeout and keep its burners. `wait` is interruptible, so
-#     the trap fires on time and cleanup runs.
+#     BACKGROUND and is awaited in bounded slices: a POSIX shell defers a trap
+#     while it waits for a FOREGROUND child (measured here: TERM was held for
+#     the full 30 s of a foreground `sleep`), so a hung command would otherwise
+#     run past the timeout and keep its burners. `wait` is interruptible in
+#     principle, but bash 3.2 (macOS /bin/sh) has a MEASURED race (t_5f9fab03,
+#     docs/audits/load-burners-sigint-trace-stage_t_5f9fab03.md): a SIGINT
+#     delivered in a narrow window can be queued and NEVER dispatched while
+#     blocked in `wait "$COMMAND_PID"` — the harness slept 10 s with its
+#     burners running and then died to the test's SIGTERM without running THAT
+#     trap either. The command-boundary deferral (held, then RUN) is the one
+#     POSIX shells are relied on to flush, so the wait loop below makes the
+#     worst-case trap latency one poll (0.1 s) by construction instead of
+#     trusting the racy wakeup.
 #
 # Burner argv carries a unique tag (`$0` of each `sh -c`, overridable with
 # HSCC_LOAD_BURNER_TAG) so a guard can pgrep for survivors without matching
@@ -202,13 +210,24 @@ new_group sh -c 'sleep "$1"; : > "$2"; kill -TERM "$3"' \
     sh "$LIMIT" "$TIMEOUT_MARK" "$$" &
 WATCHDOG_PID=$!
 
-# The command runs in the background so `wait` (not a blocking foreground
-# exec) is what the trap interrupts. Its group is owned and killed like the
-# burners': a timed-out command must not outlive the harness either.
+# The command runs in the background so no signal must interrupt a blocking
+# foreground exec of it. Its group is owned and killed like the burners': a
+# timed-out command must not outlive the harness either.
 new_group "$@" &
 COMMAND_PID=$!
 
 lb_trace in-wait "$COMMAND_PID"
-wait "$COMMAND_PID"
+# Await the command in bounded foreground slices, never in one unbounded
+# `wait`: bash 3.2 measured (see header; t_5f9fab03) can queue a SIGINT in a
+# narrow race and never dispatch its trap while blocked in `wait`. A trap
+# deferred by a FOREGROUND command is the deferral POSIX shells reliably
+# flush at the command boundary, so `sleep 0.1` bounds worst-case trap
+# latency to one poll on any POSIX shell (bash 3.2 and dash both run this
+# loop identically). The final `wait` only collects the exit status of the
+# now-dead child.
+while kill -0 "$COMMAND_PID" 2>/dev/null; do
+    sleep 0.1
+done
+wait "$COMMAND_PID" 2>/dev/null
 status=$?
 exit "$status"
