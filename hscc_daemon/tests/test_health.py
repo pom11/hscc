@@ -30,12 +30,12 @@ class TestGatewayJobAlive:
 
     # The gateway's real argv on this fleet, read back verbatim from the launchd
     # job's ProgramArguments (`launchctl list ai.hermes.gateway`).
-    REAL_ARGV = ("/Users/example/.hermes/hermes-agent/venv/bin/python "
+    REAL_ARGV = ("/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python "
                  "-m hermes_cli.main gateway run --replace")
     LAUNCHD_OUT = (
         '{\n\t"Label" = "ai.hermes.gateway";\n\t"OnDemand" = true;\n'
         '\t"LastExitStatus" = 9;\n\t"PID" = 74857;\n'
-        '\t"Program" = "/Users/example/.hermes/hermes-agent/venv/bin/python";\n};\n')
+        '\t"Program" = "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python";\n};\n')
 
     class _R:
         def __init__(self, returncode=0, stdout=""):

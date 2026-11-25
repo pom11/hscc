@@ -14,7 +14,7 @@
    "completed_at": null,
    "last_heartbeat_at": 1786989373,
    "workspace_kind": "worktree",
-   "workspace_path": "/home/devuser/dev/flightdeck/.worktrees/t_049d6986"
+   "workspace_path": "/home/hscc-fixture/dev/flightdeck/.worktrees/t_049d6986"
   },
   {
    "id": "t_704ac55b",
@@ -30,7 +30,7 @@
    "completed_at": null,
    "last_heartbeat_at": 1787250631,
    "workspace_kind": "scratch",
-   "workspace_path": "/home/devuser/.hermes/kanban/boards/hscc/workspaces/t_704ac55b"
+   "workspace_path": "/home/hscc-fixture/.hermes/kanban/boards/hscc/workspaces/t_704ac55b"
   },
   {
    "id": "t_41727d6a",
@@ -46,7 +46,7 @@
    "completed_at": null,
    "last_heartbeat_at": 1787250400,
    "workspace_kind": "worktree",
-   "workspace_path": "/home/devuser/dev/hscc/.worktrees/t_41727d6a"
+   "workspace_path": "/home/hscc-fixture/dev/hscc/.worktrees/t_41727d6a"
   }
  ],
  "count": 3,

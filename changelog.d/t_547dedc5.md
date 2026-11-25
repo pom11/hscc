@@ -1,0 +1,4 @@
+kind: Fixed
+task: t_547dedc5
+
+- The kanban dispatcher's `active_pr` respawn guard now resolves a card whose PR GitHub reports MERGED instead of holding it forever: `hermes_cli/kanban_pr_acceptance.pr_merge_state()` reads `pullRequest{state mergedAt mergeCommit{oid}}` as the card's assignee profile (any failure -> `UNKNOWN`), and the dispatcher completes the card — or blocks it `needs_input` when completion is refused — behind a 15-minute per-URL cache. `OPEN`/`CLOSED`/`UNKNOWN` keep holding exactly as before, dry runs never probe, a new terminal `active_pr_resolved` guard reason makes a failed resolution unre-spawnable, and the per-tick `respawn_guarded` event is deduped. `describe_suppression()` now also names the skipped unassigned/nonspawnable/per-profile-capped buckets, so a "dispatcher stuck" warning always says what held the tick back.

@@ -453,12 +453,12 @@ class TestGatewayCheck:
 
     # The gateway's real argv on this fleet, read back verbatim from the launchd
     # job's ProgramArguments (`launchctl list ai.hermes.gateway`).
-    REAL_ARGV = ("/Users/desac/.hermes/hermes-agent/venv/bin/python "
+    REAL_ARGV = ("/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python "
                  "-m hermes_cli.main gateway run --replace")
     LAUNCHD_OUT = (
         '{\n\t"Label" = "ai.hermes.gateway";\n\t"OnDemand" = true;\n'
         '\t"LastExitStatus" = 9;\n\t"PID" = 74857;\n'
-        '\t"Program" = "/Users/desac/.hermes/hermes-agent/venv/bin/python";\n};\n')
+        '\t"Program" = "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python";\n};\n')
 
     @pytest.fixture(autouse=True)
     def _darwin_launchd(self, monkeypatch):
@@ -535,7 +535,7 @@ class TestGatewayCheck:
     @pytest.mark.parametrize("argv", [
         # A python running doctor (or any hermes CLI work) — must NOT match,
         # or doctor would report a gateway it is itself pretending to be.
-        "python /Users/desac/.hermes/plugins/hscc_daemon/doctor.py --json",
+        "python /Users/hscc-fixture/.hermes/plugins/hscc_daemon/doctor.py --json",
         "/venv/bin/python -m hermes_cli.main -p qa --cli chat -q work kanban task t_x",
         # A prompt that merely says the words: every token is present and
         # adjacent, but a gateway server never takes a chat prompt.
@@ -546,7 +546,7 @@ class TestGatewayCheck:
         # Unrelated processes that share one token.
         "/usr/sbin/httpd -D FOREGROUND",
         "python -m venv /tmp/gateway",
-        "/Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest hscc-bootstrap",
+        "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python -m pytest hscc-bootstrap",
         "",
         "   ",
     ])
@@ -1649,7 +1649,7 @@ _SERVING_TWO = _json_fleet.dumps({"version": 2, "units": [
 class TestSparkrunLanReachability:
     def test_errno65_names_the_local_network_fix(self):
         c = doctor._sparkrun_lan_reachability(
-            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python",
             _probe=lambda interp, node: "errno=65 No route to host",
             _serving_raw=_SERVING_TWO)
         assert c.ok is False and c.fatal is False
@@ -1663,7 +1663,7 @@ class TestSparkrunLanReachability:
             seen.append((interp, node))
             return None
         c = doctor._sparkrun_lan_reachability(
-            _venv_python="/home/u/.venvs/sparkrun/bin/python", _probe=probe,
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python", _probe=probe,
             _serving_raw=_SERVING_TWO)
         assert c.ok is True and c.fatal is False
         assert {n for _i, n in seen} == {"192.0.2.1", "192.0.2.2"}  # orch node probed too
@@ -1683,7 +1683,7 @@ class TestSparkrunLanReachability:
 
     def test_plain_refused_is_reported_without_the_tcc_hint(self):
         c = doctor._sparkrun_lan_reachability(
-            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python",
             _probe=lambda interp, node: "errno=61 Connection refused",
             _serving_raw=_SERVING_TWO)
         assert c.ok is False and c.fatal is False
@@ -1827,7 +1827,7 @@ class TestFleetChecksSkipInSuite:
             str(tmp_path / ".hermes"),
             _cluster_runner=lambda: _FAKE_CLUSTER,
             fleet_checks=True,
-            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python",
             _lan_probe=lambda i, n: None,
             _cluster_default_runner=lambda: _json_fleet.dumps(
                 {"hosts": ["192.0.2.1", "192.0.2.2"]}),
@@ -1844,7 +1844,7 @@ class TestFleetChecksSkipInSuite:
             str(tmp_path / ".hermes"),
             _cluster_runner=lambda: _FAKE_CLUSTER,
             fleet_checks=True,
-            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python",
             _lan_probe=lambda i, n: "errno=65 No route to host",
             _cluster_default_runner=lambda: "",
             _status_runner=lambda cl: "",

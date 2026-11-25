@@ -22,7 +22,7 @@ ssh 192.0.2.XXX "docker exec <container> find / -name 'unsloth.jinja' 2>/dev/nul
 ssh 192.0.2.XXX "docker exec <container> ls /usr/local/lib/python3.12/dist-packages/vllm/transformers_utils/chat_templates/"
 
 # Check the model's own template
-ssh 192.0.2.XXX "docker exec <container> cat /home/spark/.cache/huggingface/hub/models--*/snapshots/*/chat_template.jinja 2>/dev/null | head -5"
+ssh 192.0.2.XXX "docker exec <container> cat /home/<ssh_user>/.cache/huggingface/hub/models--*/snapshots/*/chat_template.jinja 2>/dev/null | head -5"
 ```
 
 ## Fixes (choose one)

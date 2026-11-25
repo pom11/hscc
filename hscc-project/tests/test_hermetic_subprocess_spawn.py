@@ -58,7 +58,7 @@ guard = _load_detector()
 _MUST_BE_BANNED = """
 import subprocess
 from pathlib import Path
-subprocess.run(["python", "x.py"], cwd="/Users/operator/dev/hscc")
+subprocess.run(["python", "x.py"], cwd="/Users/hscc-fixture/dev/hscc")
 subprocess.run([str(Path.home() / "venv" / "bin" / "python"), "y.py"])
 """.strip()
 

@@ -40,11 +40,20 @@ could not see ``/Users/<real-user>/.hermes/...`` any better than a gate could.
     appears in CI-shape code (``scripts/hermetic_spawn_guard.py``) and in a Linux
     runner's pytest tmp paths, and names no operator machine.
 
-Home offenders are ADVISORY on landing (see ``HOME_PATHS_ENFORCE``): the tracked
-tree already carries concrete home paths in ~180 files, and a rule that turns the
-suite red the moment it lands blocks the merge queue instead of fixing the files.
-That is the same posture the ``ADDRESS_GUARD_ENFORCE`` repository variable
-documents for the CI job — advisory first, blocking once the baseline is clean.
+Home offenders are BLOCKING (``HOME_PATHS_ENFORCE``, flipped by t_34de41c3 once
+the tracked-tree baseline was measured and scrubbed). They were advisory at
+first, for the reason ``ADDRESS_GUARD_ENFORCE`` documents for the CI job: a rule
+that turns the suite red the moment it lands blocks the merge queue instead of
+fixing the files.
+
+A machine hostname is the third class (t_68ccc902): a macOS LocalHostName such as
+``<name>s-Mac-Studio.local`` names the operator's machine the same way a tailnet
+address or a home path does, and it was invisible to every gate. It is detected by
+SHAPE, not by writing the real hostname into this file, and it rides INSIDE
+``FORBIDDEN`` so the CI redactor masks it too. It blocks by default
+(``HOSTNAMES_ENFORCE``) because the three known occurrences were scrubbed before
+the rule was switched on; test fixtures use reserved names and are assembled at
+runtime.
 
 100.64.0.0/10 is CGNAT, which is where Tailscale hands out addresses, so a real
 tailnet address lives somewhere in it. Rather than ban the whole range — tests
@@ -72,6 +81,7 @@ from pathlib import Path
 LAN_PLACEHOLDER = "10.0.0.x"
 TAILNET_PLACEHOLDER = "100.64.0.1"
 HOME_PLACEHOLDER = "/Users/<operator>"
+HOSTNAME_PLACEHOLDER = "<host>"
 
 # The sanctioned fixture users (t_3480956c), the home-path analogue of the
 # 100.64.0.0/24 fixture block below. ONE source of truth: the allowance is built
@@ -112,6 +122,24 @@ _HOME_USER_CHARS = "A-Za-z0-9._-"
 # the ``/Users/<user>`` prefix, and a shorter match never UNDER-reports.
 _HOME_TAIL_STOP = r"\s'\"`<>|;,)()\[\]{}"
 
+# A user-name component must START alphanumeric. This kills the two shapes the
+# strictness above manufactures as findings — a prose ellipsis (`/Users/` plus
+# `...`) and a dotfile mistaken for an account (`/home/.local/bin` in a test's
+# docstring) — and no real POSIX account name begins with `.`.
+#
+# It is a LOOKAHEAD, and that is the whole reason it is allowed here. A lookahead
+# can only shorten or decline a match at a position the engine already reached;
+# it cannot stop the engine from *reaching* the `/Users/` that starts the offence.
+# A left-boundary LOOKBEHIND (`(?<![A-Za-z0-9._-])`) was measured over the tracked
+# tree on t_34de41c3 as the fix for three relative-path false positives, and it
+# costs a blind spot: a home path written after a `\n` escape inside a string
+# literal (`".../bin/zsh\n/Users/<user>/.ssh/id_rsa"`) has a word char in front of
+# the slash in the FILE BYTES, so the lookbehind declines it and every gate — the
+# hook, the pytest gate and the CI backstop — passes a real leak. That is the
+# `.pyc` boundary trap one layer up, and the same reason this branch refuses `\b`.
+# Pinned by test_a_newline_escaped_home_path_still_trips_the_branch.
+_HOME_USER_START = r"(?=[A-Za-z0-9])"
+
 
 def _unsanctioned_home_lookahead():
     """Lookaheads that skip a sanctioned fixture user and match every other one.
@@ -131,17 +159,38 @@ def _unsanctioned_home_lookahead():
 _HOME_BRANCH = (
     r"(?:/Users|/home)/"
     + _unsanctioned_home_lookahead()
+    + _HOME_USER_START
     + "[" + _HOME_USER_CHARS + "]+"
     r"(?:/[^" + _HOME_TAIL_STOP + r"]*)?"
 )
 
-FORBIDDEN = re.compile(_ADDRESS_BRANCH + "|" + _HOME_BRANCH)
+# The machine-hostname branch (t_68ccc902). A macOS LocalHostName is derived
+# from the owner's name and the model — ``<name>s-Mac-Studio.local``,
+# ``<name>s-MacBook-Pro.local`` — and it identifies the operator's machine in
+# the same class as a tailnet address or a ``/Users/<user>`` path. It was the
+# third class no gate could see.
+#
+# A SHAPE, never an enumeration: writing the real hostname here would publish it
+# in the security control, and a list of known machines misses every machine not
+# yet named. The possessive ``s`` directly before the hyphen is what the macOS
+# LocalHostName carries (the computer name's ``'s`` loses its apostrophe), so
+# this cannot match the ordinary prose form ``<name>'s Mac Studio``, where an
+# apostrophe and a space follow the name. Test fixtures use reserved names
+# (``.example`` / ``.invalid``) and, where they are not meant to trip, avoid the
+# possessive shape (``build-mac-studio.invalid``). The must-trip fixtures are
+# assembled at runtime, like the address fixtures, so no tracked byte carries a
+# hostname-shaped literal.
+_HOST_MODELS = r"(?:Mac-Studio|Mac-mini|Mac-Pro|MacBook(?:-Pro|-Air)?|iMac)"
+_HOSTNAME_BRANCH = r"\b[A-Z][a-z]+s-" + _HOST_MODELS + r"\b"
+
+FORBIDDEN = re.compile(_ADDRESS_BRANCH + "|" + _HOME_BRANCH + "|" + _HOSTNAME_BRANCH)
 
 # Which class a FORBIDDEN match belongs to. Anchored, and applied to the match
 # text only: `report()` has to explain an address and a home path differently, and
 # re-parsing ``rel:line: value`` to find out would be wrong the first time a path
 # contains a colon (measured to exist in the t_ec2c2f95 probe battery).
 _HOME_MATCH = re.compile(r"\A(?:/Users|/home)/")
+_HOSTNAME_MATCH = re.compile(_HOSTNAME_BRANCH)
 
 # Binary/vendored paths that would only produce noise.
 SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".pdf", ".ico", ".zip", ".gz", ".xcuserstate")
@@ -250,16 +299,22 @@ def is_home_occurrence(matched):
     return bool(_HOME_MATCH.match(matched))
 
 
+def is_hostname_occurrence(matched):
+    """True if a FORBIDDEN match is a machine hostname, false otherwise."""
+    return bool(_HOSTNAME_MATCH.match(matched))
+
+
 def address_hits(text):
     """The address-only view of ``all_hits``.
 
-    For the places that must reason about an *address* specifically while the home
-    class is still advisory: ``report``'s fix text, and the compiled-`.pyc` test,
-    whose blob legitimately carries its own ``co_filename`` — which on a Linux
-    runner lives inside that user's home directory, and is not the thing that test
-    is blind to.
+    For the places that must reason about an *address* specifically while a class
+    is still advisory: ``report``'s fix text, and the compiled-`.pyc` test, whose
+    blob legitimately carries its own ``co_filename`` — which on a Linux runner
+    lives inside that user's home directory, and is not the thing that test is
+    blind to.
     """
-    return [(i, v) for i, v in all_hits(text) if not is_home_occurrence(v)]
+    return [(i, v) for i, v in all_hits(text)
+            if not is_home_occurrence(v) and not is_hostname_occurrence(v)]
 
 
 def home_hits(text):
@@ -267,19 +322,32 @@ def home_hits(text):
     return [(i, v) for i, v in all_hits(text) if is_home_occurrence(v)]
 
 
-# ── the home class: advisory first, then blocking (t_3480956c) ───────────────
+def hostname_hits(text):
+    """The machine-hostname-only view of ``all_hits``."""
+    return [(i, v) for i, v in all_hits(text) if is_hostname_occurrence(v)]
+
+
+# ── the home class: BLOCKING (t_34de41c3) ────────────────────────────────────
 #
-# Why advisory at landing, stated plainly because "the gate is blind" is the
-# complaint this card answers and "the gate now screams" is not the fix:
-# the tracked tree carries concrete home paths in 180 files (measured on
-# origin/main), so a hard rule turns `test_no_real_addresses_committed.py` red
-# immediately, and the merge queue runs that suite — every merge in the repo
-# would stop, including the scrub cards that would clear it. Same posture as the
-# `ADDRESS_GUARD_ENFORCE` repository variable in .github/workflows/address-guard.yml.
+# This was advisory since t_3480956c landed, because the tracked tree carried
+# concrete home paths in 180+ files and a hard rule turns
+# `test_no_real_addresses_committed.py` red the moment it lands — which freezes
+# the merge queue (it runs that suite), including the cards that would have
+# cleared the baseline. t_34de41c3 measured the baseline at 198 offenders / 87
+# files, classified every one of them (docs/audits/home-path-enforcement-
+# decision_t_34de41c3.md), and scrubbed all 198: generic fixture users to
+# `hscc-fixture`, the fleet's real service account to `<ssh_user>`, prose about
+# the operator's machine to `/Users/<operator>`, and the shapes that were never
+# accounts (a prose ellipsis, a dotfile) by tightening this branch instead of
+# the files. `scan_tracked` on the tree that flips this returns 0.
 #
-# Flipping it is a one-line diff here (or the env var, to prove the rule bites
-# before the flip). The scrub cards are the prerequisite, not this constant.
-HOME_PATHS_ENFORCE = False
+# The knob below stays, and it is the only way to prove the rule bites before a
+# change to it ships: `HSCC_ADDRESS_GUARD_HOME_ENFORCE=1` on a tree with a
+# planted path must exit 1. Do not "temporarily" set HOME_PATHS_ENFORCE back to
+# False to get a suite green — an advisory home class is how the PR #724 class
+# reached origin, and a rule nobody can turn off is also a rule nobody notices
+# when it silently stops matching.
+HOME_PATHS_ENFORCE = True
 HOME_PATHS_ENFORCE_ENV = "HSCC_ADDRESS_GUARD_HOME_ENFORCE"
 
 # Recognisable tail on a home offender, so `report()` can explain the two classes
@@ -306,21 +374,62 @@ def is_home_offender(offender):
     return offender.endswith(HOME_PATH_OFFENDER_SUFFIX)
 
 
+# ── the machine-hostname class (t_68ccc902) ──────────────────────────────────
+#
+# Whether hostname offenders block. This card lands the detector, scrubs the
+# three known occurrences, then flips this ON — at which point `--tracked`
+# measures zero, so blocking does not freeze the merge queue. Set it False to
+# land the detector advisory-first on a tree that has not been measured, exactly
+# the posture HOME_PATHS_ENFORCE documents.
+HOSTNAMES_ENFORCE = True
+HOSTNAMES_ENFORCE_ENV = "HSCC_ADDRESS_GUARD_HOSTNAME_ENFORCE"
+
+# Recognisable tail on a hostname offender, same reason as the home suffix:
+# `report()` and `blocking()` must classify without re-parsing `rel:line: value`.
+HOSTNAME_OFFENDER_SUFFIX = f"machine hostname — scrub to {HOSTNAME_PLACEHOLDER}"
+
+
+def hostname_enforced():
+    """Whether hostname offenders block. Read at call time, not import time."""
+    if os.environ.get(HOSTNAMES_ENFORCE_ENV, "").strip().lower() in (
+            "1", "true", "yes", "on"):
+        return True
+    return bool(HOSTNAMES_ENFORCE)
+
+
+def hostname_offender(rel, line, matched):
+    """The offender string for a machine hostname — one formatter, both gates."""
+    return f"{rel}:{line}: {matched} — {HOSTNAME_OFFENDER_SUFFIX}"
+
+
+def is_hostname_offender(offender):
+    """True for an offender produced by ``hostname_offender``."""
+    return offender.endswith(HOSTNAME_OFFENDER_SUFFIX)
+
+
+def _is_advisory_now(offender):
+    """True for a class that is reported but must not fail a gate right now."""
+    if is_home_offender(offender):
+        return not home_enforced()
+    if is_hostname_offender(offender):
+        return not hostname_enforced()
+    return False
+
+
 def blocking(offenders):
     """The offenders that must fail a commit / the suite / the CI job.
 
-    Addresses and build artefacts always. Home paths only once the home class is
-    enforced, so the two gates and the pytest assertion cannot disagree about the
-    same tree: they all ask THIS function, in the same environment.
+    Addresses and build artefacts always. A home path or machine hostname only
+    once its class is enforced, so the two gates and the pytest assertion cannot
+    disagree about the same tree: they all ask THIS function, in the same
+    environment.
     """
-    if home_enforced():
-        return list(offenders)
-    return [o for o in offenders if not is_home_offender(o)]
+    return [o for o in offenders if not _is_advisory_now(o)]
 
 
 def advisory(offenders):
-    """The offenders reported but not failed on (home paths, while advisory)."""
-    return [o for o in offenders if is_home_offender(o) and not home_enforced()]
+    """The offenders reported but not failed on (a class not yet enforced)."""
+    return [o for o in offenders if _is_advisory_now(o)]
 
 
 def is_build_artefact(rel):
@@ -413,9 +522,16 @@ def scan_blob(rel, data):
         return []
     if not isinstance(data, str):
         data = data.decode("utf-8", errors="ignore")
-    return [home_offender(rel, line, matched) if is_home_occurrence(matched)
-            else f"{rel}:{line}: {matched}"
-            for line, matched in all_hits(data)]
+    return [_offender(rel, line, matched) for line, matched in all_hits(data)]
+
+
+def _offender(rel, line, matched):
+    """Format one hit as an offender, naming the class whose fix differs."""
+    if is_home_occurrence(matched):
+        return home_offender(rel, line, matched)
+    if is_hostname_occurrence(matched):
+        return hostname_offender(rel, line, matched)
+    return f"{rel}:{line}: {matched}"
 
 
 def scan_paths(root, rels, read=None):
@@ -560,20 +676,24 @@ def report(offenders, scope="staged tree"):
 
     Three classes of offender, three different fixes, so they are reported apart.
     An address is scrubbed to a placeholder; a home path to ``/Users/<operator>``;
-    a build artefact is removed from the index (telling someone to "scrub to
-    10.0.0.x" a `.pyc` is a dead end, and a dead end on a commit path is how
-    `--no-verify` gets used).
+    a machine hostname to ``<host>``; a build artefact is removed from the index
+    (telling someone to "scrub to 10.0.0.x" a `.pyc` is a dead end, and a dead
+    end on a commit path is how `--no-verify` gets used).
     """
-    artefacts, addresses, homes = [], [], []
+    artefacts, addresses, homes, hostnames = [], [], [], []
     for o in offenders:
         if o.endswith(BUILD_ARTEFACT_OFFENDER_SUFFIX):
             artefacts.append(o)
         elif is_home_offender(o):
             homes.append(o)
+        elif is_hostname_offender(o):
+            hostnames.append(o)
         else:
             addresses.append(o)
-    enforced = home_enforced()
-    hard = bool(addresses or artefacts or (homes and enforced))
+    homes_enforced = home_enforced()
+    hostnames_enforced = hostname_enforced()
+    hard = bool(addresses or artefacts or (homes and homes_enforced)
+                or (hostnames and hostnames_enforced))
 
     if addresses:
         header = (f"REAL OPERATOR ADDRESS in the {scope} — this repo is PUBLIC, "
@@ -581,13 +701,19 @@ def report(offenders, scope="staged tree"):
     elif artefacts:
         header = (f"BUILD ARTEFACT in the {scope} — this repo is PUBLIC, "
                   "the commit is blocked.")
-    elif homes and enforced:
+    elif homes and homes_enforced:
         header = (f"OPERATOR HOME PATH in the {scope} — this repo is PUBLIC, "
                   "the commit is blocked.")
-    else:
+    elif hostnames and hostnames_enforced:
+        header = (f"MACHINE HOSTNAME in the {scope} — this repo is PUBLIC, "
+                  "the commit is blocked.")
+    elif homes:
         header = (f"OPERATOR HOME PATH in the {scope} — this repo is PUBLIC. "
                   "ADVISORY: reported, not blocked (HOME_PATHS_ENFORCE is off "
                   "until the existing baseline is scrubbed).")
+    else:
+        header = (f"MACHINE HOSTNAME in the {scope} — this repo is PUBLIC. "
+                  "ADVISORY: reported, not blocked (HOSTNAMES_ENFORCE is off).")
 
     lines = [header, ""]
     lines += [f"  {o}" for o in addresses[:20]]
@@ -613,6 +739,19 @@ def report(offenders, scope="staged tree"):
             f"  in a test    -> /Users/{FIXTURE_HOME_USER}"
             f"   (the sanctioned fixture user; never exempt a whole directory)",
         ]
+    if hostnames:
+        lines += [f"  {o}" for o in hostnames[:20]]
+        if len(hostnames) > 20:
+            lines.append(f"  ... and {len(hostnames) - 20} more")
+        lines += [
+            "",
+            "Scrub a machine hostname to the documented placeholder — it names the",
+            "operator's machine, the same class as a tailnet address or a home path:",
+            f"  any hostname -> {HOSTNAME_PLACEHOLDER}"
+            f"   (e.g. {HOSTNAME_PLACEHOLDER}.local)",
+            "  in a test    -> a reserved name (`.example` / `.invalid`), never a",
+            "                  hostname-shaped literal",
+        ]
     if artefacts:
         lines += [
             "",
@@ -637,8 +776,8 @@ def report(offenders, scope="staged tree"):
             "",
             "Nothing here blocks this commit today. Scrub it anyway: the class is",
             "the one that leaked, and this becomes a hard failure once the existing",
-            "tracked-tree baseline is scrubbed (HOME_PATHS_ENFORCE in",
-            "scripts/address_guard.py).",
+            "tracked-tree baseline is scrubbed (HOME_PATHS_ENFORCE /"
+            " HOSTNAMES_ENFORCE in scripts/address_guard.py).",
         ]
         return "\n".join(lines)
     lines += [

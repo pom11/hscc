@@ -132,7 +132,7 @@ def _pin_serving_json_to_tmp(monkeypatch, tmp_path):
     ``_provision_models`` stamps a unit's serve_cmd into SERVING_JSON whenever a
     launch returns 0. Several test helpers call it directly with mock subprocess
     and, historically, did NOT redirect SERVING_JSON — leaking fixture
-    serve_cmds (e.g. recipe ~/recipes/orch.yaml → /Users/desac/recipes/orch.yaml,
+    serve_cmds (e.g. recipe ~/recipes/orch.yaml → its absolute expansion,
     hosts 10.0.0.x, port 9000) into the real serving.json. Tests that need a
     SPECIFIC serving.json still override it themselves (monkeypatch.setattr);
     this fixture only guarantees the default is never the live path.

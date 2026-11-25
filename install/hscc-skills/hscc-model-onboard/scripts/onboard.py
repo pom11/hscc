@@ -500,7 +500,7 @@ def node_ref(topo, host, model_id):
     """refs/main hash for the model in a node's local cache, or '' if absent."""
     repo = hf_repo(model_id)
     out, ok = ssh(topo["ssh_user"], host,
-                  f"cat /home/spark/.cache/huggingface/hub/{repo}/refs/main 2>/dev/null")
+                  f"cat /home/<ssh_user>/.cache/huggingface/hub/{repo}/refs/main 2>/dev/null")
     return out if ok else ""
 
 
@@ -515,7 +515,7 @@ def nas_snapshot_files(topo, model_id, ref):
 def node_snapshot_files(topo, host, model_id, ref):
     repo = hf_repo(model_id)
     out, ok = ssh(topo["ssh_user"], host,
-                  f"find /home/spark/.cache/huggingface/hub/{repo}/snapshots/{ref}/ -type f 2>/dev/null | wc -l")
+                  f"find /home/<ssh_user>/.cache/huggingface/hub/{repo}/snapshots/{ref}/ -type f 2>/dev/null | wc -l")
     return int(out) if ok and out.isdigit() else 0
 
 
@@ -529,7 +529,7 @@ def rsync_nas_to_node(topo, host, model_id):
     repo = hf_repo(model_id)
     user = topo["ssh_user"]
     src = f"/mnt/nas/hub/{repo}/"
-    dst = f"/home/spark/.cache/huggingface/hub/{repo}/"
+    dst = f"/home/<ssh_user>/.cache/huggingface/hub/{repo}/"
     ssh(user, host, f"mkdir -p {dst}")
     inner = (f'rsync -a -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no '
              f'-o UserKnownHostsFile=/dev/null" {src} {user}@{host}:{dst}')

@@ -10,7 +10,7 @@ itself.
 `find ~/.hermes -name '*.bak-*'`, excluding `node_modules`, `.worktrees` and
 `cache/scratch`: **32,502 entries** — re-measured 07:05 after the first census
 was contaminated by this card's own scratch fake-home (2,129 entries under
-`cache/scratch/t_9462260b/home/hooks`). Any re-measurement must exclude
+`cache/scratch/t_9462260b/<home>/hooks`). Any re-measurement must exclude
 `cache/scratch` and `.worktrees` or it double-counts test fixtures as operator
 damage. The pile is **live**: the total moved 32,741 → 34,632 during a single
 supervision tick, because suites that write backups are still running from
@@ -187,7 +187,7 @@ Per the safety rule, this ran against a scratch copy — never the live `hooks/`
 (kept read-only here; `cp -Rp` preserves mtimes so the copy is faithful).
 
 ```
-$ cp -Rp ~/.hermes/hooks <scratch>/home/hooks      # 27,122 entries, 318 MB
+$ cp -Rp ~/.hermes/hooks <scratch>/<home>/hooks      # 27,122 entries, 318 MB
 $ python3 backup_util.py --home <scratch>/home --dry-run --keep 3
   hooks            files=27,119 families=1 removed~24,990
 $ python3 backup_util.py --home <scratch>/home --apply --keep 3

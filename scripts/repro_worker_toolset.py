@@ -8,12 +8,12 @@ dispatcher resolves via _resolve_worker_cli_toolsets(dispatcher_HERMES_HOME).
 import os
 import sys
 
-sys.path.insert(0, "/Users/desac/.hermes/hermes-agent")
+sys.path.insert(0, os.path.expanduser("~/.hermes/hermes-agent"))
 
 # Simulate the dispatched-worker environment
 os.environ["HERMES_KANBAN_TASK"] = "t_74e1ff6f"
 os.environ["HERMES_KANBAN_BOARD"] = "hscc"
-os.environ["HERMES_HOME"] = "/Users/desac/.hermes"  # dispatcher home
+os.environ["HERMES_HOME"] = os.path.expanduser("~/.hermes")  # dispatcher home
 os.environ["TERMINAL_ENV"] = "local"
 os.environ["HERMES_SESSION_SOURCE"] = "kanban"
 
@@ -21,7 +21,8 @@ from hermes_cli.kanban_db_dispatch import _resolve_worker_cli_toolsets
 from model_tools import _compute_tool_definitions
 
 # 1. What the dispatcher pins
-pinned = _resolve_worker_cli_toolsets(env_hermes_home := "/Users/desac/.hermes")
+pinned = _resolve_worker_cli_toolsets(
+    env_hermes_home := os.path.expanduser("~/.hermes"))
 print(f"Dispatched-woker --toolsets pin: {sorted(pinned) if pinned else None}")
 print(f"  terminal in pin: {'terminal' in (pinned or [])}")
 print(f"  code_execution in pin: {'code_execution' in (pinned or [])}")

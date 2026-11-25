@@ -50,7 +50,7 @@ def test_brew_cellar_working_directory_is_rewritten_to_stable_opt_path():
 
 def test_non_brew_working_directory_is_unchanged():
     for path in ("/repo/hscc-api",
-                 "/Users/operator/src/hscc/hscc-api",
+                 "/Users/hscc-fixture/src/hscc/hscc-api",
                  "/opt/homebrew/Cellar/other/1.0/libexec/hscc",
                  "/opt/homebrew/opt/hscc/libexec/hscc/hscc-api"):
         d = api_launchd.build_api_plist("/p", path)

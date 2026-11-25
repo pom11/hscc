@@ -64,7 +64,7 @@ def fake(monkeypatch):
 def test_hermes_panes_discovers_profile(fake, monkeypatch):
     fake.responses["list-panes"] = PANE_LINES
     monkeypatch.setattr(repl_inject, "run_ps",
-                        lambda tty: "/bin/zsh\n/Users/x/.hermes/bin/hermes -p pom-orch chat\n")
+                        lambda tty: "/bin/zsh\n/Users/hscc-fixture/.hermes/bin/hermes -p pom-orch chat\n")
     panes = repl_inject.hermes_panes()
     assert len(panes) == 1
     assert panes[0]["profile"] == "pom-orch"
@@ -118,8 +118,8 @@ def test_hermes_panes_tmux_absent_is_empty_not_crash(monkeypatch):
 # Realistic wrapper: a launcher script living under ~/.hermes/bin (so it
 # contains "hermes") invoked as `... chat --project ...` (so it contains " chat")
 # with NO profile flag — it is the child that names the profile.
-_LAUNCHER = "/Users/x/.hermes/bin/orch-launch chat --project alpha"
-_CHILD = "/Users/x/.hermes/hermes-agent/venv/bin/hermes -p kronos-orch chat"
+_LAUNCHER = "/Users/hscc-fixture/.hermes/bin/orch-launch chat --project alpha"
+_CHILD = "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/hermes -p kronos-orch chat"
 
 
 def test_wrapper_pane_resolves_the_childs_profile_not_default(fake, monkeypatch):
@@ -465,7 +465,7 @@ def test_dry_run_reads_busy_from_the_real_screen_and_still_sends_nothing(
     fake.responses["capture-pane"] = (
         "history line\nmsg=interrupt · /queue · /steer\n\n")
     monkeypatch.setattr(repl_inject, "run_ps",
-                        lambda tty: "/Users/x/hermes -p pom-orch chat\n")
+                        lambda tty: "/Users/hscc-fixture/hermes -p pom-orch chat\n")
     r = repl_inject.inject("pom-orch", "x", dry_run=True, sleep_fn=lambda s: None)
     assert r["busy"] is True and r["mode"] == "queue"
     assert [c[0][0] for c in fake.calls] == ["list-panes", "capture-pane"]
