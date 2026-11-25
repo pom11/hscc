@@ -769,6 +769,10 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
   if [ "$_sweep_floor" -gt 0 ]; then
     _sweep_now="$(date +%s)"
     _swept=0
+    # Every leg-log dir we could SEE, whether or not a guard later rejected it.
+    # The denominator is what lets the report below distinguish "nothing to
+    # reclaim" from "reclaim silently doing nothing" — see that echo.
+    _seen=0
     # Whose dirs may we take? Probed, never asserted — see the helper for the
     # mount-ownership trap that made the first version delete nothing on a Linux
     # runner while passing every test that expects a dir to survive.
@@ -800,6 +804,7 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
       # once, and the un-expanded glob (no match) fails the -d test above.
       case "$_d" in */) continue ;; esac
       [ -L "$_d" ] && continue
+      _seen=$((_seen + 1))
       [ -n "$_sweep_uid" ] || continue
       _u="$(stat $_leg_tmp_uid_fmt "$_d" 2>/dev/null || true)"
       [ "$_u" = "$_sweep_uid" ] || continue
@@ -810,9 +815,17 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
         rm -rf -- "$_d" 2>/dev/null && _swept=$((_swept+1))
       fi
     done
-    if [ "$_swept" -gt 0 ]; then
-      echo "parallel: swept $_swept stale leg-log dir(s) older than ${_sweep_floor}s"
-    fi
+    # A sweep that ran must say so — including when it took nothing. This line used
+    # to exist only for `_swept > 0`, which made "this host has no litter" and "the
+    # reclaim deletes nothing on this host" produce byte-identical output. That is
+    # exactly how #825 shipped a sweep that was a silent no-op on the Linux runner
+    # (GNU `stat -f %m` exits 0 answering prose, so every candidate was skipped)
+    # while every "a stale dir must survive" test in
+    # scripts/tests/test_run_tests_leg_tmp_lifecycle.py stayed green — t_3d406a71
+    # paid for that blind spot with a card. `scanned` is the half that makes it
+    # readable: `scanned=5 took=0` names a guard rejecting dirs we can see,
+    # `scanned=0 took=0` is the honest answer "there was nothing to reclaim".
+    echo "parallel: leg-log sweep: took $_swept stale leg-log dir(s) older than ${_sweep_floor}s (scanned $_seen)"
   fi
   # Never $TMPDIR (same reasoning as the sealed HOME above: a second answer to
   # "where does suite scratch live" is how a run stops being reproducible), and
