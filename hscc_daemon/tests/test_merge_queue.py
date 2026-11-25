@@ -5608,7 +5608,7 @@ def test_a_parked_fix_card_is_blocked_typed_and_assigned_to_the_pane(
     assert create[create.index("--assignee") + 1] == "coder"
     assert create[create.index("--initial-status") + 1] == "blocked"
     block = runner.calls[1]
-    assert block[5] == "t_fix_1"
+    assert "t_fix_1" in block and block.index("--kind") < block.index("t_fix_1")
     assert block[block.index("--kind") + 1] == "capability"
     assert handed[0][0] == "t_fix_1" and handed[0][1] == "coder"
     assert entry["card"] == "t_fix_1"

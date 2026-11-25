@@ -2351,9 +2351,8 @@ def _ensure_fix_card(entry, cfg, body, reason=None, *, state_path=None,
     new_card = str(new_card)
     if park:
         typed = _kanban_run([
-            "--board", board, "block", new_card,
-            "parked for an OpenCode pane; do not dispatch",
-            "--kind", "capability"], runner=runner)
+            "--board", board, "block", "--kind", "capability", new_card,
+            "parked for an OpenCode pane; do not dispatch"], runner=runner)
         if typed is None or typed.returncode != 0:
             detail = _tail(getattr(typed, "stderr", "") if typed is not None
                            else "hermes not found", 3)
