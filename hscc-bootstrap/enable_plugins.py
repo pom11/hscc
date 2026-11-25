@@ -36,15 +36,22 @@ import sys
 
 import _theme
 
-# Sibling module in hscc-bootstrap/. Installed runtimes get the whole directory
+# Sibling modules in hscc-bootstrap/. Installed runtimes get the whole directory
 # (install_payload's DEFAULT_PAYLOAD ships hscc-bootstrap), so this import
 # resolves in both the repo and the runtime dir; the sys.path fallback covers a
 # caller that imported this file by absolute path without its dir on the path.
+#
+# ``doctor_rows`` is imported for ONE thing: ``under_pytest()``, the single
+# child-visible in-suite predicate (t_eb768c2a). This module has a live probe of
+# its own (``_probe_compaction_endpoint``) and a fence that has to be able to see
+# the door this file is exec'd in by a test suite — see the ruling there.
 try:
     import backup_util
+    import doctor_rows
 except ImportError:  # pragma: no cover - import-path robustness only
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import backup_util
+    import doctor_rows
 
 HSCC_PLUGINS = ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]
 
@@ -1237,7 +1244,25 @@ def _skip_compaction_probe(env=None):
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _probe_compaction_endpoint():
+def _compact_probe_default_fetch(models_url):
+    """The live transport: one GET of ``models_url``, parsed JSON back.
+
+    Split out of :func:`_probe_compaction_endpoint` so the probe has ONE named seam:
+    a rig injects ``_probe_compaction_endpoint(_fetch=...)`` instead of patching
+    ``urllib.request`` for the whole process (the shape
+    ``hscc_daemon/api_cli.py::launchd_status(_run_probe=...)`` already uses), and a
+    guard test can count calls on the real one. Raises on any transport error —
+    the caller owns the (non-fatal) verdict.
+    """
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(models_url)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read())
+
+
+def _probe_compaction_endpoint(_fetch=None):
     """Sanity-probe the compaction endpoint at bootstrap.
 
     Hit <COMPACT_URL>/models and assert that COMPACT_MODEL is present.
@@ -1247,9 +1272,32 @@ def _probe_compaction_endpoint():
 
     Returns True if the model is present in the endpoint's model list, False
     otherwise. Silently skips on connection errors (no live orch in test env).
+
+    Two things keep a test run off the network, and they are NOT the same thing:
+
+      * ``HSCC_SKIP_COMPACT_PROBE`` (``_skip_compaction_probe``) is a deliberate
+        opt-out — the runner sets it because the unreachable fallback endpoint
+        costs 5.04 s per ``enable()`` call. It answers "the operator/runner chose
+        not to probe"; it is not a fence, and a suite that never sets it (a leg run
+        straight through ``pytest`` instead of ``scripts/run_tests.sh``, or any
+        child spawned without that environment) has nothing in front of the socket.
+      * the in-suite fence below answers "a test forgot to seal anything".
+
+    RULING (t_8bf34130): NO — a child the suite SPAWNED must not open a socket to
+    the configured endpoint. Measured with the door loaded in a fresh interpreter,
+    planted HOME/HERMES_HOME and the opt-out deliberately absent: with
+    ``PYTEST_CURRENT_TEST`` set (i.e. a child of a pytest item — the shape
+    ``doctor.py``'s reconcile row drives, since it calls ``enable()`` from the door
+    ``doctor_tools.doctor_findings`` execs) the probe still opened
+    ``http://<endpoint>/v1/models`` twice and returned True, so the suite read the
+    operator's live orch and got the "model present" verdict for free. The env seam
+    IS honoured on every path into the probe (``enable()`` is the only production
+    caller) — the gap was never a second call path, it was that the only seal is an
+    env var the caller may not have, plus a print gate that read ``sys.modules``
+    and so saw nothing in a child. Refusing here is visible, names the seam to
+    inject, and keeps the "nothing to warn about" verdict: a probe that could not
+    run is not an endpoint whose model is missing.
     """
-    import urllib.request
-    import json
     import sys
 
     if not COMPACT_URL:
@@ -1257,16 +1305,27 @@ def _probe_compaction_endpoint():
 
     if _skip_compaction_probe():
         # Deliberate opt-out (tests, or an operator who knows the orch is down).
+        # Checked BEFORE the fence on purpose: this is a chosen answer, it must stay
+        # silent and free, and the suite's 66 enable() cases must not start printing
+        # a refusal each. The fence below only ever sees the forgot-to-seal case.
         # Report "nothing to warn about" rather than False: False is the
         # unreachable-endpoint verdict and callers/ readers must not confuse an
         # opt-out with a failed probe.
         return True
 
+    if _fetch is None and doctor_rows.under_pytest():
+        # An injected transport is ownership, not a leak: the fence stops the
+        # DEFAULT transport, which is the one that would dial out of a child.
+        _theme.make_console(file=sys.stderr).print(
+            "[warn]" + _theme.escape(
+                "[WARN] HSCC compaction probe refused inside a pytest process "
+                "— inject _probe_compaction_endpoint(_fetch=...) or set "
+                "HSCC_SKIP_COMPACT_PROBE") + "[/warn]")
+        return True
+
     models_url = _compact_models_url(COMPACT_URL)
     try:
-        req = urllib.request.Request(models_url)
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
+        data = (_fetch or _compact_probe_default_fetch)(models_url)
         listed = {m["id"] for m in data.get("data", [])}
         # vLLM sometimes returns fully-qualified IDs; check substring match too.
         present = COMPACT_MODEL in listed or any(
@@ -1283,8 +1342,11 @@ def _probe_compaction_endpoint():
                     f"endpoint.") + "[/warn]")
         return present
     except Exception as exc:
-        # Silent skip in tests (no live orch); only warn in real runs.
-        if "pytest" not in sys.modules and "unittest" not in sys.modules:
+        # Silent skip in tests (no live orch); only warn in real runs. The
+        # predicate is the child-visible one (t_8bf34130): ``sys.modules`` is empty
+        # of pytest in a suite-spawned child, so the old test let that child print
+        # a live-probe warning the parent process would have kept to itself.
+        if not doctor_rows.under_pytest() and "unittest" not in sys.modules:
             _theme.make_console(file=sys.stderr).print(
                 "[warn]" + _theme.escape(
                     f"[WARN] HSCC compaction probe failed: {exc}") + "[/warn]")

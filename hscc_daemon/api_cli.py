@@ -877,6 +877,45 @@ def launchd_status(_run_probe=None):
 
     The probe is the one doctor_supervision.py trusts for the daemon unit, so
     `hscc doctor` and `hscc api status` cannot diverge on who owns the process.
+
+    RULING (t_8bf34130) — is asking the service manager acceptable from a child
+    the SUITE spawned? NO. The fence below reads ``"pytest" in sys.modules``, so
+    it answers only for the process that imported pytest. Measured in the CI shape
+    (planted HOME/HERMES_HOME, thin interpreter, ``PYTEST_CURRENT_TEST`` the only
+    difference from the control): a marked child that never imported pytest ran
+    ``['launchctl', 'print', 'gui/<uid>/com.hscc.api']`` twice — once from a direct
+    call, once through ``_handle_status`` — and printed ``HSCC API is running under
+    launchd (pid <the operator's real pid>, com.hscc.api)`` with rc 0. The suite
+    read the operator's live gui domain and reported it as fact.
+
+    NOT FIXED HERE, ON PURPOSE: the fix is to ask the one child-visible predicate
+    (``PYTEST_CURRENT_TEST``, inherited across a spawn) instead of ``sys.modules``,
+    and how a ``hscc_daemon`` module obtains that predicate — a daemon-side helper,
+    a shared low-level module, or the one place both deployment layouts already
+    resolve — is t_fdbc24f9's ruling. A second predicate written here would fork
+    the vocabulary the sweep exists to unify, so this card stops at the ruling.
+
+    Decided here, because it is this lane's call and the next worker should not
+    re-litigate it (both follow the doctor ``gateway`` row's treatment in #763: a
+    refusal is VISIBLE, and never a silent pass):
+
+      * ``refused`` is not ``available: False``. The first is "the row could not be
+        checked", the second is "launchctl cannot be asked on this host", and the
+        callers branch on them differently. Keep the key.
+      * An UNVERIFIABLE supervisor row must not degrade the screen to "not
+        running". IMPLEMENTED: `_handle_status` gives that row its own branch —
+        `state unknown (supervisor not consulted)` — above the
+        ``Supervisor: launchd probe refused`` row that names the seam, because
+        "not running" is the exact false verdict this probe was added to kill (an
+        API launchd has served since boot reads as stopped to a PID-file-only
+        view). Pinned in
+        `hscc_daemon/tests/test_api_cli_unverifiable_supervisor_row_t_8bf34130.py`.
+      * `hscc api stop` must FAIL CLOSED on a refusal, not fall through to
+        SIGTERM. IMPLEMENTED, same guard file: the verb returns non-zero with an
+        error naming the seam and touches neither the process nor the pid file.
+        A stop that cannot tell whether launchd owns the pid is a stop that may be
+        undone by KeepAlive — the silent-un-stop the whole launchd pairing exists
+        to prevent, so it is an error naming the seam rather than a best guess.
     """
     if _run_probe is None and "pytest" in sys.modules:
         return _refused_launchd_status()
@@ -1060,6 +1099,10 @@ def _handle_stop(argv, theme_name=None):
         removes it instead.
       * nobody supervises it (a plain `hscc api start`) → SIGTERM, SIGKILL
         after the grace window, exactly as before.
+      * the supervisor could not be consulted (`launchd_status` refused) →
+        NEITHER verb, and exit non-zero (t_8bf34130). Choosing between the two
+        above without knowing who owns the pid is a coin flip whose wrong side
+        is a lie either way, so the verb says so and names the seam instead.
 
     Launchd is only asked when a unit could plausibly be involved (macOS, and
     either a unit file on disk or a PID file to check ownership against).
@@ -1074,6 +1117,25 @@ def _handle_stop(argv, theme_name=None):
     pid = daemon_ops.get_pid(API_PID_FILE)
     sup = launchd_status() if _launchd_matters() else {
         "available": False, "loaded": False, "pid": None, "state": None}
+
+    # RULING (t_8bf34130): a refusal is neither "not loaded" nor a licence to pick
+    # a verb anyway. Without the supervisor's answer this function cannot tell
+    # whether `pid` is KeepAlive-supervised, and BOTH guesses lie: a SIGTERM on a
+    # supervised process is the stop that un-stops itself on the next throttle
+    # tick, and "HSCC API is not running" with exit 0 states the very verdict the
+    # probe just refused to reach. So: fail closed, name the seam, and leave the
+    # pid file alone — `write_stopped` here would be the same false claim through
+    # the back door. Checked before every verb below, so it holds whatever the
+    # rest of the row claims.
+    if sup.get("refused"):
+        who = f" (pid {pid})" if pid else ""
+        print(f"error: cannot stop the HSCC API{who}: the supervisor could not "
+              "be consulted (launchd probe refused). If launchd owns that "
+              "process a SIGTERM would be undone by KeepAlive, and calling it "
+              "'not running' would be a guess this probe declined to make. "
+              "Inject the seam: launchd_status(_run_probe=...)",
+              file=sys.stderr)
+        return 1
 
     # The job is loaded, so launchd owns its future: bootout, do not signal.
     # The test is `loaded`, not "launchd's pid == the pid file's pid", on
@@ -1177,6 +1239,11 @@ def _handle_status(argv, theme_name=None):
     (never replacing it): the PID-file path is still how a plain
     `hscc api start` is running, and both can be true on one machine.
 
+    A supervisor probe that could not run is a THIRD case, not a stopped API
+    (t_8bf34130): the state line reports the unknown and the Supervisor row
+    names the seam, rather than degrading to "not running" — the one verdict
+    this verb was rewritten to stop giving.
+
     NEVER prints the auth token. Uses A1's resolve_config only to report the
     configured bind address (loopback default honored); does not bind anything.
     Prints a scannable connection QR (suppressed by ``--no-qr``) when a token
@@ -1234,6 +1301,14 @@ def _handle_status(argv, theme_name=None):
         status = "warn"
         state_line = (f"launchd unit loaded, no process "
                       f"(state: {sup.get('state') or 'unknown'})")
+    elif sup.get("refused"):
+        # RULING (t_8bf34130): this row is an UNKNOWN, not a verdict, and the
+        # state line is where a reader takes the verdict. An API launchd has
+        # served since boot writes no api.pid, so falling through to "not
+        # running" here re-ships — for every process the supervisor fence fires
+        # in — the exact false answer the launchd pairing (t_d2245e7e) exists to
+        # kill. Say only what is known; the Supervisor row below names the seam.
+        status, state_line = "warn", "state unknown (supervisor not consulted)"
     else:
         status, state_line = "warn", "not running"
 
