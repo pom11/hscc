@@ -458,6 +458,17 @@ on_sigterm() {
   echo "   Prime suspect: an agent command 'pkill -f run_tests.sh' or a process.kill of"
   echo "   this suite's process — check the issuing session's transcript before believing"
   echo "   any 'reaper' theory (docs/audits/rc143-suite-reaper-t_6bb29d46.md)."
+  # With a bounded pack (t_6c2123f9) a kill that only stops the shell leaves the
+  # legs in flight: they would keep burning CPU on a host running the fleet
+  # control plane and keep the log's write end open. Kill the ones we started,
+  # by pid, in the range the cursors describe — never by name (the RULE above).
+  if [ "${PARALLEL_MODE:-0}" -eq 1 ] 2>/dev/null; then
+    _k="${P_HEAD:-0}"
+    while [ "$_k" -lt "${P_NEXT:-0}" ]; do
+      kill "${P_PID[$_k]}" 2>/dev/null
+      _k=$((_k+1))
+    done
+  fi
   exit 143
 }
 trap on_sigterm TERM
@@ -547,8 +558,120 @@ for _pin in "${SUITE_ENV_UNSET[@]}"; do
 done
 unset _pin
 
+# ━━━ bounded leg concurrency (t_6c2123f9) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# WHY. A leg is one pytest process over one directory, and the box spends the
+# whole gate with ONE of them running: measured at 2026-11-25, a full roster is
+# 1323 s of wall time during which the Mac Studio sits at load 2-3 of 14
+# (docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md §1, §5). Legs are
+# independent BY CONSTRUCTION — the entire reason this runner exists is that the
+# twelve dirs must never share a pytest process — so the idle cores are a
+# pure loss. Measured through this same runner at the gate's own priority
+# (`taskpolicy -b`, `ps -o pri` 4): five legs serial 188 s vs three-deep 96 s,
+# every leg green, worst leg 93 s parallel vs 107 s serial.
+#
+# CONTRACT (pinned by scripts/tests/test_run_tests_leg_parallelism.py):
+#   HSCC_TEST_PARALLEL unset or empty -> PAR legs at a time, PAR = 2.
+#   HSCC_TEST_PARALLEL=1 (or 0)       -> the SERIAL loop below, UNTOUCHED. That
+#       path is byte-identical to the pre-concurrency runner, because the two
+#       things that read the stream by ANCHOR rather than by content — the
+#       SIGTERM forensics' `during suite: $CURRENT_SUITE` (t_6bb29d46) and
+#       merge_queue's `^✗ <leg>` / `^FAILED <path>::<test>` digest anchors —
+#       were both measured against it, and an operator debugging one leg must
+#       not have to reason about a second scheduling model.
+#   HSCC_TEST_PARALLEL=N (N>=2)       -> at most N legs in flight, LAUNCHED in
+#       roster order and reaped in launch order (FIFO, so "at most N" is a real
+#       bound and the roster order is preserved for the summary).
+#   anything else (non-numeric, negative) -> SERIAL, with a printed note. A
+#       workflow that builds the value from a list must degrade to the posture
+#       it has always had, not to an unknown one.
+#
+# WHY THE DEFAULT IS 2 AND NOT HIGHER. This host also runs the fleet control
+# plane (the daemon, the gateway, the kanban dispatcher) — legs are the second
+# most important thing on it. Two is the smallest pack that removes the serial
+# queueing for the gate the queue actually runs (a narrowed 2-3 leg gate), and it
+# is the value the interference run in the audit's §5.2 was green at. Raise it
+# with HSCC_TEST_PARALLEL on a machine that has the cores to spare.
+#
+# WHY EACH LEG GETS ITS OWN FILE. With N legs writing to one stdout, their dot
+# bands interleave and the two ANCHORED reads above break: `FAILED path::test -
+# reason` only matches merge_queue._TEST_FAILURE_RE at LINE START, and a leg's
+# short test summary would be split by another leg's progress dots. So a leg
+# writes to its own file under a tmp dir, and the files are concatenated in
+# ROSTER ORDER at the end: every block keeps the exact shape the serial runner
+# produced (`━━━ <leg> ━━━`, its pytest output, then the `━━━ Summary ━━━`
+# block), just with the blocks emitted late. The digest is therefore identical
+# for a red leg — and `test_red_leg_digest_matches_the_serial_shape` asserts that
+# against the REAL merge_queue regexes, not against a paraphrase.
+#
+# WHAT A LIVE READER SEES INSTEAD (the trade, stated, not hidden). A redirected
+# log gets no pytest bytes until a leg finishes. That is why the two live
+# signals stay in the foreground stream: the heartbeat (one watcher, one line
+# per LIVE leg — see scripts/leg_heartbeat.sh) and one `parallel: done leg=…
+# elapsed=…s rc=…` line the moment each leg is reaped. Together they still
+# answer the only question the heartbeat was written for — slow, or stopped.
+PAR_RAW="${HSCC_TEST_PARALLEL:-}"
+PAR=2
+case "$PAR_RAW" in
+  '') ;;                                    # unset/empty -> the default pack
+  *[!0-9]*)
+    PAR=1
+    echo "parallel: HSCC_TEST_PARALLEL='$PAR_RAW' is not a non-negative integer — running SERIALLY"
+    ;;
+  *)
+    if [ "$PAR_RAW" -lt 2 ]; then
+      PAR=1
+      echo "parallel: HSCC_TEST_PARALLEL=$PAR_RAW — running SERIALLY (the pre-concurrency path)"
+    else
+      PAR="$PAR_RAW"
+    fi
+    ;;
+esac
+# A pack wider than the roster is the same run; clamping keeps the launch loop
+# honest (it never waits for a leg it did not start).
+if [ "$PAR" -gt "${#LEGS[@]}" ]; then PAR="${#LEGS[@]}"; fi
+[ "$PAR" -lt 1 ] && PAR=1
+
+PARALLEL_MODE=0
+LEG_TMP=""
+LEG_PIDFILE=""
+# `loadstress` is a leg whose entire result depends on how much of the box the
+# rest of the box is using: scripts/load_burners.sh applies BOUNDED CPU pressure
+# and the leg's meaning is "these cases survive that". A concurrent pack is
+# unbounded extra pressure from an unpredictable source, so a stress result taken
+# inside one measures the pack, not the code. Serial whenever it is selected.
+if [ "$PAR" -ge 2 ]; then
+  for _chk in "${LEGS[@]}"; do
+    if [ "$_chk" = "loadstress" ]; then
+      PAR=1
+      echo "parallel: the loadstress leg needs the box to itself — running SERIALLY"
+      break
+    fi
+  done
+  unset _chk
+fi
+if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
+  # Never $TMPDIR (same reasoning as the sealed HOME above: a second answer to
+  # "where does suite scratch live" is how a run stops being reproducible), and
+  # never inside the sealed HOME. A tmp dir it cannot make is a reason to run
+  # serially, not a reason to fail a gate.
+  LEG_TMP="$(mktemp -d /tmp/hscc-legs-XXXXXX 2>/dev/null || true)"
+  if [ -n "$LEG_TMP" ] && [ -d "$LEG_TMP" ]; then
+    LEG_PIDFILE="$LEG_TMP/legs.tsv"
+    : > "$LEG_PIDFILE"
+    PARALLEL_MODE=1
+    trap 'rm -rf "$LEG_TMP" 2>/dev/null; true' EXIT
+    echo "parallel: ${PAR} legs at a time (HSCC_TEST_PARALLEL=1 for the serial path); leg logs in $LEG_TMP"
+  else
+    LEG_TMP=""
+    PAR=1
+    echo "parallel: cannot create /tmp/hscc-legs-XXXXXX — running SERIALLY"
+  fi
+fi
+
 rc=0
 declare -a summary
+
+if [ "$PARALLEL_MODE" -eq 0 ]; then
 for d in "${LEGS[@]}"; do
   CURRENT_SUITE="$d"
   echo "━━━ $d ━━━"
@@ -615,6 +738,106 @@ for d in "${LEGS[@]}"; do
     rc=1
   fi
 done
+else
+  # ── the bounded pack (t_6c2123f9) ─────────────────────────────────────────
+  # bash 3.2 is the interpreter this script must run under (/bin/bash on macOS
+  # is 3.2.57), so there is no `wait -n` and no associative array. The pool is
+  # therefore a FIFO over append-only arrays: legs launch in roster order and
+  # are reaped in launch order, which bounds the in-flight count at PAR without
+  # needing to find "the one that finished first". Reaping in launch order is
+  # also what keeps the summary and the concatenated blocks in ROSTER order,
+  # which is the whole digest contract — never reorder a red leg.
+  declare -a P_PID P_NAME P_LOG P_T0S P_CODE
+  P_N="${#LEGS[@]}"
+  P_NEXT=0; P_HEAD=0; P_LIVE=0
+  P_T0="$(date +%s)"
+
+  # ONE watcher for the whole run, told which legs exist by the file it re-reads
+  # each tick (scripts/leg_heartbeat.sh's 5th argument). It is a child of THIS
+  # runner, so the existing "a watcher must not outlive its runner" rule still
+  # holds, and it prints one existing-format line per LIVE leg — the t_ecb84764
+  # signal, generalised to N instead of dropped.
+  HB_PID=""
+  if [ "${HEARTBEAT_SECONDS:-0}" -gt 0 ] 2>/dev/null; then
+    bash "$ROOT/scripts/leg_heartbeat.sh" "roster" "$$" "$P_T0" "$HEARTBEAT_SECONDS" "$LEG_PIDFILE" &
+    HB_PID=$!
+  fi
+
+  # CURRENT_SUITE must keep naming what is running: the SIGTERM line reads it,
+  # and with a pack "what is running" is a SET. Rebuilt on every launch and every
+  # reap, in roster order, from the legs between the two cursors.
+  _live_suite() {
+    CURRENT_SUITE=""
+    _j="$P_HEAD"
+    while [ "$_j" -lt "$P_NEXT" ]; do
+      CURRENT_SUITE="${CURRENT_SUITE:+$CURRENT_SUITE }${P_NAME[$_j]}"
+      _j=$((_j+1))
+    done
+    [ -n "$CURRENT_SUITE" ] || CURRENT_SUITE="(draining)"
+  }
+
+  while [ "$P_NEXT" -lt "$P_N" ] || [ "$P_LIVE" -gt 0 ]; do
+    while [ "$P_NEXT" -lt "$P_N" ] && [ "$P_LIVE" -lt "$PAR" ]; do
+      d="${LEGS[$P_NEXT]}"
+      logf="$LEG_TMP/$P_NEXT-$d.log"
+      P_NAME[$P_NEXT]="$d"
+      P_LOG[$P_NEXT]="$logf"
+      P_T0S[$P_NEXT]="$(date +%s)"
+      # The subshell is what `pgrep -P` is asked about, exactly as the runner is
+      # in serial mode: `env` execs into pytest, so the subshell's one child IS
+      # the leg's pytest. A subshell is needed at all so the redirection belongs
+      # to the leg and `"$@"` still means the RUNNER's extra pytest args.
+      #
+      # The command MUST be the serial branch's command, flag for flag — the
+      # `-m "not loadstress"` deselect in particular. A pack that forgot it would
+      # run the load-sensitive cases on every ordinary leg while the serial gate
+      # does not, i.e. the two postures would silently test different things.
+      # Pinned by test_pack_runs_the_same_pytest_argv_as_the_serial_leg.
+      (
+        if [ "$d" = "loadstress" ]; then
+          env "${ENV_UNSET_ARGS[@]}" \
+            "$PY" "$ROOT/scripts/loadstress_leg.py" "$@"
+        else
+          env "${ENV_UNSET_ARGS[@]}" \
+            "$PY" -m pytest -q -rs "$ROOT/$d/tests" -p no:cacheprovider \
+            -m "not loadstress" "$@"
+        fi
+      ) > "$logf" 2>&1 &
+      P_PID[$P_NEXT]=$!
+      printf '%s\t%s\t%s\n' "$d" "$!" "${P_T0S[$P_NEXT]}" >> "$LEG_PIDFILE"
+      P_NEXT=$((P_NEXT+1)); P_LIVE=$((P_LIVE+1))
+      _live_suite
+    done
+    if [ "$P_LIVE" -eq 0 ]; then continue; fi
+    wait "${P_PID[$P_HEAD]}"; code=$?
+    P_CODE[$P_HEAD]="$code"
+    P_ELAPSED=$(( $(date +%s) - ${P_T0S[$P_HEAD]} ))
+    # LIVE, into the runner's own stream: the one line a reader of a redirected
+    # log can act on while the pack is still running. Prefixed `parallel:` so it
+    # can never be mistaken for one of the anchored digest lines.
+    printf 'parallel: done leg=%s elapsed=%ss rc=%s\n' \
+      "${P_NAME[$P_HEAD]}" "$P_ELAPSED" "$code"
+    P_LIVE=$((P_LIVE-1)); P_HEAD=$((P_HEAD+1))
+    _live_suite
+  done
+
+  [ -n "$HB_PID" ] && kill "$HB_PID" 2>/dev/null
+
+  # Concatenated in ROSTER ORDER (index order, not completion order): this is
+  # the stream merge_queue parses, and it has to look like the serial one.
+  P_I=0
+  while [ "$P_I" -lt "$P_N" ]; do
+    echo "━━━ ${P_NAME[$P_I]} ━━━"
+    cat "${P_LOG[$P_I]}" 2>/dev/null
+    if [ "${P_CODE[$P_I]}" -eq 0 ]; then
+      summary+=("  ✓ ${P_NAME[$P_I]}")
+    else
+      summary+=("  ✗ ${P_NAME[$P_I]} (pytest exit ${P_CODE[$P_I]})")
+      rc=1
+    fi
+    P_I=$((P_I+1))
+  done
+fi
 
 echo
 echo "━━━ Summary ━━━"
