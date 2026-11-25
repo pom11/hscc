@@ -87,13 +87,18 @@ MIN_EXAMPLES = 60
 def report():
     """One audit run shared by every assertion.
 
-    MEASURED cost, because every test in this file waits on it: 59.69 s on a
-    clean `main` worktree at host load 1.9 (t_4c9feb44) — 961 CLI subprocesses
-    over 331 probed surfaces. The "~35 s" this docstring used to claim was both
-    wrong and load-blind; the same walk measured 307.64 s while `Prober` paid a
-    0.25 s black-holed port probe per call, which is what made the whole `scripts`
-    leg look hung from test ~233. Budget against the measured number, and check
-    the census before believing any new per-probe cost.
+    MEASURED cost, because every test in this file waits on it. Pre-fan-out it
+    was 397.77 s of setup at the gate's background QoS (t_49827b5d) — ~1k CLI
+    subprocesses launched one at a time, 945 unique `(argv, width)` renders over
+    179 surfaces / 349 probed invocations. Since t_71f9fc17 the walk fans those
+    probes out over 4 isolated `Prober`s (`HSCC_CLI_HELP_PROBE_WORKERS`, `1` =
+    the serial walk): the same audit measured **329.84 s serial → 135.00 s at 4
+    workers** under `taskpolicy -b` on a box with sibling legs running
+    (load ~5), with a byte-identical report apart from the fan accounting.
+    The older "~35 s" and "59.69 s" figures this docstring carried were both
+    load-blind and predate the `-h` parity pass that doubled the walk. The
+    per-probe port-probe cost t_4c9feb44 measured (0.25 s black hole x ~1k
+    probes) is gone for good, pinned by the seal tests below.
     """
     return audit_mod.audit(str(REPO))
 

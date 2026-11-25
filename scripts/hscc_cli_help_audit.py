@@ -70,6 +70,14 @@ command; this module must never execute a mutating verb):
     ``~/.hscc/api.json`` pins for every probe child, never the operator's 8787:
     a real leak lands on the port the walk owns, and host state on the product
     port can neither arm it nor silence it.
+  * the walk may fan its probes out over N `Prober`s (t_71f9fc17, bounded by
+    `HSCC_CLI_HELP_PROBE_WORKERS`, default 4), and that changes nothing above:
+    each worker owns its OWN sandbox, its OWN canary dir and its OWN sealed
+    port, so a sensor only ever compares a probe against the state of the
+    Prober that spawned it. The analysis is still serial — the fan-out only
+    prefetched renders into `Prober.run`'s cache — so the findings and their
+    order are what the serial walk produces, and a worker that cannot be built
+    costs the walk time rather than a probe.
 
 Usage:
   python3 scripts/hscc_cli_help_audit.py                 # audit repo root
