@@ -18,3 +18,13 @@ serial: survivors=[]
 serial done 18:25:53
 alone (trace unset): rc=0 | 23 passed in 7.49s
 ALL DONE 18:26:00
+serial-at-head: rc=1 | 1 failed, 739 passed, 4 skipped in 158.86s (0:02:38)
+serial-at-head: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=0
+serial-at-head: other-failures=1
+serial-at-head: survivors=[]
+SERIAL AT HEAD DONE
+serial-shipping: rc=0 | 740 passed, 4 skipped in 170.55s (0:02:50)
+serial-shipping: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=0
+serial-shipping: other-failures=0
+serial-shipping: survivors=[]
+SERIAL AT HEAD DONE

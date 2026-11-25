@@ -172,6 +172,27 @@ re-taken at the shipping tree below.
 
 ## F6b — serial full suite at the shipping tree
 
+The rows above were taken before this card's index entries existed, so the bar's
+serial run is re-taken at `5d009d36` (the head that ships) with
+`docs/audits/support/t_8bb39d12/serial_at_head.sh`:
+
+```
+serial-shipping: rc=0 | 740 passed, 4 skipped in 170.55s (0:02:50)
+serial-shipping: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=0
+serial-shipping: other-failures=0
+serial-shipping: survivors=[]
+```
+
+Green, with both INT traps firing (`int-trap=2`, `cleanup-exit 130=2`) and
+`sigint-reset=0`: a foreground-launched suite never enters the new path. The
+`serial-at-head` rows appended below it are the intermediate run at `ad43831d`,
+kept because its single failure is the lint finding F6 describes (quoted
+`set -m` / `trap -p INT` read as command invocations) and shows the gate
+catching it rather than the fix regressing anything.
+
+So the full bar: 6/6 pair-shape INT arms with their markers (F6), one green
+serial full suite at the shipping commit (F6b), and the shared consumers alone
+with the trace unset (`23 passed`, F6).
 
 ## Left for the next worker
 
