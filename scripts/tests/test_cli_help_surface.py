@@ -87,13 +87,18 @@ MIN_EXAMPLES = 60
 def report():
     """One audit run shared by every assertion.
 
-    MEASURED cost, because every test in this file waits on it: 59.69 s on a
-    clean `main` worktree at host load 1.9 (t_4c9feb44) — 961 CLI subprocesses
-    over 331 probed surfaces. The "~35 s" this docstring used to claim was both
-    wrong and load-blind; the same walk measured 307.64 s while `Prober` paid a
-    0.25 s black-holed port probe per call, which is what made the whole `scripts`
-    leg look hung from test ~233. Budget against the measured number, and check
-    the census before believing any new per-probe cost.
+    MEASURED cost, because every test in this file waits on it. Pre-fan-out it
+    was 397.77 s of setup at the gate's background QoS (t_49827b5d) — ~1k CLI
+    subprocesses launched one at a time, 945 unique `(argv, width)` renders over
+    179 surfaces / 349 probed invocations. Since t_71f9fc17 the walk fans those
+    probes out over 4 isolated `Prober`s (`HSCC_CLI_HELP_PROBE_WORKERS`, `1` =
+    the serial walk): the same audit measured **329.84 s serial → 135.00 s at 4
+    workers** under `taskpolicy -b` on a box with sibling legs running
+    (load ~5), with a byte-identical report apart from the fan accounting.
+    The older "~35 s" and "59.69 s" figures this docstring carried were both
+    load-blind and predate the `-h` parity pass that doubled the walk. The
+    per-probe port-probe cost t_4c9feb44 measured (0.25 s black hole x ~1k
+    probes) is gone for good, pinned by the seal tests below.
     """
     return audit_mod.audit(str(REPO))
 
@@ -1667,6 +1672,287 @@ def test_probe_child_resolves_the_sealed_api_port(tmp_path, request):
         "a probe child still names the operator's default api port — the seal "
         "is not holding for this surface")
 
+
+
+# ── Probe fan-out (t_71f9fc17) ───────────────────────────────────────────
+#
+# The audit's ~945 probe children used to launch one at a time, and at the queue
+# gate's background QoS that walk WAS the `scripts` leg (397.77 s of the module
+# fixture, t_49827b5d). The fan-out buys wall time by giving each worker its OWN
+# sandbox, canary tripwire log and sealed api port — the three things
+# `Prober.run` brackets every spawn against, and the reason a thread pool over
+# ONE Prober would race the (C)/(D) sensors instead of speeding them up.
+# These pins hold the two properties that make it safe: workers cannot see each
+# other's sensors, and the walk still pays for EXACTLY the planned launches, so a
+# fan-out failure costs seconds and never a finding.
+
+#: Two surfaces, 11 probe keys — enough to have a real plan, small enough that a
+#: test which actually spawns the plan costs a second, not the 397 s the fixture
+#: costs. `(group, argv, style, kind)`, the shape `build_surface` returns.
+_TINY_SURFACE = [
+    ("top-level", ["status"], "plain", "flag"),
+    ("top-level", ["help", "status"], "plain", "help"),
+]
+
+#: The plan size for `_TINY_SURFACE`: 3 invocations × 3 widths + 1 × 2.
+_TINY_PLAN = 11
+
+
+def _stub_pre_walk_probes(monkeypatch):
+    """Cut the audit's two PRE-walk probe children out of a tiny run.
+
+    The engine-router probe and the systemic import probe are pinned by their own
+    cases; in a fan-out test they would only add interpreters and a second
+    sandbox to what is about the plan.
+    """
+    monkeypatch.setattr(audit_mod, "_orch_router_verbs",
+                        lambda *_a, **_k: ({"inject", "waker"}, None),
+                        raising=True)
+    monkeypatch.setattr(audit_mod, "_systemic_import_probe",
+                        lambda *_a, **_k: None, raising=True)
+
+
+class _SubprocessShim:
+    """Stand-in for the `subprocess` MODULE inside the audit, recording spawns.
+
+    Patched onto `audit_mod.subprocess` rather than the real module, so nothing
+    else in the process — pytest's own machinery included — is spied on or
+    slowed. `TimeoutExpired` rides along because `Prober.run` catches it out of
+    this attribute, not out of the real module.
+    """
+
+    TimeoutExpired = subprocess.TimeoutExpired
+
+    def __init__(self):
+        self.calls: list = []
+
+    def run(self, *args, **kwargs):
+        argv = list(args[0]) if args else list(kwargs.get("argv", []))
+        self.calls.append(argv)
+        return subprocess.run(*args, **kwargs)
+
+
+def _probe_launches(calls: list) -> list:
+    """Only the CLI probe children: argv = [PY, "-m", "hscc_daemon.hscc", ...]."""
+    return [c for c in calls if len(c) > 2 and c[1:3] == ["-m", "hscc_daemon.hscc"]]
+
+
+def test_probe_workers_env_is_bounded(monkeypatch):
+    """Default 4, `1` = the serial walk, garbage = serial, and a hard cap.
+
+    The cap is not cosmetics: `run_tests.sh` can run sibling legs concurrently
+    (t_6c2123f9), so an unbounded fan-out is a way to starve the rest of the
+    queue at the gate.
+    """
+    monkeypatch.delenv(audit_mod.PROBE_WORKERS_ENV, raising=False)
+    assert audit_mod.probe_workers() == audit_mod.DEFAULT_PROBE_WORKERS == 4
+    for raw, want in (("1", 1), ("2", 2), ("4", 4), ("0", 1), ("-3", 1),
+                      ("junk", 1), ("", 4), ("  3 ", 3),
+                      ("999", audit_mod.MAX_PROBE_WORKERS)):
+        monkeypatch.setenv(audit_mod.PROBE_WORKERS_ENV, raw)
+        assert audit_mod.probe_workers() == want, f"env {raw!r}"
+
+
+def test_probe_plan_is_exactly_what_the_walk_asks(monkeypatch):
+    """The prefetch list may not drift from what the serial walk actually asks.
+
+    Drift is the silent failure mode of any prefetch design. Missing keys are
+    survivable by construction (the walk pays one serial probe), but a plan built
+    from a different width set than the walk asks means the fan-out has quietly
+    stopped covering the walk while still looking green. Both directions are
+    measured over the REAL surface with `Prober.run` stubbed, so nothing spawns:
+    the walk's own asks, in its own order, against `probe_plan`.
+    """
+    asked: list = []
+
+    class _StubProber(audit_mod.Prober):
+        def run(self, argv, width):
+            asked.append((tuple(argv), width))
+            return {"argv": list(argv), "width": width, "rc": 0, "hung": False,
+                    "out": "", "err": "", "secs": 0.0, "new_files": [],
+                    "trips": [], "plist_created": False, "port_flip": False,
+                    "sensor_port": self.sensor_port}
+
+    captured: dict = {}
+    real_build_surface = audit_mod.build_surface
+
+    def _capture_build_surface():
+        built = real_build_surface()
+        captured["paths"] = built[0]
+        return built
+
+    def _no_prefetch(*_a, **_k):
+        # Without this the fan-out's cache seeding would answer the walk and the
+        # recording would describe the PLAN, not the walk — a tautology.
+        return ({"requested_workers": 1, "workers": 1, "planned": 0,
+                 "prefetched": 0, "worker_errors": [],
+                 "probe_prefetch_misses": 0}, [])
+
+    monkeypatch.setattr(audit_mod, "Prober", _StubProber, raising=True)
+    monkeypatch.setattr(audit_mod, "build_surface", _capture_build_surface,
+                        raising=True)
+    monkeypatch.setattr(audit_mod, "prefetch_renders", _no_prefetch, raising=True)
+    _stub_pre_walk_probes(monkeypatch)
+    rep = audit_mod.audit(str(REPO))
+
+    plan = audit_mod.probe_plan(captured["paths"])
+    assert rep["probes"] >= MIN_PROBES, (
+        f"the walk stopped probing surfaces ({rep['probes']} < {MIN_PROBES}) — "
+        "this comparison is then measuring the wrong surface")
+    assert len(plan) == len(set(plan)), (
+        "probe_plan must dedupe the way Prober.run's cache does — a repeated key "
+        "would make one probe look like two")
+    assert list(dict.fromkeys(asked)) == plan, (
+        "the walk and the prefetch plan disagree: a walk ask missing from the "
+        "plan is a serial probe the fan-out never covered, an extra plan key is "
+        "a wasted interpreter. Neither may happen silently. "
+        f"walk-only={sorted(set(asked) - set(plan))[:5]!r} "
+        f"plan-only={sorted(set(plan) - set(asked))[:5]!r}")
+    assert {w for _a, w in plan} <= set(audit_mod.WIDTHS_ALL), (
+        "the plan asks a width the audit does not define — (B) would silently "
+        "stop measuring a mandated width")
+
+
+def test_fan_workers_own_isolated_sensors(tmp_path, monkeypatch, request):
+    """Two probes may not share a sandbox, a canary log or a sealed port.
+
+    This is the whole reason the fan-out is over Probers: `Prober.run` diffs
+    `files_before`/`trips_before`/`port_flip` against ITS OWN state, so workers
+    that share any of the three manufacture (C)/(D) findings out of each other's
+    side effects.
+    """
+    sandbox = tmp_path / "home"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    main_canary = audit_mod.make_canary_dir(tmp_path)
+    audit_mod._seed_sandbox(sandbox)
+    shared = audit_mod._SharedSensors()
+    real_home = Path(os.path.expanduser("~"))
+    workers = [audit_mod.Prober(sandbox, main_canary, real_home, shared=shared)]
+    workers += [audit_mod._make_fan_prober(tmp_path, i, shared) for i in (1, 2, 3)]
+    for p in workers:
+        request.addfinalizer(p.close)
+    try:
+        assert len({str(p.sandbox) for p in workers}) == 4
+        assert len({str(p.canary / "trips.log") for p in workers}) == 4
+        assert len({p.sensor_port for p in workers}) == 4, (
+            "two sealed sensor ports the same: one worker's stray server would "
+            "read as a port flip in another worker's (D) findings")
+        assert all(p._shared is shared for p in workers)
+        # Every worker root stays UNDER the audit's one tmp root, because `add()`
+        # normalises str(tmp) -> <SANDBOX>. Outside it, a finding detail could
+        # carry a per-run temp path into the bipartite expectation table.
+        assert all(str(p.sandbox).startswith(str(tmp_path)) for p in workers[1:]), (
+            "a fan sandbox outside the audit's tmp root escapes the <SANDBOX> "
+            "normalisation in add()")
+        for p in workers:
+            sealed = json.loads((p.sandbox / ".hscc" / "api.json").read_text())
+            assert sealed["port"] == p.sensor_port, (
+                "this child would resolve someone else's sealed port and the "
+                "port sensor would be measuring a port it does not own")
+        # A trip recorded by one worker's canary is invisible to the others...
+        with open(workers[1].canary / "trips.log", "a") as fh:
+            fh.write("sparkrun whoami\n")
+        assert len(workers[1]._trips()) == 1
+        assert all(len(p._trips()) == 0 for p in workers if p is not workers[1]), (
+            "canary trips are landing in a shared log — the fan-out would hide a "
+            "(D) 'shell out' finding from the bracket that spawned it")
+        # ...and the child env names its OWN log even after the gate process's
+        # global moves, which is exactly what `make_canary_dir` used to do.
+        foreign = tmp_path / "foreign" / "trips.log"
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_text("")
+        monkeypatch.setenv("AUDIT_CANARY_LOG", str(foreign))
+        for p in workers:
+            assert p._env(80)["AUDIT_CANARY_LOG"] == str(p.canary / "trips.log"), (
+                "probe children inherit the gate process's canary log: with N "
+                "workers a trip lands in whichever log the global pointed at "
+                "when the child spawned — a (D) finding nobody reads")
+    finally:
+        for p in workers:
+            p.close()
+
+
+def test_plist_sensor_reports_one_creation_for_the_whole_audit(tmp_path):
+    """The LaunchAgents check is per-AUDIT, because its HOME is shared.
+
+    `~/Library/LaunchAgents/com.hscc.api.plist` is in the operator's real home —
+    the one sensor no Prober can own. N concurrent brackets would each see
+    "absent before, present after" for ONE creation and emit N (D) findings under
+    N surface names, where the serial walk emits exactly one.
+    """
+    shared = audit_mod._SharedSensors()
+    home = tmp_path / "real-home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    plist = home / "Library" / "LaunchAgents" / audit_mod.API_PLIST_NAME
+    plist.write_text("already there before the walk started\n")
+    # A file that predates the bracket is never a creation.
+    assert [shared.plist_created(True, home) for _ in range(3)] == [False] * 3
+    # A file that appeared IS reported — exactly once, across every worker.
+    assert [shared.plist_created(False, home) for _ in range(3)] == [
+        True, False, False]
+
+
+def test_fan_out_covers_the_plan_and_the_walk_relaunches_nothing(
+        monkeypatch):
+    """The acceptance property, on a 2-surface surface: 11 keys, 11 children.
+
+    One child per planned key for the WHOLE audit means the prefetch covered the
+    walk and the walk re-spawned none of it — the speedup without a second
+    interpreter anywhere. `probes` (the number the gate floors on) is untouched.
+    """
+    monkeypatch.setattr(audit_mod, "build_surface",
+                        lambda: (list(_TINY_SURFACE), {}), raising=True)
+    monkeypatch.setenv(audit_mod.PROBE_WORKERS_ENV, "4")
+    _stub_pre_walk_probes(monkeypatch)
+    shim = _SubprocessShim()
+    monkeypatch.setattr(audit_mod, "subprocess", shim, raising=True)
+    rep = audit_mod.audit(str(REPO))
+
+    assert rep["probe_fan_errors"] == [], rep["probe_fan_errors"]
+    assert rep["probe_workers"] == 4, (
+        f"the fan-out collapsed to {rep['probe_workers']} worker(s) — the "
+        "isolation pins above prove the machinery, not that the walk used it")
+    assert rep["probe_plan"] == _TINY_PLAN
+    assert rep["probes_prefetched"] == _TINY_PLAN
+    assert rep["probe_prefetch_misses"] == 0
+    assert rep["probes"] == 4, "the (A)/(B)/(C)/(D) probe count must not move"
+    launches = _probe_launches(shim.calls)
+    assert len(launches) == rep["probe_plan"], (
+        f"{len(launches)} CLI children for a {rep['probe_plan']}-key plan: the "
+        "walk re-spawned prefetched renders, or the plan under-covered it")
+
+
+def test_a_worker_that_cannot_be_built_costs_time_not_probes(monkeypatch):
+    """A fan worker that cannot reserve a sealed port must not lose a probe.
+
+    The fail-safe half: the plan's keys simply become cache misses, so the walk
+    pays for them serially and every finding still lands — slower, never blind.
+    """
+    monkeypatch.setattr(audit_mod, "build_surface",
+                        lambda: (list(_TINY_SURFACE), {}), raising=True)
+    monkeypatch.setenv(audit_mod.PROBE_WORKERS_ENV, "4")
+
+    def _no_worker(*_a, **_k):
+        raise RuntimeError("cannot reserve a free loopback api sensor port")
+
+    monkeypatch.setattr(audit_mod, "_make_fan_prober", _no_worker, raising=True)
+    _stub_pre_walk_probes(monkeypatch)
+    shim = _SubprocessShim()
+    monkeypatch.setattr(audit_mod, "subprocess", shim, raising=True)
+    rep = audit_mod.audit(str(REPO))
+
+    assert rep["probe_workers"] == 1, (
+        f"a walk that could not build a worker reported {rep['probe_workers']} "
+        "workers — the posture would be a lie in the report")
+    assert rep["probe_fan_errors"], (
+        "the degradation is invisible: a serial walk reported by a fan-out "
+        "report is exactly the silent fallback this card forbids")
+    assert rep["probes_prefetched"] == 0
+    assert rep["probes"] == 4 and rep["probe_plan"] == _TINY_PLAN
+    launches = _probe_launches(shim.calls)
+    assert len(launches) == rep["probe_plan"], (
+        f"{len(launches)} children for {_TINY_PLAN} planned keys — the failed "
+        "fan-out lost probes instead of falling back to serial")
 
 
 def test_write_findings_artifact(report):
