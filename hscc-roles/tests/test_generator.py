@@ -1351,6 +1351,30 @@ def test_the_guard_goes_red_when_its_census_root_holds_an_orphan(tmp_path, monke
     )
 
 
+def test_the_census_refuses_an_emptiness_it_cannot_attribute(monkeypatch):
+    """`_census_roots` may answer "no roots" only when the seal explains it.
+
+    Two states, both of which would otherwise let the guard call itself vacuous and
+    pass while a tree exists: HOME moved by something other than the leg's seal, and
+    a "sealed" home that sits inside the login home (the t_d39c720e shape — hermes
+    resolves such a home straight back to the live root, so it seals nothing). The
+    assertion is what turns the seal's word into a checked claim.
+    """
+    monkeypatch.setattr(rolelib, "PROFILES_DIR", "/definitely/not/here/profiles")
+    sealed = {"home": "/var/tmp/hscc-sealed-a", "pre_seal_home": "/var/tmp/hscc-login"}
+    monkeypatch.setenv("HOME", "/var/tmp/hscc-someone-else")
+    with pytest.raises(AssertionError) as exc:
+        _census_roots(sealed)
+    assert "attributed to the seal" in str(exc.value)
+    # A seal dir inside the login root is not a seal: same refusal, other reason.
+    nested = "/var/tmp/hscc-login/nested/cache"
+    monkeypatch.setenv("HOME", nested)
+    sealed = {"home": nested, "pre_seal_home": "/var/tmp/hscc-login"}
+    with pytest.raises(AssertionError) as exc:
+        _census_roots(sealed)
+    assert "attributed to the seal" in str(exc.value)
+
+
 def test_hiding_a_role_spec_reddens_the_census_that_covers_it(tmp_path, monkeypatch):
     """`mv roles/<name>.yaml` must turn the census red — measured, not assumed.
 
