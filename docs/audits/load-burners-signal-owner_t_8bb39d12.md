@@ -135,7 +135,43 @@ recorded 0/60 alone, and this card's `fg` row passed 7/7.
 
 ## F6 — proof
 
-See "Proof" below (written after the runs land).
+Driver: `docs/audits/support/t_8bb39d12/proof.sh` (sequential — parallel suites
+have previously broken load-timing cases on this host), output in
+`docs/audits/support/t_8bb39d12/proof-results.txt`. The card's bar, run against
+the fixed harness at `4f62d437`:
+
+| run | `[2-130]` failures | `int-trap` | `cleanup-exit 130` | `sigint-reset` | suite | survivors |
+|---|---|---|---|---|---|---|
+| pair0/A, pair0/B | 0, 0 | 2, 2 | 2, 2 | 9, 9 | 1 failed, 739 passed, 4 skipped | none |
+| pair1/A, pair1/B | 0, 0 | 2, 2 | 2, 2 | 9, 9 | 1 failed, 739 passed, 4 skipped | none |
+| pair2/A, pair2/B | 0, 0 | 2, 2 | 2, 2 | 9, 9 | 1 failed, 739 passed, 4 skipped | none |
+| serial (foreground) | 0 | 2 | 2 | **0** | 1 failed, 739 passed, 4 skipped | none |
+
+* **6/6 INT arms passed** across three pair runs — the shape that failed 4/4 and
+  2/2 for the three preceding cards — and each passed *non-vacuously*: the same
+  suite's own trace carries `int-trap` and `cleanup-exit 130`, so the signal was
+  observed and cleanup completed rather than the case never seeing a signal
+  (`t_f8e6fe38` LEFT-4). Two of each marker per suite: the arm in
+  `test_load_burners.py` and the INT arm in `test_loadstress_leg.py`.
+* **`sigint-reset` = 9 per async-launched suite, 0 for the foreground serial
+  run.** That contrast is the design working as claimed: every harness spawned
+  by a suite the launcher backgrounded took the reset path, and a normally
+  launched suite never enters it — no extra process, no behaviour change on the
+  healthy path.
+* **Shared consumers with the trace unset**: `test_load_burners.py` +
+  `test_loadstress_leg.py` alone → `23 passed in 7.49s`, rc 0.
+* No survivor burners after any run (`pgrep -f hscc-load-test-` empty each time).
+
+The one `failed` in every suite row is this card's own docs-index gap, not a
+behavioural regression: the pair/serial runs above were taken from worktrees
+detached at `4f62d437`, which carries the audit file while its `docs/README.md`
+entries landed in `ad43831d`. The lint said exactly that
+(`[DOC-UNLISTED] … load-burners-signal-owner_t_8bb39d12.md … has no
+backtick-quoted entry`), the gap is closed in `ad43831d`, and the serial run is
+re-taken at the shipping tree below.
+
+## F6b — serial full suite at the shipping tree
+
 
 ## Left for the next worker
 

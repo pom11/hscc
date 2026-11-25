@@ -1,0 +1,20 @@
+pair0/A: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=9 | 1 failed, 739 passed, 4 skipped in 166.09s (0:02:46)
+pair0/A: survivors=[]
+pair0/B: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=9 | 1 failed, 739 passed, 4 skipped in 167.46s (0:02:47)
+pair0/B: survivors=[]
+pair0 done 18:17:45
+pair1/A: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=9 | 1 failed, 739 passed, 4 skipped in 164.16s (0:02:44)
+pair1/A: survivors=[]
+pair1/B: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=9 | 1 failed, 739 passed, 4 skipped in 164.82s (0:02:44)
+pair1/B: survivors=[]
+pair1 done 18:20:30
+pair2/A: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=9 | 1 failed, 739 passed, 4 skipped in 165.55s (0:02:45)
+pair2/A: survivors=[]
+pair2/B: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=9 | 1 failed, 739 passed, 4 skipped in 164.37s (0:02:44)
+pair2/B: survivors=[]
+pair2 done 18:23:16
+serial: arm-failure-mentions=0 int-trap=2 cleanup-exit130=2 sigint-reset=0 | 1 failed, 739 passed, 4 skipped in 156.28s (0:02:36)
+serial: survivors=[]
+serial done 18:25:53
+alone (trace unset): rc=0 | 23 passed in 7.49s
+ALL DONE 18:26:00
