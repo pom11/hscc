@@ -152,22 +152,39 @@ CI_PENDING_TIMEOUT_S = 1800
 WAITING_MAX_AGE_S = 24 * 3600
 WAITING_MAX_AGE_KEY = "waiting_max_age_s"
 
-#: Task-policy class the gate asks for on macOS, and where that tool lives.
+#: The gate runs at the daemon's OWN scheduling posture: no `taskpolicy` prefix.
 #:
-#: The gate is a child of the `com.hermes.hscc_daemon` launchd job, whose plist
-#: sets `ProcessType => Background`; every process under it inherits background
-#: QoS and is scheduled behind ordinary interactive work.  Measured A/B on ONE
-#: pytest leg in the SAME worktree: warm at default QoS 144.9 s vs warm at
-#: background QoS 484.7 s = 3.34x (3.80x with the queue's exact no-bytecode +
-#: background combination).  The whole 12-leg suite needs 1092.6 s unopposed —
-#: 30% of DEFAULT_GATE_TIMEOUT_S — so it was the scheduling class exhausting the
-#: budget, not the suite.  `utility` is the smallest elevation that gets a real
-#: scheduler share without claiming foreground priority from the operator.
-GATE_QOS_POLICY_CLASS = "utility"
-TASKPOLICY_PATH = "/usr/sbin/taskpolicy"
-
-#: Cache for :func:`_gate_qos_prefix`; the answer cannot change during a run.
-_GATE_QOS_PREFIX_CACHE = None
+#: There used to be one.  The daemon's launchd job set `ProcessType =>
+#: Background`, everything under it was scheduled as background work, and
+#: `t_7bccacef` wrapped the gate in `taskpolicy -c utility` to lift it out.  That
+#: clamp did nothing, and the numbers below are from real launchd rather than
+#: from a shell that only looks like it (2026-11-25, throwaway probe jobs
+#: bootstrapped into this host's `gui/<uid>` domain, each running a fixed
+#: 40-million-iteration CPU loop; `docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md`
+#: §3 reached the same conclusion modelling Background with `taskpolicy -b`):
+#:
+#:   launchd ProcessType | gate leg                      | `ps -o pri` |  it/s
+#:   ------------------- | ----------------------------- | ----------- | -------
+#:   Background          | plain                         | 4           |  5.5 M
+#:   Background          | `taskpolicy -c utility`       | **4**       |  5.6 M
+#:   Standard            | plain                         | 20          | 39.1 M
+#:   Standard            | `taskpolicy -c utility`       | 20          | 41.9 M
+#:
+#: Two things follow.  Under Background the elevation does not take: a clamped
+#: child keeps pri 4 and pays the whole ~7x, so the clamp was never the
+#: protection it read as.  Under `Standard` — the posture the operator moved the
+#: daemon to (t_ae87b783) — the job's children already sit in the utility band,
+#: so asking for utility is a no-op rather than an upgrade.  And it cannot be
+#: repaired: `taskpolicy -c` parses only `utility`, `background` and
+#: `maintenance` (`-c default` answers "Could not parse 'default' as a QoS
+#: clamp"), so there is no clamp meaning "standard" to ask for at all.
+#:
+#: The single lever that reaches the tax is the operator-owned plist key, and it
+#: is `Standard` in every emitter now — com.hermes.hscc_daemon.plist.template,
+#: install.py and hscc-project/flightdeck/commands/daemon_install.py — each
+#: pinned by a test, because a bootstrap that reintroduced `Background` costs
+#: every gate 3-7x silently (measured: a 1323 s roster ran ~75 min in the gate).
+#: Re-add a clamp here only with new measurements showing it moves `ps -o pri`.
 
 #: How often a running gate re-stamps the health stream (see
 #: :class:`_GateLiveness`). 30 s is 1/20 of verify's 600 s staleness budget for
@@ -1560,55 +1577,42 @@ class _GateLiveness:
             thread.join(timeout=max(5.0, self.interval + 5.0))
 
 
-def _gate_qos_prefix():
-    """Argv prefix that pulls the gate out of inherited background QoS.
-
-    ``()`` means "ask for nothing" — which is deliberately the answer on every
-    non-macOS host AND on a macOS host where /usr/sbin/taskpolicy is missing.
-    The prefix is a *program* exec'd before the shell, so an unavailable program
-    would make the gate exit 127 and record `red-gate` on a PR whose code was
-    never even compiled.  A QoS speed-up is never worth a false red, so this
-    fails toward the pre-fix behaviour rather than toward the fix.
-    """
-    global _GATE_QOS_PREFIX_CACHE
-    if _GATE_QOS_PREFIX_CACHE is None:
-        _GATE_QOS_PREFIX_CACHE = (
-            (TASKPOLICY_PATH, "-c", GATE_QOS_POLICY_CLASS)
-            if sys.platform == "darwin" and os.path.exists(TASKPOLICY_PATH)
-            else ()
-        )
-    return _GATE_QOS_PREFIX_CACHE
-
-
 #: The interpreter a gate's shell string runs under.  ``shell=True`` resolves to
 #: this same ``/bin/sh`` (``subprocess.unix_shell`` on POSIX) and deliberately
 #: NOT to ``$SHELL``, so naming it by hand keeps an operator's gate scripts
-#: behaving exactly as they did before the QoS prefix below was added.
+#: behaving exactly as they did before the (since removed) QoS prefix.
 GATE_SHELL = "/bin/sh"
 
 
 def _gate_shell_argv(command):
-    """Argv that runs the operator's shell string at the requested QoS class.
+    """Argv that runs the operator's shell string, unmodified, in a shell.
 
-    The shape is ``[taskpolicy, -c, utility, /bin/sh, -c, <command>]``, spawned
-    with ``shell=False``.  Two things about it are load-bearing:
+    The shape is ``[/bin/sh, -c, <command>]``, spawned with ``shell=False``.
+    There is deliberately nothing in front of the shell: the gate runs at the
+    daemon's own scheduling posture, which is ``Standard`` since the operator
+    moved the launchd job there (see the block above
+    ``LIVENESS_STAMP_S`` for the measurements that killed the old
+    ``taskpolicy -c utility`` prefix — it could not lift a Background job and is
+    a no-op under Standard).
 
-    * `taskpolicy` must be the *program* that gets exec'd, so the shell and every
-      pytest leg under it inherit the class — that is the entire point of item 1.
-    * the command must reach the shell as ONE argument.
+    The two load-bearing details of the shape are unchanged by that removal:
+
+    * the shell must be the *program* that gets exec'd, with the operator's
+      command reaching it as ONE argument.
 
     The tempting one-line diff — a list argv with ``shell=True`` still set — does
     the opposite of both.  On POSIX ``shell=True`` runs
     ``/bin/sh -c <argv[0]> <argv[1]> ...``, so only ``argv[0]`` is the command and
-    ``-c utility /bin/sh -c <gate>`` silently become the shell's own ``$0 $1 $2``.
-    Measured on this host: the gate then ran a bare `taskpolicy`, printed its
-    usage and exited **64** — which the queue would have recorded as `red-gate`
-    on every PR on the Mac, against code that was never even compiled.  An
-    injected fake ``Popen`` cannot see that, because it never execs anything,
-    which is why :func:`test_the_gate_argv_actually_runs_the_operators_command`
-    executes the real argv instead of only reading its shape.
+    whatever followed silently became the shell's own ``$0 $1 $2``.  Measured on
+    this host when the QoS prefix was in front of the shell: the gate then ran a
+    bare `taskpolicy`, printed its usage and exited **64** — which the queue would
+    have recorded as `red-gate` on every PR on the Mac, against code that was
+    never even compiled.  An injected fake ``Popen`` cannot see that, because it
+    never execs anything, which is why
+    :func:`test_the_gate_argv_actually_runs_the_operators_command` executes the
+    real argv instead of only reading its shape.
     """
-    return [*_gate_qos_prefix(), GATE_SHELL, "-c", command]
+    return [GATE_SHELL, "-c", command]
 
 
 def _stream_text(stream):
@@ -1784,11 +1788,13 @@ def _run_gate(command, worktree, timeout_s, cancel_check=None,
     only ever returned when ``cancel_check`` is supplied.
 
     Three things this leg must get right, all learned from a 1800 s budget that
-    a 1092.6 s suite kept failing (see :func:`_gate_qos_prefix`,
+    a 1092.6 s suite kept failing (see the block above ``LIVENESS_STAMP_S``,
     :func:`_kill_gate_group` and :func:`_stream_text`):
 
-    1. do not run at the launchd job's inherited **background QoS**, which
-       measured 3.34x slower and is what actually exhausted the budget;
+    1. do not run at a **throttled scheduling posture**, which measured 3-7x
+       slower and is what actually exhausted the budget.  The posture is the
+       launchd job's `ProcessType` — a user-space `taskpolicy` clamp was tried
+       for it and cannot move it, so the fix lives in the plist emitters;
     2. do not leave the gate's pytest **alive after the timeout**, or the next
        attempt competes with the previous attempt's orphan;
     3. carry the **real last lines** into the handback, so a timeout is
