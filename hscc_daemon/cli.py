@@ -25,6 +25,7 @@ from .cli_theme import (
     make_status_panel,
     make_table,
 )
+from .util import unblock_stop_signals
 
 
 def _console(**kwargs):
@@ -218,6 +219,10 @@ def cmd_start():
     os.setsid()
     signal.signal(signal.SIGTERM, _sigterm_handler)
     signal.signal(signal.SIGINT, _sigterm_handler)
+    # Both children inherit the caller's signal MASK, and a mask survives the
+    # forks: a disposition without an unblocked signal never dispatches, so
+    # `hscc stop` would SIGTERM a daemon that can never answer (t_81e00872).
+    unblock_stop_signals()
 
     os.chdir(os.path.expanduser("~"))
 

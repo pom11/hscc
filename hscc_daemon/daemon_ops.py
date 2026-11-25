@@ -803,6 +803,11 @@ def run_daemon_loop():
 
     signal.signal(signal.SIGTERM, stop_handler)
     signal.signal(signal.SIGINT, stop_handler)
+    # Clear a BLOCKED mask inherited from the spawner, or the handlers above
+    # are installed but never dispatched and the loop cannot be stopped
+    # (t_81e00872). This is the `start-daemon` entry path's own install site.
+    from .util import unblock_stop_signals
+    unblock_stop_signals()
 
     STREAMS = PERIODIC_INTERVALS
 
