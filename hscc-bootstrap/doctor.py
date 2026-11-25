@@ -1407,7 +1407,7 @@ def _orch_waker_check_row(injected=None, hscc_dir=None) -> "Check":
     """
     if injected is not None:
         res = injected()
-    elif "pytest" in sys.modules:
+    elif doctor_rows.under_pytest():
         res = _refused_orch_waker_check()
     else:
         waker = _load_orch_waker()
@@ -1498,7 +1498,7 @@ def _cron_watchers_check_row(injected=None, hscc_dir=None) -> "Check":
     """
     if injected is not None:
         res = injected()
-    elif "pytest" in sys.modules:
+    elif doctor_rows.under_pytest():
         res = _refused_cron_watchers_check()
     else:
         cw = _load_cron_watchers()
@@ -1569,7 +1569,7 @@ def _supervision_check_row(injected=None, hscc_dir=None) -> "Check":
     """
     if injected is not None:
         res = injected()
-    elif "pytest" in sys.modules:
+    elif doctor_rows.under_pytest():
         res = _refused_supervision_check()
     else:
         try:
@@ -1669,7 +1669,7 @@ def _kanban_enforce_check_row(injected=None, hscc_dir=None) -> "Check":
     """
     if injected is not None:
         res = injected()
-    elif "pytest" in sys.modules:
+    elif doctor_rows.under_pytest():
         res = _refused_kanban_enforce_check()
     else:
         kp = _load_kanban_pause()
@@ -1849,7 +1849,7 @@ def _budget_hook_check_row(injected=None, hermes_home=None) -> "Check":
     """
     if injected is not None:
         res = injected()
-    elif "pytest" in sys.modules:
+    elif doctor_rows.under_pytest():
         res = _refused_budget_hook_check()
     else:
         roots = _budget_plugin_dirs(hermes_home)
@@ -2525,7 +2525,7 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
     silently ignored seam).
     """
     if fleet_checks is None:
-        fleet_checks = "pytest" not in sys.modules
+        fleet_checks = not doctor_rows.under_pytest()
     home = (hermes_home or os.environ.get("HERMES_HOME")
             or os.path.expanduser("~/.hermes"))
     checks: List[Check] = [
@@ -2598,7 +2598,7 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                                   "pytest process — inject _ssh_factory"}
             return refused
         nr_factory = _ssh_factory or (
-            _refused_transport if "pytest" in sys.modules else None)
+            _refused_transport if doctor_rows.under_pytest() else None)
         nr_res = doctor_node_recovery.check(
             _node_hosts(_cluster_runner), ssh_factory=nr_factory,
             hscc_dir=hscc_dir)
@@ -2609,7 +2609,7 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # ERROR naming the missing seam — an honest "cannot verify", never a
         # silent pass and never a real read of the operator's profiles.
         rs_scan = _role_soul_scan or (
-            _refused_role_soul_scan if "pytest" in sys.modules
+            _refused_role_soul_scan if doctor_rows.under_pytest()
             else doctor_role_soul.check)
         rs_res = rs_scan()
 

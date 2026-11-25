@@ -212,6 +212,23 @@ def _install_probe_feature(monkeypatch, loader=lambda: _ProbeFeature()):
                         raising=False)
 
 
+def _outside_pytest_branch(monkeypatch):
+    """Close both channels ``doctor_rows.under_pytest()`` reads, for a direct
+    ``build_row`` call.
+
+    The registry fence used to be read off the module handed to ``build_row``,
+    which is why a stand-in with an empty ``sys.modules`` was enough. It is one
+    shared, child-visible predicate now (t_eb768c2a), so the process's own
+    channels have to go — and they have to go from the test BODY: pytest
+    re-exports ``PYTEST_CURRENT_TEST`` for the call phase after any setup
+    fixture has run. ``monkeypatch`` restores both at teardown, and only this
+    row is in scope, because these tests call ``build_row`` directly rather
+    than un-fencing a whole ``run_doctor()``.
+    """
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+
 def test_new_row_needs_no_change_to_run_doctor(tmp_path, monkeypatch):
     """THE regression test for the hotspot. A row appended to the registry
     renders — no keyword, no check-list entry, no adapter added to run_doctor().
@@ -271,7 +288,7 @@ def test_generic_row_refuses_inside_pytest_without_a_seam(tmp_path,
     assert res["ok"] is True, "a refusal is never fatal"
 
 
-def test_generic_row_is_unverifiable_when_module_missing():
+def test_generic_row_is_unverifiable_when_module_missing(monkeypatch):
     """A deployment where the feature module is not next to bootstrap: the row
     says it CANNOT verify, never vanishes and never claims ok.
 
@@ -282,6 +299,12 @@ def test_generic_row_is_unverifiable_when_module_missing():
     would ssh the live fleet. The fence tests that DO go through run_doctor()
     keep pytest in sys.modules on purpose.
     """
+    # The fence is the shared, child-visible predicate now, so the view of
+    # a module's ``sys.modules`` no longer decides the branch: close BOTH
+    # channels here, in the body (a setup fixture is too early — pytest
+    # re-exports the marker for the call phase after fixtures run).
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkey = _ProbeHooks(loader=lambda: None)
     row = doctor_rows.build_row(monkey, _probe_spec(), None)
     assert row.ok is False and row.fatal is False
@@ -289,28 +312,40 @@ def test_generic_row_is_unverifiable_when_module_missing():
     assert "re-run bootstrap" in row.fix
 
 
-def test_generic_row_forwards_hscc_dir_outside_pytest():
+def test_generic_row_forwards_hscc_dir_outside_pytest(monkeypatch):
     """The human-CLI path for a generic row: the feature's own
     doctor_check(hscc_dir=...) gets the sandbox root. Bootstrap keeps HOME real
     and relocates only HSCC_DIR, so a row that dropped this would read the
     OPERATOR's ~/.hscc from a sandboxed Stage-1 run. Same reasoning as above
     for calling build_row directly rather than run_doctor."""
+    # The fence is the shared, child-visible predicate now, so the view of
+    # a module's ``sys.modules`` no longer decides the branch: close BOTH
+    # channels here, in the body (a setup fixture is too early — pytest
+    # re-exports the marker for the call phase after fixtures run).
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     row = doctor_rows.build_row(_ProbeHooks(), _probe_spec(), None,
                                 hscc_dir="/sandbox/.hscc")
     assert row.detail == "probe ok (hscc_dir=/sandbox/.hscc)"
 
 
-def test_generic_row_exposes_only_the_five_check_fields():
+def test_generic_row_exposes_only_the_five_check_fields(monkeypatch):
     """`_ProbeFeature.doctor_check` returns a sixth field on purpose: the
     adapter must copy exactly the five, or `doctor --json` grows a shape the
     renderer does not know about."""
+    # The fence is the shared, child-visible predicate now, so the view of
+    # a module's ``sys.modules`` no longer decides the branch: close BOTH
+    # channels here, in the body (a setup fixture is too early — pytest
+    # re-exports the marker for the call phase after fixtures run).
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     row = doctor_rows.build_row(_ProbeHooks(), _probe_spec(), None)
     assert {f for f in row.__dataclass_fields__} == {"name", "ok", "detail",
                                                      "fix", "fatal"}
     assert set(vars(row)) == {"name", "ok", "detail", "fix", "fatal"}
 
 
-def test_generic_row_resolves_the_fallback_name_constant():
+def test_generic_row_resolves_the_fallback_name_constant(monkeypatch):
     """``fallback_name`` is the NAME OF A MODULE CONSTANT, not the name itself
     (the `_BUDGET_HOOK_CHECK_NAME` convention), so a feature verdict dict with no
     ``name`` must print the constant's VALUE — not the literal string
@@ -330,6 +365,12 @@ def test_generic_row_resolves_the_fallback_name_constant():
             return {"ok": True, "detail": "no name here", "fix": "",
                     "fatal": False}
 
+    # The fence is the shared, child-visible predicate now, so the view of
+    # a module's ``sys.modules`` no longer decides the branch: close BOTH
+    # channels here, in the body (a setup fixture is too early — pytest
+    # re-exports the marker for the call phase after fixtures run).
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     hooks = _ProbeHooks(loader=lambda: _NamelessFeature())
     row = doctor_rows.build_row(hooks, _probe_spec(), None)
     assert row.name == _ProbeFeature.CHECK_NAME, row.name

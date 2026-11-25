@@ -49,6 +49,10 @@ import os
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
+# The in-suite fence is ONE predicate, shared with the row registry: see
+# ``doctor_rows.under_pytest`` for why the module-local test is not enough.
+import doctor_rows  # flat sibling, next to this module (hscc-bootstrap/)
+
 # ── The shared surfaces, imported from the modules that own them ────────────
 # Neither constant is re-declared here: RUNTIME_WATCHDOG_SEC, MANAGED_KEYS,
 # HARDLOCKUP_KEY and the drop-in builder all stay single-sourced in the install
@@ -333,7 +337,7 @@ def _default_ssh_factory() -> Callable[[str], Callable[[str, int], Dict[str, Any
     Refused outright inside a pytest process: a suite that forgot to inject its
     own transport must fail loudly rather than ssh to the live fleet.
     """
-    if "pytest" in sys.modules:
+    if doctor_rows.under_pytest():
         def refused_in_suite(_host: str):
             return _refused_transport("production ssh transport refused inside a "
                                       "pytest process — inject ssh_factory")
@@ -366,7 +370,7 @@ def _topology_hosts() -> List[str]:
     ``_cluster_runner`` into ``run_doctor``). Returning ``[]`` here is safe
     because an empty host list renders as an ERROR, never as an all-clear.
     """
-    if "pytest" in sys.modules:
+    if doctor_rows.under_pytest():
         return []
     boot_dir = os.path.dirname(os.path.abspath(__file__))
     if boot_dir not in sys.path:

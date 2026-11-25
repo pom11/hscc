@@ -66,6 +66,10 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+# The in-suite fence is ONE predicate, shared with the row registry: see
+# ``doctor_rows.under_pytest`` for why the module-local test is not enough.
+import doctor_rows  # flat sibling, next to this module (hscc-bootstrap/)
+
 #: The row's printed name. Kept here (not only in doctor.py) so the verdict and
 #: the row cannot drift; doctor.py carries a fallback constant for the case where
 #: this module itself is not importable, and a test pins the two equal.
@@ -419,7 +423,7 @@ def doctor_check(hermes_home: Optional[str] = None,
     The keyword overrides exist for the row's own tests; production calls leave
     them alone and read the declarations from their owners.
     """
-    if hermes_home is None and "pytest" in sys.modules:
+    if hermes_home is None and doctor_rows.under_pytest():
         return refused()
     root = _hermes_root(hermes_home or os.environ.get("HERMES_HOME")
                         or os.path.expanduser("~/.hermes"))

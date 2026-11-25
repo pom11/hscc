@@ -133,6 +133,10 @@ def _out_of_pytest(monkeypatch):
     """Force the row's human-CLI path. monkeypatch.delitem restores
     sys.modules["pytest"] at teardown, so no other test sees it missing."""
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    # The fence is shared and child-visible now (doctor_rows.under_pytest),
+    # so the marker pytest exports for THIS item has to go too, or the row
+    # refuses and the branch under test is never taken.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
 
 
 def _isolate(tmp_path, monkeypatch):
