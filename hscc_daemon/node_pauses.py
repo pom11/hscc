@@ -73,6 +73,7 @@ break it — or be broken by it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -93,17 +94,85 @@ ENTRY_KEYS = ("reason", "since", "until", "units", "span_nodes", "stopped")
 
 # ── Diagnostics ────────────────────────────────────────────────────────────
 
+def _warn_route(msg):
+    """This module's ONE nameable WARN route — the only call :func:`silent_read` mutes.
+
+    An indirection rather than a bare ``log(...)`` at the call site, so a documented
+    read door can borrow exactly this route and nothing else (the shape
+    ``autodown._kanban_warn`` established in PR #723). Deferred import: a broken
+    logger must not turn a readable overlay into an exception.
+    """
+    from .daemon_ops import log
+    log(msg, "WARN")
+
+
+#: Messages a muted read already echoed in THIS process (see
+#: :func:`_echo_muted_warn`). This module has NO once-per-process WARN budget —
+#: every malformed field warns on every parse — so this set is the only dedupe a
+#: muted window has, and nothing here restores a budget because there is none.
+_MUTED_ECHOED: set = set()
+
+
+def _echo_muted_warn(msg):
+    """The muted route: the operator's terminal, never the log file.
+
+    Deliberately NOT a silent stub. ``load`` answers a corrupt overlay with
+    ``{"pauses": {}}`` ("fail-loud on CORRUPTION", :func:`load`) — the corruption
+    exists *only* in this WARN, so a read that muted the fact as well as the file
+    would let an operator believe a pause is in force when nothing can read it.
+    ``stderr`` is not the invariant; the file is (t_88abe739). The daemon's repair
+    paths never enter a muted window, so their file writes — the ones that matter
+    when nobody is watching a terminal — are untouched.
+    """
+    if msg in _MUTED_ECHOED:
+        return
+    _MUTED_ECHOED.add(msg)
+    try:
+        print(f"[node_pauses] WARN: {msg}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 — logging must never break the read
+        pass
+
+
+@contextlib.contextmanager
+def silent_read():
+    """Borrow this module's WARN route for one documented read, then give it back.
+
+    Inside the window :func:`_warn_route` is :func:`_echo_muted_warn`, so a
+    malformed ``node_pauses.json`` read by ``hscc node paused`` — a verb whose own
+    help says "Read-only — this reads ~/.hscc/node_pauses.json and nothing else"
+    (``hscc.py:1423``) — echoes its warnings to stderr instead of appending them to
+    ``$HSCC_HOME/daemon.log``. Used by that door and by nothing that writes: the
+    daemon's heal/lifecycle/alerts paths keep the file line, because a parked node
+    the daemon cannot see is paused is exactly what the log must record.
+
+    Unlike ``board_pin.silent_read`` / ``autodown.silent_read`` there is no
+    once-per-process budget to restore here — ``_warn`` warns on every call — so
+    giving the route back is the whole of the restore, and no read can spend an
+    alarm this module does not have. Scoped to the ONE call, undone in ``finally``;
+    it mutates a module global, so a process with concurrent logging threads would
+    see the window (the door this guards is a one-shot process).
+    """
+    global _warn_route
+    real_route = _warn_route
+    _warn_route = _echo_muted_warn
+    try:
+        yield
+    finally:
+        _warn_route = real_route
+
+
 def _warn(msg):
     """Route a WARN through the daemon's log convention; never raise.
 
     A broken logger must not turn a *readable* overlay into an exception: every
     caller of this module is a repair decision or a CLI print, and none of them
     should die because ``daemon_ops`` could not open its log. Falls back to
-    stderr (never stdout — stdout is the machine channel for ``--json``).
+    stderr (never stdout — stdout is the machine channel for ``--json``). A
+    documented read door wraps its call in :func:`silent_read`, which routes the
+    same warning to stderr instead of the log file.
     """
     try:
-        from .daemon_ops import log
-        log(msg, "WARN")
+        _warn_route(msg)
     except Exception:  # noqa: BLE001 - logging must never be the failure
         try:
             print(f"[node_pauses] WARN: {msg}", file=sys.stderr)

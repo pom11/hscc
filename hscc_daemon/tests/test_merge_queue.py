@@ -4295,3 +4295,290 @@ def test_a_merged_or_closed_pr_in_the_fifo_is_rejected_before_any_gate(tmp_path)
     assert result["processed"][0]["result"] == "already-closed", result
     assert not marker.exists() and gh.merge_calls == []
     assert _last(state, "alpha")["result"] == "already-closed"
+
+
+# ── a per-PR hold survives a push (t_662753d6) ──────────────────────────────
+#
+# `hscc merge-queue remove <project> <pr>` is a pull, not a hold: the next empty
+# tick runs auto-enqueue again, and the ONLY existing suppression
+# (`_auto_enqueue_suppressed`) covers a single PR that just failed a RED GATE on
+# the SAME head SHA — so the push a review request causes is exactly the event
+# that lifts it. Measured on the deployed copy (2026-11-24): a PR pulled while a
+# `HOLD — do not re-queue this PR` comment sat on it was auto-enqueued again by
+# the tick after its fold commit (`beba4c4c` -> `2ca09b1c`), and a PR whose gate
+# exhausted its 3600s budget was handed back and began a second hour. The only
+# lever was project-wide (`pause`), which halts every other queued PR too.
+#
+# These cases pin the per-PR hold: recorded in the SAME state document as
+# `enabled`/`paused`, honoured by every path that can put a PR back into the
+# FIFO (auto-enqueue, the wait-list drain, the wait-list retry claim), honoured
+# regardless of the head SHA, and released ONLY by `unhold`. The ticks are driven
+# with `_no_runner` wherever the queue must not touch git/gh at all: a held PR
+# that is skipped before the readiness probe costs no network call, so an
+# injected runner that raises is the assertion that nothing was probed.
+
+def test_a_held_pr_stays_out_of_the_fifo_after_its_head_changes(
+        tmp_path, monkeypatch):
+    """THE regression: a push must not lift a hold (a push is what a review causes)."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    mq.hold_pr("alpha", 7, reason="defect-carrying head", path=_state(tmp_path))
+
+    def source(cfg, gh_runner=None):
+        return [{"pr": 7, "card": "t_hold", "assignee": "worker",
+                 "branch": pair["branch"]}]
+
+    def run_tick():
+        # No runner may be touched: the hold wins BEFORE the readiness probe, so
+        # a held PR is neither probed (`gh`) nor processed (git) at all.
+        return mq.tick(state_path=_state(tmp_path),
+                       root=str(tmp_path / "queue"), registry_path=registry,
+                       auto_source=source, git_runner=_no_runner,
+                       gh_runner=_no_runner)
+
+    first = run_tick()
+    assert first["processed"] == [], first
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["waiting"] == [] and ps["in_flight"] is None
+    assert [h["pr"] for h in ps["held"]] == [7], ps
+    assert ps["held"][0]["reason"] == "defect-carrying head", ps
+
+    # The worker pushes the fix. Today this is the event that clears the red-gate
+    # suppression and re-queues the PR; a hold must survive it.
+    _git(pair["repo"], "checkout", pair["branch"])
+    (pair["repo"] / "folded.txt").write_text("folded\n")
+    _git(pair["repo"], "add", ".")
+    _git(pair["repo"], "commit", "-m", "fold the review fix")
+    _git(pair["repo"], "push", "origin", pair["branch"])
+    assert _git(pair["repo"], "rev-parse", "HEAD") != pair["head"]
+
+    second = run_tick()
+    assert second["processed"] == [], second
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["waiting"] == [], ps
+    assert [h["pr"] for h in ps["held"]] == [7], ps
+
+
+def test_unhold_lets_the_pr_back_in_on_the_next_tick(tmp_path, monkeypatch):
+    """Release is explicit: `unhold`, and then the normal path re-queues it."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"], "headRefOid": pair["head"]}})
+    mq.hold_pr("alpha", 7, reason="parked by the orchestrator",
+               path=_state(tmp_path))
+
+    def source(cfg, gh_runner=None):
+        return [{"pr": 7, "card": "t_hold", "assignee": "worker",
+                 "branch": pair["branch"]}]
+
+    def run_tick():
+        return mq.tick(state_path=_state(tmp_path),
+                       root=str(tmp_path / "queue"), registry_path=registry,
+                       auto_source=source, gh_runner=gh,
+                       git_runner=subprocess.run)
+
+    assert run_tick()["processed"] == []
+    assert gh.calls == [], "a held PR must not even be probed"
+
+    mq.unhold_pr("alpha", 7, path=_state(tmp_path))
+    result = run_tick()
+
+    assert result["processed"][0]["pr"] == 7, result
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [7]
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["held"] == [], ps
+
+
+def test_a_hold_only_stops_its_own_pr_and_pause_still_halts_everything(
+        tmp_path, monkeypatch):
+    """A hold is per-PR: the rest of the FIFO runs; `pause` remains the sledgehammer."""
+    pair = _repo_pair(tmp_path)
+    second_head = _new_branch(pair["repo"], "wt/t_second")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({
+        7: {"headRefName": pair["branch"], "headRefOid": pair["head"]},
+        8: {"headRefName": "wt/t_second", "headRefOid": second_head},
+    })
+    mq.hold_pr("alpha", 7, reason="prose diff the selector cannot narrow",
+               path=_state(tmp_path))
+
+    def source(cfg, gh_runner=None):
+        return [{"pr": 7, "card": "t_a", "assignee": "worker"},
+                {"pr": 8, "card": "t_b", "assignee": "worker"}]
+
+    def run_tick():
+        return mq.tick(state_path=_state(tmp_path),
+                       root=str(tmp_path / "queue"), registry_path=registry,
+                       auto_source=source, gh_runner=gh,
+                       git_runner=subprocess.run)
+
+    first = run_tick()
+    assert [e["pr"] for e in first["processed"]] == [8], first
+    assert first["processed"][0]["result"] == "merged", first
+    assert gh.merged == [8]
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["waiting"] == [], ps
+    assert [h["pr"] for h in ps["held"]] == [7], ps
+
+    # `pause` still halts the whole project — including an UNHELD ready PR.
+    mq.unhold_pr("alpha", 7, path=_state(tmp_path))
+    mq.set_paused("alpha", True, path=_state(tmp_path))
+    assert run_tick()["processed"] == []
+    assert gh.merged == [8], "a paused project must not be processed"
+    mq.set_paused("alpha", False, path=_state(tmp_path))
+    assert run_tick()["processed"][0]["pr"] == 7
+
+
+def test_a_hold_survives_a_gate_timeout_transition(tmp_path, monkeypatch):
+    """Instance 2: the gate-timeout hand-back must not start a second hour."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["sh -c 'sleep 999'"],
+                         timeout_s=42)
+    gh = FakeGh({31: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}})
+    fake, _calls = _fake_subprocess(popem=_timeout_popem())
+    monkeypatch.setattr(mq, "subprocess", fake)
+    mq.add_to_queue("alpha", 31, card="t_slow", assignee="worker",
+                    path=_state(tmp_path))
+
+    first = mq.tick(state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+                    registry_path=registry, gh_runner=gh,
+                    git_runner=subprocess.run,
+                    handback=lambda card, assignee, msg: True)
+    assert first["processed"][0]["result"] == "gate-timeout", first
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["waiting"]] == [31], ps
+
+    # The operator pulls it AFTER the timeout handed it back: the pull must hold.
+    logged = []
+    mq.hold_pr("alpha", 31, reason="gate budget exhausted twice",
+               path=_state(tmp_path))
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["waiting"] == [] and ps["queue"] == [], ps
+    assert [h["pr"] for h in ps["held"]] == [31], ps
+    assert ps["held"][0]["reason"] == "gate budget exhausted twice", ps
+
+    # And the hand-back path must not start a second hour: the every-tick
+    # wait-list drain leaves it out, and the gate never runs again for it.
+    second = mq.tick(state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run,
+                     log=lambda msg, *a, **k: logged.append(msg))
+    assert second["processed"] == [], second
+    assert gh.merged == [], second
+    assert not [line for line in logged if "returned green waiting" in line], \
+        logged
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["waiting"] == [] and ps["queue"] == [], ps
+    assert ps["held"][0]["reason"] == "gate budget exhausted twice", ps
+
+
+def test_a_held_pr_is_never_claimed_even_when_it_was_added_on_purpose(
+        tmp_path, monkeypatch):
+    """A held entry may sit in the FIFO (an explicit `add`) but is never claimed."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"], "headRefOid": pair["head"]}})
+    mq.hold_pr("alpha", 7, reason="parked", path=_state(tmp_path))
+    mq.add_to_queue("alpha", 7, card="t_add", path=_state(tmp_path))
+
+    result = mq.tick(state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run)
+
+    assert result["processed"] == [], result
+    assert gh.merged == []
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [7], ps
+    assert [h["pr"] for h in ps["held"]] == [7], ps
+
+
+def test_hold_and_unhold_are_cli_verbs_that_record_and_release_the_reason(
+        tmp_path, monkeypatch, capsys):
+    """`hold`/`unhold` are the operator surface, and `add` cannot defeat a hold."""
+    from hscc_daemon import merge_queue_cli
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    home = tmp_path / "hscc-home"
+    monkeypatch.setenv("HSCC_HOME", str(home))
+    monkeypatch.setenv("FLIGHTDECK_REGISTRY", registry)
+
+    assert merge_queue_cli.cmd_merge_queue(
+        ["hold", "alpha", "7", "--reason", "defect-carrying head"]) == 0
+    out = capsys.readouterr().out
+    assert "held PR #7" in out, out
+    ps = mq.load_state(mq.state_file())["projects"]["alpha"]
+    assert ps["held"] == [{"pr": 7, "reason": "defect-carrying head",
+                           "held_at": ps["held"][0]["held_at"]}], ps
+
+    # A held PR is not re-added by an explicit `add`: `unhold` is the release.
+    assert merge_queue_cli.cmd_merge_queue(["add", "alpha", "7"]) == 1
+    refusal = capsys.readouterr()
+    assert "unhold" in refusal.out + refusal.err, \
+        "the refusal must name unhold"
+    assert mq.load_state(mq.state_file())["projects"]["alpha"]["queue"] == []
+
+    assert merge_queue_cli.cmd_merge_queue(["unhold", "alpha", "7"]) == 0
+    assert "released PR #7" in capsys.readouterr().out
+    assert mq.load_state(mq.state_file())["projects"]["alpha"]["held"] == []
+
+    # The verbs are in the operator-facing help, both group and per-verb.
+    assert merge_queue_cli.cmd_merge_queue(["--help"]) == 0
+    helptext = capsys.readouterr().out
+    assert "merge-queue hold <project> <pr>" in helptext, helptext
+    assert "merge-queue unhold <project> <pr>" in helptext, helptext
+
+
+def test_the_read_surfaces_show_a_hold_with_its_reason_and_never_write(
+        tmp_path, monkeypatch, capsys):
+    """A hold is not folklore in a PR comment — and rendering it is read-only.
+
+    The byte-identical-ledger guarantee #753 pinned for the queue line is
+    re-asserted here with a hold in the document: `view`, the CLI's `status` and
+    `list --json`, and the monitor line must all carry the reason, and the ledger
+    must not gain a byte, a mtime tick, a lock file or a worktree directory.
+    """
+    from hscc_daemon import kanban_live, merge_queue_cli
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    home = tmp_path / "hscc-home"
+    monkeypatch.setenv("HSCC_HOME", str(home))
+    monkeypatch.setenv("FLIGHTDECK_REGISTRY", registry)
+    mq.hold_pr("alpha", 7, reason="defect-carrying head",
+               path=mq.state_file())
+    mq.add_to_queue("alpha", 8, card="t_other", path=mq.state_file())
+    path = mq.state_file()
+
+    with open(path, "rb") as f:
+        before = (os.stat(path).st_mtime_ns, f.read())
+    before_dir = sorted(os.listdir(home))
+
+    rows = mq.view(state_path=path, registry_path=registry)["projects"]["alpha"]
+    assert rows["held_len"] == 1, rows
+    assert rows["held"][0]["pr"] == 7, rows
+    assert rows["held"][0]["reason"] == "defect-carrying head", rows
+    # The held PR is a hold, not a queued or waiting row.
+    assert [r["pr"] for r in rows["rows"]] == [8], rows
+
+    assert merge_queue_cli.cmd_merge_queue(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "held=1" in out, out
+    assert "defect-carrying head" in out, out
+
+    assert merge_queue_cli.cmd_merge_queue(["list", "alpha", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    held = payload["projects"]["alpha"]["held"]
+    assert [h["pr"] for h in held] == [7], payload
+    assert held[0]["reason"] == "defect-carrying head", payload
+
+    data = kanban_live.attach_merge_queue(
+        {}, registry_path=registry, state_path=path, now=time.time())
+    line = kanban_live.merge_queue_line(data)
+    assert line is not None
+    assert "held #7" in line.plain, line.plain
+    assert "defect-carrying head" in line.plain, line.plain
+
+    with open(path, "rb") as f:
+        assert (os.stat(path).st_mtime_ns, f.read()) == before
+    assert sorted(os.listdir(home)) == before_dir

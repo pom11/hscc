@@ -23,6 +23,7 @@ import json
 import sys
 
 from hscc_daemon import autodown
+from hscc_daemon import board_pin
 from hscc_daemon import cli_theme as theme
 
 VALID_SUBCOMMANDS = ("status", "enable", "disable", "wake", "cancel")
@@ -231,7 +232,13 @@ def _cmd_status(rest, json_mode, theme_name=None):
     # ONE builder shared with GET /v1/autodown/status (t_8743f98c). It owns
     # the read-only interlock evaluation and reconciles a recorded "down"
     # against the serving layer, so the CLI and the widget can never disagree.
-    status = autodown.status_snapshot()
+    # t_4dcb34e6: the same builder enumerates and opens boards, and a worker
+    # shell's pin conflict is reported by ``board_pin._emit`` appending a WARN to
+    # ``$HSCC_HOME/daemon.log`` — which this door's docstring forbids ("Never
+    # writes, never creates, never acts"). Borrow the route for this ONE call:
+    # the conflict still reaches stderr and ``_WARNED`` is deferred, not spent.
+    with board_pin.silent_read():
+        status = autodown.status_snapshot()
     kc = {"ok": status["kanban_ok"], "reason": status["kanban_reason"]}
     prci = status.get("prci_signal")
     if json_mode:

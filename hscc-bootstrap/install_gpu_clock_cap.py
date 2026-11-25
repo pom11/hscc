@@ -55,6 +55,10 @@ import os
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
+# The in-suite fence is ONE predicate, shared with the row registry: see
+# ``doctor_rows.under_pytest`` for why the module-local test is not enough.
+import doctor_rows  # flat sibling, next to this module (hscc-bootstrap/)
+
 UNIT_NAME = "hscc-gpu-clock-cap.service"
 UNIT_PATH = f"/etc/systemd/system/{UNIT_NAME}"
 NVIDIA_SMI = "/usr/bin/nvidia-smi"
@@ -448,7 +452,7 @@ def _refused(_cmd: str, _timeout: int) -> Dict[str, Any]:
 
 def _default_ssh_factory() -> Callable[[str], Runners]:
     """The installers' sanctioned sparkrun route, bound per node; refused under pytest."""
-    if "pytest" in sys.modules:
+    if doctor_rows.under_pytest():
         return lambda _host: _refused
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:

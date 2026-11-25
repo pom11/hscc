@@ -375,6 +375,12 @@ def test_the_row_is_unverifiable_when_its_module_is_missing(monkeypatch):
     outside = types.SimpleNamespace()
     outside.__dict__.update(vars(doctor))          # AFTER the patch, not before
     outside.sys = types.SimpleNamespace(modules={})
+    import sys  # the shared fence reads the PROCESS module table
+    # The fence is the shared, child-visible predicate now, not a view of
+    # this module's ``sys.modules``: close BOTH process channels, or the
+    # refusal branch is taken and the CLI path under test never runs.
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
 
     row = doctor_rows.build_row(outside, spec, None)
 

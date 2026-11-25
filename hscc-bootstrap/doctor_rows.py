@@ -42,8 +42,44 @@ and the five-field ``Check`` adapter that keeps ``doctor --json`` one shape.
 
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from typing import Callable, List, Optional
+
+#: The marker pytest exports for the duration of EACH item — and which every
+#: subprocess of that item therefore inherits. This is the only in-suite signal
+#: that crosses a spawn, and the repo already asks of a child rather than
+#: inventing a second one (``hscc_daemon/main_cli.py``,
+#: ``hscc-api/repl_inject.py``, ``hscc-project/flightdeck/core/tmux_chat.py``).
+PYTEST_MARKER = "PYTEST_CURRENT_TEST"
+
+
+def under_pytest() -> bool:
+    """True in a pytest process **or in any process a pytest process spawned**.
+
+    The fence this one value serves is "a suite must never read the operator's
+    state". ``"pytest" in sys.modules`` answers that only for the process that
+    imported pytest, and the door the agent tool relays is NOT that process:
+    ``doctor_tools.doctor_findings`` execs ``python3 hscc-bootstrap/doctor.py
+    --json`` in a fresh interpreter (the flat sibling imports only resolve when
+    the script runs as a script), so every row this registry builds renders in a
+    child where pytest was never imported and the module-local test reads as
+    though it had fired while refusing nothing.
+
+    That is not hypothetical. It is how ``orch_wake_subs`` was caught
+    (t_14eae4b5, PR #732), and the roster-wide measurement for t_eb768c2a found
+    the same shape in every remaining fence on the doctor path: under the marker
+    a spawned door still read the live service manager, the deployed plugin
+    tree, the profile trees, the pause overlay and the fleet CLI, and refused
+    exactly one row — the only one whose module already honoured the marker.
+
+    So the test lives HERE, once, and is shared by the registry fence below and
+    by every row module that has a fence of its own. A row must not re-implement
+    it: a copy without the marker is a fence that only guards the process nobody
+    is asking about.
+    """
+    return "pytest" in sys.modules or bool(os.environ.get(PYTEST_MARKER))
 
 #: The five fields every doctor row exposes. ``doctor --json`` and the ○/●
 #: renderer key off exactly these, so the adapter below drops anything else a
@@ -171,7 +207,7 @@ def build_row(doctor_module, spec: FeatureCheckRow, injected, **context):
     check_cls = doctor_module.Check
     if injected is not None:
         res = injected()
-    elif "pytest" in doctor_module.sys.modules:
+    elif under_pytest():
         res = resolve_hook(doctor_module, spec.refusal)()
     else:
         feature = resolve_hook(doctor_module, spec.loader)()

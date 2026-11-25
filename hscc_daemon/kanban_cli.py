@@ -265,8 +265,16 @@ def _cmd_stale(rest, json_mode, theme_name=None):
     if older_than is None:
         older_than = DEFAULT_STALE_DAYS
 
-    result = autodown.list_stale_tasks(
-        older_than=older_than, registered_only=True)
+    from hscc_daemon import board_pin
+    # t_4dcb34e6: ``hscc kanban stale`` (no ``--archive``) is the documented list
+    # verb, and the board opens inside it report a worker shell's pin conflict by
+    # appending a WARN to ``$HSCC_HOME/daemon.log`` — a file write inside a read
+    # (board_pin.py:192 -> :203 via guard_board(mode="read"):226). The WARN route is
+    # borrowed for this ONE call; the operator still gets it on stderr and
+    # ``_WARNED`` is deferred, not spent.
+    with board_pin.silent_read():
+        result = autodown.list_stale_tasks(
+            older_than=older_than, registered_only=True)
     tasks = result["tasks"]
 
     if json_mode:
@@ -340,28 +348,42 @@ def _parse_monitor_args(rest):
 
 def _cmd_monitor(rest, json_mode, theme_name=None):
     """``hscc kanban monitor`` — read-only view of the workers on every board."""
+    from hscc_daemon import board_pin
     from hscc_daemon import kanban_live
     opts, err = _parse_monitor_args(rest)
     if err:
         return _error(err, json_mode)
     if json_mode and opts["live"]:
         return _error("--json is a single snapshot; drop --live", json_mode)
-    if json_mode:
-        print(json.dumps(kanban_live.attach_merge_queue(
+    # t_4dcb34e6 §1 + §3 (t_c8b80284): this door is advertised read-only, and the
+    # read underneath it speaks two WARN routes that append to
+    # ``$HSCC_HOME/daemon.log`` — ``kanban_live._caps_warn_route`` (a caps config
+    # that cannot be read; kanban_live.py:145 -> :156 via _read_caps -> collect)
+    # and ``board_pin._warn_route`` (a worker shell's board-pin conflict, reached
+    # through the read-only board open in ``collect``). Both are borrowed for this
+    # ONE handler body, so ``--live`` counts as one long read and every tick stays
+    # quiet; each module's own once-per-process budget is deferred, not spent, and
+    # each route comes back in ``finally``. One `with` line, both halves: a
+    # half-muted door would still create the file. The daemon's ``stream_silence``
+    # consumer of ``collect`` is NOT in scope (audit §3) — it keeps writing the
+    # file exactly as before.
+    with board_pin.silent_read(), kanban_live.silent_read():
+        if json_mode:
+            print(json.dumps(kanban_live.attach_merge_queue(
+                kanban_live.attach_orchestrators(kanban_live.attach_tokens(
+                    kanban_live.collect(board=opts["board"], registered_only=True))),
+                board=opts["board"]), default=list))
+            return 0
+        console = _console(theme_name)
+        if opts["live"]:
+            return kanban_live.run_live(console, interval=opts["interval"],
+                                        board=opts["board"])
+        data = kanban_live.attach_merge_queue(
             kanban_live.attach_orchestrators(kanban_live.attach_tokens(
                 kanban_live.collect(board=opts["board"], registered_only=True))),
-            board=opts["board"]), default=list))
-        return 0
-    console = _console(theme_name)
-    if opts["live"]:
-        return kanban_live.run_live(console, interval=opts["interval"],
-                                    board=opts["board"])
-    data = kanban_live.attach_merge_queue(
-        kanban_live.attach_orchestrators(kanban_live.attach_tokens(
-            kanban_live.collect(board=opts["board"], registered_only=True))),
-        board=opts["board"])
-    console.print(kanban_live.render(data, snapshot=True, width=console.width))
-    return 1 if data["errors"] and not data["boards"] else 0
+            board=opts["board"])
+        console.print(kanban_live.render(data, snapshot=True, width=console.width))
+        return 1 if data["errors"] and not data["boards"] else 0
 
 
 def _cmd_pause(sub, rest, json_mode, theme_name=None):

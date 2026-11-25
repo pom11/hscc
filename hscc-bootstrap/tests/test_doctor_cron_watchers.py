@@ -151,6 +151,10 @@ def test_row_reports_unverifiable_when_module_missing(tmp_path, monkeypatch):
     # delitem restores sys.modules["pytest"] at teardown — the same idiom the
     # waker bridge test uses to force the non-pytest path.
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    # The fence is shared and child-visible now (doctor_rows.under_pytest),
+    # so the marker pytest exports for THIS item has to go too, or the row
+    # refuses and the branch under test is never taken.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     row = doctor._cron_watchers_check_row(None)
     assert row.ok is False and row.fatal is False
     assert "not importable" in row.detail
@@ -184,6 +188,10 @@ def test_row_uses_the_real_check_outside_pytest_and_never_a_relocated_root(
 
     monkeypatch.setattr(doctor, "_load_cron_watchers", lambda: CW())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    # The fence is shared and child-visible now (doctor_rows.under_pytest),
+    # so the marker pytest exports for THIS item has to go too, or the row
+    # refuses and the branch under test is never taken.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     row = doctor._cron_watchers_check_row(None, hscc_dir="/sandbox/.hscc")
     assert calls == [(None, True)], "the cron row must not be handed a root"
     assert row.detail == "from the real check"
@@ -225,6 +233,10 @@ def test_row_survives_a_cron_watchers_without_the_drift_seam(monkeypatch):
 
     monkeypatch.setattr(doctor, "_load_cron_watchers", lambda: CW())
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    # The fence is shared and child-visible now (doctor_rows.under_pytest),
+    # so the marker pytest exports for THIS item has to go too, or the row
+    # refuses and the branch under test is never taken.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     row = doctor._cron_watchers_check_row(None, hscc_dir="/sandbox/.hscc")
     assert calls == [None] and row.detail == "stamp read only"
 

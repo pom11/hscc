@@ -363,3 +363,7 @@ Audit notes (`*_audit.md`) ship with their e2e verify scripts (`*_verify_e2e.py`
 ### Test-suite leg strategy (live)
 
 - `docs/audits/hscc-bootstrap-leg-strategy-t_b9e517a9.md` — fresh `--durations=0` measurement of the `hscc-bootstrap` leg (1183 passed in 292.03 s, 14 CPUs, load 2.13/2.53): the three installer-subprocess files are 177.54 s = 60.8 %, every duration is spread rather than timeout-quantised, and the decision is **leave as-is** — share-installed-home loses test isolation, split-leg moves wall time without reducing it on the serial runner. **live** (t_b9e517a9)
+
+### Read doors that write `daemon.log` (live)
+
+- `docs/audits/latent-read-warns_t_4dcb34e6.md` — the four latent read-path WARNs left over from the read-surface audit: a per-leaf verdict table (`board_pin._emit`, `node_pauses._warn`, `kanban_live._note_caps_unreadable` → **FIX**; `kanban_pause._warn_pin_once` read-refused → **ACCEPT**, with the call-graph proof), and the shape the fixes must keep — a nameable WARN route per module borrowed by a `silent_read()` context manager that echoes to stderr instead of appending to `$HSCC_HOME/daemon.log`, and restores the budget in `finally` because a silent mute would be a fail-open dressed as a fix. Explains why the doctor door guard is structurally blind to latent leaves (no sandbox arms a pin or plants a corrupt overlay), why the mute lives at the borrower and never inside `collect`, and which `kanban_cli.py` / `kanban_live.py` / `cards_live.py` seams must nest rather than widen. **live** (t_4dcb34e6)

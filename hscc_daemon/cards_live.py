@@ -640,10 +640,24 @@ class Monitor:
                            "caps": (None, None), "errors": [], "boards": []}
 
     def _default_collect(self):
-        return kanban_live.attach_tokens(
-            kanban_live.collect(kanban_db=self.kanban_db, board=self.board,
-                                registered_only=True),
-            hermes_home=self.hermes_home)
+        # ``hscc cards monitor`` (both the snapshot and ``--live``) is advertised
+        # read-only (cards_live.py:1023), and the read underneath it speaks two
+        # WARN routes that append to ``$HSCC_HOME/daemon.log``:
+        # ``kanban_live._caps_warn_route`` (unreadable caps config,
+        # kanban_live.py:145 -> :156 via _read_caps <- collect) and
+        # ``board_pin._warn_route`` (a worker shell's board-pin conflict, through
+        # the read-only board open). Both are borrowed here so every consumer of
+        # this collector — ``snapshot()`` and every ``run_live()`` tick — is a
+        # read that creates no log file; ``_MUTED_ECHOED`` in each module keeps a
+        # ``--live`` pass from reprinting one line per tick. Reached only via
+        # ``cmd_cards`` (cards_live.py:1056 <- hscc.py:2885), never by a daemon
+        # loop: a caller that injects ``collect=`` bypasses this method entirely.
+        from hscc_daemon import board_pin
+        with board_pin.silent_read(), kanban_live.silent_read():
+            return kanban_live.attach_tokens(
+                kanban_live.collect(kanban_db=self.kanban_db, board=self.board,
+                                    registered_only=True),
+                hermes_home=self.hermes_home)
 
     def _outcomes(self) -> dict:
         """``{(board, card): kind}`` for every card that had an outcome in the

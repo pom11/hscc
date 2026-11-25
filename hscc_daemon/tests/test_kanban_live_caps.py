@@ -345,3 +345,258 @@ def _alpha_board():
             return _Ctx()
 
     return _Lib()
+
+
+# ── the two monitor doors must not create $HSCC_HOME/daemon.log ─────────────
+#
+# t_4dcb34e6 §3 (docs/audits/latent-read-warns_t_4dcb34e6.md): ``collect`` reads the
+# caps config, and a config it cannot read is reported by appending a WARN to
+# ``$HSCC_HOME/daemon.log`` (``_note_caps_unreadable`` -> ``_caps_warn_route`` ->
+# ``log``). ``hscc kanban monitor`` and ``hscc cards monitor`` both advertise a
+# read-only view, so that write is the invariant t_88abe739 cares about — and it is
+# LATENT: a sandbox that plants no broken Hermes config never reaches the branch,
+# which is why the doctor door guard is blind to it. So the condition is PLANTED
+# here, and the presence control below is what proves it fired (the #704 hole).
+#
+# Recipe: hscc-cluster/tests/test_doctor_tool.py::_seal_door_env, as worked by
+# test_node_pauses.py::TestPausedDoorWritesNoFile and
+# test_board_pin.py::TestReadDoorWritesNoLogFile.
+
+_TASK_COLS = ("id", "title", "assignee", "status", "priority", "created_at",
+              "completed_at", "last_heartbeat_at", "current_run_id")
+
+
+class _DoorLib:
+    """A kanban lib with one readable board, so ``collect`` runs a real pass.
+
+    Not a stub of the caps read — only of hermes' lib loader, which is what the
+    door itself calls. ``collect`` bails out BEFORE ``_read_caps`` when the loader
+    returns None (``kanban_live.py:384-389``), so without this injected lib the
+    guard would pass without ever touching the latent branch. No
+    ``kanban_db_path``: ``_open_board_ro`` then falls back to
+    ``board_pin.open_board``, which is the documented read door for the pin guard.
+    """
+
+    def __init__(self, slug="alpha"):
+        import sqlite3          # module-local, as _alpha_board below does
+        self.slug = slug
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT,
+          status TEXT, priority INTEGER DEFAULT 0, created_at INTEGER,
+          completed_at INTEGER, last_heartbeat_at INTEGER, current_run_id INTEGER);
+        CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT,
+          status TEXT, started_at INTEGER, last_heartbeat_at INTEGER,
+          ended_at INTEGER, outcome TEXT);
+        CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT,
+          run_id INTEGER, kind TEXT, payload TEXT, created_at INTEGER);
+        """)
+        conn.execute("INSERT INTO tasks (id,title,assignee,status,created_at) "
+                     "VALUES ('t_rdy','waits','qa','ready',1700000000)")
+        conn.commit()
+
+        class _Ctx:
+            def __enter__(self):
+                return conn
+
+            def __exit__(self, *a):
+                return False
+
+        self._ctx = _Ctx
+
+    def list_boards(self):
+        return [{"slug": self.slug}]
+
+    def connect_closing(self, board=None):
+        return self._ctx()
+
+
+def _tree(root):
+    """name -> bytes for every file under ``root`` ({} when absent)."""
+    from pathlib import Path
+    p = Path(root)
+    if not p.exists():
+        return {}
+    return {str(f.relative_to(p)): f.read_bytes()
+            for f in sorted(p.rglob("*")) if f.is_file()}
+
+
+@pytest.fixture
+def door_env(tmp_path, monkeypatch):
+    """Sandbox HOME + the import-anchored sinks, and the pin kept unarmed.
+
+    ``LOG_FILE``/``PID_FILE`` are bound at import (``daemon_ops.py:17-19``), so a
+    test that only moved HOME would assert about a file it cannot create while
+    quietly appending to the OPERATOR's real log. ``LEDGER_PATH`` and
+    ``HERMES_HOME`` are import-anchored the same way: left alone, this door would
+    read the operator's session store and append a real orchestrator-ledger sample
+    from a test that is supposed to touch nothing.
+    """
+    from types import SimpleNamespace
+    import hscc_daemon.daemon_ops as daemon_ops
+    from hscc_daemon import board_pin
+
+    home = tmp_path / "fakehome"
+    hscc = home / ".hscc"
+    hscc.mkdir(parents=True)
+    hermes = home / ".hermes"          # no state.db: the token read finds nothing
+    hermes.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(daemon_ops, "LOG_FILE", str(hscc / "daemon.log"))
+    monkeypatch.setattr(daemon_ops, "PID_FILE", str(hscc / "daemon.pid"))
+    monkeypatch.setattr(kanban_live, "HERMES_HOME", str(hermes))
+    monkeypatch.setattr(kanban_live, "LEDGER_PATH",
+                        str(tmp_path / "ledger" / "kmon_orch_tokens.json"))
+    # No worker-shell pin: the board-pin route is PR #737's subject
+    # (test_board_pin.TestReadDoorWritesNoLogFile) and must not be able to satisfy
+    # or defeat a presence control that is about the CAPS route.
+    monkeypatch.delenv(board_pin.PIN_ENV, raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+    # Per-process dedupe + the caps budget: a stale one from another test would
+    # let the WARN through silently, or swallow it before this door runs.
+    monkeypatch.setattr(kanban_live, "_MUTED_ECHOED", set())
+    monkeypatch.setattr(board_pin, "_MUTED_ECHOED", set())
+    monkeypatch.setattr(board_pin, "_WARNED", set())
+    kanban_live._CAPS_READ.update(reason="", warned=False)
+    return SimpleNamespace(home=home, hscc=hscc, log=hscc / "daemon.log",
+                           ledger=tmp_path / "ledger" / "kmon_orch_tokens.json")
+
+
+@pytest.fixture
+def unreadable_caps(monkeypatch, door_env):
+    """PLANT the latent condition, both halves, and prove the read still runs.
+
+    ``_load_hermes_config`` raising is the host state the audit describes (a
+    Hermes tree that fails at import time). It is not enough on its own:
+    ``collect`` calls ``autodown._load_kanban_db_or_default()`` first and returns
+    early when hermes' lib is unreachable, so the caps read is never reached —
+    the #704 hole in guard form. The loader therefore also gets a real lib, and
+    ``registered_board_names`` keeps the board in the enumeration the door asks
+    for (``registered_only=True``).
+    """
+    from types import SimpleNamespace
+    from hscc_daemon import autodown
+
+    boom = RuntimeError("config.yaml is unreadable: simulated disk fault")
+
+    def _load_hermes_config():
+        raise boom
+
+    monkeypatch.setattr(kanban_live, "_load_hermes_config", _load_hermes_config)
+    lib = _DoorLib()
+    monkeypatch.setattr(autodown, "_load_kanban_db_or_default", lambda: lib)
+    monkeypatch.setattr(autodown, "registered_board_names",
+                        lambda registry_path=None: ({"alpha"}, None))
+    return SimpleNamespace(lib=lib, reason=str(boom))
+
+
+class TestMonitorDoorWritesNoLogFile:
+    """The read doors advertise, guarded against the doors themselves."""
+
+    def test_kanban_monitor_json_creates_no_log_file(self, door_env, unreadable_caps,
+                                                     capsys):
+        from hscc_daemon import kanban_cli
+        import json as _json
+        before = _tree(door_env.home)
+
+        # The DOCUMENTED verb, not a hand-assembled ``_cmd_monitor(["--json"], …)``:
+        # ``cmd_kanban`` strips ``--json`` from argv (kanban_cli.py:446-448) before
+        # the handler's own parser sees it, so passing it down as ``rest`` dies in
+        # "unknown argument" and the door never reads — a red that proves nothing
+        # and, worse, a guard that would pass vacuously on the un-muted code too.
+        rc = kanban_cli.cmd_kanban(["monitor", "--json"])
+        captured = capsys.readouterr()
+
+        assert rc == 0, captured.out
+        payload = _json.loads(captured.out)
+        # The monitor still renders, and it still reports blank caps — the payload
+        # cannot tell "no cap configured" from "unreadable", which is exactly why
+        # the WARN is the fact's only record and must go to stderr, not vanish.
+        assert payload["caps"] == [None, None], payload["caps"]
+        assert [b["name"] for b in payload["boards"]] == ["alpha"], payload["boards"]
+        # Presence control: the latent branch really ran (the #704 hole).
+        assert "fleet caps unreadable" in captured.err, captured.err
+        assert unreadable_caps.reason in captured.err, captured.err
+        assert "simulated disk fault" in captured.err, captured.err
+        assert not door_env.ledger.exists(), (
+            "the read touched the orchestrator ledger outside its own sandbox")
+        assert not door_env.log.exists(), (
+            "hscc kanban monitor created $HSCC_HOME/daemon.log during a read")
+        assert _tree(door_env.home) == before, (
+            f"a read wrote into the sandbox: "
+            f"{sorted(set(_tree(door_env.home)) ^ set(before))}")
+        (door_env.hscc / "canary.json").write_text("{}", encoding="utf-8")
+        assert _tree(door_env.home) != before, (
+            "the snapshot cannot see a write — the read-only claim proves nothing")
+
+    def test_the_budget_and_the_reason_survive_the_read(self, door_env,
+                                                        unreadable_caps, capsys):
+        """The door spends no alarm and overwrites no finding.
+
+        ``_note_caps_unreadable`` sets both slots *before* it emits, so a mute that
+        handed back only the route would leave the process believing the caps
+        warning had been delivered. Seeding a reason from an earlier real read is
+        what makes restoring ``["reason"]`` load-bearing: a ``finally`` that reset
+        the dict (or left the door's own reason in it) fails this, and the next
+        render in the same process would then claim "the operator never set a cap"
+        — the different fact ``kanban_live.py:140-142`` warns about.
+        """
+        from hscc_daemon import kanban_cli
+        kanban_live._CAPS_READ.update(reason="earlier real read", warned=True)
+
+        assert kanban_cli.cmd_kanban(["monitor", "--json"]) == 0
+        capsys.readouterr()
+
+        assert kanban_live._CAPS_READ == {"reason": "earlier real read",
+                                          "warned": True}, kanban_live._CAPS_READ
+
+    def test_the_caps_route_is_given_back_after_the_read(self, door_env,
+                                                         unreadable_caps, capsys):
+        """Post-window, the same WARN writes the file again: borrowed, not installed.
+
+        Both halves of the ``finally`` are proved here. If the route were left
+        swapped the file would stay empty; if only the route were restored and the
+        ``warned`` budget left spent, the second read would stay silent and the
+        operator's own log would never learn the caps are unreadable.
+        """
+        from hscc_daemon import kanban_cli
+        assert kanban_cli.cmd_kanban(["monitor", "--json"]) == 0
+        capsys.readouterr()
+        assert not door_env.log.exists()
+
+        kanban_live.collect(kanban_db=unreadable_caps.lib)     # outside a window
+
+        assert door_env.log.exists(), (
+            "the monitor never gave the caps WARN route back")
+        text = door_env.log.read_text(encoding="utf-8")
+        # Named, not merely "some line": a board-pin or unrelated WARN writing the
+        # file must not be able to satisfy this.
+        assert "fleet caps unreadable" in text, text
+        assert unreadable_caps.reason in text, text
+
+    def test_the_cards_monitor_collector_creates_no_log_file(self, door_env,
+                                                             unreadable_caps,
+                                                             capsys):
+        """The second door: ``hscc cards monitor`` reads through the same collector.
+
+        Driven at ``Monitor._default_collect`` — the seam ``cmd_cards`` reaches
+        (cards_live.py:1056 <- hscc.py:2885) for both the snapshot and every
+        ``--live`` tick. The presence control is asserted for THIS door, not
+        inherited from the kanban one: each door owns its own mute.
+        """
+        from hscc_daemon import cards_live
+        before = _tree(door_env.home)
+
+        data = cards_live.Monitor()._default_collect()
+        captured = capsys.readouterr()
+
+        assert data["caps"] == (None, None), data["caps"]
+        assert [b["name"] for b in data["boards"]] == ["alpha"], data["boards"]
+        assert "fleet caps unreadable" in captured.err, captured.err
+        assert not door_env.log.exists(), (
+            "hscc cards monitor created $HSCC_HOME/daemon.log during a read")
+        assert _tree(door_env.home) == before, (
+            f"a read wrote into the sandbox: "
+            f"{sorted(set(_tree(door_env.home)) ^ set(before))}")
