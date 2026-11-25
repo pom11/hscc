@@ -3434,7 +3434,7 @@ def test_tick_names_the_pr_waiting_behind_a_ci_pending_claim(tmp_path,
                  20: {"headRefName": "wt/t_second", "headRefOid": second}},
                 views={19: [{}, pending, pending, pending, pending]})
     monkeypatch.setattr(mq, "_run_gate",
-                        lambda command, worktree, timeout_s: ("pass", ""))
+                        lambda command, worktree, timeout_s, cancel_check=None, **kw: ("pass", ""))
 
     lines, log = _logger()
     mq.add_to_queue("alpha", 19, path=_state(tmp_path))
@@ -3501,7 +3501,7 @@ def test_gate_leg_announces_itself_before_it_holds_the_queue(tmp_path,
     lines, log = _logger()
     at_gate_start = []
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         at_gate_start.append(list(lines))
         return "pass", ""
 
@@ -3551,7 +3551,7 @@ def test_remove_during_a_gate_leaves_no_verdict_for_a_pr_that_is_gone(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 7, card="t_removed", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
         return "fail", "FAILED hscc_daemon/tests/test_x.py::test_y - boom"
 
