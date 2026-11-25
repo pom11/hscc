@@ -1,0 +1,6 @@
+repo=<WORKTREE> runner_exists=True repeats=3 head_bytes=200
+head_live     leaked 0/3  mean_orphans=0.0  rc=[-13,-13,-13]  banner_named_sigpipe=0/3
+external      leaked 0/3  mean_orphans=2.0  rc=[-13,-13,-13]  banner_named_sigpipe=0/3
+head          leaked 1/3  mean_orphans=0.0  rc=[-13,-13,-13]  banner_named_sigpipe=0/3
+              /tmp/hscc-legs-M5Shds -> {'0-hscc-commands.log': 19, '0.rc': 13, '1-sparkrun-hermes.log': 19, '1.rc': 13, '2-memori_byodb.log': 0, 'legs.tsv': 94}
+control_term  leaked 0/3  mean_orphans=0.0  rc=[143,143,143]  banner_named_sigpipe=0/3
