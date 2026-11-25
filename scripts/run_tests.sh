@@ -17,6 +17,9 @@
 #         HSCC_TEST_LEGS="hscc-api scripts"  run ONLY those legs (see the leg
 #         selection block below for the full contract; unknown names exit 64
 #         rather than running a subset silently).
+#         HSCC_TEST_PARALLEL=N  run N legs at a time. UNSET or 1 = the SERIAL
+#         path, byte-identical to the pre-concurrency runner; N>=2 packs. See
+#         the bounded leg concurrency block below for why the default is 1.
 #         HSCC_TEST_LEGS="loadstress"  the STRESS leg: re-runs every case
 #         pytest.ini marks `loadstress` N repeats deep under bounded CPU
 #         pressure owned by scripts/load_burners.sh (scripts/loadstress_leg.py
@@ -578,38 +581,50 @@ done
 unset _pin
 
 # ━━━ bounded leg concurrency (t_6c2123f9) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# WHY. A leg is one pytest process over one directory, and the box spends the
-# whole gate with ONE of them running: measured at 2026-11-25, a full roster is
-# 1323 s of wall time during which the Mac Studio sits at load 2-3 of 14
+# WHY THIS EXISTS. A leg is one pytest process over one directory, and the box
+# spends the whole gate with ONE of them running: a full roster is 1323 s of wall
+# time during which the Mac Studio sits at load 2-3 of 14
 # (docs/audits/merge-queue-gate-leg-timings_t_fdc2bff0.md §1, §5). Legs are
 # independent BY CONSTRUCTION — the entire reason this runner exists is that the
-# twelve dirs must never share a pytest process — so the idle cores are a
-# pure loss. Measured through this same runner at the gate's own priority
-# (`taskpolicy -b`, `ps -o pri` 4): five legs serial 188 s vs three-deep 96 s,
-# every leg green, worst leg 93 s parallel vs 107 s serial.
+# twelve dirs must never share a pytest process — so the idle cores are a pure
+# loss. Measured through this same runner at the gate's own priority
+# (`taskpolicy -b`, `ps -o pri` 4): five legs serial 188 s vs three-deep 96 s.
+#
+# WHY THE DEFAULT IS 1 AND NOT 2 — THE MEASUREMENT THAT DECIDED IT. The card set
+# the bar at "a full-roster concurrent run must be green before the default goes
+# above 1", so the roster was run at p=2. It is **not green**: 12 legs, 3 red —
+# `hscc-api` (an ERROR at setup in `test_gateway_serve_watchdog.py:637`:
+# `harness identity check broken on darwin: our own live parent pid 3578 did not
+# match its own argv marker; _state_and_command answered ('Z', '<defunct>')`),
+# plus `scripts` (1 failed) and `.github/scripts`. Five legs packed were green and
+# a narrowed two-leg gate (`hscc_daemon` + `scripts`) is the case the speedup was
+# measured on, but a mechanism that reddens three legs of the twelve-leg roster
+# cannot become the posture every gate takes by default. So the pack is OPT-IN
+# until `hscc-api`'s harness identity check stops tripping when its leg is packed
+# — the zombie/`<defunct>` parent is the lead, and the two candidate mechanisms
+# are named in scripts/tests/test_run_tests_leg_parallelism.py's module docstring
+# (deferred reaping leaves a finished child unreaped for up to one poll tick; and
+# `set -m` puts a packed leg in its own process group).
 #
 # CONTRACT (pinned by scripts/tests/test_run_tests_leg_parallelism.py):
-#   HSCC_TEST_PARALLEL unset or empty -> PAR legs at a time, PAR = 2.
-#   HSCC_TEST_PARALLEL=1 (or 0)       -> the SERIAL loop below, UNTOUCHED. That
-#       path is byte-identical to the pre-concurrency runner, because the two
-#       things that read the stream by ANCHOR rather than by content — the
-#       SIGTERM forensics' `during suite: $CURRENT_SUITE` (t_6bb29d46) and
-#       merge_queue's `^✗ <leg>` / `^FAILED <path>::<test>` digest anchors —
-#       were both measured against it, and an operator debugging one leg must
-#       not have to reason about a second scheduling model.
-#   HSCC_TEST_PARALLEL=N (N>=2)       -> at most N legs in flight, LAUNCHED in
-#       roster order and reaped in launch order (FIFO, so "at most N" is a real
-#       bound and the roster order is preserved for the summary).
-#   anything else (non-numeric, negative) -> SERIAL, with a printed note. A
-#       workflow that builds the value from a list must degrade to the posture
-#       it has always had, not to an unknown one.
+#   HSCC_TEST_PARALLEL unset or empty -> the SERIAL loop below, UNTOUCHED: no
+#       extra line, no new tmp dir, no job control. Two readers anchor on this
+#       stream rather than reading it — the SIGTERM forensics'
+#       `during suite: $CURRENT_SUITE` (t_6bb29d46) and merge_queue's
+#       `^✗ <leg>` / `^FAILED <path>::<test>` digest anchors — and both were
+#       measured against it.
+#   HSCC_TEST_PARALLEL=1 (or 0)       -> the same serial loop, with one line
+#       saying so.
+#   HSCC_TEST_PARALLEL=N (N>=2)       -> at most N legs in flight, launched in
+#       roster order, reaped as they FINISH (a slot is recycled the moment its
+#       leg ends — waiting for the oldest instead measured 1.0x, i.e. nothing).
+#   anything else (non-numeric, negative) -> SERIAL, with a printed note: a
+#       workflow that builds the value from a list must degrade to the posture it
+#       has always had, not to an unknown one.
 #
-# WHY THE DEFAULT IS 2 AND NOT HIGHER. This host also runs the fleet control
-# plane (the daemon, the gateway, the kanban dispatcher) — legs are the second
-# most important thing on it. Two is the smallest pack that removes the serial
-# queueing for the gate the queue actually runs (a narrowed 2-3 leg gate), and it
-# is the value the interference run in the audit's §5.2 was green at. Raise it
-# with HSCC_TEST_PARALLEL on a machine that has the cores to spare.
+# WHY THE PACK CAP IS MODEST WHEN IT IS USED. This host also runs the fleet
+# control plane (the daemon, the gateway, the kanban dispatcher). Two is enough
+# to remove the serial queueing for the gate the queue actually runs.
 #
 # WHY EACH LEG GETS ITS OWN FILE. With N legs writing to one stdout, their dot
 # bands interleave and the two ANCHORED reads above break: `FAILED path::test -
@@ -618,27 +633,24 @@ unset _pin
 # writes to its own file under a tmp dir, and the files are concatenated in
 # ROSTER ORDER at the end: every block keeps the exact shape the serial runner
 # produced (`━━━ <leg> ━━━`, its pytest output, then the `━━━ Summary ━━━`
-# block), just with the blocks emitted late. The digest is therefore identical
-# for a red leg — and `test_red_leg_digest_matches_the_serial_shape` asserts that
-# against the REAL merge_queue regexes, not against a paraphrase.
+# block), just with the blocks emitted late. `test_red_leg_digest_matches_the_
+# serial_shape` asserts that against the REAL merge_queue regexes, not a copy.
 #
 # WHAT A LIVE READER SEES INSTEAD (the trade, stated, not hidden). A redirected
-# log gets no pytest bytes until a leg finishes. That is why the two live
-# signals stay in the foreground stream: the heartbeat (one watcher, one line
-# per LIVE leg — see scripts/leg_heartbeat.sh) and one `parallel: done leg=…
-# elapsed=…s rc=…` line the moment each leg is reaped. Together they still
-# answer the only question the heartbeat was written for — slow, or stopped.
+# log gets no pytest bytes until a leg finishes. That is why the two live signals
+# stay in the foreground stream: the heartbeat (one watcher, one line per LIVE
+# leg — see scripts/leg_heartbeat.sh) and one `parallel: done leg=… elapsed=…s
+# rc=… pack=…s` line the moment each leg is reaped. Together they still answer
+# the only question the heartbeat was written for — slow, or stopped.
 PAR_RAW="${HSCC_TEST_PARALLEL:-}"
-PAR=2
+PAR=1
 case "$PAR_RAW" in
-  '') ;;                                    # unset/empty -> the default pack
+  '') ;;                                    # unset/empty -> serial, silently
   *[!0-9]*)
-    PAR=1
     echo "parallel: HSCC_TEST_PARALLEL='$PAR_RAW' is not a non-negative integer — running SERIALLY"
     ;;
   *)
     if [ "$PAR_RAW" -lt 2 ]; then
-      PAR=1
       echo "parallel: HSCC_TEST_PARALLEL=$PAR_RAW — running SERIALLY (the pre-concurrency path)"
     else
       PAR="$PAR_RAW"

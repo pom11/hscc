@@ -146,14 +146,27 @@ def test_the_pack_never_exceeds_the_bound(tmp_path, parallel, expected_peak):
         f"bound={parallel}\nlog={r['log']!r}")
 
 
-def test_the_default_pack_is_two(tmp_path):
-    """Unset must mean TWO, and must SAY so.
+def test_the_default_is_the_serial_stream_and_prints_nothing_new(tmp_path):
+    """Unset must be the OLD run, line for line.
 
-    Two because this host also runs the fleet control plane; the number has to
-    be visible in the log or a reader cannot tell a 2-deep run from a 1-deep one
-    after the fact.
+    The pack is opt-in (see the block's WHY THE DEFAULT IS 1 in run_tests.sh):
+    unset selects the serial loop and adds no line, no tmp dir and no job
+    control, so every consumer of this script keeps the stream it was measured
+    against until it asks for something else.
     """
-    r = _run(tmp_path, plan=_plan([(LEG_A, 0.6, 0), (LEG_B, 0.6, 0), (LEG_C, 0.6, 0)]))
+    r = _run(tmp_path, plan=_plan([(LEG_A, 0.3, 0), (LEG_B, 0.3, 0), (LEG_C, 0.3, 0)]))
+    assert "parallel:" not in r["log"], f"unset must be silent:\\n{r['log']}"
+    peak, _ = _in_flight(r["trace"])
+    assert peak == 1, r["trace"]
+    # The serial stream interleaves each banner with its own leg's output (in a
+    # pack the banner sits immediately before the whole captured block instead).
+    assert re.search(rf"━━━ {LEG_A} ━━━\n\.", r["log"]), r["log"]
+
+
+def test_two_at_a_time_is_opt_in(tmp_path):
+    """And asking for a pack gets one, visibly."""
+    r = _run(tmp_path, plan=_plan([(LEG_A, 0.6, 0), (LEG_B, 0.6, 0), (LEG_C, 0.6, 0)]),
+             parallel=2)
     assert re.search(r"^parallel: 2 legs at a time", r["log"], re.M), r["log"]
     peak, _ = _in_flight(r["trace"])
     assert peak == 2, r["trace"]
