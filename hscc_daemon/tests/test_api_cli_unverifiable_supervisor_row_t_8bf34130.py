@@ -38,7 +38,7 @@ LIVE_PID = 42424
 
 PRINT_RUNNING = """\
 GuiJob: com.hscc.api
-	path = /Users/dev/Library/LaunchAgents/com.hscc.api.plist
+	path = /Users/hscc-fixture/Library/LaunchAgents/com.hscc.api.plist
 	type = LaunchAgent
 	state = running
 

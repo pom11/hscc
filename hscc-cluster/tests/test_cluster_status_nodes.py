@@ -24,13 +24,13 @@ import hscc
 # replaced with RFC 5737 documentation ranges like the rest of the suite.
 _TWO_JOBS_TP2 = """Cluster: hscc (default) — 4 host(s)
 
-Job: /home/devuser/.sparkrun-local/recipes/local-fixed/ds4.yaml  (tp=2, pp=1)  [5c8555695aa50555_4e690f2e56f8]  (2 container(s))
+Job: /home/hscc-fixture/.sparkrun-local/recipes/local-fixed/ds4.yaml  (tp=2, pp=1)  [5c8555695aa50555_4e690f2e56f8]  (2 container(s))
   node_0     192.0.2.244                           Up 39 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc
   node_1     192.0.2.246                           Up 39 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc
   logs: sparkrun logs 5c8555695aa50555_4e690f2e56f8
   stop: sparkrun stop 5c8555695aa50555_4e690f2e56f8
 
-Job: /home/devuser/.sparkrun-local/recipes/local-fixed/ds4.yaml  (tp=2, pp=1)  [79d915fa1d2c3348_f4de31453fdf]  (2 container(s))
+Job: /home/hscc-fixture/.sparkrun-local/recipes/local-fixed/ds4.yaml  (tp=2, pp=1)  [79d915fa1d2c3348_f4de31453fdf]  (2 container(s))
   node_0     192.0.2.247                           Up 32 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc
   node_1     192.0.2.248                           Up 32 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc
   logs: sparkrun logs 79d915fa1d2c3348_f4de31453fdf
@@ -154,7 +154,7 @@ class TestAdditiveContract:
         for w in data["workloads"]:
             assert set(w) == {"name", "tp", "pp", "container_id", "nodes"}
         w0 = data["workloads"][0]
-        assert w0["name"] == "/home/devuser/.sparkrun-local/recipes/local-fixed/ds4.yaml"
+        assert w0["name"] == "/home/hscc-fixture/.sparkrun-local/recipes/local-fixed/ds4.yaml"
         assert (w0["tp"], w0["pp"]) == ("2", "1")
         assert w0["container_id"] == "5c8555695aa50555_4e690f2e56f8"
 

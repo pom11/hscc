@@ -138,10 +138,10 @@ class Responder:
 
 @pytest.mark.parametrize("mode", ["probe", "enable-new", "retire-old"])
 def test_command_shape_is_b64_piped_bash_and_carries_no_privilege(mode):
-    cmd = m.command_for(mode, pkgs="/home/op/.hermes/plugins")
+    cmd = m.command_for(mode, pkgs="/home/hscc-fixture/.hermes/plugins")
     assert cmd.startswith("printf '%s' '") and cmd.endswith("| base64 -d | bash -s")
     body = base64.b64decode(m._PAYLOAD.search(cmd).group(1)).decode()
-    assert body == m.node_script(mode, pkgs="/home/op/.hermes/plugins")
+    assert body == m.node_script(mode, pkgs="/home/hscc-fixture/.hermes/plugins")
     assert m.mode_of_command(cmd) == mode
     # a --user operation: sudo would escalate on a cluster node to change
     # something the user already owns
@@ -708,7 +708,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 -m hscc_daemon start-daemon
-WorkingDirectory=/home/op/.hermes/plugins/hscc_daemon
+WorkingDirectory=/home/hscc-fixture/.hermes/plugins/hscc_daemon
 Environment=PATH=/usr/bin:/bin
 Restart=on-failure
 
@@ -725,7 +725,7 @@ CORRUPT_UNIT = (
     "\u2502 [Unit]                                       \u2502\n"
     "\u2502 ExecStart=/usr/bin/python3 -m hscc_daemon     \u2502\n"
     "\u2502  start-daemon                                 \u2502\n"
-    "\u2502 Environment=PATH=/home/op/.hermes/hermes-age  \u2502\n"
+    "\u2502 Environment=PATH=/home/hscc-fixture/.hermes/hermes-age  \u2502\n"
     "\u2502 nt/venv/bin:/usr/bin:/bin                     \u2502\n"
     "\u2502 WantedBy=default.target                       \u2502\n"
     "\u2570\u2500\u2500\u2500\u2518\n")

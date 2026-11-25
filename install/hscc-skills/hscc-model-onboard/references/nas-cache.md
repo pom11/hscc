@@ -9,7 +9,7 @@ download and lets `HF_HUB_OFFLINE=1` containers start instantly.
 | Location | Path | Notes |
 |----------|------|-------|
 | NAS (mounted on gateway) | `/mnt/nas/hub/<repo>/` | single source of truth |
-| Node-local cache | `/home/spark/.cache/huggingface/hub/<repo>/` | what the container reads |
+| Node-local cache | `/home/<ssh_user>/.cache/huggingface/hub/<repo>/` | what the container reads |
 | In container | `/cache/huggingface` | bind-mount of the node-local dir |
 
 `<repo>` = `org/model` with slashes doubled to dashes:
@@ -37,7 +37,7 @@ run rsync **from the gateway** to each node:
 ```bash
 ssh spark@<gateway> \
   'rsync -a -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" \
-   /mnt/nas/hub/<repo>/ spark@<node>:/home/spark/.cache/huggingface/hub/<repo>/'
+   /mnt/nas/hub/<repo>/ spark@<node>:/home/<ssh_user>/.cache/huggingface/hub/<repo>/'
 ```
 
 `onboard.py cache <model>` does exactly this for every serving node, idempotently.
@@ -64,7 +64,7 @@ ssh spark@<gateway> \
 ```bash
 # ref hash on NAS vs a node
 ssh spark@<gateway> 'cat /mnt/nas/hub/<repo>/refs/main'
-ssh spark@<node>    'cat /home/spark/.cache/huggingface/hub/<repo>/refs/main'
+ssh spark@<node>    'cat /home/<ssh_user>/.cache/huggingface/hub/<repo>/refs/main'
 # snapshot file counts should match
-ssh spark@<node> 'find /home/spark/.cache/huggingface/hub/<repo>/snapshots/<hash>/ -type f | wc -l'
+ssh spark@<node> 'find /home/<ssh_user>/.cache/huggingface/hub/<repo>/snapshots/<hash>/ -type f | wc -l'
 ```

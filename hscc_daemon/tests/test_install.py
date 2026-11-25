@@ -12,18 +12,18 @@ class TestDaemonPathEnv:
 
     def test_contains_venv_bin(self):
         from hscc_daemon.install import _daemon_path_env
-        hmdir = "/home/user"
+        hmdir = "/home/hscc-fixture"
         path = _daemon_path_env(hmdir)
-        assert "/home/user/.hermes/hermes-agent/venv/bin" in path
+        assert "/home/hscc-fixture/.hermes/hermes-agent/venv/bin" in path
 
     def test_contains_local_bin(self):
         from hscc_daemon.install import _daemon_path_env
-        path = _daemon_path_env("/home/user")
-        assert "/home/user/.local/bin" in path
+        path = _daemon_path_env("/home/hscc-fixture")
+        assert "/home/hscc-fixture/.local/bin" in path
 
     def test_contains_system_paths(self):
         from hscc_daemon.install import _daemon_path_env
-        path = _daemon_path_env("/home/user")
+        path = _daemon_path_env("/home/hscc-fixture")
         assert "/usr/bin" in path
         assert "/bin" in path
         assert "/usr/sbin" in path

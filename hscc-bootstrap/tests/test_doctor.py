@@ -1649,7 +1649,7 @@ _SERVING_TWO = _json_fleet.dumps({"version": 2, "units": [
 class TestSparkrunLanReachability:
     def test_errno65_names_the_local_network_fix(self):
         c = doctor._sparkrun_lan_reachability(
-            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python",
             _probe=lambda interp, node: "errno=65 No route to host",
             _serving_raw=_SERVING_TWO)
         assert c.ok is False and c.fatal is False
@@ -1663,7 +1663,7 @@ class TestSparkrunLanReachability:
             seen.append((interp, node))
             return None
         c = doctor._sparkrun_lan_reachability(
-            _venv_python="/home/u/.venvs/sparkrun/bin/python", _probe=probe,
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python", _probe=probe,
             _serving_raw=_SERVING_TWO)
         assert c.ok is True and c.fatal is False
         assert {n for _i, n in seen} == {"192.0.2.1", "192.0.2.2"}  # orch node probed too
@@ -1683,7 +1683,7 @@ class TestSparkrunLanReachability:
 
     def test_plain_refused_is_reported_without_the_tcc_hint(self):
         c = doctor._sparkrun_lan_reachability(
-            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python",
             _probe=lambda interp, node: "errno=61 Connection refused",
             _serving_raw=_SERVING_TWO)
         assert c.ok is False and c.fatal is False
@@ -1827,7 +1827,7 @@ class TestFleetChecksSkipInSuite:
             str(tmp_path / ".hermes"),
             _cluster_runner=lambda: _FAKE_CLUSTER,
             fleet_checks=True,
-            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python",
             _lan_probe=lambda i, n: None,
             _cluster_default_runner=lambda: _json_fleet.dumps(
                 {"hosts": ["192.0.2.1", "192.0.2.2"]}),
@@ -1844,7 +1844,7 @@ class TestFleetChecksSkipInSuite:
             str(tmp_path / ".hermes"),
             _cluster_runner=lambda: _FAKE_CLUSTER,
             fleet_checks=True,
-            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _venv_python="/home/hscc-fixture/.venvs/sparkrun/bin/python",
             _lan_probe=lambda i, n: "errno=65 No route to host",
             _cluster_default_runner=lambda: "",
             _status_runner=lambda cl: "",

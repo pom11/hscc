@@ -19,12 +19,12 @@ import pytest
 import gateway_liveness as gl
 
 
-REAL_ARGV = ("/Users/example/.hermes/hermes-agent/venv/bin/python "
+REAL_ARGV = ("/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python "
              "-m hermes_cli.main gateway run --replace")
 LAUNCHD_OUT = (
     '{\n\t"Label" = "ai.hermes.gateway";\n\t"OnDemand" = true;\n'
     '\t"LastExitStatus" = 9;\n\t"PID" = 74857;\n'
-    '\t"Program" = "/Users/example/.hermes/hermes-agent/venv/bin/python";\n};\n')
+    '\t"Program" = "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python";\n};\n')
 
 
 class _R:
@@ -127,14 +127,14 @@ class TestArgvScan:
         assert gl.argv_is_gateway(argv) is True
 
     @pytest.mark.parametrize("argv", [
-        "python /Users/example/.hermes/plugins/hscc-bootstrap/doctor.py --json",
+        "python /Users/hscc-fixture/.hermes/plugins/hscc-bootstrap/doctor.py --json",
         "/venv/bin/python -m hermes_cli.main -p qa --cli chat -q work task t_x",
         '/venv/bin/python -m hermes_cli.main chat -q "why did the gateway run fail"',
         '/bin/bash -c pgrep -f "hermes_cli.main gateway run --replace"',
         "grep gateway run --replace",
         "/usr/sbin/httpd -D FOREGROUND",
         "python -m venv /tmp/gateway",
-        "/Users/example/.hermes/hermes-agent/venv/bin/python -m pytest hscc-bootstrap",
+        "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python -m pytest hscc-bootstrap",
         "",
         "   ",
     ])

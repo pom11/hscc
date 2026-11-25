@@ -48,7 +48,7 @@ env:
   VLLM_FP8_MOE_BACKEND: flashinfer_cutlass
   FLASHINFER_DISABLE_VERSION_CHECK: "1"
   VLLM_MARLIN_USE_ATOMIC_ADD: "1"
-  HF_HOME: /cache/huggingface          # bind-mounted from /home/spark/.cache/huggingface
+  HF_HOME: /cache/huggingface          # bind-mounted from /home/<ssh_user>/.cache/huggingface
   HF_HUB_OFFLINE: "1"                   # never re-download at serve time
   TRANSFORMERS_OFFLINE: "1"
 ```

@@ -1,19 +1,19 @@
 {
  "workloads": [
   {
-   "name": "/home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+   "name": "/home/hscc-fixture/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
    "tp": "2",
    "pp": "1",
    "container_id": "9a0467d69586ef5f_4e690f2e56f8"
   },
   {
-   "name": "/home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+   "name": "/home/hscc-fixture/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
    "tp": "2",
    "pp": "1",
    "container_id": "eaa6ce556fd1e21d_f4de31453fdf"
   },
   {
-   "name": "/home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+   "name": "/home/hscc-fixture/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
    "tp": "2",
    "pp": "1",
    "container_id": "81fb38c99696b8c8_086606fbaf71"

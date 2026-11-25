@@ -563,7 +563,7 @@ class TestContainerIdResolution:
         wedged entry is the probe's (unit/node/port, no model, no recipe).
         Pre-fix this resolved to None 2/2 in production; post-fix it must
         resolve to the container on the unit's own node+port."""
-        recipe = "/home/op/.sparkrun-local/recipes/local-fixed/qwen3.8.yaml"
+        recipe = "/home/hscc-fixture/.sparkrun-local/recipes/local-fixed/qwen3.8.yaml"
         model = "local-inference-lab/Qwen3.8-Flash-Next-NVFP4"
         entries = recover._normalise_identity_entries({
             "groups": {},

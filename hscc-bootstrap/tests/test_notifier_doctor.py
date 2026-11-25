@@ -224,7 +224,7 @@ def test_partially_masked_node_is_red():
 def test_foreign_override_is_a_red_line():
     raw = state(service="masked", timer="masked")
     raw = raw.replace("HSCC_UNIT_0_LINK: /dev/null",
-                      "HSCC_UNIT_0_LINK: /home/u/own-unit")
+                      "HSCC_UNIT_0_LINK: /home/hscc-fixture/own-unit")
     r = dnm.layer(NODE, ssh_cmd=transport(state=raw), enabled=True)
     assert r["verdict"] == dnm.V_FAIL
     assert "not HSCC" in r["problems"][0] or "override" in r["problems"][0]
