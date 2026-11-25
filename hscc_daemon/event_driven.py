@@ -75,6 +75,21 @@ except ImportError:  # pragma: no cover - standalone-script fallback
     theme = _FallbackTheme()
 
 
+# The single in-suite predicate of this package (t_fdbc24f9), imported the same
+# peer-guarded way ``cli_theme`` is: this module is also runnable as a script
+# (``python3 hscc_daemon/event_driven.py status``), in which case ``hscc_daemon``
+# is not on ``sys.path`` but its own directory is ``sys.path[0]`` and
+# ``suite_fence`` is a flat stdlib-only module that resolves there. Both arms
+# therefore succeed on every real invocation; what must NOT exist is a guarded
+# import that silently leaves ``suite_fence`` unset, because that is a fence that
+# fails OPEN on exactly the host that has no package deployed (the reasoning
+# suite_fence's own docstring gives for the bootstrap copy).
+try:
+    from hscc_daemon import suite_fence
+except ImportError:  # pragma: no cover - standalone-script fallback
+    import suite_fence
+
+
 def _console(**kwargs):
     """A themed Console for the human CLI views (theme auto-detects)."""
     if sys.stdout.isatty():
@@ -116,6 +131,84 @@ def _event_log(msg: str, level: str = "INFO") -> None:
     line = f"[{ts}] [EVENT  ] [{level:>5s}] {msg}"
     from .daemon_ops import append_rotating
     append_rotating(os.path.join(HSCC_DIR, "daemon.log"), line)
+
+
+#: The phrase every refusal in this repo carries — ``doctor_rows``,
+#: ``doctor_supervision._refused_supervision_check``, ``api_cli.REFUSAL``,
+#: ``_refused_transport``. Spelled here rather than imported from ``api_cli``
+#: because ``api_cli`` is a different unit (and its copy is a constant of its own
+#: module); the pin that keeps the two sentences identical lives in
+#: ``tests/test_event_driven_launchctl_fence_t_5fd62226.py``.
+REFUSAL = "refused inside a pytest process"
+
+
+def _refused_launchctl(argv) -> Tuple[None, str]:
+    """In-suite stand-in for a ``launchctl`` command no runner was installed for.
+
+    THE HOLE THIS CLOSES (t_5fd62226). Two sites in this module forked a real
+    ``launchctl`` with nothing asking whether a test suite was driving:
+    ``LaunchdJobGenerator.uninstall_job`` ran ``launchctl bootout gui/<uid>
+    com.nousresearch.hscc-periodic.<stream>`` and ``status()`` ran ``launchctl list
+    <label>``. The only defence was that every case reaching them requested the
+    opt-in ``fake_subprocess`` fixture and redirected ``PLIST_DIR`` — a per-file
+    convention nothing enforces. A new case that forgot it tore the operator's
+    periodic jobs out of their gui domain, and the same exec is reachable from
+    ``EventDrivenDaemon.stop()`` and ``_cleanup_stale_launchd()`` (which runs on
+    every daemon start), not just from the CLI verb.
+
+    WHY HERE AND NOT IN ``hscc_daemon/tests/conftest.py``: the predicate has to
+    reach (a) a FRESH interpreter a suite item exec'd — pytest was never imported
+    there, only ``PYTEST_CURRENT_TEST`` crossed the fork, which is the whole
+    finding of t_251cd84f — and (b) every other test dir in the repo. An autouse
+    fixture reaches neither. And per ``hscc-daemon-ambient-seam-stub`` a fence
+    that REFUSES must not be default-stubbed away: every case that forgot the seam
+    would then pass for the wrong reason. So there is no conftest default for it.
+
+    THE SHAPE: ``(None, msg)`` — the channel ``_launchctl`` reserves for "the
+    supervisor could not be asked", which callers must read as "unknown", never as
+    a statement about the job. The operator path below is byte-for-byte the code
+    that ran before this function existed; the guard cannot fire outside a suite.
+
+    INSTALLING A RUNNER (the escape hatch, and how existing cases pass untouched):
+    ``monkeypatch.setattr(event_driven, "_launchctl", my_runner)`` REPLACES this
+    function, so the fence is simply not on that path — no new parameter, and the
+    cases that already stubbed ``subprocess.run`` keep their answer by stubbing
+    ``subprocess.run`` on a runner they installed.
+    """
+    verbs = " ".join(str(a) for a in argv[1:2])
+    return None, (
+        f"launchctl {verbs} {REFUSAL}: this process is driven by a test suite and "
+        "the command would have reached the operator's live gui domain. Install a "
+        'runner for the case — monkeypatch.setattr(event_driven, "_launchctl", '
+        "my_runner) — and assert what it was called with."
+    )
+
+
+def _launchctl(argv, timeout: int = 10) -> Tuple[Optional[int], str]:
+    """Run one ``launchctl`` command; ``(returncode, output)`` or ``(None, error)``.
+
+    ``returncode is None`` means the command could not be asked at all — no
+    ``launchctl`` binary (a non-macOS host), a timeout, or the pytest fence below.
+    Both callers must read that as "the supervisor was not consulted", NEVER as
+    "the job is not loaded": a silent not-loaded is the same false claim
+    t_8bf34130 rules out for the API's supervisor row.
+
+    FENCED (t_5fd62226): under ``suite_fence.under_pytest()`` it answers
+    ``_refused_launchctl`` instead of forking. Outside a suite the guard is false
+    and the code below is what has always run.
+    """
+    if suite_fence.under_pytest():
+        return _refused_launchctl(argv)
+    try:
+        cp = subprocess.run([str(a) for a in argv], capture_output=True,
+                            text=True, timeout=timeout)
+        return cp.returncode, (cp.stdout or "") + (cp.stderr or "")
+    except FileNotFoundError:
+        return None, f"command not found: {argv[0]}"
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {timeout}s: {' '.join(str(a) for a in argv)}"
+    except OSError as exc:
+        return None, f"could not run {argv[0]}: {exc}"
 
 
 # ── KqueueWatcher ────────────────────────────────────────────────────────────
@@ -525,14 +618,20 @@ class LaunchdJobGenerator:
         plist_path = os.path.join(PLIST_DIR, f"{label}.plist")
 
         try:
-            # Try to unload
-            result = subprocess.run(
-                ["launchctl", "bootout", f"gui/{os.getuid()}", label],
-                capture_output=True, text=True, timeout=10,
-            )
-            _event_log(f"Unloaded launchd job: {label} (rc={result.returncode})")
+            # Try to unload. FENCED forking (t_5fd62226): a suite that forgot to
+            # install a runner gets a visible refusal in the daemon log instead of
+            # a real `launchctl bootout` against the operator's periodic jobs. The
+            # refusal does NOT change what this verb reports — removing the plist
+            # is the work this function owns, and `bootout` of a job that was never
+            # loaded is a no-op the previous code already swallowed.
+            rc, out = _launchctl(
+                ["launchctl", "bootout", f"gui/{os.getuid()}", label], timeout=10)
+            if rc is None:
+                _event_log(f"Could not ask launchd to unload {label}: {out}", "WARN")
+            else:
+                _event_log(f"Unloaded launchd job: {label} (rc={rc})")
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass  # May not be loaded, file might not exist
+            pass  # Only _launchctl's own guards now; kept for the OSError contract
 
         # Remove plist file
         try:
@@ -564,21 +663,19 @@ class LaunchdJobGenerator:
             label = f"{PERIODIC_LABEL_PREFIX}.{stream}"
             plist_path = os.path.join(PLIST_DIR, f"{label}.plist")
             exists = os.path.exists(plist_path)
-            # Check if loaded in launchd
-            loaded = False
-            try:
-                result = subprocess.run(
-                    ["launchctl", "list", label],
-                    capture_output=True, text=True, timeout=5,
-                )
-                loaded = result.returncode == 0
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                pass
+            # Check if loaded in launchd. FENCED forking (t_5fd62226), and the
+            # "could not be asked" answer is now carried in `loaded_error` instead
+            # of being folded into `loaded: False`: an unasked probe is not
+            # evidence that the job is unloaded (t_8bf34130's ruling for the API's
+            # supervisor row, applied to the periodic rows).
+            rc, probe_error = _launchctl(["launchctl", "list", label], timeout=5)
+            loaded = rc == 0
             status[stream] = {
                 "label": label,
                 "interval": PERIODIC_STREAMS[stream],
                 "exists": exists,
                 "loaded": loaded,
+                "loaded_error": probe_error if rc is None else None,
                 "plist_path": plist_path,
             }
         return status
@@ -1073,11 +1170,18 @@ def cmd_event_status() -> None:
     table.add_column("loaded", no_wrap=True)
     for stream in PERIODIC_STREAMS:
         info = status.get(stream, {})
+        # An unasked probe is NOT evidence of "not loaded" (t_5fd62226) — the row
+        # says `unknown` rather than quietly rendering the same `no` an unloaded
+        # job gets. Plain text, so the piped-no-ANSI contract holds.
+        if info.get("loaded_error"):
+            loaded_cell = "unknown"
+        else:
+            loaded_cell = "[ok]yes[/ok]" if info.get("loaded") else "no"
         table.add_row(
             stream,
             str(info.get("interval", "?")),
             "[ok]yes[/ok]" if info.get("exists") else "no",
-            "[ok]yes[/ok]" if info.get("loaded") else "no",
+            loaded_cell,
         )
     console.print(table)
 
