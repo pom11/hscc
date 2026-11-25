@@ -3,7 +3,7 @@
 # Emits always (digest, not watchdog). Routed to delivery target (desktop).
 
 set -u
-SPARKRUN="/Users/desac/.local/bin/sparkrun"
+SPARKRUN="${SPARKRUN:-$HOME/.local/bin/sparkrun}"
 
 echo "*HSCC cluster digest — $(date '+%Y-%m-%d %H:%M')*"
 echo ""

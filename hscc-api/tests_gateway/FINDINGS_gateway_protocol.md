@@ -125,5 +125,5 @@ raw terminal bytes except where text is recoverable from message.delta frames.
 ## Isolation safety record
 
 - Only scratch port 9211 used; live 9119 never contacted.
-- Scratch home /tmp/hermes_iso_home_t776 only; no /Users/desac/.hermes state written.
+- Scratch home /tmp/hermes_iso_home_t776 only; no ~/.hermes state written.
 - All frames captured from the isolated instance.

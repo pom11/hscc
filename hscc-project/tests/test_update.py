@@ -154,10 +154,11 @@ def _editable_args(tmp_path, **kw):
 
 def test_installed_source_editable(tmp_path, monkeypatch):
     """An editable file:// URL resolves to a local path, editable == True."""
+    src_dir = tmp_path / "flightdeck" / ".worktrees" / "t_7ced1ee7"
     dist_dir = tmp_path / "flightdeck-0.1.0.dist-info"
     dist_dir.mkdir()
     (dist_dir / "direct_url.json").write_text(
-        '{"dir_info": {"editable": true}, "url": "file:///Users/desac/dev/flightdeck/.worktrees/t_7ced1ee7"}',
+        '{"dir_info": {"editable": true}, "url": "file://%s"}' % src_dir,
         encoding="utf-8",
     )
 
@@ -169,7 +170,7 @@ def test_installed_source_editable(tmp_path, monkeypatch):
     monkeypatch.setattr(self_update, "_iter_dist", _single(FakeDist()))
     src = self_update.installed_source()
     assert src["mechanism"] == "editable"
-    assert src["source"] == "/Users/desac/dev/flightdeck/.worktrees/t_7ced1ee7"
+    assert src["source"] == str(src_dir)
 
 
 def test_installed_source_non_editable_git(tmp_path, monkeypatch):

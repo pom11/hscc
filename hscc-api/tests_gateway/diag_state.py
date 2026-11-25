@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Diagnostic: dump the scratch state.db's sessions + the named session msgs."""
+import os
 import sys
-sys.path.insert(0, "/Users/desac/dev/hscc/.worktrees/t_59cc6714/hscc-api")
+sys.path.insert(0, os.path.expanduser("~/dev/hscc/.worktrees/t_59cc6714/hscc-api"))
 from hermes_state import SessionDB
 
 from pathlib import Path

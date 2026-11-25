@@ -8,7 +8,7 @@ events.first.seq, prepend, advance nextBefore = page.next_before). The Swift
 source is at ios-app/Sources/HSCC/Views/SessionHistoryView.swift lines 173-219.
 """
 import sys, os
-sys.path.insert(0, '/Users/desac/.hermes/kanban/boards/hscc/workspaces/t_3359b983/hscc/hscc-api')
+sys.path.insert(0, os.path.expanduser('~/.hermes/kanban/boards/hscc/workspaces/t_3359b983/hscc/hscc-api'))
 import session_event
 
 # Fresh store, seeded with N contiguous events mirroring real append semantics.

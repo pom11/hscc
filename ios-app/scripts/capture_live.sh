@@ -38,7 +38,7 @@ if [ ! -f "$TOKEN_FILE" ]; then
 fi
 TOKEN="$(cat "$TOKEN_FILE")"
 HEADER_AUTH="Authorization: Bearer $TOKEN"
-PY=/Users/desac/miniconda3/envs/p313/bin/python3
+PY="${PY:-$HOME/miniconda3/envs/p313/bin/python3}"
 
 OUT="scripts/live_captures/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"

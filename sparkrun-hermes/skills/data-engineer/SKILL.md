@@ -92,9 +92,9 @@ Each duplicate gen process allocates 8-37GB of RAM. On a 36GB Mac Studio, just 2
 
 2. **Probe the data:**
    ```bash
-   /Users/desac/miniconda3/envs/p313/bin/python3 -c "
-   import sys
-   sys.path.insert(0, '/Users/desac/dev/sphoin_engine/bin')
+   ~/miniconda3/envs/p313/bin/python3 -c "
+   import os, sys
+   sys.path.insert(0, os.path.expanduser('~/dev/sphoin_engine/bin'))
    from fetchers.dukascopy import fetch
    df = fetch('EURJPY', '4h', start='2010-01-01')
    print(f'rows={len(df)}, memory={df.memory_usage().sum()/1e9:.2f} GB')
@@ -147,7 +147,7 @@ When the gen subprocess fails:
 ## ⚠️ Common Pitfalls
 
 1. **Duplicate gen processes:** Always dedup before spawning (RULE 2)
-2. **Wrong conda env path:** Use `/Users/desac/miniconda3/envs/p313/bin/python3`, NOT `conda run -n p313`
+2. **Wrong conda env path:** Use `~/miniconda3/envs/p313/bin/python3`, NOT `conda run -n p313`
 3. **--no-mem-gate is banned:** Never pass `--no-mem-gate` — this disables the admission gate and can OOM-panic the box
 4. **Stale worker PIDs:** The kanban DB worker_pid can be stale — always verify the gen subprocess exists separately
 5. **Memory underestimation:** If a gen uses significantly more memory than `--mem-est-gb`, increase the estimate so the gate forces single-process execution

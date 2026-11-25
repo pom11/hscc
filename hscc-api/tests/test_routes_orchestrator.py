@@ -957,7 +957,7 @@ def test_backing_invoke_nonzero_exit_no_stderr(monkeypatch):
 def test_backing_invoke_strips_channel_notice_lines(monkeypatch):
     """`-Q` can emit a cwd-restore notice on stdout BEFORE the reply; the parsed
     reply must not be polluted by it (observed real transport, t_bc242def)."""
-    _popen(monkeypatch, stdout=("↪ restored workspace dir: /Users/desac\n\n"
+    _popen(monkeypatch, stdout=("↪ restored workspace dir: /Users/hscc-fixture\n\n"
                                 "the actual reply here\n"))
     reply, _, _ = routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
     assert "restored workspace" not in reply
@@ -1018,7 +1018,7 @@ def test_notice_line_does_not_strip_warning_shaped_reply_content():
 def test_notice_line_strips_known_preamble_shapes():
     """Known Hermes startup lines are stripped; near-misses are not."""
     assert routes_orchestrator._is_notice_line(
-        "↪ restored workspace dir: /Users/desac"
+        "↪ restored workspace dir: /Users/hscc-fixture"
     )
     assert routes_orchestrator._is_notice_line(
         "⚠ tirith security scanner enabled but not available — command "
