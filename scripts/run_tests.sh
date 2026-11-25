@@ -462,14 +462,33 @@ on_sigterm() {
   # legs in flight: they would keep burning CPU on a host running the fleet
   # control plane and keep the log's write end open. Kill the ones we started,
   # by pid, in the range the cursors describe — never by name (the RULE above).
+  # `set -m` in the pack gives every leg its own process group, so the group kill
+  # reaches the pytest AND the children IT spawned (a leg that shells out to
+  # bootstrap.sh leaves a grandchild behind otherwise).
   if [ "${PARALLEL_MODE:-0}" -eq 1 ] 2>/dev/null; then
     _k="${P_HEAD:-0}"
     while [ "$_k" -lt "${P_NEXT:-0}" ]; do
+      kill -- "-${P_PID[$_k]}" 2>/dev/null
       kill "${P_PID[$_k]}" 2>/dev/null
       _k=$((_k+1))
     done
   fi
   exit 143
+}
+on_sigint() {
+  # A pack puts each leg in its OWN process group (set -m), so a Ctrl-C at the
+  # terminal no longer reaches pytest the way it does on the serial path. The
+  # trap restores what the serial path gives for free.
+  echo
+  echo "!! run_tests.sh RECEIVED SIGINT at $(date '+%Y-%m-%d %H:%M:%S') — elapsed ${SECONDS}s, during suite: ${CURRENT_SUITE:-unknown}"
+  if [ "${PARALLEL_MODE:-0}" -eq 1 ] 2>/dev/null; then
+    _k="${P_HEAD:-0}"
+    while [ "$_k" -lt "${P_NEXT:-0}" ]; do
+      kill -- "-${P_PID[$_k]}" 2>/dev/null
+      _k=$((_k+1))
+    done
+  fi
+  exit 130
 }
 trap on_sigterm TERM
 
@@ -763,6 +782,14 @@ else
     HB_PID=$!
   fi
 
+  # Job control for the pack only, and restored after it: every background leg
+  # then runs in its OWN process group, which is what lets the TERM/INT handlers
+  # stop a leg and everything that leg spawned, by pid. (On the serial path
+  # pytest is in the runner's own group, which is why Ctrl-C reaches it there
+  # without any of this.)
+  set -m
+  trap on_sigint INT
+
   # CURRENT_SUITE must keep naming what is running: the SIGTERM line reads it,
   # and with a pack "what is running" is a SET. Rebuilt on every launch and every
   # reap, in roster order, from the legs between the two cursors.
@@ -822,6 +849,8 @@ else
   done
 
   [ -n "$HB_PID" ] && kill "$HB_PID" 2>/dev/null
+  set +m
+  trap - INT
 
   # Concatenated in ROSTER ORDER (index order, not completion order): this is
   # the stream merge_queue parses, and it has to look like the serial one.
