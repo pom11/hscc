@@ -1099,18 +1099,71 @@ def _test_leg_roster(worktree):
     return legs or None
 
 
-def _local_test_legs(changed, roster):
+#: A top-level changelog fragment (``changelog.d/*.md``). The one non-test
+#: file a test-only diff may carry; the archived tree is not a fragment.
+_CHANGELOG_FRAGMENT_RE = re.compile(r"^changelog\.d/[^/]+\.md$")
+
+
+def _is_test_file(path, leg):
+    """Whether ``path`` is a test file owned by ``leg``.
+
+    ``<leg>/tests/**`` is the suite layout this repo uses (a conftest under
+    that tree included), and ``<leg>/**/test_*.py`` covers a test that sits
+    beside the module it pins. Anything else — a source file, a leg-root
+    conftest, a fixture with another name — is not a test-only path.
+    """
+    root = leg.rstrip("/") + "/"
+    if not path.startswith(root):
+        return False
+    rel = path[len(root):]
+    if rel.startswith("tests/"):
+        return True
+    parts = rel.split("/")
+    if parts[-1] == "conftest.py" and "tests" in parts[:-1]:
+        return True
+    return parts[-1].startswith("test_") and parts[-1].endswith(".py")
+
+
+def _test_only_legs(paths, roster):
+    """Legs that own a wholly test-only diff, or ``None`` for today's rule.
+
+    Test-only means every path is a test file owned by a roster leg or a
+    top-level changelog fragment. A fragment selects no leg: it is data the
+    ``scripts`` leg parses, not a test this PR can break, so a test-only diff
+    skips that leg and any cross-leg expansion entirely. A diff with no owned
+    test file, a path no leg owns, or more than :data:`MAX_LOCAL_TEST_LEGS`
+    owning legs returns ``None`` so the caller keeps the ordinary rule: under-
+    selection is the failure mode this gate must not have.
+    """
+    chosen = set()
+    for path in paths:
+        if _CHANGELOG_FRAGMENT_RE.match(path):
+            continue
+        owners = [leg for leg in roster if _is_test_file(path, leg)]
+        if not owners:
+            return None
+        chosen.update(owners)
+    if not chosen or len(chosen) > MAX_LOCAL_TEST_LEGS:
+        return None
+    return [leg for leg in roster if leg in chosen]
+
+
+def _local_test_legs(changed, roster, log=None):
     """Legs a narrowed local gate may run, or ``None`` for the full suite.
 
-    A path under a leg's own directory selects that leg. Repo prose and the
-    Apple client trees select :data:`SCRIPTS_LEG`, mirroring
-    ``.github/scripts/leg_select.py`` — ``scripts/tests`` is their only Python
-    reader (it parses ``changelog.d/`` and ``CHANGELOG.md``, lints the README
-    and docs index, and reads/executes the app publishers). A shared harness
-    path, an unreadable/odd roster, a roster without :data:`SCRIPTS_LEG` for
-    such a path, an empty diff, a path no rule claims, or more than
-    :data:`MAX_LOCAL_TEST_LEGS` distinct legs widen to ``None`` (full suite):
-    under-selection is the failure mode this gate must not have.
+    A wholly test-only diff selects exactly the legs that own those test files
+    (plus the changelog fragments it carries, which select nothing); GitHub CI
+    still runs the full roster on every push to main, so the backstop is
+    unchanged. Any other diff keeps the ordinary rule: a path under a leg's
+    own directory selects that leg. Repo prose and the Apple client trees
+    select :data:`SCRIPTS_LEG`, mirroring ``.github/scripts/leg_select.py`` —
+    ``scripts/tests`` is their only Python reader (it parses ``changelog.d/``
+    and ``CHANGELOG.md``, lints the README and docs index, and reads/executes
+    the app publishers). A shared harness path, an unreadable/odd roster, a
+    roster without :data:`SCRIPTS_LEG` for such a path, an empty diff, a path
+    no rule claims, or more than :data:`MAX_LOCAL_TEST_LEGS` distinct legs
+    widen to ``None`` (full suite): under-selection is the failure mode this
+    gate must not have.
     """
     if not roster or any(not _LEG_NAME_RE.match(leg) for leg in roster):
         return None
@@ -1121,6 +1174,11 @@ def _local_test_legs(changed, roster):
         if any(path == shared or path.startswith(shared)
                for shared in SHARED_GATE_PATHS):
             return None
+    test_only = _test_only_legs(paths, roster)
+    if test_only is not None:
+        if log is not None:
+            log("legs: test-only diff -> %s" % " ".join(test_only), "INFO")
+        return test_only
     chosen = set()
     for path in paths:
         claimed = {leg for leg in roster
@@ -1143,11 +1201,12 @@ def _selected_leg_gate(legs):
     return 'HSCC_TEST_LEGS="%s" %s' % (" ".join(legs), RUN_TESTS_GATE)
 
 
-def _resolve_gates(cfg, worktree, git_runner, base="main"):
+def _resolve_gates(cfg, worktree, git_runner, base="main", log=None):
     """Gate command list for this PR, including hscc's conditional app builds.
 
     Declared gates are used verbatim. For hscc's built-in defaults the pytest
-    gate is narrowed to the legs the rebased diff touches (see
+    gate is narrowed to the legs the rebased diff touches (a wholly test-only
+    diff to exactly the legs that own its tests; see
     :func:`_local_test_legs`); app build gates still come from that same diff.
     The full suite is not lost with the narrowed local gate: GitHub CI runs it
     on the pushed head and :func:`_post_push_ready` refuses to merge until that
@@ -1160,7 +1219,7 @@ def _resolve_gates(cfg, worktree, git_runner, base="main"):
         return []
     gates = list(DEFAULT_HSCC_GATES)
     changed = _changed_files(worktree, git_runner, base=base)
-    legs = _local_test_legs(changed, _test_leg_roster(worktree))
+    legs = _local_test_legs(changed, _test_leg_roster(worktree), log=log)
     if legs:
         gates[gates.index(RUN_TESTS_GATE)] = _selected_leg_gate(legs)
     for prefix, cmd in APP_BUILD_GATES.items():
@@ -2707,7 +2766,7 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     if cancel:
         return _stop_cancelled(state_path, project, entry, cancel)
 
-    gates = _resolve_gates(cfg, worktree, git_runner, base=base)
+    gates = _resolve_gates(cfg, worktree, git_runner, base=base, log=log)
     _update_flight(state_path, project, entry["pr"],
                    stage="gating" if gates else "merging")
     timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
