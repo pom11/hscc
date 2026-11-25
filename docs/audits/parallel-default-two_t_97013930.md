@@ -68,10 +68,30 @@ runs is the one under test.
 | full roster, run D, immediately after C | same | **712 s** | 1391 s (**1.95×**) | `ALL GREEN`, 12/12 `rc=0`, load 3.0/3.3/3.5 |
 | full roster, run A (at `1d276dbc`) | same | 718 s | — | 11/12, `✗ scripts` — §7: my own pin, not the pack |
 
-Serial reference for the gate pair, from the parent's per-leg durations: `hscc_daemon`
-331 s + `scripts` 248 s = **579 s**. Measured packed: **330 s → 1.75×**. The
-parent's `~340 s` was arithmetic on those two numbers; it is replaced by the 330 s
-above, and the arithmetic turned out to be a fair guess for once.
+**QoS, precisely — these are utility-QoS walls, not the queue's observed walls.**
+Every clock in this table was taken from a shell wrapped in `/usr/sbin/taskpolicy -c
+utility`. That prefix is not an invention of this harness: it is the class the queue
+itself builds its command with (`merge_queue.py:152-155`, shape `[taskpolicy, -c,
+utility, /bin/sh, -c, <cmd>]`). It is still NOT the wall the queue sees, because the
+queue is spawned by `com.hermes.hscc_daemon`, whose launchd `ProcessType =>
+Background` taxes the run further and which `taskpolicy` cannot lift (this card's own
+out-of-scope note; t_49827b5d measured the same `scripts` leg at 1009 s under that
+background class against 268 s here). What transfers to the queue is therefore the
+**ratio**, not the absolute seconds — and the tax lands on serial and packed alike.
+
+**The gate pair, labelled by how each number was obtained.** Measured packed wall:
+**330 s**, one run, both legs inside it (`hscc_daemon` 330 s, `scripts` 268 s). The
+serial side of both ratios below is *derived* — arithmetic on per-leg durations, never
+a timed serial gate:
+
+* same sample: 330 + 268 = **598 s** of leg work in the run that produced the 330 s
+  wall → **1.81×**. One sample, no cross-run mixing. This is the number to quote.
+* cross-run: the parent's per-leg durations at its own tree, 331 + 248 = **579 s** →
+  **1.75×**. Useful only as a second sample; it mixes two trees.
+
+The parent's `~340 s` was arithmetic on those two numbers and was never run as a gate;
+it is replaced by the measured 330 s above, and the arithmetic turned out to be a fair
+guess for once.
 
 **Why the gate lands exactly on its longest leg, and why that is the whole win.**
 In the 330 s gate, `scripts` (268 s) disappeared entirely inside `hscc_daemon`
