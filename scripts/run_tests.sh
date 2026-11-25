@@ -757,16 +757,22 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
   if [ "$_sweep_floor" -gt 0 ]; then
     _sweep_now="$(date +%s)"
     _swept=0
-    # `-maxdepth 1` never descends, `-type d` (with find's default -P) never
-    # follows a planted symlink, `-user` never touches another account's dir.
-    while IFS= read -r _d; do
-      [ -n "$_d" ] || continue
+    # A glob, not `find`: `/tmp` is itself a symlink on macOS, so `find /tmp`
+    # resolves to the link and never descends (measured twice — the find form
+    # sweeps nothing here). The three guards are the whole blast radius: skip
+    # symlinks (`-d` is true through one), skip another account's dir, and skip
+    # anything whose age cannot be read.
+    for _d in /tmp/hscc-legs-*; do
+      [ -d "$_d" ] || continue
+      [ -L "$_d" ] && continue
+      _u="$(stat -f %u "$_d" 2>/dev/null || stat -c %u "$_d" 2>/dev/null || true)"
+      [ "$_u" = "$(id -u)" ] || continue
       _m="$(stat -f %m "$_d" 2>/dev/null || stat -c %Y "$_d" 2>/dev/null || true)"
       case "$_m" in ''|*[!0-9]*) continue ;; esac
       if [ $(( _sweep_now - _m )) -ge "$_sweep_floor" ]; then
         rm -rf -- "$_d" 2>/dev/null && _swept=$((_swept+1))
       fi
-    done < <(find /tmp -maxdepth 1 -type d -name 'hscc-legs-*' -user "$(id -un)" 2>/dev/null)
+    done
     if [ "$_swept" -gt 0 ]; then
       echo "parallel: swept $_swept stale leg-log dir(s) older than ${_sweep_floor}s"
     fi
