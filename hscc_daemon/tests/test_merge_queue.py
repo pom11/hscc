@@ -4582,3 +4582,167 @@ def test_the_read_surfaces_show_a_hold_with_its_reason_and_never_write(
     with open(path, "rb") as f:
         assert (os.stat(path).st_mtime_ns, f.read()) == before
     assert sorted(os.listdir(home)) == before_dir
+
+
+# ── post-push HEAD READ LAG ────────────────────────────────────────────────
+#
+# `gh pr view` keeps answering the PRE-push ``headRefOid`` for a few seconds
+# after a push, and the queue's own ``_push_branch`` is the commonest push this
+# file makes.  On 2.17.5 that lagging read was taken for "a worker pushed over
+# us" twice — PR #742 at 00:53:49Z and #761 at 00:09:56Z, each one releasing a
+# claim whose ~75-minute local gate had already passed — because a head that
+# had simply not been served yet and a head someone else had moved looked
+# identical to ``_settle_pushed_head``.  These tests pin the distinction:
+# the sha we pushed FROM is re-polled and then HELD, only a THIRD sha releases.
+
+def _lagging_head_views(pr, pre_push_sha, *, lag=None):
+    """Per-PR ``FakeGh`` views whose post-push head stays on ``pre_push_sha``.
+
+    The first read (the pre-push one ``process_entry`` makes) is the normal
+    answer; after it GitHub reports the PRE-push sha for ``lag`` consecutive
+    looks — the post-push one plus that many re-reads.  ``lag`` defaults to a
+    whole budget (the first look + every re-read the queue is allowed), i.e.
+    GitHub never catches up within the tick.
+    """
+    if lag is None:
+        lag = 1 + max(1, int(mq.HEAD_READ_POLL_ATTEMPTS))
+    stale = {"headRefOid": pre_push_sha}
+    return {pr: [{}] + [dict(stale) for _ in range(max(0, int(lag)))]}
+
+
+def test_a_lagging_head_read_after_our_push_is_repolled_not_released(
+        tmp_path, monkeypatch):
+    """GitHub serving the pre-push head is read lag: re-read, do not release."""
+    monkeypatch.setattr(mq, "HEAD_READ_POLL_DELAY_S", 0.0)
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    # One lagging read, then GitHub catches up on the queue's first re-read.
+    gh = FakeGh({31: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}},
+                views=_lagging_head_views(31, pair["head"], lag=1))
+    mq.add_to_queue("alpha", 31, path=_state(tmp_path))
+    logged = []
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     log=lambda msg, *a, **k: logged.append(msg))
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert gh.merged == [31]
+    assert not any("head moved" in line for line in logged), logged
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["queue"] == [] and ps["waiting"] == [] and ps["in_flight"] is None
+    # pre-push read + lagging read + the re-read that caught up + post-merge.
+    views = [argv for argv in gh.calls if argv[:3] == ["gh", "pr", "view"]]
+    assert len(views) == 4, views
+
+
+def test_a_head_read_that_never_catches_up_holds_the_claim(tmp_path,
+                                                           monkeypatch):
+    """Still the pre-push head after every re-read: hold, and merge next tick.
+
+    The hold is what makes this cheap: the gate this claim carries has already
+    passed, and the next tick re-reads the PR in place — it does not rebase and
+    re-gate, which is the ~75 minutes the false release used to throw away.
+    """
+    monkeypatch.setattr(mq, "HEAD_READ_POLL_DELAY_S", 0.0)
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({32: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}},
+                views=_lagging_head_views(32, pair["head"]))
+    mq.add_to_queue("alpha", 32, path=_state(tmp_path))
+    gate_calls = []
+
+    def gate(command, worktree, timeout_s, **extra):
+        gate_calls.append(command)
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    logged = []
+    first = mq.tick(state_path=_state(tmp_path),
+                    root=str(tmp_path / "queue"), registry_path=registry,
+                    gh_runner=gh, git_runner=subprocess.run,
+                    log=lambda msg, *a, **k: logged.append(msg))
+
+    assert first["processed"][0]["result"] == "ci-pending", first
+    assert gh.merged == []
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"]["stage"] == "ci-pending"
+    pushed = ps["in_flight"]["pushed_sha"]
+    assert pushed and pushed != pair["head"]
+    # The sha GitHub was reporting is carried on the claim, so a later tick that
+    # reads it again recognises the SAME lag instead of releasing.
+    assert ps["in_flight"]["pre_push_sha"] == pair["head"]
+    assert ps["waiting"] == []
+    assert any("holding the claim" in line for line in logged), logged
+    assert not any("head moved" in line for line in logged), logged
+
+    second = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     log=lambda msg, *a, **k: logged.append(msg))
+    assert second["processed"][0]["result"] == "merged", second
+    assert gh.merged == [32]
+    assert len(gate_calls) == 1, "the held claim was re-gated"
+    # It merges the SHA it pushed, not whatever the lagging read reported.
+    assert gh.merge_calls[0][-1] == pushed, gh.merge_calls[0]
+
+
+def test_a_head_still_stale_on_a_later_tick_holds_the_claim_too(tmp_path,
+                                                                monkeypatch):
+    """A lag longer than one tick must not release either — the budget does."""
+    monkeypatch.setattr(mq, "HEAD_READ_POLL_DELAY_S", 0.0)
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({33: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}},
+                views=_lagging_head_views(
+                    33, pair["head"],
+                    lag=2 * (1 + max(1, int(mq.HEAD_READ_POLL_ATTEMPTS)))))
+    mq.add_to_queue("alpha", 33, path=_state(tmp_path))
+    logged = []
+    tick = lambda: mq.tick(  # noqa: E731 - one shape, three ticks
+        state_path=_state(tmp_path), root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        log=lambda msg, *a, **k: logged.append(msg))
+
+    assert tick()["processed"][0]["result"] == "ci-pending"
+    assert tick()["processed"][0]["result"] == "ci-pending"
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"]["stage"] == "ci-pending"
+    assert ps["waiting"] == [] and gh.merged == []
+    assert not any("head moved" in line for line in logged), logged
+
+    assert tick()["processed"][0]["result"] == "merged"
+    assert gh.merged == [33]
+
+
+def test_a_third_sha_after_the_push_is_still_released(tmp_path, monkeypatch):
+    """A head that is neither pushed nor pre-push IS a foreign push: release."""
+    pair = _repo_pair(tmp_path)
+    # A real sha on origin that is neither the head we started from nor the
+    # head the queue pushed: what a worker pushing over the claim looks like.
+    foreign = _git(pair["repo"], "rev-parse", "origin/main")
+    assert foreign not in (pair["head"],)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({34: {"headRefName": pair["branch"],
+                      "headRefOid": pair["head"]}},
+                views={34: [{}, {"headRefOid": foreign}]})
+    mq.add_to_queue("alpha", 34, path=_state(tmp_path))
+    logged = []
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     log=lambda msg, *a, **k: logged.append(msg))
+
+    assert result["processed"][0]["result"] == "waiting", result
+    assert gh.merged == []
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert [e["pr"] for e in ps["waiting"]] == [34]
+    assert any("head moved from the pushed" in line for line in logged), logged
+    # A third sha is decided at once: re-reading cannot make a real push go
+    # away, and burning the poll budget on it only slows the queue down.
+    views = [argv for argv in gh.calls if argv[:3] == ["gh", "pr", "view"]]
+    assert len(views) == 2, views
