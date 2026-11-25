@@ -34,6 +34,7 @@ from pathlib import Path
 from hscc_daemon import cli_theme as theme
 from hscc_daemon import daemon_ops
 from hscc_daemon import qr_code
+from hscc_daemon import suite_fence
 from hscc_daemon import verify
 # The daemon's own stdio detach (F6, `cli._detach_stdio`). Imported — NOT
 # re-implemented — so `hscc api start` and `hscc start` daemonise through one
@@ -928,11 +929,19 @@ def _refused_launchd_status() -> dict:
     hscc-bootstrap/doctor.py's `_refused_supervision_check`: a refusal that is
     VISIBLE in the caller's output, never a silent "not loaded" that lets a
     test pass for the wrong reason while a real unit sits loaded.
+
+    The question is asked of `hscc_daemon.suite_fence`, not of this process: the
+    caller that reaches this default target without a seam is often a fresh
+    interpreter a suite item exec'd (`hscc api status` from a script a test
+    writes, a probe child of a guard), and pytest was never imported there. A
+    local `"pytest" in sys.modules` test answers for the process nobody is
+    asking about — the ruling and the two-signal reasoning are in suite_fence.
     """
     return {"available": False, "loaded": False, "pid": None, "state": None,
             "refused": True,
-            "note": "launchd probe refused inside a pytest process — inject "
-                    "launchd_status(_run_probe=...) or monkeypatch the function"}
+            "note": "launchd probe refused inside a pytest process (or a child "
+                    "one spawned) — inject launchd_status(_run_probe=...) or "
+                    "monkeypatch the function"}
 
 
 def launchd_status(_run_probe=None):
@@ -990,7 +999,7 @@ def launchd_status(_run_probe=None):
         undone by KeepAlive — the silent-un-stop the whole launchd pairing exists
         to prevent, so it is an error naming the seam rather than a best guess.
     """
-    if _run_probe is None and "pytest" in sys.modules:
+    if _run_probe is None and suite_fence.under_pytest():
         return _refused_launchd_status()
     runner = _run_probe or _launchctl_run
     target = f"gui/{os.getuid()}/{_launchd_label()}"
@@ -1360,17 +1369,33 @@ def _handle_status(argv, theme_name=None):
     pid = daemon_ops.get_pid(API_PID_FILE)
     sup = launchd_status() if _launchd_matters() else {
         "available": False, "loaded": False, "pid": None, "state": None}
+    # RULING (t_88b08940) — a PID file that names a dead pid does NOT outrank an
+    # ANSWERED supervisor row. The file proves one thing only: the process this
+    # verb's own file recorded is gone. It cannot prove the API is down, because
+    # the unit writes no api.pid — so a stale file is exactly what a machine
+    # running a launchd-served API (plus some older or crashed `hscc api start`)
+    # leaves behind. Reading it as the verdict printed "stale PID file (not
+    # running)" two lines above the Supervisor row that said `loaded, pid 42424,
+    # state running`, with rc 0: the same false answer the launchd pairing
+    # (t_d2245e7e) exists to kill, and once the in-suite fence (t_251cd84f) lands
+    # it becomes a screen a suite case that plants a pid file cannot falsify.
+    # So the supervisor's ANSWER is the state line whenever it says the unit is
+    # loaded, and the stale file becomes a row below it. The file keeps deciding
+    # the verdict when the supervisor ANSWERED that no unit is loaded, and when
+    # there is no supervisor to ask at all (no plist, non-macOS) — that is the
+    # plain `hscc api start` case this branch was written for, and it is why the
+    # fix is a precedence question rather than a deletion.
+    stale_pid_file = pid is None and os.path.exists(API_PID_FILE)
+    unit_loaded = bool(sup.get("available")) and bool(sup.get("loaded"))
     if pid:
         status, state_line = "ok", f"HSCC API is running (PID {pid})"
-    elif os.path.exists(API_PID_FILE):
-        status, state_line = "warn", "stale PID file (not running)"
-    elif sup.get("available") and sup.get("loaded") and sup.get("pid"):
+    elif unit_loaded and sup.get("pid"):
         # THE bug this card exists for: launchd has served this API since boot
         # and the PID-file read alone said "not running".
         status = "ok"
         state_line = (f"HSCC API is running under launchd "
                       f"(pid {sup['pid']}, {_launchd_label()})")
-    elif sup.get("available") and sup.get("loaded"):
+    elif unit_loaded:
         # Loaded but no pid: throttled after a failure (a --tailscale unit with
         # Tailscale down is exactly this) or exiting. Report launchd's own
         # word — "not running" here is the truth, not a false alarm.
@@ -1384,7 +1409,18 @@ def _handle_status(argv, theme_name=None):
         # running" here re-ships — for every process the supervisor fence fires
         # in — the exact false answer the launchd pairing (t_d2245e7e) exists to
         # kill. Say only what is known; the Supervisor row below names the seam.
-        status, state_line = "warn", "state unknown (supervisor not consulted)"
+        # Composed, not replaced, when a stale PID file is also on disk
+        # (t_88b08940): the dead pid in that file is OUR OWN read and stays worth
+        # reporting, but it still does not license the verdict the probe refused
+        # to reach, so the line keeps the unknown and adds the fact.
+        status = "warn"
+        state_line = ("stale PID file; state unknown (supervisor not consulted)"
+                      if stale_pid_file else
+                      "state unknown (supervisor not consulted)")
+    elif stale_pid_file:
+        # Nothing supervises it (answered, or never asked) and the recorded
+        # process is gone: the plain `hscc api start` leftover. Truth, not guess.
+        status, state_line = "warn", "stale PID file (not running)"
     else:
         status, state_line = "warn", "not running"
 
@@ -1406,6 +1442,13 @@ def _handle_status(argv, theme_name=None):
 
     console = _console(theme_name)
     rows = [state_line]
+    if unit_loaded and stale_pid_file:
+        # The stale file lost the right to be the VERDICT (t_88b08940), not the
+        # right to be seen: a leftover api.pid beside a loaded unit is the orphan
+        # class doctor_supervision hunts, and an operator who runs `hscc api stop`
+        # next should know the file is there. Stated as a fact, never as the
+        # headline, which is the Supervisor row's job.
+        rows.append("PID file:      stale (recorded process is gone)")
     if sup.get("refused"):
         # Suite-only (see _refused_launchd_status): a test that forgot to inject
         # the seam must SEE that, not silently read the PID-file fallback.

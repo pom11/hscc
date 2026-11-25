@@ -87,13 +87,18 @@ MIN_EXAMPLES = 60
 def report():
     """One audit run shared by every assertion.
 
-    MEASURED cost, because every test in this file waits on it: 59.69 s on a
-    clean `main` worktree at host load 1.9 (t_4c9feb44) — 961 CLI subprocesses
-    over 331 probed surfaces. The "~35 s" this docstring used to claim was both
-    wrong and load-blind; the same walk measured 307.64 s while `Prober` paid a
-    0.25 s black-holed port probe per call, which is what made the whole `scripts`
-    leg look hung from test ~233. Budget against the measured number, and check
-    the census before believing any new per-probe cost.
+    MEASURED cost, because every test in this file waits on it. Pre-fan-out it
+    was 397.77 s of setup at the gate's background QoS (t_49827b5d) — ~1k CLI
+    subprocesses launched one at a time, 945 unique `(argv, width)` renders over
+    179 surfaces / 349 probed invocations. Since t_71f9fc17 the walk fans those
+    probes out over 4 isolated `Prober`s (`HSCC_CLI_HELP_PROBE_WORKERS`, `1` =
+    the serial walk): the same audit measured **329.84 s serial → 135.00 s at 4
+    workers** under `taskpolicy -b` on a box with sibling legs running
+    (load ~5), with a byte-identical report apart from the fan accounting.
+    The older "~35 s" and "59.69 s" figures this docstring carried were both
+    load-blind and predate the `-h` parity pass that doubled the walk. The
+    per-probe port-probe cost t_4c9feb44 measured (0.25 s black hole x ~1k
+    probes) is gone for good, pinned by the seal tests below.
     """
     return audit_mod.audit(str(REPO))
 
@@ -500,6 +505,116 @@ def _a_table_timeout(py: str, n_probes_hint: int = A_TABLE_MIN_PROBES) -> int:
 _A_RECEIPT_RE = None
 
 
+# ── the sibling arm walks a SAMPLE, not the whole surface (t_49827b5d) ──────
+#
+# WHAT THIS COST AND WHY IT MOVED. `test_a_table_identical_under_sibling_
+# interpreters` asked every sibling interpreter to walk the WHOLE surface:
+# `--a-table '*'` -> A_TABLE_MIN_PROBES (329) CLI subprocesses, launched serially
+# by the sibling. Measured in the 2.17.5 queue gate (PR #767, 02:46Z) and
+# reproduced here at background QoS: **334.69 s** of the leg's 1009 s, with the
+# leg's `[leg-heartbeat]` naming exactly this child —
+# `first_child=/Users/desac/min... 02:56`, i.e. the whole leg parked on
+# `~/miniconda3/envs/p313/bin/python` while it re-launched the CLI 329 times.
+# That is 33 % of the leg spent re-proving, on a second CPython, a property the
+# sibling cannot vary except through argparse's own rendering.
+#
+# WHAT THE CHECK IS FOR. GATE-313 was: CPython 3.13's argparse widened the help
+# column by 2 chars, so an (A) detail became rendering-dependent and drifted on
+# ONE interpreter only. That class is global (it comes from argparse's help
+# formatter, not from a specific verb), so the arm does not need all 329
+# surfaces to keep its teeth — it needs surfaces from every group, so a drift
+# cannot hide in the one group sampled. The sample is therefore GROUP-BREADTH
+# first, stride-filled to a floor, and the receipt is recalibrated to the work
+# REQUESTED: `>= len(requested)`, never `>= 329` — so the arm still fails if the
+# sibling answers without walking what it was asked to walk.
+#
+# WHAT IS NOT WEAKENED. The full 329-probe walk is one environment variable
+# away (`HSCC_CLI_HELP_SIBLING_WALK=full`) and stays the shape used by a deep
+# run; the local full-surface walk (`report`, the audit itself) still walks every
+# surface at full strength on the leg interpreter, so the (A) table this arm
+# compares against is never sampled. A drift on an unsampled surface is then
+# caught by the local pass on the interpreter that has it — which is the half
+# that actually broke in GATE-313.
+SIBLING_WALK_ENV = "HSCC_CLI_HELP_SIBLING_WALK"
+SIBLING_SAMPLE_FLOOR = 24
+
+
+def _walkable_surface_names() -> list:
+    """Every surface name the (A)-only pass would walk, in walk order.
+
+    Derived from the SAME `build_surface()` / `invocations_for()` the pass
+    consumes (the audit's own single source of truth), so a sampled name can
+    never be a name the sibling would silently not find, and a surface that
+    disappears shrinks the sample rather than lying about it. The `api start`
+    exclusion is the pass's own (:func:`a_table`), not a new one.
+    """
+    paths, _fd = audit_mod.build_surface()
+    out: list = []
+    for _group, argv, _style, kind in paths:
+        for inv, _flag in audit_mod.invocations_for(argv, kind):
+            if inv[:2] == ["api", "start"]:
+                continue
+            name = audit_mod._norm(inv)
+            if name not in out:
+                out.append(name)
+    return out
+
+
+def _sibling_sample() -> list:
+    """The surfaces the sibling arm walks by default: breadth first, then stride.
+
+    Group breadth is the property (an argparse rendering change is not
+    per-verb), so every `hscc <group>` gets its first surface, then the rest of
+    the floor is filled by a stride across the whole list so the sample is not
+    six near-identical `cluster` verbs.
+    """
+    names = _walkable_surface_names()
+    if len(names) <= SIBLING_SAMPLE_FLOOR:
+        return names
+    picked: list = []
+    seen_groups: set = set()
+    for n in names:
+        key = " ".join(n.split()[:2])
+        if key in seen_groups:
+            continue
+        seen_groups.add(key)
+        picked.append(n)
+    room = SIBLING_SAMPLE_FLOOR - len(picked)
+    if room > 0:
+        step = max(1, len(names) // room)
+        for i in range(0, len(names), step):
+            if len(picked) >= SIBLING_SAMPLE_FLOOR:
+                break
+            if names[i] not in picked:
+                picked.append(names[i])
+    return picked
+
+
+def _sibling_walk_request(report) -> tuple:
+    """(surfaces_to_walk_or_None_for_whole_surface, min_receipt_probes, mode).
+
+    Every surface with a local (A) line is ALWAYS walked — the sample only
+    stands in for the "prove you also find nothing here" bulk, never for a real
+    finding. ``None`` means the whole surface (`'*'`), which is also the only
+    case the A_TABLE_MIN_PROBES receipt floor describes.
+
+    The probe floor is the work REQUESTED because each surface costs exactly one
+    probe in this pass (`A_TABLE_WIDTHS` picks one authoritative width), so
+    `len(want)` is a real floor rather than a guess — and unlike the old
+    constant it is a floor the sample walk can actually meet.
+    """
+    found = sorted(report["a_counts"])
+    whole = ([])          # empty list == `'*'` == the whole surface, see below
+    if os.environ.get(SIBLING_WALK_ENV, "").strip().lower() == "full":
+        return (found or whole), (len(found) if found else A_TABLE_MIN_PROBES), "full"
+    sample = [s for s in _sibling_sample() if s not in found]
+    want = sorted(set(found) | set(sample))
+    if not want:                          # no surface enumerated at all: never
+        return whole, A_TABLE_MIN_PROBES, "full"   # vacuous-sample, walk all
+    return want, len(want), "sample"
+
+
+
 def _parse_a_receipt(stderr: str) -> dict:
     import re as _re
     global _A_RECEIPT_RE
@@ -540,7 +655,7 @@ def test_a_table_identical_under_sibling_interpreters(report):
     surfacing as a bare ``subprocess.TimeoutExpired`` traceback with no
     number in it, which is what made three separate cards re-diagnose this
     from scratch."""
-    surfaces = sorted(report["a_counts"])
+    surfaces, min_probes, mode = _sibling_walk_request(report)
     siblings = _sibling_interpreters()
     if not siblings:
         dropped = "; ".join(f"{p}: {w}" for p, w in sorted(SIBLING_DROPPED.items()))
@@ -548,7 +663,7 @@ def test_a_table_identical_under_sibling_interpreters(report):
                     " on PATH"
                     + (f" (dropped -> {dropped})" if dropped else ""))
     for py in siblings:
-        budget = _a_table_timeout(py)
+        budget = _a_table_timeout(py, n_probes_hint=min_probes)
         try:
             table, failed, receipt = _sibling_a_table(py, surfaces,
                                                       timeout=budget)
@@ -558,7 +673,9 @@ def test_a_table_identical_under_sibling_interpreters(report):
                 f" calibrated budget of {budget}s (median CLI --help probe"
                 f" measured just before the walk; see the measurement block"
                 f" beside A_TABLE_TIMEOUT_SECS). This pass launches"
-                f" ~{A_TABLE_MIN_PROBES} CLI subprocesses; a timeout here"
+                f" ~{min_probes} CLI subprocesses ({mode} walk —"
+                f" {SIBLING_WALK_ENV}=full asks for all"
+                f" {A_TABLE_MIN_PROBES}); a timeout here"
                 f" means the box is starved or the pass is wedged, NOT that"
                 f" the (A) table drifted.\n  stdout tail:"
                 f" {(e.stdout or '')[-300:]!r}\n  stderr tail:"
@@ -569,11 +686,14 @@ def test_a_table_identical_under_sibling_interpreters(report):
             # The walk must have actually happened. Without this the sibling
             # could answer `{}` in 0.1 s and the equality below would pass
             # while having compared nothing (t_28b0e521 requirement: never
-            # green merely because the box happened to be free).
-            assert _receipt_probes(receipt) >= A_TABLE_MIN_PROBES, (
-                f"sibling {py} reported only {receipt!r} for the (A)-only"
-                f" walk — a healthy whole-surface pass launches >="
-                f" {A_TABLE_MIN_PROBES} CLI probes. The sibling answered"
+            # green merely because the box happened to be free). The floor is
+            # the work REQUESTED, so it travels with the mode instead of being
+            # a constant the sample could never reach (t_49827b5d).
+            assert _receipt_probes(receipt) >= min_probes, (
+                f"sibling {py} reported only {receipt!r} for a {mode} (A)-only"
+                f" walk of {len(surfaces) or 'all'} surface(s) — the pass was"
+                f" asked for >={min_probes} probes and cannot buy its way into"
+                f" the budget by doing less work. The sibling answered"
                 f" without walking the surface, so the table equality below"
                 f" would be vacuous.")
             assert table == report["a_counts"], (
@@ -744,6 +864,60 @@ def test_capable_python_probe_ignores_the_running_interpreter(monkeypatch):
     # The running interpreter can import the audit deps (the suite runs there),
     # so this is the exact shape CI hit: capable, but not a sibling.
     assert _capable_python_on_path() is None
+
+
+def test_sibling_sample_stays_broad_and_arms_the_full_walk(monkeypatch):
+    """The SAMPLE may be cheap, it may not be narrow or vacuous.
+
+    Three properties the sampling decision depends on, each pinned without a
+    subprocess (the sample is derived from `build_surface()`, not from a probe):
+
+      * every surface GROUP on the CLI contributes at least one sampled surface
+        — the drift class this arm guards (GATE-313: argparse's help column) is
+        a formatter property, so it shows up wherever there is help text, and a
+        sample drawn from two groups would be a way to un-gate it quietly;
+      * the sample is a real fraction of the surface, i.e. the code is still
+        choosing, not returning everything (which would silently restore the
+        334 s walk) or nothing (which would assert nothing);
+      * `HSCC_CLI_HELP_SIBLING_WALK=full` really does ask for the whole surface
+        and restores the A_TABLE_MIN_PROBES receipt floor, so the deep run is a
+        variable away and is not a second, drifting implementation.
+    """
+    names = _walkable_surface_names()
+    # HEALTH FLOOR, not a restatement of MIN_PROBES: MIN_PROBES (331) counts
+    # probe INVOCATIONS, this list is deduped by surface NAME (a `hscc help X`
+    # invocation is reachable from two paths), and `a_table` restricts its walk
+    # by name too. MEASURED at this commit: 314 distinct names for the 331
+    # invocations. If the enumeration collapses, a sample drawn off it is
+    # vacuous — the same reason the audit pins MIN_SURFACE_PATHS.
+    assert len(names) >= 300, (
+        f"the (A)-only walkable surface shrank to {len(names)} distinct names "
+        f"(measured 314 at this commit, off the audit's {MIN_PROBES} "
+        f"invocations) — a sample off a broken enumeration proves nothing")
+    sample = _sibling_sample()
+    all_groups = {" ".join(n.split()[:2]) for n in names}
+    sample_groups = {" ".join(n.split()[:2]) for n in sample}
+    assert sample_groups == all_groups, (
+        "the sibling sample no longer covers every surface group, so an "
+        f"argparse rendering drift could hide in: {sorted(all_groups - sample_groups)}")
+    assert SIBLING_SAMPLE_FLOOR <= len(sample) < len(names) // 4, (
+        f"sample is {len(sample)} of {len(names)} surfaces — it must stay a "
+        f"bounded SAMPLE (the whole walk is what this card removed)")
+
+    monkeypatch.delenv(SIBLING_WALK_ENV, raising=False)
+    want, floor, mode = _sibling_walk_request({"a_counts": {}})
+    assert mode == "sample" and floor == len(want) and want, (
+        "the sample floor must be the work REQUESTED, so a sibling that "
+        "walks nothing still fails the receipt")
+    monkeypatch.setenv(SIBLING_WALK_ENV, "full")
+    want, floor, mode = _sibling_walk_request({"a_counts": {}})
+    assert mode == "full" and not want and floor == A_TABLE_MIN_PROBES, (
+        "HSCC_CLI_HELP_SIBLING_WALK=full must request the WHOLE surface "
+        f"(empty request list == `*`), got {mode!r}/{want!r}/{floor}")
+    # A real (A) line is never left to the sample.
+    victim = names[0]
+    want, floor, _mode = _sibling_walk_request({"a_counts": {victim: ["x"]}})
+    assert victim in want and floor >= 1
 
 
 def test_sibling_gate_still_runs_a_real_sibling():
@@ -1498,6 +1672,287 @@ def test_probe_child_resolves_the_sealed_api_port(tmp_path, request):
         "a probe child still names the operator's default api port — the seal "
         "is not holding for this surface")
 
+
+
+# ── Probe fan-out (t_71f9fc17) ───────────────────────────────────────────
+#
+# The audit's ~945 probe children used to launch one at a time, and at the queue
+# gate's background QoS that walk WAS the `scripts` leg (397.77 s of the module
+# fixture, t_49827b5d). The fan-out buys wall time by giving each worker its OWN
+# sandbox, canary tripwire log and sealed api port — the three things
+# `Prober.run` brackets every spawn against, and the reason a thread pool over
+# ONE Prober would race the (C)/(D) sensors instead of speeding them up.
+# These pins hold the two properties that make it safe: workers cannot see each
+# other's sensors, and the walk still pays for EXACTLY the planned launches, so a
+# fan-out failure costs seconds and never a finding.
+
+#: Two surfaces, 11 probe keys — enough to have a real plan, small enough that a
+#: test which actually spawns the plan costs a second, not the 397 s the fixture
+#: costs. `(group, argv, style, kind)`, the shape `build_surface` returns.
+_TINY_SURFACE = [
+    ("top-level", ["status"], "plain", "flag"),
+    ("top-level", ["help", "status"], "plain", "help"),
+]
+
+#: The plan size for `_TINY_SURFACE`: 3 invocations × 3 widths + 1 × 2.
+_TINY_PLAN = 11
+
+
+def _stub_pre_walk_probes(monkeypatch):
+    """Cut the audit's two PRE-walk probe children out of a tiny run.
+
+    The engine-router probe and the systemic import probe are pinned by their own
+    cases; in a fan-out test they would only add interpreters and a second
+    sandbox to what is about the plan.
+    """
+    monkeypatch.setattr(audit_mod, "_orch_router_verbs",
+                        lambda *_a, **_k: ({"inject", "waker"}, None),
+                        raising=True)
+    monkeypatch.setattr(audit_mod, "_systemic_import_probe",
+                        lambda *_a, **_k: None, raising=True)
+
+
+class _SubprocessShim:
+    """Stand-in for the `subprocess` MODULE inside the audit, recording spawns.
+
+    Patched onto `audit_mod.subprocess` rather than the real module, so nothing
+    else in the process — pytest's own machinery included — is spied on or
+    slowed. `TimeoutExpired` rides along because `Prober.run` catches it out of
+    this attribute, not out of the real module.
+    """
+
+    TimeoutExpired = subprocess.TimeoutExpired
+
+    def __init__(self):
+        self.calls: list = []
+
+    def run(self, *args, **kwargs):
+        argv = list(args[0]) if args else list(kwargs.get("argv", []))
+        self.calls.append(argv)
+        return subprocess.run(*args, **kwargs)
+
+
+def _probe_launches(calls: list) -> list:
+    """Only the CLI probe children: argv = [PY, "-m", "hscc_daemon.hscc", ...]."""
+    return [c for c in calls if len(c) > 2 and c[1:3] == ["-m", "hscc_daemon.hscc"]]
+
+
+def test_probe_workers_env_is_bounded(monkeypatch):
+    """Default 4, `1` = the serial walk, garbage = serial, and a hard cap.
+
+    The cap is not cosmetics: `run_tests.sh` can run sibling legs concurrently
+    (t_6c2123f9), so an unbounded fan-out is a way to starve the rest of the
+    queue at the gate.
+    """
+    monkeypatch.delenv(audit_mod.PROBE_WORKERS_ENV, raising=False)
+    assert audit_mod.probe_workers() == audit_mod.DEFAULT_PROBE_WORKERS == 4
+    for raw, want in (("1", 1), ("2", 2), ("4", 4), ("0", 1), ("-3", 1),
+                      ("junk", 1), ("", 4), ("  3 ", 3),
+                      ("999", audit_mod.MAX_PROBE_WORKERS)):
+        monkeypatch.setenv(audit_mod.PROBE_WORKERS_ENV, raw)
+        assert audit_mod.probe_workers() == want, f"env {raw!r}"
+
+
+def test_probe_plan_is_exactly_what_the_walk_asks(monkeypatch):
+    """The prefetch list may not drift from what the serial walk actually asks.
+
+    Drift is the silent failure mode of any prefetch design. Missing keys are
+    survivable by construction (the walk pays one serial probe), but a plan built
+    from a different width set than the walk asks means the fan-out has quietly
+    stopped covering the walk while still looking green. Both directions are
+    measured over the REAL surface with `Prober.run` stubbed, so nothing spawns:
+    the walk's own asks, in its own order, against `probe_plan`.
+    """
+    asked: list = []
+
+    class _StubProber(audit_mod.Prober):
+        def run(self, argv, width):
+            asked.append((tuple(argv), width))
+            return {"argv": list(argv), "width": width, "rc": 0, "hung": False,
+                    "out": "", "err": "", "secs": 0.0, "new_files": [],
+                    "trips": [], "plist_created": False, "port_flip": False,
+                    "sensor_port": self.sensor_port}
+
+    captured: dict = {}
+    real_build_surface = audit_mod.build_surface
+
+    def _capture_build_surface():
+        built = real_build_surface()
+        captured["paths"] = built[0]
+        return built
+
+    def _no_prefetch(*_a, **_k):
+        # Without this the fan-out's cache seeding would answer the walk and the
+        # recording would describe the PLAN, not the walk — a tautology.
+        return ({"requested_workers": 1, "workers": 1, "planned": 0,
+                 "prefetched": 0, "worker_errors": [],
+                 "probe_prefetch_misses": 0}, [])
+
+    monkeypatch.setattr(audit_mod, "Prober", _StubProber, raising=True)
+    monkeypatch.setattr(audit_mod, "build_surface", _capture_build_surface,
+                        raising=True)
+    monkeypatch.setattr(audit_mod, "prefetch_renders", _no_prefetch, raising=True)
+    _stub_pre_walk_probes(monkeypatch)
+    rep = audit_mod.audit(str(REPO))
+
+    plan = audit_mod.probe_plan(captured["paths"])
+    assert rep["probes"] >= MIN_PROBES, (
+        f"the walk stopped probing surfaces ({rep['probes']} < {MIN_PROBES}) — "
+        "this comparison is then measuring the wrong surface")
+    assert len(plan) == len(set(plan)), (
+        "probe_plan must dedupe the way Prober.run's cache does — a repeated key "
+        "would make one probe look like two")
+    assert list(dict.fromkeys(asked)) == plan, (
+        "the walk and the prefetch plan disagree: a walk ask missing from the "
+        "plan is a serial probe the fan-out never covered, an extra plan key is "
+        "a wasted interpreter. Neither may happen silently. "
+        f"walk-only={sorted(set(asked) - set(plan))[:5]!r} "
+        f"plan-only={sorted(set(plan) - set(asked))[:5]!r}")
+    assert {w for _a, w in plan} <= set(audit_mod.WIDTHS_ALL), (
+        "the plan asks a width the audit does not define — (B) would silently "
+        "stop measuring a mandated width")
+
+
+def test_fan_workers_own_isolated_sensors(tmp_path, monkeypatch, request):
+    """Two probes may not share a sandbox, a canary log or a sealed port.
+
+    This is the whole reason the fan-out is over Probers: `Prober.run` diffs
+    `files_before`/`trips_before`/`port_flip` against ITS OWN state, so workers
+    that share any of the three manufacture (C)/(D) findings out of each other's
+    side effects.
+    """
+    sandbox = tmp_path / "home"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    main_canary = audit_mod.make_canary_dir(tmp_path)
+    audit_mod._seed_sandbox(sandbox)
+    shared = audit_mod._SharedSensors()
+    real_home = Path(os.path.expanduser("~"))
+    workers = [audit_mod.Prober(sandbox, main_canary, real_home, shared=shared)]
+    workers += [audit_mod._make_fan_prober(tmp_path, i, shared) for i in (1, 2, 3)]
+    for p in workers:
+        request.addfinalizer(p.close)
+    try:
+        assert len({str(p.sandbox) for p in workers}) == 4
+        assert len({str(p.canary / "trips.log") for p in workers}) == 4
+        assert len({p.sensor_port for p in workers}) == 4, (
+            "two sealed sensor ports the same: one worker's stray server would "
+            "read as a port flip in another worker's (D) findings")
+        assert all(p._shared is shared for p in workers)
+        # Every worker root stays UNDER the audit's one tmp root, because `add()`
+        # normalises str(tmp) -> <SANDBOX>. Outside it, a finding detail could
+        # carry a per-run temp path into the bipartite expectation table.
+        assert all(str(p.sandbox).startswith(str(tmp_path)) for p in workers[1:]), (
+            "a fan sandbox outside the audit's tmp root escapes the <SANDBOX> "
+            "normalisation in add()")
+        for p in workers:
+            sealed = json.loads((p.sandbox / ".hscc" / "api.json").read_text())
+            assert sealed["port"] == p.sensor_port, (
+                "this child would resolve someone else's sealed port and the "
+                "port sensor would be measuring a port it does not own")
+        # A trip recorded by one worker's canary is invisible to the others...
+        with open(workers[1].canary / "trips.log", "a") as fh:
+            fh.write("sparkrun whoami\n")
+        assert len(workers[1]._trips()) == 1
+        assert all(len(p._trips()) == 0 for p in workers if p is not workers[1]), (
+            "canary trips are landing in a shared log — the fan-out would hide a "
+            "(D) 'shell out' finding from the bracket that spawned it")
+        # ...and the child env names its OWN log even after the gate process's
+        # global moves, which is exactly what `make_canary_dir` used to do.
+        foreign = tmp_path / "foreign" / "trips.log"
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_text("")
+        monkeypatch.setenv("AUDIT_CANARY_LOG", str(foreign))
+        for p in workers:
+            assert p._env(80)["AUDIT_CANARY_LOG"] == str(p.canary / "trips.log"), (
+                "probe children inherit the gate process's canary log: with N "
+                "workers a trip lands in whichever log the global pointed at "
+                "when the child spawned — a (D) finding nobody reads")
+    finally:
+        for p in workers:
+            p.close()
+
+
+def test_plist_sensor_reports_one_creation_for_the_whole_audit(tmp_path):
+    """The LaunchAgents check is per-AUDIT, because its HOME is shared.
+
+    `~/Library/LaunchAgents/com.hscc.api.plist` is in the operator's real home —
+    the one sensor no Prober can own. N concurrent brackets would each see
+    "absent before, present after" for ONE creation and emit N (D) findings under
+    N surface names, where the serial walk emits exactly one.
+    """
+    shared = audit_mod._SharedSensors()
+    home = tmp_path / "real-home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    plist = home / "Library" / "LaunchAgents" / audit_mod.API_PLIST_NAME
+    plist.write_text("already there before the walk started\n")
+    # A file that predates the bracket is never a creation.
+    assert [shared.plist_created(True, home) for _ in range(3)] == [False] * 3
+    # A file that appeared IS reported — exactly once, across every worker.
+    assert [shared.plist_created(False, home) for _ in range(3)] == [
+        True, False, False]
+
+
+def test_fan_out_covers_the_plan_and_the_walk_relaunches_nothing(
+        monkeypatch):
+    """The acceptance property, on a 2-surface surface: 11 keys, 11 children.
+
+    One child per planned key for the WHOLE audit means the prefetch covered the
+    walk and the walk re-spawned none of it — the speedup without a second
+    interpreter anywhere. `probes` (the number the gate floors on) is untouched.
+    """
+    monkeypatch.setattr(audit_mod, "build_surface",
+                        lambda: (list(_TINY_SURFACE), {}), raising=True)
+    monkeypatch.setenv(audit_mod.PROBE_WORKERS_ENV, "4")
+    _stub_pre_walk_probes(monkeypatch)
+    shim = _SubprocessShim()
+    monkeypatch.setattr(audit_mod, "subprocess", shim, raising=True)
+    rep = audit_mod.audit(str(REPO))
+
+    assert rep["probe_fan_errors"] == [], rep["probe_fan_errors"]
+    assert rep["probe_workers"] == 4, (
+        f"the fan-out collapsed to {rep['probe_workers']} worker(s) — the "
+        "isolation pins above prove the machinery, not that the walk used it")
+    assert rep["probe_plan"] == _TINY_PLAN
+    assert rep["probes_prefetched"] == _TINY_PLAN
+    assert rep["probe_prefetch_misses"] == 0
+    assert rep["probes"] == 4, "the (A)/(B)/(C)/(D) probe count must not move"
+    launches = _probe_launches(shim.calls)
+    assert len(launches) == rep["probe_plan"], (
+        f"{len(launches)} CLI children for a {rep['probe_plan']}-key plan: the "
+        "walk re-spawned prefetched renders, or the plan under-covered it")
+
+
+def test_a_worker_that_cannot_be_built_costs_time_not_probes(monkeypatch):
+    """A fan worker that cannot reserve a sealed port must not lose a probe.
+
+    The fail-safe half: the plan's keys simply become cache misses, so the walk
+    pays for them serially and every finding still lands — slower, never blind.
+    """
+    monkeypatch.setattr(audit_mod, "build_surface",
+                        lambda: (list(_TINY_SURFACE), {}), raising=True)
+    monkeypatch.setenv(audit_mod.PROBE_WORKERS_ENV, "4")
+
+    def _no_worker(*_a, **_k):
+        raise RuntimeError("cannot reserve a free loopback api sensor port")
+
+    monkeypatch.setattr(audit_mod, "_make_fan_prober", _no_worker, raising=True)
+    _stub_pre_walk_probes(monkeypatch)
+    shim = _SubprocessShim()
+    monkeypatch.setattr(audit_mod, "subprocess", shim, raising=True)
+    rep = audit_mod.audit(str(REPO))
+
+    assert rep["probe_workers"] == 1, (
+        f"a walk that could not build a worker reported {rep['probe_workers']} "
+        "workers — the posture would be a lie in the report")
+    assert rep["probe_fan_errors"], (
+        "the degradation is invisible: a serial walk reported by a fan-out "
+        "report is exactly the silent fallback this card forbids")
+    assert rep["probes_prefetched"] == 0
+    assert rep["probes"] == 4 and rep["probe_plan"] == _TINY_PLAN
+    launches = _probe_launches(shim.calls)
+    assert len(launches) == rep["probe_plan"], (
+        f"{len(launches)} children for {_TINY_PLAN} planned keys — the failed "
+        "fan-out lost probes instead of falling back to serial")
 
 
 def test_write_findings_artifact(report):

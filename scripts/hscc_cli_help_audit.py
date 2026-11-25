@@ -70,6 +70,14 @@ command; this module must never execute a mutating verb):
     ``~/.hscc/api.json`` pins for every probe child, never the operator's 8787:
     a real leak lands on the port the walk owns, and host state on the product
     port can neither arm it nor silence it.
+  * the walk may fan its probes out over N `Prober`s (t_71f9fc17, bounded by
+    `HSCC_CLI_HELP_PROBE_WORKERS`, default 4), and that changes nothing above:
+    each worker owns its OWN sandbox, its OWN canary dir and its OWN sealed
+    port, so a sensor only ever compares a probe against the state of the
+    Prober that spawned it. The analysis is still serial — the fan-out only
+    prefetched renders into `Prober.run`'s cache — so the findings and their
+    order are what the serial walk produces, and a worker that cannot be built
+    costs the walk time rather than a probe.
 
 Usage:
   python3 scripts/hscc_cli_help_audit.py                 # audit repo root
@@ -95,7 +103,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -173,6 +183,73 @@ def invocations_for(argv, kind):
     if not _h_probe_exempt(argv):
         out.append((list(argv) + ["-h"], "-h"))
     return out
+
+
+# ── Probe fan-out (t_71f9fc17) ───────────────────────────────────────────
+#: How many probe children the walk may have in flight at once.
+#:
+#: The walk is ~1k interpreter launches, and at the queue gate's background QoS
+#: it IS the `scripts` leg (measured 397.77 s of module-fixture setup on
+#: origin/main@c3d686dc, t_49827b5d). The children are hermetic, so the launch
+#: cost is parallelisable — but only ACROSS Probers: each one's (C)/(D) sensors
+#: diff against ITS OWN sandbox, canary log and sealed port (see
+#: :meth:`Prober.run`), so a thread pool over ONE Prober races those sensors
+#: into false findings. Hence: N Probers, one thread each, and the ANALYSIS
+#: stays serial — renders are prefetched into the main Prober's cache and the
+#: existing walk consumes them in its own order.
+#:
+#: Bounded on purpose: `run_tests.sh` can run sibling legs concurrently
+#: (t_6c2123f9), so an unbounded fan-out would starve the rest of the queue.
+#: `1` restores the pre-fan-out behaviour exactly, and is also the fallback for
+#: an unparseable value — an env var nobody can read must not buy concurrency.
+PROBE_WORKERS_ENV = "HSCC_CLI_HELP_PROBE_WORKERS"
+DEFAULT_PROBE_WORKERS = 4
+MAX_PROBE_WORKERS = 8
+
+
+def probe_workers() -> int:
+    """Fan-out width from `HSCC_CLI_HELP_PROBE_WORKERS` (default 4, cap 8)."""
+    raw = os.environ.get(PROBE_WORKERS_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_PROBE_WORKERS
+    try:
+        n = int(raw.strip())
+    except ValueError:
+        return 1
+    return max(1, min(n, MAX_PROBE_WORKERS))
+
+
+def widths_for(kind: str) -> tuple:
+    """The render widths the walk asks for one surface of this kind.
+
+    Lifted out of the walk loop so :func:`probe_plan` and the walk cannot
+    disagree about what a surface costs: a plan built from a different width set
+    than the walk asks is a plan that silently prefetches nothing useful.
+    """
+    return (WIDTHS_WRAP + (WIDTH_WIDE,)) if kind != "help" else WIDTHS_WRAP
+
+
+def probe_plan(paths) -> list:
+    """Every `(argv-tuple, width)` the walk asks, deduped, in walk order.
+
+    Derived from the SAME :func:`invocations_for` / :func:`widths_for` the walk
+    calls, and deduped exactly as `Prober.run`'s cache dedupes it (the
+    `hscc help <group>` router invocation repeats across surfaces, so the same
+    key is asked by several surfaces). Consumed by :func:`prefetch_renders`;
+    a key the plan missed costs the walk one serial probe, so drift here is a
+    slowdown, never a missed probe.
+    """
+    keys: list = []
+    seen: set = set()
+    for _group, argv, _style, kind in paths:
+        for inv, _flag in invocations_for(argv, kind):
+            for w in widths_for(kind):
+                key = (tuple(inv), w)
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+    return keys
+
 
 sys.path.insert(0, str(REPO))
 PROJECT_DIR = REPO / "hscc-project"
@@ -390,6 +467,7 @@ def _orch_router_verbs(tmp: Path, canary: Path) -> tuple[set, str | None]:
                 "PYTHONPATH": os.pathsep.join([str(REPO), str(PROJECT_DIR)]),
                 "COLUMNS": "100", "NO_COLOR": "1", "TERM": "dumb",
                 "HSCC_THEME": "dark",
+                "AUDIT_CANARY_LOG": str(canary / "trips.log"),
                 "PATH": os.pathsep.join([str(canary), env.get("PATH", "")])})
     try:
         proc = subprocess.run([PY, str(script), str(REPO / "hscc-cluster"),
@@ -503,7 +581,24 @@ def build_surface():
 # ── Sensors / probing ────────────────────────────────────────────────────
 
 def make_canary_dir(root: Path) -> Path:
-    """A PATH-prefix dir with recording tripwire sparkrun + hermes binaries."""
+    """A PATH-prefix dir with recording tripwire sparkrun + hermes binaries.
+
+    Also points the CALLING PROCESS's own `AUDIT_CANARY_LOG` at the new log,
+    because the two pre-walk probes (`_coverage`'s engine probe and
+    `_systemic_import_probe`) build their child env from `os.environ` instead of
+    through `Prober._env`. Every probe child of a `Prober` gets the variable from
+    `Prober._env` instead — per-Prober, which is the property the fan-out needs:
+    a trip recorded into another Prober's log is a (D) finding nobody reads
+    (t_71f9fc17). Fan Probers use :func:`_write_canary_dir` so building them
+    cannot move this global under the main walk.
+    """
+    canary = _write_canary_dir(root)
+    os.environ["AUDIT_CANARY_LOG"] = str(canary / "trips.log")
+    return canary
+
+
+def _write_canary_dir(root: Path) -> Path:
+    """Create the tripwire dir under `root`. Touches no process state."""
     canary = root / "canary-bin"
     canary.mkdir(parents=True, exist_ok=True)
     for name in ("sparkrun", "hermes", "gh", "git"):
@@ -514,18 +609,54 @@ def make_canary_dir(root: Path) -> Path:
             "exit 97\n")
         p.chmod(0o755)
     (canary / "trips.log").write_text("")
-    os.environ["AUDIT_CANARY_LOG"] = str(canary / "trips.log")
     return canary
+
+
+class _SharedSensors:
+    """Sensor state that is genuinely per-AUDIT, not per-Prober (t_71f9fc17).
+
+    Everything `Prober` snapshots — sandbox, canary log, sealed port — is
+    per-Prober, because the fan-out gives each Prober its own copy of each. The
+    LaunchAgents plist is the one thing they cannot split: it lives in the
+    operator's REAL home, so every probe of every Prober shares it. N brackets
+    running concurrently could each see "absent before, present after" for ONE
+    creation and emit N (D) findings under N surface names, where the serial walk
+    emits exactly one. Claiming it keeps that invariant, and states honestly what
+    the finding can promise with N workers: the first bracket that SAW the file,
+    which under concurrency is not provably the probe that wrote it.
+
+    For `HSCC_CLI_HELP_PROBE_WORKERS=1` this is exactly the old
+    `(not plist_before) and self._plist()`, so today's behaviour is unchanged.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._plist_claimed = False
+
+    def plist_created(self, plist_before: bool, real_home: Path) -> bool:
+        """Did a probe just create the api LaunchAgent? At most one YES per audit."""
+        if plist_before or self._plist_claimed:
+            return False
+        with self._lock:
+            if plist_before or self._plist_claimed:
+                return False
+            if not (real_home / "Library" / "LaunchAgents"
+                    / API_PLIST_NAME).exists():
+                return False
+            self._plist_claimed = True
+            return True
 
 
 class Prober:
     """Executes help invocations under a sandbox HOME; snapshots side effects."""
 
     def __init__(self, sandbox: Path, canary: Path, real_home: Path,
-                 sensor_port: int | None = None):
+                 sensor_port: int | None = None,
+                 shared: "_SharedSensors | None" = None):
         self.sandbox = sandbox
         self.canary = canary
         self.real_home = real_home
+        self._shared = shared if shared is not None else _SharedSensors()
         self._cache = {}
         # port -> the socket this Prober itself holds (the defensive hold at the
         # bottom of this method). The (D) port sensor does NOT read them.
@@ -654,6 +785,13 @@ class Prober:
             "NO_COLOR": "1",
             "TERM": "dumb",
             "HSCC_THEME": "dark",
+            # The canary tripwires append to $AUDIT_CANARY_LOG, so whatever a
+            # child inherits decides WHICH log records its trip. Inheriting the
+            # gate process's global was harmless while one Prober owned one log;
+            # with the fan-out (t_71f9fc17) a child that picked up another
+            # Prober's log would hide a trip from the bracket that spawned it —
+            # a silently missed (D) finding. Pin it to this Prober's own log.
+            "AUDIT_CANARY_LOG": str(self.canary / "trips.log"),
             "PATH": os.pathsep.join([str(self.canary), env.get("PATH", "")]),
         })
         return env
@@ -716,12 +854,117 @@ class Prober:
             "out": out, "err": err, "secs": round(time.monotonic() - t0, 3),
             "new_files": sorted(self._files() - files_before),
             "trips": self._trips()[trips_before:],
-            "plist_created": (not plist_before) and self._plist(),
+            "plist_created": self._shared.plist_created(plist_before,
+                                                        self.real_home),
             "port_flip": (not self.port_busy_at_start) and self._port_busy(),
             "sensor_port": self.sensor_port,
         }
         self._cache[key] = result
         return result
+
+    def close(self) -> None:
+        """Release the defensive port holds (t_71f9fc17: the audit now owns N).
+
+        A single audit used to leak its two holds into whatever process called
+        it (pytest, the CLI, the baseline generator) and let GC decide. With the
+        fan-out a walk holds them once per Prober, so the audit closes each one
+        it built, on the way out, instead of leaving 2N sockets pinned.
+        """
+        for s in list(self._held_ports.values()):
+            try:
+                s.close()
+            except OSError:
+                pass
+        self._held_ports.clear()
+        self._tripwire_socks = []
+
+
+def _make_fan_prober(tmp: Path, index: int, shared: "_SharedSensors") -> Prober:
+    """An isolated Prober for the fan-out: own sandbox, own canary, own port.
+
+    Built under the audit's ONE `tmp` root, and that is not cosmetic: `add()`
+    normalises `str(tmp)` to `<SANDBOX>` in every finding detail, so a worker
+    sandbox OUTSIDE `tmp` could leak a per-run temp path into the bipartite
+    expectation table and make a (D) finding unmatched. Construction stays in the
+    PARENT thread — it reserves a sealed sensor port, writes the seal config, and
+    `make_canary_dir` would move a process global — so the threads only ever call
+    `Prober.run`, each on the one Prober it owns.
+    """
+    root = tmp / f"fan-{index}"
+    sandbox = root / "home"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    canary = _write_canary_dir(root)
+    _seed_sandbox(sandbox)
+    return Prober(sandbox, canary, Path(os.path.expanduser("~")),
+                  shared=shared)
+
+
+def prefetch_renders(prober, paths, tmp, shared, workers=None):
+    """Probe the whole planned walk in parallel; seed `prober`'s cache.
+
+    Returns `(stats, extra_probers)` — the caller owns the extras (their sealed
+    ports need normalising in findings, and their holds need closing).
+
+    The walk that follows is UNCHANGED and serial: a prefetched key is a cache hit
+    in `Prober.run`, so findings land in exactly the serial order with exactly the
+    serial semantics. Each render's `new_files` / `trips` / `port_flip` come from
+    the sensors of the ONE Prober that spawned that probe — which is precisely why
+    the fan-out is over Probers and not a thread pool over one shared Prober,
+    where those brackets would race each other into false (C)/(D) findings.
+
+    Fail-safe, never silent:
+      * a key the plan does not cover is only a cache miss — the walk pays one
+        serial probe and still makes every finding;
+      * a probe that raises inside a worker is left out of the cache and re-run
+        by the walk, which reports a probe error as a (D) finding as it always
+        did (the count lands in `stats["probe_prefetch_misses"]`);
+      * a Prober that cannot even be built (no free sealed port) costs one
+        worker, not the walk.
+    """
+    n = probe_workers() if workers is None else max(1, int(workers))
+    plan = probe_plan(paths)
+    stats = {"requested_workers": n, "workers": 1, "planned": len(plan),
+             "prefetched": 0, "worker_errors": [], "probe_prefetch_misses": 0}
+    if n <= 1 or len(plan) < 2:
+        return stats, []
+    probers = [prober]
+    for i in range(1, n):
+        try:
+            probers.append(_make_fan_prober(tmp, i, shared))
+        except Exception as e:  # noqa: BLE001 — fewer workers, never fewer probes
+            stats["worker_errors"].append(f"fan-{i}: {type(e).__name__}: {e}")
+            break
+    stats["workers"] = len(probers)
+    if len(probers) < 2:
+        return stats, probers[1:]
+    # Interleaved chunks spread the slow surfaces (the big router --help renders)
+    # over the workers, and keep each Prober touched by exactly one thread — the
+    # invariant that makes its sensor bracketing sound.
+    chunks = [plan[i::len(probers)] for i in range(len(probers))]
+
+    def _run_chunk(idx: int) -> tuple[list, int]:
+        pairs, misses = [], 0
+        p = probers[idx]
+        for argv, width in chunks[idx]:
+            try:
+                pairs.append(((argv, width), p.run(list(argv), width)))
+            except Exception:  # noqa: BLE001 — the walk retries it serially
+                misses += 1
+        return pairs, misses
+
+    with ThreadPoolExecutor(max_workers=len(probers)) as ex:
+        futures = [ex.submit(_run_chunk, i) for i in range(len(probers))]
+        for f in futures:
+            try:
+                pairs, misses = f.result()
+            except Exception as e:  # noqa: BLE001 — walk covers the gap
+                stats["worker_errors"].append(f"chunk: {type(e).__name__}: {e}")
+                continue
+            stats["probe_prefetch_misses"] += misses
+            for key, result in pairs:
+                prober._cache.setdefault(key, result)
+    stats["prefetched"] = sum(1 for k in plan if k in prober._cache)
+    return stats, probers[1:]
 
 
 # ── Checks ───────────────────────────────────────────────────────────────
@@ -1211,6 +1454,7 @@ def _systemic_import_probe(sandbox_parent: Path, canary: Path) -> str | None:
                 "PYTHONPATH": os.pathsep.join([str(REPO), str(PROJECT_DIR)]),
                 "COLUMNS": "100", "NO_COLOR": "1", "TERM": "dumb",
                 "HSCC_THEME": "dark",
+                "AUDIT_CANARY_LOG": str(canary / "trips.log"),
                 "PATH": os.pathsep.join([str(canary), env.get("PATH", "")])})
     subprocess.run([PY, "-m", "hscc_daemon.hscc", "--help"], env=env,
                    cwd=str(home), capture_output=True, text=True, timeout=60)
@@ -1342,6 +1586,13 @@ def audit(repo=None) -> dict:
     examples_total = 0
     examples_failed = 0
     seen_examples = set()
+    # Every sealed api port this walk reserved: the main Prober's plus one per
+    # fan worker. A (D) port finding's detail names the port of the Prober that
+    # measured it, and those numbers are kernel-assigned per run — so every one
+    # of them is normalised to `<SEAL_PORT>` below, not just the main one, or a
+    # prefetched finding would enter the bipartite table carrying a number no fix
+    # card can reproduce (t_71f9fc17; the same reasoning as t_e5a9469e).
+    seal_ports = {prober.sensor_port}
 
     def add(group, command, kind, detail, fix):
         # Normalise probe-environment noise so findings are deterministic and
@@ -1355,8 +1606,8 @@ def audit(repo=None) -> dict:
         # The whole phrase is replaced, not the bare digits, so a coincidental
         # number inside help text can never be normalised away by accident.
         detail = detail.replace(str(tmp), "<SANDBOX>")
-        detail = detail.replace(f"api port {prober.sensor_port}",
-                                "api port <SEAL_PORT>")
+        for _seal in seal_ports:
+            detail = detail.replace(f"api port {_seal}", "api port <SEAL_PORT>")
         detail = re.sub(r"\[\d{4}-\d\d-\d\dT[^\]]+\]", "[<TS>]", detail)
         key = (command, kind, detail)
         if key in seen_findings:
@@ -1382,6 +1633,16 @@ def audit(repo=None) -> dict:
             f"resolve_cluster_config fallback): {trip}",
             "make cluster-config resolution lazy (first use, not import)")
 
+    # ── fan-out (t_71f9fc17) ─────────────────────────────────────────────
+    # Prefetch every render the walk is about to ask, over N isolated Probers —
+    # AFTER the two pre-walk probes above (they read the main canary log) and
+    # BEFORE the walk, which then reads them back through `Prober.run`'s own
+    # cache. The walk itself is untouched: same order, same checks, same
+    # findings. A key the prefetch did not cover costs it one serial probe.
+    fan_stats, fan_probers = prefetch_renders(prober, paths, tmp,
+                                              prober._shared)
+    seal_ports |= {p.sensor_port for p in fan_probers}
+
     # Empirical exec-echo detector: a --help that prints a mutation-verb echo
     # (e.g. cmd_heal treating "--help" as a node name) executed the command.
     EXEC_ECHO = re.compile(
@@ -1405,7 +1666,7 @@ def audit(repo=None) -> dict:
             # regression that forks a server is caught by the (D) sensors
             # (port flip, new HOME files, 60s hang), not by refusing to look.
             probes += 1
-            widths = (WIDTHS_WRAP + (WIDTH_WIDE,)) if kind != "help" else WIDTHS_WRAP
+            widths = widths_for(kind)
             try:
                 renders = {w: prober.run(inv, w) for w in widths}
             except Exception as e:  # probe machinery failure must not pass silently
@@ -1531,6 +1792,13 @@ def audit(repo=None) -> dict:
                         f"example does not parse: {exs!r} — {err}",
                         "rewrite the example against the real parser")
 
+    # Read the holds BEFORE closing them: the report names which ports the walk
+    # defended, and `close()` empties the map it reads.
+    defended = set(prober._held_ports)
+    for p in fan_probers:
+        defended |= set(p._held_ports)
+    for p in [prober] + fan_probers:
+        p.close()
     shutil.rmtree(tmp, ignore_errors=True)
     return {
         "surface_paths": len(paths),
@@ -1546,8 +1814,25 @@ def audit(repo=None) -> dict:
         # The (D) port check's sealed posture, recorded so a report says which
         # port the walk measured and which ports it merely defended. A (D)
         # port finding's detail carries <SEAL_PORT>; this is the number.
+        # Since the fan-out (t_71f9fc17) a walk reserves ONE sealed port per
+        # Prober: `sealed_port` stays the main Prober's (the one the serial walk
+        # would have used alone) and `sealed_ports` is every number the walk
+        # normalised away.
         "sealed_port": prober.sensor_port,
-        "defended_ports": sorted(prober._held_ports),
+        "sealed_ports": sorted(seal_ports),
+        "defended_ports": sorted(defended),
+        # Fan-out accounting (t_71f9fc17). `probes` above is unchanged by design
+        # — it counts surfaces probed, which is what the gate floors on. These
+        # say HOW the renders were obtained, so "the fan-out quietly did less
+        # work" is measurable rather than assumed: `probes_prefetched` must equal
+        # `probe_plan` on a healthy tree, and any `probe_fan_errors` or
+        # `probe_prefetch_misses` is the walk paying serial for a worker that
+        # could not be built or a probe that raised in a thread.
+        "probe_workers": fan_stats["workers"],
+        "probe_plan": fan_stats["planned"],
+        "probes_prefetched": fan_stats["prefetched"],
+        "probe_prefetch_misses": fan_stats["probe_prefetch_misses"],
+        "probe_fan_errors": fan_stats["worker_errors"],
     }
 
 
@@ -1625,6 +1910,7 @@ def a_table(repo=None, surfaces=None, stats=None) -> dict:
             for af in a_findings_for_surface(renders):
                 if af["kind"] == "A" and af["detail"] not in lines:
                     lines.append(af["detail"])
+    prober.close()   # t_71f9fc17: this pass holds the api ports too
     shutil.rmtree(tmp, ignore_errors=True)
     if stats is not None:
         stats.update({"probes": n_probes, "surfaces": n_surfaces,

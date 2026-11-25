@@ -224,6 +224,22 @@ def _clone(origin: Path, ws: Path) -> Path:
     return ws
 
 
+def _worktree_with_local_only_branch(tmp_path, ws, branch):
+    """``ws`` is a worktree on ``branch``; its main checkout also holds a
+    second, never-pushed branch, so the shared common dir answers the repo-wide
+    ``log --branches --not --remotes`` probe with a line from elsewhere.
+    """
+    origin = _bare_origin(tmp_path)
+    main = tmp_path / "main-checkout"
+    _git("clone", str(origin), str(main), cwd=tmp_path)
+    _git("worktree", "add", "-b", branch, str(ws), "HEAD", cwd=main)
+    _git("checkout", "-b", "local-only", cwd=main)
+    (main / "LOCAL.md").write_text("only on this host\n")
+    _git("add", "-A", cwd=main)
+    _git("commit", "-m", "local-only: never pushed", cwd=main)
+    return main
+
+
 def make_ws(lib, slug, task_id, *, mode="clean", tmp_path=None,
             doc="DECISION.md", extra=None) -> Path:
     """Materialise one workspace.
@@ -667,6 +683,91 @@ def test_a_worktree_leaves_through_git_and_the_main_repo_forgets_it(lib, tmp_pat
     assert str(ws) not in listed, "the parent repo kept a dead registration"
     assert (lib.home / "kanban" / "workspace-archive" / "hscc"
             / "t_wt.tar.gz").is_file()
+
+
+def test_a_pushed_worktree_is_removed_despite_a_local_only_branch_elsewhere(
+        lib, tmp_path):
+    """t_e56493c0: the keep-verdict is what removal deletes, not repo-wide.
+
+    The worktree's own branch is pushed; the shared common dir also holds a
+    second, never-pushed branch. The old repo-wide probe read that branch from
+    inside the worktree and kept it as ``unpushed``; the worktree itself can be
+    removed without losing that branch, so the removal proceeds.
+    """
+    lib.add_task("hscc", "t_wt")
+    ws = lib.workspace("hscc", "t_wt")
+    _worktree_with_local_only_branch(tmp_path, ws, "card")
+    (ws / "DECISION.md").write_text("decision made here\n")
+    _git("add", "-A", cwd=ws)
+    _git("commit", "-m", "t_wt: decision", cwd=ws)
+    _git("push", "-u", "origin", "card", cwd=ws)
+    assert _git("log", "@{u}..HEAD", "--oneline", cwd=ws).stdout.strip() == ""
+    common = _git("log", "--branches", "--not", "--remotes", "--oneline",
+                  cwd=ws).stdout
+    assert "never pushed" in common, "fixture lost its common-dir-only branch"
+
+    plan = wc.plan_clean(now=NOW, kanban_db=lib)
+    assert plan["skipped"] == [], plan["skipped"]
+    (action,) = plan["actions"]
+    assert action["worktrees"] == [str(ws)]
+    res = wc.execute(plan, apply=True, kanban_db=lib)
+    assert res["removed"] == 1 and res["errors"] == []
+    assert not ws.exists()
+    assert (lib.home / "kanban" / "workspace-archive" / "hscc"
+            / "t_wt.tar.gz").is_file()
+
+
+def test_a_dirty_worktree_is_still_kept(lib, tmp_path):
+    lib.add_task("hscc", "t_wt")
+    ws = lib.workspace("hscc", "t_wt")
+    _worktree_with_local_only_branch(tmp_path, ws, "card")
+    (ws / "WIP.md").write_text("uncommitted work\n")
+
+    plan = wc.plan_clean(now=NOW, kanban_db=lib)
+    assert plan["actions"] == []
+    (skipped,) = plan["skipped"]
+    assert skipped["reason"] == "dirty" and skipped["path"] == str(ws)
+    assert wc.execute(plan, apply=True, kanban_db=lib)["removed"] == 0
+    assert ws.is_dir()
+
+
+def test_a_full_clone_with_an_unpushed_commit_is_still_kept(lib, tmp_path):
+    """The clone rule does not weaken: its object store IS the workspace."""
+    lib.add_task("hscc", "t_clone")
+    ws = make_ws(lib, "hscc", "t_clone", mode="unpushed", tmp_path=tmp_path)
+    plan = wc.plan_clean(now=NOW, kanban_db=lib)
+    assert plan["actions"] == []
+    (skipped,) = plan["skipped"]
+    assert skipped["reason"] == "unpushed" and skipped["path"] == str(ws)
+    assert wc.execute(plan, apply=True, kanban_db=lib)["removed"] == 0
+    assert ws.is_dir()
+
+
+def test_an_unpushed_worktree_branch_survives_the_removal(lib, tmp_path):
+    """The worktree goes; its branch and commit stay in the shared common dir.
+
+    That is the handoff fact behind dropping ``unpushed`` from the worktree
+    verdict: ``git worktree remove`` deletes the checkout, never the branch.
+    """
+    lib.add_task("hscc", "t_wt")
+    ws = lib.workspace("hscc", "t_wt")
+    main = _worktree_with_local_only_branch(tmp_path, ws, "card")
+    (ws / "DECISION.md").write_text("decision made here\n")
+    _git("add", "-A", cwd=ws)
+    _git("commit", "-m", "t_wt: decision", cwd=ws)
+    assert _git("rev-list", "--count", "origin/main..HEAD",
+                cwd=ws).stdout.strip() == "1"
+
+    plan = wc.plan_clean(now=NOW, kanban_db=lib)
+    (action,) = plan["actions"]
+    assert action["worktrees"] == [str(ws)]
+    res = wc.execute(plan, apply=True, kanban_db=lib)
+    assert res["removed"] == 1 and res["errors"] == []
+    assert not ws.exists()
+    assert str(ws) not in _git("worktree", "list", "--porcelain",
+                               cwd=main).stdout
+    assert _git("show", "refs/heads/card:DECISION.md",
+                cwd=main).stdout == "decision made here\n"
 
 
 def test_an_unresolvable_worktree_keeps_the_workspace(lib, tmp_path, monkeypatch):
