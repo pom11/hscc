@@ -141,6 +141,49 @@ permanent advisory — so the CLI proof is the shape `t_34de41c3` used: a plante
 must exit 1 with the knob, must still exit 1 with the knob set to a falsy value (the
 env var is not an off switch), and a real address must block whatever the knob says.
 
+## Decision 3 taken — the flip (t_d42e6d48)
+
+`OPERATOR_IDENTITIES_ENFORCE = True`, shipped by the card this section names, on the
+condition Decision 3 set: `blocking()` measured at zero on the tree that flips, on a
+host where the branch is live.
+
+What "the tree that flips" turned out to mean, and why it is not the parent branch:
+#829 was written against `main` at `b5331610`, and `main` had moved by the time the
+flip was measured (`164c2da8`). The merge queue does not test the #829 branch — it
+tests the merge. So the measurement ran on `origin/main` merged with the #829 branch
+(a local throwaway merge), not on the branch alone.
+
+Measured on that tree, on the operator's host, identity branch derived and therefore
+live (1 name — the same host the merge queue runs on, so the branch was not inert):
+
+| measurement | result |
+| --- | --- |
+| tracked files scanned (`git ls-files` → `scan_tracked`) | 2571 |
+| offenders of any class | **0** |
+| `blocking()` with `HSCC_ADDRESS_GUARD_IDENTITY_ENFORCE=1` | **0** |
+| `python3 scripts/address_guard.py --tracked --repo .` | exit **0**, empty report |
+| `len(FORBIDDEN.pattern)` | 325 (401 with #820's hostname branch merged too) |
+
+Zero offenders means no scrub was owed and no false positive had to be answered by
+tightening the branch. The `pytest-of-*` case the flip card was told to weigh did not
+appear in the tracked tree — the tmp paths that carry it are never committed, so the
+class never sees them.
+
+**The flip-changes-the-assertion half is the part that proves the flip.** While the
+class was advisory the CLI test asserted rc 0; a flip that left that pin passing would
+have left the shipped posture covered by nothing. It now asserts rc 1 **by default**,
+plus rc 1 with a falsy env value (the knob is still not an off switch), plus rc 1 for a
+real address whatever the knob says. The report, knob and same-line-hazard tests were
+re-derived from the shipped posture the same way, and the report test gained the case
+the flip created: a home path and a name in one report, where two enforced classes now
+share one header — the home title wins, so the identity section is still the only thing
+telling a reader that the fix for a person is not `10.0.0.x`.
+
+What the flip did **not** change: CI stays blind to this class, because a hosted runner
+derives `runner` and the class declines itself for it. The teeth are on the machine
+that commits, which is where a name is actually written. And a third party's name stays
+invisible — the limitation below is untouched by enforcement.
+
 ## Scrub targets, by audience
 
 | audience | shape | becomes |
@@ -165,10 +208,15 @@ scanner over diffs), not a wider `FORBIDDEN`.
 ## Status
 
 * Scrub: 21 occurrences across 8 files, its own commit, lands with this card.
-* Detector: `OPERATOR_IDENTITIES_ENFORCE` shipped **advisory**; the flip is a separate
-  card that must re-measure `blocking()` on the tree it flips.
+* Detector: `OPERATOR_IDENTITIES_ENFORCE` shipped **advisory** here and **flipped to
+  True** by t_d42e6d48, on the measurement in "Decision 3 taken" above.
 * Parented on t_68ccc902 (`scripts/address_guard.py`, same region). **That PR was
   still OPEN and CONFLICTING when this card was worked** — the board handoff said
   merged. The username branch is written to meet #820 halfway: `_offender()` and
   `_is_advisory_now()` keep #820's names and shapes, so the rebase picks one copy of
-  each rather than forking the dispatcher.
+  each rather than forking the dispatcher. Measured at flip time, when both were still
+  open: merging #820 into `main` + #829 conflicts in **14 hunks of
+  `scripts/address_guard.py`** (its test-file append merges clean). Sharing the helper
+  names was necessary, not sufficient — whoever lands the second of the two should
+  expect a manual pass over the branch constants, the offender dispatcher and `report()`'s
+  header ladder, in that order.

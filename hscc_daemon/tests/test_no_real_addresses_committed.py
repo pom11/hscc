@@ -42,9 +42,13 @@ def test_no_real_operator_address_in_tracked_files():
     `blocking()` is the one predicate that decides fail-vs-report for both gates
     and the CI job, and this assertion asks it rather than the raw scan — that is
     what keeps the hook, this suite and the CI backstop from disagreeing about the
-    same tree. Today the subset is addresses + build artefacts; the home class
-    joins it when HOME_PATHS_ENFORCE flips (see
-    ``test_home_class_is_advisory_now_and_blocking_when_enforced``).
+    same tree. The subset is addresses + build artefacts + home paths
+    (``HOME_PATHS_ENFORCE``, flipped by t_34de41c3) + the operator's own name
+    (``OPERATOR_IDENTITIES_ENFORCE``, flipped by t_d42e6d48 on a measured
+    zero-finding baseline — see the identity section of
+    docs/audits/operator-identity-decision_t_25f7a806.md). That last one is why this
+    line is worth reading before you add a file: the name it catches is the one this
+    host derives, so a log or transcript committed from here can fail the queue.
     """
     offenders = address_guard.scan_tracked(REPO)
 
