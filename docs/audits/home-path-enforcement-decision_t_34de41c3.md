@@ -52,7 +52,7 @@ cannot be. The natural form `(?<![A-Za-z0-9._-])` was measured over the whole
 tracked tree; it drops 10 findings, and **one of them is not a false positive**:
 
 ```
-hscc-api/tests/test_repl_inject.py:67  '/Users/x/.hermes/bin/hermes'
+hscc-api/tests/test_repl_inject.py:67  the path under user 'x' at .hermes/bin/hermes
     preceding text: 'tty: "/bin/zsh\\n'
 ```
 
@@ -66,7 +66,8 @@ the `.pyc` boundary trap this module already documents, and it is exactly why
 `t_3480956c` refused `\b` on this branch. A lookbehind over the path-name class
 is `\b` wearing a different hat.
 
-**Rejected.** The 3 `/home/hooks` findings are worth less than one blind spot.
+**Rejected.** The 3 findings at the scratch tree's fake-home `hooks` directory
+are worth less than one blind spot.
 
 ## Decision 3 — keep the one boundary tightening that cannot blind the guard
 
@@ -74,18 +75,14 @@ is `\b` wearing a different hat.
 with an alphanumeric. This is a *lookahead*, and a lookahead can only shorten
 the reported match — it cannot make the guard skip a line it would otherwise
 see, because the offence is still the `/Users/<user>` prefix that starts the
-match. Measured: drops exactly 5 findings, all provably not accounts:
-
-```
-hscc-project/docs/COMMANDS.md:947            '/Users/.../.worktrees/t_x'
-hscc-project/flightdeck/core/self_update.py:109  '/Users/...'
-hscc-project/tests/test_sync.py:796          '/Users/.../dev/eco'
-hscc_daemon/tests/test_update_check_shadow.py:84  '/home/.local/bin/hscc'
-hscc_daemon/tests/test_update_check_shadow.py:85  '/home/.hermes/plugins/hscc/hscc'
-```
-
-— a prose ellipsis (`. ` is a user-name char) and two malformed `<tmp>/home/.local`
-fixture strings. No real POSIX account starts with `.`. Findings gained: 0.
+match. Measured: drops exactly 5 findings, all provably not accounts — the
+three sites that spell a prose ellipsis as the user component
+(`hscc-project/docs/COMMANDS.md:947`,
+`hscc-project/flightdeck/core/self_update.py:109`,
+`hscc-project/tests/test_sync.py:796`) and the two malformed
+`<tmp>/home/<dot-prefixed>` fixture strings at
+`hscc_daemon/tests/test_update_check_shadow.py:84,85`. No real POSIX account
+starts with `.`. Findings gained: 0.
 Pattern grows 264 → 298 chars, against a cap of 4096.
 
 ## Decision 4 — the remaining false positives are scrubbed with the placeholder convention
@@ -120,10 +117,12 @@ but it is also public and it names a real account.
 
 ## Known limitation this card does NOT close
 
-`_HOME_TAIL_STOP` includes `)` — deliberate, so a Markdown link
-`[x](/Users/real/path)` still matches (proven: it does). The cost is that a
-*closing paren is also a stop char*, so `/home/u/own)` truncates rather than
-fails. Unchanged by this card.
+`_HOME_TAIL_STOP` includes `)` — deliberate, so a Markdown link whose target is
+an absolute home path still matches; the paren context is pinned by the
+`link ](…)` case in `test_find_in_text_home_verdicts`
+(`scripts/tests/test_address_guard.py`). The cost is that a *closing paren is
+also a stop char*, so a home path followed by `)` truncates at the paren rather
+than reporting the whole tail. Unchanged by this card.
 
 ## Status / plan
 
