@@ -82,7 +82,8 @@ def _repo_pair(tmp_path, *, shared=False, base="main"):
 
 
 def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
-              base_branch=None, timeout_s=None, waiting_max_age_s=None):
+              base_branch=None, timeout_s=None, waiting_max_age_s=None,
+              ci_pending_timeout_s=None):
     path = tmp_path / "registry.yaml"
     mq_cfg = {}
     if enabled is not None:
@@ -95,6 +96,8 @@ def _registry(tmp_path, repo, *, name="alpha", enabled=True, gates=None,
         mq_cfg["timeout_s"] = timeout_s
     if waiting_max_age_s is not None:
         mq_cfg["waiting_max_age_s"] = waiting_max_age_s
+    if ci_pending_timeout_s is not None:
+        mq_cfg["ci_pending_timeout_s"] = ci_pending_timeout_s
     body = {
         "projects": [{
             "name": name,
@@ -3503,6 +3506,82 @@ def test_ci_pending_timeout_releases_to_the_rechecked_wait_list(tmp_path):
     assert ps["in_flight"] is None
     assert [e["pr"] for e in ps["waiting"]] == [21]
     assert mq.outcome_state("ci-timeout") == "waiting"
+
+
+def test_ci_pending_budget_defaults_and_is_the_projects_to_set():
+    """The CI-pending budget is 3600 s unless a valid registry line moves it."""
+    assert mq.CI_PENDING_TIMEOUT_S == 3600
+    for cfg, want in (({}, 3600), (None, 3600),
+                      ({"ci_pending_timeout_s": 900}, 900),
+                      ({"ci_pending_timeout_s": "900"}, 900),
+                      ({"ci_pending_timeout_s": 900.9}, 900),
+                      ({"ci_pending_timeout_s": 0}, 3600),
+                      ({"ci_pending_timeout_s": -1}, 3600),
+                      ({"ci_pending_timeout_s": "30m"}, 3600),
+                      ({"ci_pending_timeout_s": ""}, 3600),
+                      ({"ci_pending_timeout_s": True}, 3600),
+                      ({"ci_pending_timeout_s": None}, 3600),
+                      ({"ci_pending_timeout_s": []}, 3600)):
+        assert mq.ci_pending_budget_s(cfg) == want, cfg
+
+    # The expiry predicate reads the budget it is handed, not the constant.
+    old = time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                        time.gmtime(time.time() - 120))
+    assert mq._ci_pending_expired(old, 60)
+    assert not mq._ci_pending_expired(old, 3600)
+
+    warned = []
+
+    def log(msg, level="INFO"):
+        warned.append((msg, level))
+
+    assert mq.ci_pending_budget_s(
+        {"name": "alpha", "ci_pending_timeout_s": "30m"}, log=log) == 3600
+    assert warned and warned[0][1] == "WARN"
+    assert "ignoring invalid merge_queue.ci_pending_timeout_s='30m'" in \
+        warned[0][0]
+    warned.clear()
+    assert mq.ci_pending_budget_s({"ci_pending_timeout_s": 60}, log=log) == 60
+    assert warned == []          # a good value is silent
+
+
+def test_ci_pending_expiry_uses_the_registry_budget_and_names_a_backlog(tmp_path):
+    """A 60 s override expires where 120 s of pending CI would otherwise hold."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"],
+                         ci_pending_timeout_s=60)
+    pending = [{"__typename": "CheckRun", "status": "QUEUED",
+                "conclusion": None}]
+    gh = FakeGh(
+        {21: {"headRefName": pair["branch"], "headRefOid": pair["head"]}},
+        views={21: [{"statusCheckRollup": pending}]})
+    state = _state(tmp_path)
+    doc = mq.load_state(state)
+    ps = mq._project_state(doc, "alpha")
+    ps["in_flight"] = {
+        "pr": 21, "card": "t_ci_timeout", "assignee": "worker",
+        "branch": pair["branch"], "stage": "ci-pending",
+        "pushed_sha": pair["head"], "ci_base": "main",
+        "ci_since": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                  time.gmtime(time.time() - 120)),
+        "enqueued_at": "2020-01-01T00:00:00+00:00",
+    }
+    mq.save_state(doc, state)
+    lines = []
+
+    result = mq.tick(state_path=state,
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     log=lambda msg, *a, **k: lines.append(msg))
+
+    assert result["processed"][0]["result"] == "ci-timeout", result
+    assert result["processed"][0]["timeout_s"] == 60
+    assert gh.merged == []
+    assert any("CI still running after 60s (runner backlog)" in line
+               for line in lines), lines
+    ps = mq.load_state(state)["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert [e["pr"] for e in ps["waiting"]] == [21]
 
 
 def test_checks_verdict_separates_pending_from_red():
