@@ -13,6 +13,8 @@
 #   rc 0                          -> green
 #   rc 64                         -> red (run_tests.sh rejected the selection)
 #   "pytest exit N" with N != 1   -> red (the harness, not a test, is broken)
+#   `✗ <leg> (no leg output …)`   -> red (no leg record and no output: the harness
+#                                    could not run the leg, so it is never advisory)
 #   rc 1, a real test failure    -> advisory: warning + green; enforced: red
 #   HSCC_TESTS_ENFORCE=true/1/yes -> enforced (case-insensitive, never fail-open)
 #   FORCED_ENFORCE=true           -> enforced for this run (workflow_dispatch)
@@ -47,6 +49,21 @@ fi
 # Any other code is the harness, not a test failure.
 if [ "$rc" -ne 1 ]; then
   echo "::error::scripts/run_tests.sh exited ${rc}, which is not a test-failure code"
+  exit 1
+fi
+
+# A packed leg that left no `.rc` record and no output at all did not fail a test —
+# the harness could not run it (t_f508ce51). run_tests.sh has to SAY that on the
+# summary row, because the row otherwise carries `pytest exit 1`, which the rule below
+# reads as an ordinary TEST failure: advisory warning, GREEN check. That is how a pack
+# that could not even open `.github/scripts`'s log looked like a red test for a whole
+# release (t_692814f5). A leg that never ran must never be advisory, so this is
+# matched before the rule below and before the enforce branch.
+# ANCHORED ON PURPOSE: `✗ <leg> (no leg output` is a summary row, so a test's own
+# output that merely mentions the words cannot reclassify a real test failure as the
+# harness. Pinned by .github/scripts/tests/test_leg_verdict.py.
+if grep -Eq '^[[:space:]]*✗ [^)]*\(no leg output' "$log"; then
+  echo "::error::a leg produced no record and no output — the harness could not run it (not a test failure)"
   exit 1
 fi
 
