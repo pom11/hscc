@@ -615,25 +615,38 @@ def test_a_home_path_after_a_word_char_still_trips_the_branch():
         assert address_guard.home_hits(ctx), f"{label}: the branch went blind"
 
 
-def test_an_address_never_hides_behind_a_home_path_on_the_same_line():
+def test_an_address_never_hides_behind_a_home_path_on_the_same_line(monkeypatch):
     """THE interaction hazard of making one class advisory, pinned in both orders.
 
     With one match per line, a line holding a home path and a real LAN address
-    would have reported only the home path while the home class is advisory — so
+    would have reported only the home path while the home class was advisory — so
     the blocking address would leave the gate unseen and the commit would pass.
     `find_in_text` returns every match for that reason, and this is the test that
     would have caught it.
+
+    t_34de41c3 made the home class blocking, so the hazard changed shape and is
+    now pinned in BOTH postures: the address must reach the blocking subset while
+    home is filtered out (advisory) *and* while home blocks alongside it.
     """
     addr = "10" + ".0.0.5"
     path = _home("/Users", rest="/x")
+    addr_only = f"d.md:1: {addr}"
     for line, label in ((f"host {addr} and {path}", "address first"),
                         (f"{path} and host {addr}", "home path first")):
         assert [v for _, v in address_guard.address_hits(line)] == [addr], label
         assert [v for _, v in address_guard.home_hits(line)] == [path], label
         offenders = address_guard.scan_blob("d.md", line.encode())
         assert len(offenders) == 2, (label, offenders)
-        assert address_guard.blocking(offenders) == [f"d.md:1: {addr}"], (
+        # enforced (the shipped posture since t_34de41c3): both block.
+        assert addr_only in address_guard.blocking(offenders), (
             f"{label}: the address escaped the blocking subset")
+        assert len(address_guard.blocking(offenders)) == 2, label
+        # advisory (reachable only by editing the constant now): the address
+        # still blocks on its own — it was never allowed to ride along with home.
+        monkeypatch.setattr(address_guard, "HOME_PATHS_ENFORCE", False)
+        assert address_guard.blocking(offenders) == [addr_only], (
+            f"{label}: advisory mode lost the address")
+        monkeypatch.setattr(address_guard, "HOME_PATHS_ENFORCE", True)
 
 
 def test_home_path_is_visible_to_the_pattern_the_redactor_loads():
@@ -707,24 +720,46 @@ def test_the_fixtures_themselves_are_clean_tracked_content():
 
 # ── advisory now, blocking on the flip ───────────────────────────────────────
 
-def test_report_explains_a_home_path_differently_from_an_address():
+def test_report_explains_a_home_path_differently_from_an_address(monkeypatch):
     """The fix for a home path is not `10.0.0.x`, and a wrong fix on a commit path
-    is how --no-verify gets used."""
+    is how --no-verify gets used. Both postures, because the header text differs
+    between them and a reader must never have to guess which one fired."""
     planted = address_guard.home_offender("a.md", 3, _home("/Users", rest="/x"))
+
+    # enforced — the shipped posture since t_34de41c3.
     text = address_guard.report([planted])
     assert "a.md:3" in text
     assert address_guard.HOME_PLACEHOLDER in text
     assert address_guard.FIXTURE_HOME_USER in text
     assert "PUBLIC" in text
-    assert "ADVISORY" in text, "advisory must be stated, not left to the exit code"
+    assert "blocked" in text, "the enforced header must say the commit is blocked"
+    assert "ADVISORY" not in text, (
+        "an enforced finding must not be described as advisory — that wording is "
+        "how a hard rule reads as optional to whoever hits it")
     # mixed: the address still gets its own placeholders, the home path gets its own
     mixed = address_guard.report([planted, "b.md:1: " + REAL_LAN])
     assert "10.0.0.x" in mixed and "100.64.0.1" in mixed
     assert "a.md:3" in mixed and "b.md:1" in mixed
 
+    # advisory — reachable only by editing the constant, so the wording stays
+    # exercised rather than rotting into a lie.
+    monkeypatch.setattr(address_guard, "HOME_PATHS_ENFORCE", False)
+    adv = address_guard.report([planted])
+    assert "ADVISORY" in adv, "advisory must be stated, not left to the exit code"
+    assert address_guard.advisory([planted]) == [planted]
+    assert address_guard.blocking([planted]) == []
 
-def test_cli_reports_a_home_path_without_blocking_and_blocks_when_enforced(tmp_path):
-    """Both halves of the posture, through the CLI the hook and CI both call."""
+
+def test_cli_blocks_a_home_path_now_that_home_is_enforced(tmp_path):
+    """The flip, through the CLI the hook and CI both call (t_34de41c3).
+
+    This is the "prove the rule bites" half of the advisory-then-flip habit: a
+    knob nobody can turn on is a knob that silently stays off, and an advisory
+    class is exactly how the PR #724 shape reached origin. The advisory posture is
+    covered in-process (report/blocking above) rather than by an env-var off
+    switch ON PURPOSE — `HSCC_ADDRESS_GUARD_HOME_ENFORCE` can only strengthen the
+    rule, so a CI job or a checkout cannot mute the home class by exporting it.
+    """
     r = _repo(tmp_path)
     (r / "loadstress.md").write_text(
         f"interpreter: {_home('/Users', rest='/.hermes/venv/bin/python')}\n",
@@ -739,18 +774,20 @@ def test_cli_reports_a_home_path_without_blocking_and_blocks_when_enforced(tmp_p
              "--staged", "--repo", str(r)],
             capture_output=True, env=proc_env)
 
-    advisory = run()
-    assert advisory.returncode == 0, advisory.stderr.decode()   # advisory: reported
-    err = advisory.stderr.decode()
-    assert "loadstress.md:1" in err, err                          # ...and visible
-    assert "ADVISORY" in err
-    assert address_guard.HOME_PLACEHOLDER in err                  # ...with the fix
+    default = run()
+    assert default.returncode == 1, (
+        "HOME_PATHS_ENFORCE is True, so a planted home path must exit 1 — if this "
+        "passes with 0 the flip did not land")
+    err = default.stderr.decode()
+    assert "loadstress.md:1" in err, err                        # reported, not silent
+    assert "blocked" in err and address_guard.HOME_PLACEHOLDER in err
 
-    enforced = run(**{address_guard.HOME_PATHS_ENFORCE_ENV: "true"})
-    assert enforced.returncode == 1, (
-        "the home class can never be turned on — advisory would be permanent, which"
-        " is the blind gate this card replaces with a slower one")
-    assert "blocked" in enforced.stderr.decode()
+    # the env knob can still only strengthen: a truthy value changes nothing
+    assert run(**{address_guard.HOME_PATHS_ENFORCE_ENV: "true"}).returncode == 1
+    # ...and a falsy value must NOT mute the class
+    assert run(**{address_guard.HOME_PATHS_ENFORCE_ENV: "0"}).returncode == 1, (
+        "the env var became an OFF switch: an exported variable in CI could now "
+        "disable the home rule")
     # a real address still blocks whatever the home knob says
     (r / "leak.md").write_text("host " + REAL_LAN + "\n", encoding="utf-8")
     _git(r, "add", "leak.md")

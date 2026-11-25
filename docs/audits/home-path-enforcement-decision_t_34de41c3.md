@@ -124,11 +124,26 @@ an absolute home path still matches; the paren context is pinned by the
 also a stop char*, so a home path followed by `)` truncates at the paren rather
 than reporting the whole tail. Unchanged by this card.
 
-## Status / plan
+## Status
 
 * [x] baseline measured with the shipping guard (198 / 87)
 * [x] decision recorded (this file)
-* [ ] pattern tightening `(?=[A-Za-z0-9])` + tests
-* [ ] scrub sweep + `HOME_PATHS_ENFORCE = True` flip
-* [ ] redactor-side home coverage (the gap `t_c927b73e` left)
-* [ ] cross-file `MAX_PATTERN_CHARS` pin
+* [x] pattern tightening `(?=[A-Za-z0-9])` + tests (`test_a_newline_escaped_home_path_still_trips_the_branch`
+      is the test that goes red if anyone re-adds a left boundary)
+* [x] scrub sweep — all 198 cleared, `scan_tracked` returns 0 — and
+      `HOME_PATHS_ENFORCE = True`
+* [x] redactor-side home coverage (the gap `t_c927b73e` left): unit mask,
+      byte-identical anti-vacuity, and the end-to-end job leg in **both** postures
+* [x] cross-file `MAX_PATTERN_CHARS` pin (279 of 4096 today, pinned under half)
+* [x] the flip proved to bite: planted path → `--tracked` rc=1, `--staged` rc=1,
+      and a guard that cannot run still rc=2
+
+### Measured after the flip
+
+`len(FORBIDDEN.pattern)` 264 → **279** (cap 4096). Tracked offenders: **0**.
+`hscc_daemon/tests/test_no_real_addresses_committed.py scripts/tests`:
+**744 passed, 4 skipped, 1 failed** — the failure is
+`test_run_tests_leg_parallelism.py::test_the_per_leg_logs_do_not_pile_up_in_tmp`,
+which snapshots a *global* `/tmp/hscc-legs-*` glob and therefore breaks whenever
+another suite runs on the shared host. It passes in isolation (2/2 here) and no
+file this card touches is on its path. Worth a flake card; not this diff.
