@@ -436,7 +436,8 @@ def test_the_daemon_state_rows_declare_no_root_context():
     config, the ``orch_waker``/``kanban_enforce``/``node_pause_expiry`` stream
     stamps through ``state.STATE_DIR``, the paused-policy document through
     ``kanban_pause.STATE_PATH``, the node-pause overlay and the expiry stamp's
-    root through their own modules' HOME-derived constants — and none of
+    root through their own modules' HOME-derived constants, and the installed
+    daemon plist through ``~/Library/LaunchAgents`` (t_8b17cb40) — and none of
     them reads ``HSCC_DIR``. A root taken from that variable is therefore not a
     relocation of this state; it is a read of a directory nothing writes to, and
     the row reported absence as a fact about a live host (a pid file at that root
@@ -450,7 +451,7 @@ def test_the_daemon_state_rows_declare_no_root_context():
     """
     by_key = {s.key: s for s in doctor.FEATURE_CHECK_ROWS}
     for key in ("orch_waker", "kanban_enforce", "node_pauses",
-                "node_pause_expiry"):
+                "node_pause_expiry", "process_posture"):
         assert by_key[key].row_kwargs == (), (
             f"the {key} row must declare no per-row context: a handed root "
             "splits the reader from writers that resolve from HOME (t_be690204)")
