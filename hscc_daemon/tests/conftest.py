@@ -499,10 +499,16 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # every fork spy. ``install_job``/``cmd_install_event_driven``
             # additionally ``os.makedirs(PLIST_DIR)`` + write into it.
             #
-            # The values mirror the real layout under the per-test tmp dir
-            # (tmp_path stands in for $HOME), which is also exactly what
-            # test_event_driven_cli_no_ansi.py used to patch per-test — so
-            # the seal replaces that patching instead of layering under it.
+            # The values sit under the per-test tmp dir (tmp_path stands in
+            # for $HOME). ``HSCC_DIR``/``STATE_DIR`` are byte-identical to what
+            # test_event_driven_cli_no_ansi.py's old per-test helper patched;
+            # ``PLIST_DIR`` deliberately differs from that helper, which used
+            # ``<tmp>/LaunchAgents``: the seal mirrors the REAL layout
+            # (``<tmp>/Library/LaunchAgents``) because that is where a plist
+            # actually lands, and it is the shape the sandbox guard in
+            # test_no_live_hscc_leak.py plants and byte-diffs. Either way the
+            # seal replaces that per-test patching rather than layering under
+            # it.
             (event_driven, "HSCC_DIR", base),
             (event_driven, "STATE_DIR", p("state")),
             (event_driven, "PLIST_DIR",
@@ -569,7 +575,27 @@ def _isolate_hscc(tmp_path, monkeypatch):
         "_module_attrs() above; the sandboxed proof is "
         "test_no_live_hscc_leak.py."
     )
-    assert _real_plist_dir != _ed.PLIST_DIR and _real_home not in _ed.PLIST_DIR
+    # The negative arms are BOUNDED TO THE LAUNCHD DIR, never to $HOME
+    # textually. pytest's tmp_path lives under TMPDIR, and TMPDIR may
+    # legitimately sit under $HOME: Hermes exports TMPDIR/TMP/TEMP at the
+    # profile scratch dir (hermes_constants.apply_scratch_tmp_env, called from
+    # hermes_bootstrap), and that dir is inside the home. A
+    # ``_real_home not in PLIST_DIR`` substring arm therefore goes red on
+    # EVERY case in this package (this fixture is autouse -- the blast radius
+    # is the whole leg, not one file) on exactly the clean-env spawns (cron,
+    # CI, ssh without TMPDIR) that the seal exists to cover. Measured: with
+    # HOME=<sbx> TMPDIR=<sbx>/tmp the substring arm errored 5/5 cases at this
+    # line, while the two exact-path arms below pass there and still catch a
+    # seal aimed at the real launchd dir (mutation: PLIST_DIR pointed back at
+    # expanduser("~/Library/LaunchAgents")). test_event_driven_plist_seal_
+    # t_35d9f6ea.py::test_plist_dir_is_not_the_operators_launchagents states
+    # the same rule; the fixture must not contradict it.
+    assert _ed.PLIST_DIR != _real_plist_dir, (
+        f"the seal points event_driven.PLIST_DIR at the operator's real "
+        f"launchd dir ({_ed.PLIST_DIR!r})")
+    assert not _ed.PLIST_DIR.startswith(_real_plist_dir + os.sep), (
+        f"the seal points event_driven.PLIST_DIR inside the operator's real "
+        f"launchd dir ({_ed.PLIST_DIR!r})")
     assert _ed.HSCC_DIR == base, (
         f"the autouse seal no longer redirects event_driven.HSCC_DIR "
         f"({_ed.HSCC_DIR!r}); _event_log appends to <HSCC_DIR>/daemon.log")
@@ -595,8 +621,14 @@ def _isolate_hscc(tmp_path, monkeypatch):
     assert _install.PLIST_FILE == os.path.join(
         _sealed_plist_dir, "com.hermes.hscc_daemon.plist"), (
         f"install.PLIST_FILE is not the sealed plist ({_install.PLIST_FILE!r})")
-    assert _real_plist_dir != _install.PLIST_DIR and \
-        _real_home not in _install.PLIST_DIR
+    # Bounded to the launchd dir, not `$HOME` as a substring (t_35d9f6ea
+    # review B1): pytest's tmp_path may legitimately sit under TMPDIR, and
+    # TMPDIR may sit under the login home. An exact-path and a not-inside
+    # arm still catch a seal aimed at the operator's real launchd dir.
+    assert _install.PLIST_DIR != _real_plist_dir and not \
+        _install.PLIST_DIR.startswith(_real_plist_dir + os.sep), (
+            "install.PLIST_DIR points at the operator's real launchd dir "
+            f"({_install.PLIST_DIR!r})")
     _sealed_systemd = Path(str(tmp_path)) / ".config" / "systemd" / "user"
     assert _install.SYSTEMD_USER_DIR == _sealed_systemd, (
         f"install.SYSTEMD_USER_DIR is not sealed ({_install.SYSTEMD_USER_DIR!r});"
@@ -619,8 +651,10 @@ def _isolate_hscc(tmp_path, monkeypatch):
         "API supervisor unit with no subprocess for any fence to see. Re-add "
         "the entry in _module_attrs(); the sandboxed proof is "
         "test_plist_seal_install_api_t_2f09d480.py.")
-    assert _real_plist_dir != _api.API_PLIST_PATH and \
-        _real_home not in _api.API_PLIST_PATH
+    assert _api.API_PLIST_PATH != _real_plist_dir and not \
+        _api.API_PLIST_PATH.startswith(_real_plist_dir + os.sep), (
+            "api_launchd.API_PLIST_PATH points at the operator's real launchd "
+            f"dir ({_api.API_PLIST_PATH!r})")
 
     # NOT neutered here, deliberately. desktop._notify_macos / _notify_linux
     # shell out to osascript / notify-send, so a test that reaches a real

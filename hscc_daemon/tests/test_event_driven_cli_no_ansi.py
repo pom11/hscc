@@ -39,11 +39,13 @@ class TestNoAnsiEventDrivenCli:
     # the shape that leaves the NEXT event-driven test file unprotected: the
     # suite-wide seal was never load-bearing here, so deleting it would have
     # broken nothing. Every path these commands touch is now redirected by the
-    # autouse ``conftest._isolate_hscc`` seal, whose values are the same ones
-    # that helper set (``<tmp>/Library/LaunchAgents``, ``<tmp>/hscc``,
-    # ``<tmp>/hscc/state``), so these five commands run against the seal
-    # itself and the seal is what keeps the operator's real LaunchAgents
-    # intact. A test that patched its own path would still win (monkeypatch
+    # autouse ``conftest._isolate_hscc`` seal (``<tmp>/Library/LaunchAgents``,
+    # ``<tmp>/hscc``, ``<tmp>/hscc/state``), so these five commands run against
+    # the seal itself and the seal is what keeps the operator's real
+    # LaunchAgents intact. The seal's launchd path mirrors the real layout and
+    # is one level deeper than the old helper's ``<tmp>/LaunchAgents`` — the
+    # commands do not care which tmp path they get, only that it is not the
+    # home dir. A test that patched its own path would still win (monkeypatch
     # LIFO teardown) — patching is unnecessary here, not forbidden.
     def test_install(self, monkeypatch, tmp_path, fake_subprocess):
         fake_subprocess.set_result(returncode=0)
