@@ -23,3 +23,25 @@ task: t_a8dc2f78
   returns macOS capacity to the pool that t_31679ad1 gated the compile for in
   the first place. `pull_request` is untouched in both files: a workflow that
   stops reporting on the PR head blocks every PR forever.
+
+---
+kind: Verified
+order: 1
+
+- Gate for the leg that owns these tests, real numbers and not a paraphrase:
+  `HSCC_TEST_LEGS=.github/scripts bash scripts/run_tests.sh` → `legs: SELECTED
+  1/12 -> .github/scripts`, **262 passed in 18.82 s**, `✓ .github/scripts (19s)`,
+  `ALL GREEN` (rc 0); `~/.hermes/hermes-agent/venv/bin/python -m pytest
+  .github/scripts/tests -q` → **262 passed in 17.79 s** (rc 0).
+- Red-before measured in the same tree: both triggers widened back to unfiltered →
+  **2 failed** (rc 1), one per pinned file, each naming the file it caught; then
+  restored byte-for-byte and re-green. Without the widening run the new assertion is
+  only a claim — the pre-existing `"\n  push:\n" in text` passed both ways.
+- Full local roster serially, because `leg_select.py` sends any `.github/` diff to
+  every leg: **12/12 green, `ALL GREEN`** — bootstrap 1558, commands 93, roles 549,
+  cluster 1376 (+3 skipped), project 1521, daemon 5463 (+1 skipped),
+  sparkrun-hermes 19, api 1480 (+1 skipped, 1 xfailed), memori_byodb 33, scripts
+  (194 s), `.github/scripts` 262, comfyui-sparkrun 134.
+- `scripts/changelog_fragments.py check` → `OK — [Unreleased] is pointer, 62 fragment
+  entries consistent`. Delivered as PR #838 (`720d27e1`, `22c395d2`), base `main`,
+  opened not merged; `git status --short` empty at each commit.
