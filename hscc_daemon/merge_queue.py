@@ -2759,8 +2759,13 @@ def _stop_cancelled(state_path, project, entry, reason):
 
 def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                   root=None, git_runner=None, gh_runner=None,
-                  handback=None, log=None):
-    """Process one claimed PR entry. Returns a small result dict."""
+                  handback=None, log=None, pre_gated=False):
+    """Process one claimed PR entry. Returns a small result dict.
+
+    ``pre_gated`` is set by the batch path after the combined tree already ran
+    the union of every member's gates: the per-PR rebase/push/CI/merge below
+    still runs, only the local gate legs are skipped.
+    """
     doc = doc if doc is not None else load_state(state_path)
     ps = _project_state(doc, project)
     git_runner = git_runner or _default_runner
@@ -2845,7 +2850,9 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
     if cancel:
         return _stop_cancelled(state_path, project, entry, cancel)
 
-    gates = _resolve_gates(cfg, worktree, git_runner, base=base, log=log)
+    gates = ([] if pre_gated
+             else _resolve_gates(cfg, worktree, git_runner, base=base,
+                                 log=log))
     _update_flight(state_path, project, entry["pr"],
                    stage="gating" if gates else "merging")
     timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
@@ -4084,6 +4091,347 @@ def _resume_ci_pending(project, cfg, entry, *, state_path, git_runner=None,
         pre_push_sha=str(entry.get("pre_push_sha") or ""))
 
 
+# ── opt-in batch gating ────────────────────────────────────────────────────
+#
+# ``merge_queue.batch_size`` is 1 (today's one-PR path) unless the operator
+# opts in. A batch exists only while the combined tree is built and gated: its
+# members live in ONE in-flight record (``{"batch": true, "prs": [...]}``) so a
+# daemon restart can reclaim an orphaned gate group and release the whole batch
+# back to the FIFO. The per-PR rebase/push/CI/merge phase then runs through the
+# ordinary single path with its local gate legs skipped, so the existing
+# exact-SHA merge authority does not move.
+
+def _batch_size(cfg):
+    """``merge_queue.batch_size`` clamped to at least 1 (1 = today's path)."""
+    try:
+        size = int((cfg or {}).get("batch_size") or 1)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, size)
+
+
+def _is_batch(flight):
+    return isinstance(flight, dict) and flight.get("batch") is True
+
+
+def _batch_members(flight):
+    prs = (flight or {}).get("prs")
+    if not isinstance(prs, list):
+        return []
+    return [e for e in prs if isinstance(e, dict) and e.get("pr") is not None]
+
+
+def _update_batch(state_path, project, **fields):
+    """Stamp the batch record (fresh read, same lock discipline as a claim)."""
+    with _file_lock():
+        doc = load_state(state_path)
+        flight = _project_state(doc, project).get("in_flight")
+        if _is_batch(flight):
+            flight.update(fields)
+            save_state(doc, state_path)
+
+
+def _take_batch_member(state_path, project, pr, *, return_to=None):
+    """Remove one member from the batch record, optionally returning it.
+
+    ``return_to="queue"`` puts it back at the head (FIFO order); ``"waiting"``
+    appends it to the wait list. The record clears when its last member leaves.
+    """
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        members = _batch_members(flight)
+        entry = next((e for e in members if _entry_pr(e) == int(pr)), None)
+        if not _is_batch(flight) or entry is None:
+            return None
+        keep = [e for e in members if e is not entry]
+        if keep:
+            flight["prs"] = keep
+            flight["pr"] = keep[0]["pr"]
+        else:
+            ps["in_flight"] = None
+        if return_to == "waiting":
+            if (_find_entry(ps["waiting"], pr) is None
+                    and _find_entry(ps["queue"], pr) is None):
+                ps["waiting"].append(entry)
+        elif return_to == "queue":
+            if (_find_entry(ps["queue"], pr) is None
+                    and _find_entry(ps["waiting"], pr) is None):
+                ps["queue"].insert(0, entry)
+        save_state(doc, state_path)
+        return entry
+
+
+def _finish_batch_member(project, state_path, result, entry, **fields):
+    """Record a terminal verdict for one member while the batch holds the rest."""
+    pr = int(entry.get("pr") or 0)
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        members = _batch_members(flight)
+        target = next((e for e in members if _entry_pr(e) == pr), None)
+        if not _is_batch(flight) or target is None:
+            return False
+        keep = [e for e in members if e is not target]
+        if keep:
+            flight["prs"] = keep
+            flight["pr"] = keep[0]["pr"]
+        else:
+            ps["in_flight"] = None
+        ps["last"] = _last_record(result, entry, **fields)
+        save_state(doc, state_path)
+    return True
+
+
+def _release_batch(state_path, project, *, entries=None, waiting=False):
+    """Put every (remaining) member back in FIFO order at the queue head."""
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        flight = ps.get("in_flight")
+        members = list(entries) if entries is not None else _batch_members(flight)
+        if _is_batch(flight):
+            ps["in_flight"] = None
+        if waiting:
+            for entry in members:
+                pr = _entry_pr(entry)
+                if pr is None:
+                    continue
+                if (_find_entry(ps["waiting"], pr) is not None
+                        or _find_entry(ps["queue"], pr) is not None):
+                    continue
+                ps["waiting"].append(entry)
+        else:
+            # Reversed insertion keeps the batch's FIFO order at the head.
+            for entry in reversed(members):
+                pr = _entry_pr(entry)
+                if pr is None:
+                    continue
+                if (_find_entry(ps["queue"], pr) is not None
+                        or _find_entry(ps["waiting"], pr) is not None):
+                    continue
+                ps["queue"].insert(0, entry)
+        save_state(doc, state_path)
+        return members
+
+
+def _claim_entry(state_path, project, entry):
+    """Promote one released entry to the ordinary single in-flight claim."""
+    pr = _entry_pr(entry)
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        for source in ("queue", "waiting"):
+            found = _find_entry(ps[source], pr)
+            if found is not None:
+                ps[source].remove(found)
+                ps["in_flight"] = found
+                save_state(doc, state_path)
+                return found
+    return None
+
+
+def _process_batch(project, cfg, batch, *, state_path, root=None,
+                   git_runner=None, gh_runner=None, handback=None, log=None):
+    """Build + gate a combined tree once, then merge each member in order.
+
+    A terminal/refused member leaves before any git work. A member whose stack
+    rebase conflicts is handed back on the normal single-PR conflict path and
+    the rest continue. A red combined gate falls back to gating the members one
+    by one so the culprit is named and gets the normal red handling.
+    """
+    git_runner = git_runner or _default_runner
+    gh_runner = gh_runner or _default_runner
+    handback = handback or default_handback
+    log = log or (lambda *a, **k: None)
+    base = expected_base(cfg, git_runner) or "main"
+    outcomes = []
+    members = _batch_members(batch)
+
+    def _single(entry, pre_gated):
+        claimed = _claim_entry(state_path, project, entry)
+        if claimed is None:
+            return {"pr": entry.get("pr"), "result": "removed"}
+        return process_entry(
+            project, cfg, claimed, state_path=state_path, root=root,
+            git_runner=git_runner, gh_runner=gh_runner, handback=handback,
+            log=log, pre_gated=pre_gated)
+
+    # 1. Drop what can never be in this batch (terminal, wrong base, fork).
+    infos = {}
+    stackable = []
+    for entry in members:
+        info = pr_view_settled(cfg["repo"], entry["pr"], runner=gh_runner)
+        if isinstance(info, dict):
+            infos[_entry_pr(entry)] = info
+            if info.get("headRefName"):
+                entry["branch"] = info["headRefName"]
+            state = str(info.get("state") or "").upper()
+            if state in ("MERGED", "CLOSED"):
+                result = "already-" + state.lower()
+                _finish_batch_member(project, state_path, result, entry,
+                                     sha=info.get("headRefOid"))
+                outcomes.append({"pr": entry["pr"], "result": result})
+                continue
+            reason = refusal_reason(info, base)
+            if reason:
+                body = ("Merge queue: refusing this PR.\n\n"
+                        f"{reason}\n\n"
+                        "It stays out of the queue until it is retargeted "
+                        "(base branch) or re-opened from a branch in this "
+                        "repo.\n")
+                _comment_pr(cfg["repo"], entry["pr"], body, gh_runner, log=log)
+                _finish_batch_member(project, state_path, "refused", entry,
+                                     error=reason)
+                outcomes.append({"pr": entry["pr"], "result": "refused",
+                                 "error": reason})
+                continue
+        stackable.append(entry)
+
+    # Not enough left to be a batch: the ordinary single path decides.
+    if len(stackable) < 2:
+        for entry in stackable:
+            outcomes.append(_single(entry, False))
+        return outcomes
+
+    try:
+        worktree = ensure_worktree(cfg, root=root, git_runner=git_runner,
+                                   base=base)
+    except Exception as exc:
+        log(f"merge-queue {project}: batch worktree failed: {exc}", "WARN")
+        _release_batch(state_path, project, entries=stackable)
+        return outcomes + [{"pr": e["pr"], "result": "retry",
+                            "error": str(exc)} for e in stackable]
+
+    branch = f"mq/batch-{int(time.time())}"
+    _update_batch(state_path, project, stage="rebasing", branch=branch)
+    start = _git(["checkout", "--detach", "--force", f"origin/{base}"],
+                 worktree, git_runner)
+    if start is None or start.returncode != 0:
+        err = f"git checkout origin/{base} failed"
+        _release_batch(state_path, project, entries=stackable)
+        return outcomes + [{"pr": e["pr"], "result": "retry", "error": err}
+                           for e in stackable]
+    _git(["checkout", "-B", branch], worktree, git_runner)
+
+    # 2. Rebase each member, in FIFO order, onto the growing combined branch.
+    kept = []
+    for entry in stackable:
+        info = infos.get(_entry_pr(entry)) or {}
+        err = _prepare_head(worktree, info, git_runner)
+        if err:
+            _take_batch_member(state_path, project, entry["pr"],
+                               return_to="queue")
+            outcomes.append({"pr": entry["pr"], "result": "retry",
+                             "error": err})
+            continue
+        proc = _git(["rebase", branch], worktree, git_runner,
+                    timeout=DEFAULT_GATE_TIMEOUT_S)
+        if proc is None or proc.returncode != 0:
+            conflicted = _conflicted_files(worktree, git_runner)
+            _git(["rebase", "--abort"], worktree, git_runner)
+            names = (", ".join(conflicted) if conflicted
+                     else "(files not reported)")
+            output = _tail(((proc.stdout or "") + (proc.stderr or ""))
+                           if proc else "", 20)
+            body = (f"Merge queue: rebase onto origin/{base} conflicted.\n\n"
+                    f"Conflicted files: {names}\n\n"
+                    f"{resolve_instructions(info.get('headRefName'), base)}\n"
+                    f"{output}")
+            if _finish_batch_member(project, state_path, "conflict", entry,
+                                    conflicted=conflicted):
+                _handback(entry, cfg, body, handback, gh_runner, log=log,
+                          reason="rebase conflict", state_path=state_path,
+                          project=project)
+            log(f"merge-queue {project}: PR #{entry['pr']} conflict in "
+                f"{names}", "WARN")
+            outcomes.append({"pr": entry["pr"], "result": "conflict",
+                             "conflicted": conflicted})
+            continue
+        _git(["checkout", "-B", branch], worktree, git_runner)
+        kept.append(entry)
+
+    if not kept:
+        return outcomes
+
+    # 3. One gate run on the combined tree; the diff is the union of the
+    # members' diffs, so _resolve_gates selects the union of their legs.
+    gates = _resolve_gates(cfg, worktree, git_runner, base=base, log=log)
+    label = " ".join(f"#{e['pr']}" for e in kept)
+    log(f"merge-queue {project}: batch start: {label} legs="
+        + (" | ".join(gates) if gates else "none"), "INFO")
+    _update_batch(state_path, project,
+                  stage="gating" if gates else "merging")
+    timeout_s = int(cfg.get("timeout_s") or DEFAULT_GATE_TIMEOUT_S)
+    pseudo = {"pr": kept[0]["pr"]}
+    for command in gates:
+        log(f"merge-queue {project}: batch gate start: {command} "
+            f"(budget {timeout_s}s)", "INFO")
+        gate_pgids = []
+
+        def _record(pid):
+            gate_pgids.append(int(pid))
+            _update_batch(state_path, project, pgid=int(pid), gate=command)
+
+        try:
+            with _GateLiveness(project, pseudo["pr"], command):
+                verdict, output = _run_gate(
+                    command, worktree, timeout_s,
+                    cancel_check=lambda: _cancel_reason(
+                        state_path, project, pseudo, cfg),
+                    on_start=_record)
+        finally:
+            if gate_pgids:
+                try:
+                    _update_batch(state_path, project, pgid=None)
+                except Exception:
+                    pass
+        if verdict == "cancelled":
+            reason = (_cancel_reason(state_path, project, pseudo, cfg)
+                      or "removed")
+            _release_batch(state_path, project, entries=kept)
+            return outcomes + [{"pr": e["pr"], "result": reason}
+                               for e in kept]
+        if verdict == "timeout":
+            _release_batch(state_path, project, entries=kept, waiting=True)
+            body = (
+                "Merge queue: the batch gate ran out of its time budget.\n\n"
+                f"Gate: {command}\n"
+                f"Budget: {timeout_s}s (exceeded)\n\n"
+                "This is NOT a test failure. Every PR in the batch is back in "
+                "the wait list and will be looked at again on a later tick.\n"
+                f"{output}")
+            _handback(kept[0], cfg, body, handback, gh_runner, log=log,
+                      create=False, state_path=state_path, project=project)
+            log(f"merge-queue {project}: batch gate timed out after "
+                f"{timeout_s}s: {command} (not a test failure)", "WARN")
+            return outcomes + [{"pr": e["pr"], "result": "gate-timeout",
+                                "gate": command, "timeout_s": timeout_s}
+                               for e in kept]
+        if verdict != "pass":
+            # Cheap bisect: the ordinary single path names the culprit and
+            # gives it the normal red handling; the rest still proceed.
+            log(f"merge-queue {project}: batch red -> singles", "WARN")
+            _release_batch(state_path, project, entries=kept)
+            for entry in kept:
+                outcomes.append(_single(entry, False))
+            return outcomes
+
+    # 4. Green: per-PR rebase onto the then-current base, push, CI, merge.
+    log(f"merge-queue {project}: batch green", "INFO")
+    _release_batch(state_path, project, entries=kept)
+    for entry in kept:
+        outcome = _single(entry, True)
+        outcomes.append(outcome)
+        if outcome.get("result") == CI_PENDING_STAGE:
+            # That PR now owns the single in-flight slot; the rest stay queued
+            # for a later tick (or batch).
+            break
+    return outcomes
+
+
 # ── tick ────────────────────────────────────────────────────────────────────
 
 def _repo_groups(projects, names):
@@ -4196,6 +4544,18 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 # The recorded group belongs to the run that just died; the
                 # re-gated leg records its own.
                 flight.pop("pgid", None)
+                if _is_batch(flight):
+                    # A batch is ONE claim: release every member back to the
+                    # FIFO in its original order (nothing is half-merged yet).
+                    ps["in_flight"] = None
+                    for member in reversed(_batch_members(flight)):
+                        if not any(
+                                int(e.get("pr", 0))
+                                == int(member.get("pr", 0))
+                                for e in ps["queue"]):
+                            ps["queue"].insert(0, member)
+                    recovered.append(name)
+                    continue
                 ps["in_flight"] = None
                 if not any(int(e.get("pr", 0)) == int(flight.get("pr", 0))
                            for e in ps["queue"]):
@@ -4365,6 +4725,7 @@ def tick(*, state_path=None, root=None, registry_path=None,
             # earlier save and this claim is not lost. Re-reading enabled and
             # paused also makes a pause/disable raced in during discovery win.
             declined = []
+            batch = None
             with _file_lock():
                 doc = load_state(state_path)
                 best = None
@@ -4409,8 +4770,29 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 if best is not None:
                     _, claim_name, pos, entry = best
                     ps = _project_state(doc, claim_name)
-                    entry = ps[source].pop(pos)
-                    ps["in_flight"] = entry
+                    cfg = cfgs.get(claim_name) or {}
+                    size = _batch_size(cfg)
+                    if source == "queue" and pos == 0 and size > 1:
+                        # Opt-in batch: claim the first N eligible FIFO entries
+                        # as ONE in-flight record. A held entry at the head
+                        # keeps the ordinary single-claim path.
+                        candidates = list(ps["queue"][:size])
+                        if (len(candidates) >= 2
+                                and not any(
+                                    _hold_of(ps, e.get("pr")) is not None
+                                    for e in candidates)):
+                            del ps["queue"][:len(candidates)]
+                            batch = {
+                                "batch": True,
+                                "stage": "claimed",
+                                "pr": candidates[0]["pr"],
+                                "prs": candidates,
+                                "started_at": _now_iso(),
+                            }
+                            ps["in_flight"] = batch
+                    if batch is None:
+                        entry = ps[source].pop(pos)
+                        ps["in_flight"] = entry
                     save_state(doc, state_path)
             # Outside the file lock: a log write must not extend how long the
             # CLI waits on the ledger (same rule as `_update_flight`'s stamp).
@@ -4423,7 +4805,8 @@ def tick(*, state_path=None, root=None, registry_path=None,
             # tick may spend the whole gate budget before it returns, and the
             # stream must not sit dark across it.  "claimed" until process_entry
             # reports a real stage of its own.
-            _stream_stamp(project=claim_name, pr=entry["pr"], stage="claimed")
+            _stream_stamp(project=claim_name,
+                          pr=(batch or entry)["pr"], stage="claimed")
 
             cfg = cfgs[claim_name]
             # One lock per repo path: two project names on the same checkout
@@ -4431,20 +4814,48 @@ def tick(*, state_path=None, root=None, registry_path=None,
             lock_root = os.path.dirname(os.path.abspath(state_path))
             with _repo_lock(cfg["repo"], root=lock_root):
                 try:
-                    outcome = process_entry(
-                        claim_name, cfg, entry, doc=doc,
-                        state_path=state_path, root=root,
-                        git_runner=git_runner, gh_runner=gh_runner,
-                        handback=handback, log=log)
+                    if batch is not None:
+                        outcomes = _process_batch(
+                            claim_name, cfg, batch, state_path=state_path,
+                            root=root, git_runner=git_runner,
+                            gh_runner=gh_runner, handback=handback, log=log)
+                    else:
+                        outcomes = [process_entry(
+                            claim_name, cfg, entry, doc=doc,
+                            state_path=state_path, root=root,
+                            git_runner=git_runner, gh_runner=gh_runner,
+                            handback=handback, log=log)]
                 except Exception as exc:
                     error = (f"{type(exc).__name__}: {exc}\n"
                              f"{traceback.format_exc()}")
-                    log(f"merge-queue {claim_name}: PR #{entry['pr']} "
-                        f"raised:\n{error}", "ERROR")
-                    outcome = _retry_or_drop(
-                        doc, state_path, claim_name, entry, error)
-            result["processed"].append({"project": claim_name, **outcome})
-            _outcome_line(log, claim_name, entry, outcome)
+                    log(f"merge-queue {claim_name}: "
+                        f"{(batch or entry)['pr']} raised:\n{error}", "ERROR")
+                    if batch is not None:
+                        # Never strand a half-claimed batch: every member the
+                        # record still holds goes back to its FIFO position and
+                        # the next tick retries. Members already merged/conflicted
+                        # before the raise are no longer in the record.
+                        fresh = _project_state(load_state(state_path),
+                                               claim_name).get("in_flight")
+                        if _is_batch(fresh):
+                            members_left = _release_batch(state_path,
+                                                          claim_name)
+                            outcomes = [{"pr": e["pr"], "result": "error",
+                                         "error": _capped_error(error)}
+                                        for e in members_left]
+                        elif isinstance(fresh, dict) and fresh.get("pr"):
+                            # The batch already reached its per-PR phase.
+                            outcomes = [_retry_or_drop(
+                                None, state_path, claim_name, fresh, error)]
+                        else:
+                            outcomes = []
+                    else:
+                        outcomes = [_retry_or_drop(
+                            doc, state_path, claim_name, entry, error)]
+            for outcome in outcomes:
+                result["processed"].append({"project": claim_name, **outcome})
+                _outcome_line(log, claim_name, {"pr": outcome.get("pr")},
+                              outcome)
             doc = load_state(state_path)
             for name in members:
                 ps = _project_state(doc, name)
