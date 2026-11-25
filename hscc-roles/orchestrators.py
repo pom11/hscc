@@ -26,6 +26,7 @@ at a fixture without touching the real registry or profile tree.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Optional
 
 import yaml
@@ -655,6 +656,52 @@ def skill_guard_is_reviewer(profile_name: str) -> bool:
         return profile_name.endswith("-orch") or profile_name == "reviewer"
 
 
+#: The bootstrap installer module, loaded once from the sibling payload.
+_INSTALL_ORCHPAD = None
+#: Test/programmatic seams for the pip and ``orchpad-hermes`` runners.
+_ORCHPAD_RUN = None
+_ORCHPAD_INSTALLER_RUN = None
+
+
+def _load_install_orchpad():
+    """Import ``hscc-bootstrap/install_orchpad.py`` once (sibling payload)."""
+    global _INSTALL_ORCHPAD
+    if _INSTALL_ORCHPAD is None:
+        bootstrap = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), os.pardir,
+            "hscc-bootstrap"))
+        if bootstrap not in sys.path:
+            # APPEND, never insert: the payload has flat module names
+            # (``_theme``, ``backup_util``) and putting it ahead of the
+            # hscc-roles dir would shadow ``hscc-roles/_theme`` in this very
+            # process. This only needs to make ``import install_orchpad``
+            # resolvable; existing entries keep precedence.
+            sys.path.append(bootstrap)
+        import install_orchpad  # noqa: PLC0415 - lazy sibling import
+        _INSTALL_ORCHPAD = install_orchpad
+    return _INSTALL_ORCHPAD
+
+
+def _ensure_orchpad(profile: str, profile_dir: str) -> str:
+    """Ensure orchpad on ONE orchestrator profile; return a status token.
+
+    The installer owns package/plugin/config logic (one implementation shared
+    with bootstrap and ``project new``); this only resolves the Hermes root
+    from the profile path the generator itself writes through. Never raises:
+    an orchestrator without its pad is a warning, not a provisioning failure.
+    """
+    try:
+        mod = _load_install_orchpad()
+        hermes_home = os.path.dirname(os.path.dirname(
+            os.path.abspath(profile_dir)))
+        return mod.ensure_profile(
+            hermes_home, profile, None, apply=True,
+            main=main_orch.main_profile(),
+            run=_ORCHPAD_RUN, installer_run=_ORCHPAD_INSTALLER_RUN)
+    except Exception as exc:  # noqa: BLE001 - best-effort by contract
+        return f"failed:{type(exc).__name__}: {exc}"[:400]
+
+
 def ensure_orchestrator(
     project: Optional[str] = None,
     base_identity: str = "",
@@ -688,5 +735,9 @@ def ensure_orchestrator(
     # (the pane-start doors re-apply it for a profile whose pane appears later).
     subscription = orch_subscribe.apply_subscription_policy(
         resolved["profile"], profile_dir=profile_dir)
+    # The pad is an orchestrator surface (operator rule 2026-11-23): every path
+    # that creates or repairs the main OR a project orchestrator gets it, and
+    # the token is part of this result so callers report it rather than guess.
+    orchpad = _ensure_orchpad(resolved["profile"], profile_dir)
     return {**resolved, "changed": changed, "review_skill": seed,
-            "subscription": subscription}
+            "subscription": subscription, "orchpad": orchpad}

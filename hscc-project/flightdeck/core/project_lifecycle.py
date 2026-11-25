@@ -400,6 +400,7 @@ def _orch_profile_name(name: str) -> str:
 
 _PLUGINS_TIER_FLAG = "--plugins-tier-only"
 _PLUGINS_TIER_SCRIPT = os.path.join("hscc-bootstrap", "enable_plugins.py")
+_ORCHPAD_INSTALLER_SCRIPT = os.path.join("hscc-bootstrap", "install_orchpad.py")
 
 
 def _hermes_root_home(env=None) -> str:
@@ -424,29 +425,38 @@ def _orch_profile_home(profile: str, env=None) -> str:
     return os.path.join(_hermes_root_home(env), "profiles", profile)
 
 
-def _bootstrap_enable_plugins_script(env=None) -> Optional[str]:
-    """Locate ``enable_plugins.py``, or None when this tree has no bootstrap writer.
+def _bootstrap_script(relative: str, env=None) -> Optional[str]:
+    """Locate one bootstrap script, or None when this tree has no writer.
 
-    Three candidates, first hit wins: an explicit ``HSCC_BOOTSTRAP_DIR`` (operator /
-    test override, the same knob style as ``HSCC_HERMES_PYTHON`` above), the installed
-    plugin payload next to the Hermes home, and the repo sibling of this file — so the
-    same code answers in a brew keg, an installed tree and a checkout.
+    Three candidates, first hit wins: an explicit ``HSCC_BOOTSTRAP_DIR``
+    (operator / test override, the same knob style as ``HSCC_HERMES_PYTHON``),
+    the installed plugin payload next to the Hermes home, and the repo sibling
+    of this file — so the same code answers in a brew keg, an installed tree
+    and a checkout.
     """
     env = os.environ if env is None else env
     candidates = []
     override = (env.get("HSCC_BOOTSTRAP_DIR") or "").strip()
     if override:
         candidates.append(os.path.join(os.path.expanduser(override),
-                                       "enable_plugins.py"))
-    candidates.append(os.path.join(_hermes_root_home(env), "plugins",
-                                   _PLUGINS_TIER_SCRIPT))
+                                       os.path.basename(relative)))
+    candidates.append(os.path.join(_hermes_root_home(env), "plugins", relative))
     # <repo>/hscc-project/flightdeck/core/<this file> → <repo>/hscc-bootstrap/...
-    candidates.append(str(Path(__file__).resolve().parents[3]
-                          / "hscc-bootstrap" / "enable_plugins.py"))
+    candidates.append(str(Path(__file__).resolve().parents[3] / relative))
     for path in candidates:
         if os.path.isfile(path):
             return path
     return None
+
+
+def _bootstrap_enable_plugins_script(env=None) -> Optional[str]:
+    """Locate ``enable_plugins.py``, or None when this tree has no bootstrap writer."""
+    return _bootstrap_script(_PLUGINS_TIER_SCRIPT, env)
+
+
+def _bootstrap_install_orchpad_script(env=None) -> Optional[str]:
+    """Locate ``install_orchpad.py``, or None when bootstrap is not deployed."""
+    return _bootstrap_script(_ORCHPAD_INSTALLER_SCRIPT, env)
 
 
 def _seed_plugin_tier(profile: str, _run=None) -> str:
@@ -475,7 +485,47 @@ def _seed_plugin_tier(profile: str, _run=None) -> str:
         return f"failed:{type(exc).__name__}"
 
 
-def ensure_profile(name: str, _run=None, tier_report=None) -> str:
+def _ensure_orchpad(profile: str, _run=None) -> str:
+    """Ask bootstrap to install + enable orchpad on ONE orchestrator home.
+
+    Returns the step-report token: ``enabled`` when the bootstrap installer
+    changed something, ``already`` when the package, plugin files and config
+    entry were all in place, ``failed:<why>`` otherwise. Never raises — the pad
+    is an orchestrator convenience, and creating the profile is the step's
+    contract.
+    """
+    try:
+        script = _bootstrap_install_orchpad_script()
+        if script is None:
+            return "failed:no-bootstrap-installer"
+        home = _hermes_root_home()
+        venv = resolve_hermes_python()
+        python = sys.executable or "python3"
+        cmd = [python, script, "--apply", "--profile", profile,
+               "--hermes-home", home]
+        if venv:
+            # Install into the interpreter that can actually host Hermes, not
+            # merely whatever python this process happens to run.
+            cmd += ["--python", venv]
+        proc = _run_cmd(cmd, os.getcwd(), _run)
+        rc = getattr(proc, "returncode", None)
+        out = (getattr(proc, "stdout", "") or "").strip()
+        err = (getattr(proc, "stderr", "") or "").strip()
+        if rc != 0:
+            return (f"failed:rc={rc}" + (f" {err or out}" if err or out else ""))[:400]
+        try:
+            status = (json.loads(out) or {}).get("status") or ""
+        except (TypeError, ValueError):
+            return f"failed:unparseable installer output: {out[:160]}"
+        if status in ("enabled", "already") or status.startswith("failed:"):
+            return status
+        return f"failed:{status or 'empty installer report'}"[:400]
+    except Exception as exc:                     # noqa: BLE001 - never fatal, by design
+        return f"failed:{type(exc).__name__}: {exc}"[:400]
+
+
+def ensure_profile(name: str, _run=None, tier_report=None,
+                   orchpad_report=None) -> str:
     """Step 6a — ensure the ``<name>-orch`` orchestrator profile exists.
 
     The chat transport is ``hermes -p <name>-orch ...``. Before this step,
@@ -495,6 +545,11 @@ def ensure_profile(name: str, _run=None, tier_report=None) -> str:
     be able to repair a home whose tier was never written. ``tier_report`` is an
     optional dict that receives ``{"status": <token>}`` so the caller can show
     what happened — the return value stays ``created`` | ``skipped``.
+
+    The same repair posture applies to orchpad: every orchestrator profile this
+    step creates OR finds gets the pinned package, the plugin files and its own
+    ``plugins.enabled`` entry (``orchpad_report`` receives the token). The
+    bootstrap hook owns that logic, so this module does not duplicate it.
     """
     profile = _orch_profile_name(name)
     # Existence probe. A nonzero probe (unreadable environment) is NOT an
@@ -505,6 +560,7 @@ def ensure_profile(name: str, _run=None, tier_report=None) -> str:
     )
     if exists:
         _report_tier(tier_report, _seed_plugin_tier(profile, _run))
+        _report_orchpad(orchpad_report, _ensure_orchpad(profile, _run))
         return "skipped"
     created = _run_cmd(["hermes", "profile", "create", profile], os.getcwd(), _run)
     if created.returncode != 0:
@@ -513,6 +569,7 @@ def ensure_profile(name: str, _run=None, tier_report=None) -> str:
             f"{(created.stderr or '').strip() or '(no error output)'}"
         )
     _report_tier(tier_report, _seed_plugin_tier(profile, _run))
+    _report_orchpad(orchpad_report, _ensure_orchpad(profile, _run))
     return "created"
 
 
@@ -522,6 +579,16 @@ def _report_tier(tier_report, status: str) -> None:
         return
     try:
         tier_report["status"] = status
+    except Exception:                            # noqa: BLE001 - reporting only
+        pass
+
+
+def _report_orchpad(orchpad_report, status: str) -> None:
+    """Hand the orchpad outcome to an interested caller. Never raises."""
+    if orchpad_report is None:
+        return
+    try:
+        orchpad_report["status"] = status
     except Exception:                            # noqa: BLE001 - reporting only
         pass
 
@@ -1341,13 +1408,19 @@ def create_project(
 
     # --- Step 5a: orchestrator profile (<name>-orch) ---
     tier: dict = {}
+    orchpad: dict = {}
     try:
-        prof = ensure_profile(name, _run=_run, tier_report=tier)
+        prof = ensure_profile(name, _run=_run, tier_report=tier,
+                              orchpad_report=orchpad)
         detail = f"profile {name}-orch {prof}"
         # R5: an unseeded home is not silent. The tier write is best-effort, so its
         # outcome is reported rather than allowed to fail the step.
         if tier.get("status"):
             detail += f", plugins.enabled {tier['status']}"
+        # The pad is best-effort too: a missing package/plugin is a warning in
+        # the step detail, never a reason to fail project creation.
+        if orchpad.get("status"):
+            detail += f", orchpad: {orchpad['status']}"
         results.append(
             {"id": "profile", "status": "ok" if prof == "created" else "skipped",
              "detail": detail}

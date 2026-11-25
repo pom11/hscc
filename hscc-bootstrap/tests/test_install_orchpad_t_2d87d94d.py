@@ -302,7 +302,9 @@ def test_a_failed_plugin_install_names_the_profile(tmp_path):
     by_name = {e["profile"]: e for e in report["profiles"]}
     assert by_name["demo-orch"]["status"] == "failed"
     assert "disk full" in by_name["demo-orch"]["error"]
-    assert by_name["general"]["status"] == "verified"
+    # general had no config.yaml in this fixture: the shared enable step seeds
+    # the new-home tier + orchpad, so this run counts as a change, not "verified".
+    assert by_name["general"]["status"] == "installed"
 
 
 def test_the_installer_prefers_the_venv_console_script(tmp_path):
@@ -321,3 +323,115 @@ def test_the_installer_prefers_the_venv_console_script(tmp_path):
     script.unlink()
     fallback = io.installer_cmd(python, tmp_path / "home", "demo-orch")
     assert fallback[:3] == [str(python), "-m", "orchpad.hermes_plugin.cli"]
+
+
+# ── the single-profile repair path every provisioning door shares ───────────
+
+def test_ensure_profile_installs_and_enables_one_orchestrator(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "demo-orch")
+
+    venv = FakeVenv()
+    calls = []
+    status = io.ensure_profile(home, "demo-orch", "/venv/bin/python",
+                               apply=True, main="general", run=venv,
+                               installer_run=_plugin_runner(calls))
+
+    assert status == "enabled"
+    assert io.plugin_present(home / "profiles" / "demo-orch")
+    assert "orchpad" in (_enabled(home, "demo-orch") or [])
+    assert calls[0][calls[0].index("--profile") + 1] == "demo-orch"
+    assert len([c for c in venv.calls if "pip" in c]) == 1
+
+
+def test_ensure_profile_is_idempotent(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "demo-orch")
+    venv, calls = FakeVenv(), []
+    installer = _plugin_runner(calls)
+
+    first = io.ensure_profile(home, "demo-orch", "/venv/bin/python",
+                              apply=True, main="general", run=venv,
+                              installer_run=installer)
+    config = home / "profiles" / "demo-orch" / "config.yaml"
+    before = (config.read_text(encoding="utf-8"), config.stat().st_mtime_ns)
+
+    second = io.ensure_profile(home, "demo-orch", "/venv/bin/python",
+                               apply=True, main="general", run=venv,
+                               installer_run=installer)
+
+    assert (first, second) == ("enabled", "already")
+    assert (config.read_text(encoding="utf-8"),
+            config.stat().st_mtime_ns) == before
+    assert len([c for c in venv.calls if "pip" in c]) == 1
+
+
+def test_ensure_profile_refuses_worker_and_reviewer_homes(tmp_path):
+    home = tmp_path / ".hermes"
+    for name in ("coder", "reviewer"):
+        _profile(home, name)
+
+    for name in ("coder", "reviewer"):
+        status = io.ensure_profile(home, name, "/venv/bin/python",
+                                   apply=True, main="general",
+                                   run=FakeVenv(),
+                                   installer_run=_plugin_runner([]))
+        assert status.startswith("failed:"), status
+        assert "not an orchestrator profile" in status
+        assert not (home / "profiles" / name / "plugins").exists()
+        assert not (home / "profiles" / name / "config.yaml").exists()
+
+
+def test_ensure_profile_failure_is_a_token_never_an_exception(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "demo-orch")
+
+    def install(argv):
+        return _cp(argv, 1, "", "disk full")
+
+    status = io.ensure_profile(home, "demo-orch", "/venv/bin/python",
+                               apply=True, main="general",
+                               run=FakeVenv(version=io.PIN_VERSION),
+                               installer_run=install)
+
+    assert status.startswith("failed:")
+    assert "disk full" in status
+
+
+def test_ensure_profile_without_a_hermes_venv_names_the_fix(tmp_path,
+                                                           monkeypatch):
+    home = tmp_path / ".hermes"
+    _profile(home, "demo-orch")
+    monkeypatch.delenv("HSCC_HERMES_PYTHON", raising=False)
+
+    status = io.ensure_profile(home, "demo-orch", apply=True, main="general")
+
+    assert status.startswith("failed:")
+    assert "no Hermes venv python" in status
+    assert "HSCC_HERMES_PYTHON" in status
+
+
+def test_ensure_profile_does_not_claim_enabled_without_the_config_entry(
+        tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "demo-orch")
+    (home / "profiles" / "demo-orch" / "config.yaml").write_text(
+        "plugins: [unterminated\n", encoding="utf-8")
+
+    status = io.ensure_profile(home, "demo-orch", "/venv/bin/python",
+                               apply=True, main="general",
+                               run=FakeVenv(),
+                               installer_run=_plugin_runner([]))
+
+    assert status.startswith("failed:")
+    assert "does not name it" in status
+
+
+def test_the_main_name_comes_from_the_one_resolver(tmp_path, monkeypatch):
+    hscc = tmp_path / "hscc"
+    hscc.mkdir()
+    (hscc / "main-orchestrator.json").write_text(
+        json.dumps({"name": "ops"}), encoding="utf-8")
+    monkeypatch.delenv("MAIN_ORCH_NAME", raising=False)
+
+    assert io.main_name(hscc_dir=str(hscc)) == "ops"

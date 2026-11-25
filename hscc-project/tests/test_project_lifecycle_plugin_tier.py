@@ -94,6 +94,13 @@ class RealWriterRunner(Runner):
         if cmd[:2] == ["hermes", "profile"]:
             return super().__call__(cmd, cwd)      # parent records the call
         self.calls.append(list(cmd))
+        # Step 6a now also asks the real installer for orchpad. Its pip step is
+        # deliberately NOT run from this suite (the card's read-only rule), so
+        # answer that one command with the installer's own report shape.
+        if any(str(part).endswith("install_orchpad.py") for part in cmd):
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps({"ok": True, "status": "already"}),
+                stderr="")
         return lifecycle._default_run(cmd, cwd)
 
 

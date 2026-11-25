@@ -431,6 +431,8 @@ def cmd_orch_all(argv):
                 "session": result["session"],
                 "board": result["board"],
                 "changed": result["changed"],
+                **({"orchpad": result["orchpad"]}
+                   if result.get("orchpad") is not None else {}),
             })
         except orchestrators.OrchestratorError as e:
             failures.append({"project": project, "error": str(e)})

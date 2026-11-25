@@ -373,6 +373,8 @@ def handle_create(server, ctx, query, body):
             orch_step["detail"] += " (created)"
         else:
             orch_step["detail"] += " (already existed)"
+        if orch.get("orchpad"):
+            orch_step["detail"] += f", orchpad: {orch['orchpad']}"
     except ApiError:
         # t_c443c001: a profile-root REFUSAL (503) is a refusal of the whole
         # request, not a step that half-succeeded. Swallowing it here would
