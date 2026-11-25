@@ -78,8 +78,11 @@ if _PLUGIN_DIR not in sys.path:
 # rolelib.py:75-95 (t_d39c720e). So the candidate root is checked against the login
 # home and refused, not trusted.
 
-#: Location pins this leg must not inherit. Measured, block above.
-SEALED_ENV_KEYS = ("HSCC_REGISTRY", "HERMES_HOME")
+#: Location pins this leg must not inherit. Measured, block above. The venv
+#: override is here for the orchpad repair path: a developer shell that exports
+#: ``HSCC_HERMES_PYTHON`` would otherwise let a profile test pip-install into
+#: that real venv, which the read-only test posture forbids.
+SEALED_ENV_KEYS = ("HSCC_REGISTRY", "HERMES_HOME", "HSCC_HERMES_PYTHON")
 
 #: The login home BEFORE the seal. Kept so the guard can name what moved, and so
 #: the containment check below has a pre-seal value to compare against.

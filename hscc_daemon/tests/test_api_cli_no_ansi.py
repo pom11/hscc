@@ -9,10 +9,25 @@ byte-exact machine contract — the QR payload built by ``_build_qr_payload``
 for the iOS scanner — is NEVER altered by theming, and that no literal
 ``[ok]`` / ``[warn]`` / ``[error]`` markup ever leaks to a piped consumer.
 
-Only presentation (and the QR wire payload) is exercised here; the 
+Only presentation (and the QR wire payload) is exercised here; the
 start/stop/status lifecycle logic and the never-print-the-token invariant are
 covered by test_api_cli.py / test_unified_cli.py. No real API server is bound
 and no real background process is spawned.
+
+No real ``launchctl`` is ever EXECED anywhere in this file: the fence in
+``launchd_status`` refuses to ask inside a pytest process, so an unsheamed verb
+gets a visible refusal row rather than a fork.
+
+What is NOT hermetic, stated plainly because it is the sentence the next reader
+acts on: only the THREE lifecycle cases below declare a supervisor posture
+(``test_status_not_running_no_ansi``, ``test_stop_no_ansi``,
+``test_stop_running_no_ansi`` — see ``_supervisor_has_no_unit``). The other four
+that drive these verbs — ``test_no_raw_markup_leak``, ``test_status_no_ansi_with_qr``,
+``test_status_running_no_ansi``, ``test_status_stale_pid_no_ansi`` — still call them
+unsheamed, and ``_launchd_matters()`` stats the operator's real
+``~/Library/LaunchAgents/com.hscc.api.plist`` for each. They stay green only
+because the fence answers and their assertions never read a supervisor row.
+Residual tracked in t_6c4c17fc; do not copy the unsheamed shape into a new case.
 """
 
 import io
@@ -86,15 +101,121 @@ def no_fork(monkeypatch):
     monkeypatch.setattr(daemon_ops_mod, "save_pid", lambda pid_file: None)
 
 
+# ── the supervisor seam ─────────────────────────────────────────────────────
+#
+# `status` and `stop` ask the supervisor who owns the API before they answer
+# (`_launchd_matters()` → `launchd_status()`), and that read is AMBIENT. The gate
+# opens on the operator's real `~/Library/LaunchAgents/com.hscc.api.plist`, so on
+# any box where the unit was ever installed — a workstation, and the box the
+# merge-queue gate runs on — it opened inside every case in this file. The
+# t_8bf34130 fence then refused to answer inside a pytest process, and the three
+# lifecycle cases below rendered whatever the host happened to be doing instead
+# of what they claim: `status` printed "state unknown (supervisor not
+# consulted)" where it asserts "not running", and `stop` failed CLOSED with rc 1
+# where it asserts its normal report. (Both directions are the same defect: an
+# assertion that holds only because no API happens to be running reads the host
+# just as hard as one that fails because one is.)
+#
+# The fence itself is the feature and is NOT loosened here — a suite that forgets
+# the seam must see the refusal, pinned in
+# test_api_cli_unverifiable_supervisor_row_t_8bf34130.py and
+# test_api_cli_launchd.py::test_probe_refuses_to_run_inside_pytest_without_a_seam.
+# What these cases lacked is the seam they were already being told to inject.
+# Each now DECLARES the posture it draws — macOS, a unit file installed, no job
+# loaded — which is exactly the unsupervised world those three verbs report and
+# SIGTERM about, and pins the two ambient inputs that decide whether the seam is
+# consulted at all. Same shape as test_api_cli_launchd.py::_run_status.
+#
+# So the verdict of THESE THREE cases no longer moves with the host: one canned
+# `launchctl print` answer is the fact under test, and the cases that want the
+# supervised (bootout) path are the ones in test_api_cli_launchd.py that declare
+# it. The four status/markup cases that drive these verbs without a seam are the
+# residual named in the module docstring (t_6c4c17fc) — they are green on the
+# fence's refusal, not on a declared posture.
+
+#: Measured on this box: `launchctl print gui/<uid>/com.hscc.api` for a job that
+#: is not loaded answers rc 113 with `Bad request.` plus a could-not-find-service
+#: line (and `_launchctl_run` folds stderr into the returned text). `launchd_status`
+#: reads ANY rc!=0 as an ANSWER — available, not loaded — never as a fault. Kept as
+#: data so the posture is readable rather than buried in a lambda. The same value is
+#: pinned at the probe level in test_api_cli_launchd.py::
+#: test_probe_not_loaded_is_an_answer_not_a_fault; rc 3 is bootout's already-unloaded
+#: answer, not print's.
+LAUNCHCTL_NO_JOB = (
+    113,
+    'Bad request.\nCould not find service "com.hscc.api" '
+    "in domain for user gui: 501",
+)
+
+
+class _Probe:
+    """A canned `launchctl` runner. Records every argv it was asked to run."""
+
+    def __init__(self, rc, out):
+        self.rc = rc
+        self.out = out
+        self.calls = []
+
+    def __call__(self, argv, timeout=10):
+        self.calls.append([str(a) for a in argv])
+        return self.rc, self.out
+
+
+def _supervisor_has_no_unit(monkeypatch, tmp_path):
+    """Declare: unit file installed, no launchd job loaded. Returns the probe.
+
+    Pins every input the supervisor question can turn on:
+      * `sys.platform` — the gate's first test, so the seam is consulted on the
+        same code path on every host instead of only on macOS;
+      * `api_launchd.API_PLIST_PATH` — a unit file on disk is what makes asking
+        launchd worth a fork, and pinning it keeps the case from inheriting the
+        host's real LaunchAgents directory;
+      * `_run_probe` — the canned answer, so `launchctl` is never execed.
+
+    The original `launchd_status` is captured BEFORE the patch: the obvious
+    `lambda **kw: api_cli_mod.launchd_status(_run_probe=probe)` self-recurses,
+    because by the time the lambda runs the attribute IS the lambda.
+    """
+    from hscc_daemon import api_launchd
+
+    monkeypatch.setattr(api_cli_mod.sys, "platform", "darwin")
+    plist = tmp_path / "com.hscc.api.plist"
+    plist.write_text("declared by the case; never read by the verbs\n")
+    monkeypatch.setattr(api_launchd, "API_PLIST_PATH", str(plist))
+    probe = _Probe(*LAUNCHCTL_NO_JOB)
+    real = api_cli_mod.launchd_status
+    monkeypatch.setattr(api_cli_mod, "launchd_status",
+                        lambda **kw: real(_run_probe=probe))
+    return probe
+
+
+#: The verbs may ask launchd exactly once, and only ever the read-only `print`.
+#: An empty list would mean the seam was never consulted (the ambient bug back);
+#: a `bootout` entry would mean the case silently moved onto the supervised path.
+PRINT_ONLY = ["print"]
+
+
 # ── status ──────────────────────────────────────────────────────────────────
 
-def test_status_not_running_no_ansi(api_env):
+def test_status_not_running_no_ansi(api_env, monkeypatch, tmp_path):
+    # Declared posture (see the supervisor seam block): no pid file AND no loaded
+    # unit — the only box on which "not running" is a true statement. Asking the
+    # host instead would make this case pass on a machine with no API and fail on
+    # one with an API, which is the same ambient bug in two directions.
+    probe = _supervisor_has_no_unit(monkeypatch, tmp_path)
     out, rc = _capture(cmd_api, ["status", "--no-qr"])
     assert rc == 0
     assert NO_ANSI not in out, f"status leaked ANSI: {out!r}"
     assert "not running" in out
+    assert "launchd probe refused" not in out  # the seam answered, not the fence
+    # No supervisor row at all: launchd was ASKED (see the call count below) and
+    # answered "no such job". Without this line the case would still pass on a
+    # box where the unit IS loaded — launchd's own "state = not running" contains
+    # the phrase above, which is how a weak assertion re-opens the ambient hole.
+    assert "Supervisor:" not in out
     assert "╭─ api" in out  # themed status panel present (box degrades to text)
     assert "127.0.0.1:8787" in out  # host:port still reported
+    assert [c[1] for c in probe.calls] == PRINT_ONLY
 
 
 def test_status_running_no_ansi(api_env, monkeypatch, tmp_path):
@@ -157,16 +278,26 @@ def test_start_no_ansi_with_qr(api_env, no_fork):
 
 # ── stop ────────────────────────────────────────────────────────────────────
 
-def test_stop_no_ansi(api_env):
+def test_stop_no_ansi(api_env, monkeypatch, tmp_path):
+    # Declared posture: nothing supervises the API and nothing is running, so the
+    # verb's report — not a fail-closed refusal — is what this case renders.
+    probe = _supervisor_has_no_unit(monkeypatch, tmp_path)
     out, rc = _capture(cmd_api, ["stop"])
     assert rc == 0
     assert NO_ANSI not in out, f"stop leaked ANSI: {out!r}"
     assert "HSCC API is not running" in out
+    assert [c[1] for c in probe.calls] == PRINT_ONLY
 
 
-def test_stop_running_no_ansi(api_env, monkeypatch):
+def test_stop_running_no_ansi(api_env, monkeypatch, tmp_path):
     import hscc_daemon.daemon_ops as daemon_ops_mod
 
+    # Declared posture: a unit file is installed but launchd has no job loaded,
+    # so nobody supervises this pid and SIGTERM is the right verb (the bootout
+    # path is declared and pinned in test_api_cli_launchd.py). Without the seam
+    # the verb fails CLOSED on a refusal — rc 1 and an error on stderr — and this
+    # case would be asserting the host's supervisor state, not its rendering.
+    probe = _supervisor_has_no_unit(monkeypatch, tmp_path)
     # Simulate a live API process without sending real signals: get_pid
     # reports a running pid, and the first liveness probe during the wait loop
     # reports the process is gone (so it hits the "stopped" path, not SIGKILL).
@@ -186,6 +317,8 @@ def test_stop_running_no_ansi(api_env, monkeypatch):
     assert NO_ANSI not in out, f"stop leaked ANSI: {out!r}"
     assert "Stopping HSCC API" in out
     assert "HSCC API stopped (PID 4242)" in out
+    # Signalled, not booted out: one read-only supervisor question.
+    assert [c[1] for c in probe.calls] == PRINT_ONLY
 
 
 # ── help ────────────────────────────────────────────────────────────────────

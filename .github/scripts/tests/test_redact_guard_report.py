@@ -47,6 +47,10 @@ def _addr(*parts):
 
 REAL_LAN = _addr("192", ".168.88.244")
 REAL_TAILNET = _addr("100.64", ".55.7")
+# A machine hostname-shaped fixture on a reserved TLD, assembled so this tracked
+# file does not carry the literal (t_68ccc902). The real class is a macOS
+# LocalHostName; the redactor must drop it because it loads only FORBIDDEN.
+REAL_HOSTNAME = "Alices-" + "Mac-Studio.invalid"
 LAN_PLACEHOLDER = "10.0.0.x"
 TAILNET_PLACEHOLDER = "100.64.0.1"
 
@@ -84,6 +88,20 @@ def test_redact_handles_colon_bearing_path():
     out = redactor.redact(line, pattern)
     assert REAL_LAN not in out
     assert "docs/we:ird.md:3" in out
+
+
+def test_redact_drops_a_machine_hostname_like_any_other_identifier():
+    """t_68ccc902: the new class must not reach the public log.
+
+    The redactor loads the guard's own FORBIDDEN and nothing else, so this is the
+    redactor-side proof that a hostname offender is masked, position retained.
+    """
+    pattern = redactor.load_pattern()
+    line = f"  docs/audits/x.md:4: {REAL_HOSTNAME} (macOS)"
+    out = redactor.redact(line, pattern)
+    assert "docs/audits/x.md:4" in out
+    assert REAL_HOSTNAME not in out
+    assert REAL_HOSTNAME.split(".")[0] not in out
 
 
 def test_pattern_comes_from_the_shipped_guard():

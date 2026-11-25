@@ -470,6 +470,31 @@ else
   fi
 fi
 
+# orchpad is the orchestrator's own pad (follow-ups/ideas/waiting-on), not a
+# worker surface: operator rule 2026-11-23 keeps cluster/control surfaces on the
+# main orchestrator and the per-project `<project>-orch` profiles. The package
+# is pinned to a git tag and installed into the Hermes venv; its own console
+# script `orchpad-hermes` installs the plugin, profile by profile. This runs
+# AFTER orch-all so every orchestrator home exists. Non-fatal: the pad is an
+# orchestrator convenience, and `hscc doctor` reports any profile left without
+# it.
+hdr "Install: orchpad (orchestrator pads)"
+if $SKIP_ROLES; then warn "skipped"
+elif $DRY_RUN; then
+  plan "orchpad: install pinned package into the Hermes venv + orchpad-hermes plugin, and enable 'orchpad' in each orchestrator profile's own config.yaml plugins.enabled, for ${MAIN_ORCH_NAME:-general} and every <project>-orch profile (install_orchpad.py --apply)"
+elif OP_JSON=$(HERMES_HOME="$HERMES_HOME" HSCC_DIR="$HSCC_DIR" MAIN_ORCH_NAME="$MAIN_ORCH_NAME" \
+    "$PYBIN" "$BOOT_DIR/install_orchpad.py" --apply --python "$PYBIN" \
+    --hermes-home "$HERMES_HOME" --main-name "$MAIN_ORCH_NAME" 2>&1); then
+  OP_ACTION=$(printf '%s' "$OP_JSON" | "$PYBIN" -c "
+import sys, json
+d = json.load(sys.stdin)
+print(d.get('action','unknown'))
+" 2>/dev/null || echo unknown)
+  ok "orchpad installed on orchestrator profiles ($OP_ACTION)"
+else
+  warn "orchpad install reported issues — orchestrator pads unavailable: $OP_JSON"
+fi
+
 # The main orchestrator's board (M3, t_7b55db57): create it by the stored name
 # (default `general`) and make it the kanban CURRENT board, so cards created
 # without an explicit board= land there instead of on whichever project board

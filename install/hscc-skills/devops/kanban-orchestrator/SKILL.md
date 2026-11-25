@@ -126,6 +126,8 @@ Decide from what you read, not from the intent that prompted the card:
 
 That is not decoration — it is the worker's drift baseline. Without it the worker has no way to tell whether the card's premise still holds, and every worker so far had to re-derive it from scratch or trust a dead instruction.
 
+**When the project's merge queue gates the PR, review has a defined shape and two of its verdicts are traps.** `references/reviewing-queue-gated-prs.md` is the playbook: the **head-moved discriminator** (when the queue logs `head moved from the pushed <sha>`, compare that sha with `gh pr view <N> --json headRefOid` — equal means the release was spurious, because the queue rebases PRs itself and GitHub serves a stale head for a while after its own push; only a *third* sha is a genuine foreign push, so do not tell a lane it pushed), and **a doctor row's real seam** (`hscc-cluster/tests/test_doctor_tool.py::TestReadOnly::test_the_read_writes_nothing_anywhere` spawns the real door, so what matters is what the row *writes* and *execs* and whether `doctor_rows.under_pytest()` refuses before any exec — the row *enumeration* in that same file builds synthetic `_row()`/`_payload()` fixtures, so needing no change there is insulation, not corroboration). It also states why running the full suite locally to review a queue-on PR is the wrong move: CI and the queue's own gate own the full suite, and a parallel local run feeds the load-flake class that bounces gates.
+
 ### Stacked PRs: prevent the ghost, then test supersession correctly
 
 **Merge stacked PRs strictly bottom-up.** A worker that bases PR B on PR A's *open* branch makes A's

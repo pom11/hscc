@@ -2399,6 +2399,44 @@ def _refused_process_posture_check() -> dict:
                    "must never read ~/Library/LaunchAgents or ask launchd."}
 
 
+_ORCHPAD_CHECK_NAME = "orchpad plugin on orchestrator profiles"
+
+
+def _load_doctor_orchpad():
+    """Import ``hscc-bootstrap/doctor_orchpad.py`` for the t_2d87d94d row.
+
+    Same rule as the other feature rows: the verdict lives with the feature, and
+    a module that cannot be imported is UNVERIFIABLE rather than dropped.
+    """
+    try:
+        import doctor_orchpad
+        return doctor_orchpad
+    except ImportError:
+        return None
+
+
+def _refused_orchpad_check() -> dict:
+    """In-suite stand-in for the orchpad check when no seam was injected.
+
+    Its real target is the operator's live ``~/.hermes`` profile tree; an
+    uninjected suite must never read it. Wording is delegated to the feature
+    module so doctor and the check cannot state two different refusals.
+    """
+    mod = _load_doctor_orchpad()
+    refused_hook = getattr(mod, "refused", None)
+    if callable(refused_hook):
+        verdict = refused_hook()
+        if isinstance(verdict, dict):
+            return verdict
+    return {"name": _ORCHPAD_CHECK_NAME, "ok": False, "fatal": False,
+            "detail": "orchpad check refused inside a pytest process — "
+                      "inject _orchpad_check",
+            "fix": "Call doctor_orchpad.doctor_check(hermes_home=<tmp fake "
+                   "home>, main_name=...), or pass "
+                   "_orchpad_check=lambda: {...}; a suite must never read the "
+                   "operator's live ~/.hermes."}
+
+
 # ---------------------------------------------------------------------------
 # FEATURE ROW REGISTRY (t_32a06db9)
 #
@@ -2693,6 +2731,26 @@ FEATURE_CHECK_ROWS: List["doctor_rows.FeatureCheckRow"] = [
         fallback_name="_PROCESS_POSTURE_CHECK_NAME",
         missing_detail="hscc-bootstrap/doctor_process_posture.py not importable "
                        "— the scheduling posture of the installed daemon job "
+                       "cannot be verified",
+        missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
+                    "(re-run bootstrap)."),
+    # t_2d87d94d: bootstrap installs orchpad into the Hermes venv and its
+    # plugin on the main orchestrator plus every ``<project>-orch`` only
+    # (cluster/control surfaces are main-orch/orch, operator 2026-11-23). A
+    # profile created after bootstrap, or a plugin dir removed by hand, leaves
+    # an orchestrator without its pad and nothing else notices. WARN, never
+    # fatal: doctor is Stage-1 and the pad is an orchestrator convenience.
+    # BOTH contexts, each with a writer that honours it: hermes_home is the
+    # profile tree bootstrap writes (the budget-hook precedent), and hscc_dir
+    # is main_orch's relocation seam for the stored main-orchestrator name.
+    doctor_rows.FeatureCheckRow(
+        key="orchpad", seam_kwarg="_orchpad_check",
+        row_kwargs=("hermes_home", "hscc_dir"),
+        loader="_load_doctor_orchpad",
+        refusal="_refused_orchpad_check",
+        fallback_name="_ORCHPAD_CHECK_NAME",
+        missing_detail="hscc-bootstrap/doctor_orchpad.py not importable — "
+                       "orchestrator profiles missing the orchpad plugin "
                        "cannot be verified",
         missing_fix="Deploy the hscc-bootstrap plugin next to the doctor "
                     "(re-run bootstrap)."),
