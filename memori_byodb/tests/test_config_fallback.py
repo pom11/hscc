@@ -19,7 +19,7 @@ import json
 from memori_byodb import MemoriBYODBMProvider, _load_config, _DEFAULT_HOME
 
 
-def _write_config(home, *, entity_id="desac_hermes"):
+def _write_config(home, *, entity_id="hermes_role"):
     home.mkdir(parents=True, exist_ok=True)
     (home / "memori_byodb.json").write_text(
         json.dumps({"entityId": entity_id, "projectId": "cluster",
@@ -32,7 +32,7 @@ def _write_config(home, *, entity_id="desac_hermes"):
 def test_load_config_falls_back_to_shared_default_home(tmp_path, monkeypatch):
     """A profile home with no config still resolves the shared default config."""
     default_home = tmp_path / "hermes"  # stands in for ~/.hermes
-    _write_config(default_home, entity_id="desac_hermes")
+    _write_config(default_home, entity_id="hermes_role")
     monkeypatch.setattr("memori_byodb._DEFAULT_HOME", default_home)
 
     profile_home = default_home / "profiles" / "hscc-orch"
@@ -40,7 +40,7 @@ def test_load_config_falls_back_to_shared_default_home(tmp_path, monkeypatch):
 
     cfg = _load_config(profile_home)
     assert cfg is not None
-    assert cfg.entity_id == "desac_hermes"
+    assert cfg.entity_id == "hermes_role"
 
 
 def test_load_config_prefers_profile_home_when_present(tmp_path, monkeypatch):
@@ -71,7 +71,7 @@ def test_initialize_succeeds_for_profile_home(tmp_path, monkeypatch):
     used to raise RuntimeError -> provider never activated). Uses a fake client
     so no SQLite/SDK glue runs."""
     default_home = tmp_path / "hermes"
-    _write_config(default_home, entity_id="desac_hermes")
+    _write_config(default_home, entity_id="hermes_role")
     monkeypatch.setattr("memori_byodb._DEFAULT_HOME", default_home)
 
     captured = {}
@@ -85,5 +85,5 @@ def test_initialize_succeeds_for_profile_home(tmp_path, monkeypatch):
     provider = MemoriBYODBMProvider()
     provider.initialize("sess-1", hermes_home=str(default_home / "profiles" / "hscc-orch"))
     # The shared config was resolved -> the client was constructed from it.
-    assert captured["entity_id"] == "desac_hermes"
+    assert captured["entity_id"] == "hermes_role"
     assert provider._project_id  # resolved from config projectId

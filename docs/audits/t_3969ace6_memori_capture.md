@@ -46,7 +46,7 @@ Newest `memori_conversation` row (verbatim):
    entity_fact_mention, session, process — are frozen at **2026-06-13 02:50:29**
    (the message/fact/mention rows all carry 2026-06-13; process/session too).
 2. There is exactly ONE row written after 06-13: `memori_entity` id=3
-   `desac_hermes`, date_created **2026-08-14 06:41:28**. It is an **orphan** —
+   `hermes_role`, date_created **2026-08-14 06:41:28**. It is an **orphan** —
    it has no session, no conversation, no entity_fact. (Verified: entity 3 has
    no rows in memori_session; sessions 1–3 all belong to entities 1–2.)
 3. The 06-13 data is entirely **cron-generated**: all three conversations have
@@ -54,7 +54,7 @@ Newest `memori_conversation` row (verbatim):
    "Extracted 13 notable tweets…". They used the OLD entity IDs
    (`twitter-autosave` entity 1 + process `twitter-autosave-cron`, and
    `default` entity 2). The current interactive hermes sessions (entity
-   `desac_hermes`) have produced **zero** rows.
+   `hermes_role`) have produced **zero** rows.
 
 So the operator's claim is confirmed: memori_byodb has captured nothing since
 2026-06-13 at the conversation level, and the only later write is a lone orphan
@@ -69,7 +69,7 @@ entity row.
   returns a config only if that file exists and has `entityId`). Current file
   (mtime 2026-08-12 11:47):
   ```json
-  { "entityId": "desac_hermes", "projectId": "hermes_cluster",
+  { "entityId": "hermes_role", "projectId": "hermes_cluster",
     "processId": "hermes_gateway", "dbPath": "~/.hermes/memori_byodb.db" }
   ```
 - It is configured on many profiles (`hscc-orch`, `flightdeck-orch`,
@@ -126,9 +126,9 @@ is never reached.
 
 Note also: inside `_schedule_entity_writes`, `driver.entity.create(entity_id)`
 (extension line 223) runs BEFORE line 227, and is idempotent via the unique
-constraint on `external_id`. That exactly explains the one orphan `desac_hermes`
+constraint on `external_id`. That exactly explains the one orphan `hermes_role`
 entity row created on 2026-08-14 (first augmentation after the config switched
-entityId to `desac_hermes`): the entity row is created, then `.entity` raises,
+entityId to `hermes_role`): the entity row is created, then `.entity` raises,
 so no session/conversation/facts follow.
 
 ### The plugin is genuinely capturing (invoking augmentation) — and failing
@@ -183,9 +183,9 @@ attempts.
 | 2026-06-11 | `memori_byodb/local_augmentation.py` introduced (git 6498763, 94e7b3f) — list-shaped parse output from the start |
 | 2026-06-13 02:48–02:50 | **Last successful captures** — all three conversations are `Twitter autosave cron - 2026-06-13`, entities `twitter-autosave`/`default`, process `twitter-autosave-cron` |
 | 2026-06-13 → ~08-12 | Capture gap: `memori_byodb.json` absent/invalid → `_load_config` returned None → logs show `Memory provider 'memori_byodb' loaded but no provider instance found` all through early August (agent.log.3) |
-| 2026-08-12 11:47 | `memori_byodb.json` written with `entityId: desac_hermes` |
+| 2026-08-12 11:47 | `memori_byodb.json` written with `entityId: hermes_role` |
 | 2026-08-12 15:58 | provider first active with the local augmentation (`Local augmentation initialized …` agent.log.3:21727) |
-| 2026-08-14 06:41 | first augmentation after config → `driver.entity.create('desac_hermes')` creates the orphan entity row, then `.entity` raises → no session/conversation/facts |
+| 2026-08-14 06:41 | first augmentation after config → `driver.entity.create('hermes_role')` creates the orphan entity row, then `.entity` raises → no session/conversation/facts |
 | 2026-08-23 → 08-27 | 25 × `'list' object has no attribute 'entity'` |
 | 2026-09-17 01:41:11 | last augmentation error == DB mtime (final write attempt) |
 | 2026-09-17 02:23 | last observed provider activation; none since |
@@ -197,7 +197,7 @@ introduced (06-11) with list-shaped parse output, the write path has been
 broken; the reason capture appeared to "work" on 06-13 is that those rows were
 written by whatever augmentation ran at that moment (the logs from that window
 are rotated out), and — critically — the *current* config/entity
-(`desac_hermes`) has never once produced a successful capture. The gap
+(`hermes_role`) has never once produced a successful capture. The gap
 06-13→08-12 is because the provider wasn't configured/active; from 08-12
 onward it is configured and active but **fails every augmentation**.
 
@@ -213,7 +213,7 @@ enqueued and reaching the fact-write stage), but every augmentation fails with
 `local_augmentation.py` hands the SDK a `list` of plain dicts where the SDK
 requires a `Memories` object with `.entity.facts`. The failure point precedes
 `_schedule_conversation_writes`, so no conversation/message/fact rows are ever
-written under the current `desac_hermes` configuration.
+written under the current `hermes_role` configuration.
 
 **Capture is not tied to `memori_daemon`.** `memori_byodb` is fully local
 (SQLite + local LLM augmentation) and needs only: config file present, provider
@@ -228,7 +228,7 @@ silence.
 Per the operator's rule, this card only measures and root-causes; the fix is
 spawned as a separate card. Recommended follow-up:
 
-- **Card**: `fix(memori_byodb): local augmentation writes list where SDK expects Memories` — the local augmentation must construct the SDK's `Memories` / entity-facts data structure (or write entity-facts + conversation rows directly through the driver/manager API) instead of passing the raw `list` from `_parse_response` into `_schedule_entity_writes`. Until then, every capture for `entity_id=desac_hermes` raises at `_augmentation.py:227` and nothing is persisted.
+- **Card**: `fix(memori_byodb): local augmentation writes list where SDK expects Memories` — the local augmentation must construct the SDK's `Memories` / entity-facts data structure (or write entity-facts + conversation rows directly through the driver/manager API) instead of passing the raw `list` from `_parse_response` into `_schedule_entity_writes`. Until then, every capture for `entity_id=hermes_role` raises at `_augmentation.py:227` and nothing is persisted.
 - Proposed fix shape (for the child card to design/implement): in `process()`, build a `Memories` object whose `.entity.facts` / `.entity.fact_embeddings` reflect the parsed facts, so `_schedule_entity_writes` / `_schedule_conversation_writes` operate on the expected shape — OR bypass the SDK `_schedule_*` helpers and write the rows directly via the driver.
 - Reference: `memori_byodb/local_augmentation.py:91` (call site), memori SDK `_augmentation.py:217-261` (expected `Memories` contract), `memori_byodb/_client.py:141-174` (capture_turn enqueue+wait).
 

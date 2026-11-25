@@ -84,7 +84,7 @@ retired is their *scheduling*.
 These are the exact, verified commands (2026-11-01) — run them, do not
 paraphrase them. **The entries are Hermes cron jobs in the `default` profile's
 store, not OS crontab lines**: `crontab -l` on the dispatcher host returns `no
-crontab for desac`, so checking the system crontab proves nothing. (Audit B
+crontab for <user>`, so checking the system crontab proves nothing. (Audit B
 filed this gap as "cron entries"; the table above records the accurate store.)
 
 ```bash

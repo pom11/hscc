@@ -20,7 +20,7 @@ sqlite3 ~/.hermes/memori_byodb.db \
 ```
 → newest = id 5/6, 2026-06-13 02:50:29, Twitter autosave cron. Counts:
 memori_conversation=3, conversation_message=6, entity=3, entity_fact=25.
-All capture-path rows frozen at 2026-06-13. One orphan `desac_hermes` entity
+All capture-path rows frozen at 2026-06-13. One orphan `hermes_role` entity
 row (id 3, 2026-08-14) created before the SDK write failed.
 
 ## Root cause (TWO independent gaps)
