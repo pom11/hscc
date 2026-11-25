@@ -757,17 +757,38 @@ if [ "$PAR" -ge 2 ] && [ "${#LEGS[@]}" -ge 2 ]; then
   if [ "$_sweep_floor" -gt 0 ]; then
     _sweep_now="$(date +%s)"
     _swept=0
+    # Whose dirs may we take? Probed, never asserted — see the helper for the
+    # mount-ownership trap that made the first version delete nothing on a Linux
+    # runner while passing every test that expects a dir to survive.
+    # shellcheck source=leg_tmp_sweep_owner.sh
+    . "$ROOT/scripts/leg_tmp_sweep_owner.sh" 2>/dev/null || true
+    _sweep_uid="$(type _leg_tmp_sweep_owner >/dev/null 2>&1 && _leg_tmp_sweep_owner || true)"
+    case "$_sweep_uid" in ''|*[!0-9]*) _sweep_uid="" ;; esac
+    # The mtime format is probed for the same reason: GNU `stat -f %m` prints a
+    # filesystem-info block and exits 0, so the `BSD || GNU` chain this replaced
+    # fed prose to the numeric guard and skipped every candidate there too.
+    _age_fmt=""
+    for _f in '-c %Y' '-f %m'; do
+      if [ "$(stat $_f "$ROOT" 2>/dev/null)" -gt 0 ] 2>/dev/null; then _age_fmt="$_f"; break; fi
+    done
     # A glob, not `find`: `/tmp` is itself a symlink on macOS, so `find /tmp`
     # resolves to the link and never descends (measured twice — the find form
-    # sweeps nothing here). The three guards are the whole blast radius: skip
-    # symlinks (`-d` is true through one), skip another account's dir, and skip
-    # anything whose age cannot be read.
+    # sweeps nothing here). The guards are the whole blast radius: skip symlinks
+    # (`-d` is true through one), skip a namespace we cannot write, skip another
+    # account's dir, and skip anything whose age cannot be read. Every guard that
+    # rejects the ONLY candidate makes the sweep a silent no-op, which is why the
+    # two positive sweep tests are the gate on this block, not a nicety.
     for _d in /tmp/hscc-legs-*; do
       [ -d "$_d" ] || continue
+      # `/tmp/hscc-legs-foo/` and `/tmp/hscc-legs-foo` are one dir; take each
+      # once, and the un-expanded glob (no match) fails the -d test above.
+      case "$_d" in */) continue ;; esac
       [ -L "$_d" ] && continue
-      _u="$(stat -f %u "$_d" 2>/dev/null || stat -c %u "$_d" 2>/dev/null || true)"
-      [ "$_u" = "$(id -u)" ] || continue
-      _m="$(stat -f %m "$_d" 2>/dev/null || stat -c %Y "$_d" 2>/dev/null || true)"
+      [ -n "$_sweep_uid" ] || continue
+      _u="$(stat $_leg_tmp_uid_fmt "$_d" 2>/dev/null || true)"
+      [ "$_u" = "$_sweep_uid" ] || continue
+      [ -n "$_age_fmt" ] || continue
+      _m="$(stat $_age_fmt "$_d" 2>/dev/null || true)"
       case "$_m" in ''|*[!0-9]*) continue ;; esac
       if [ $(( _sweep_now - _m )) -ge "$_sweep_floor" ]; then
         rm -rf -- "$_d" 2>/dev/null && _swept=$((_swept+1))
