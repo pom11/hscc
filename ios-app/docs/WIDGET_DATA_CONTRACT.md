@@ -91,11 +91,17 @@ not make "≤ 2 per surface per refresh" tight, it would make it unanswerable �
 which is the reason `t_447cc7fc` retired one of the two routes rather than
 keeping both.
 
-No wire byte figure for this route appears anywhere in this file, and none may
-be quoted from a card or a PR body until §9's re-measure runs: the ≤ 16 KB soft
-ceiling above is therefore **unverified** for history, and the only case that
-could breach it is the widest one (`window=7d`, `node=all`, the full
-`metrics=` list), which is what that measurement must take.
+**Measured, and this ceiling does NOT hold for history** (`t_25fcf502`,
+2026-11-23, against the deployed `hscc-api` 2.17.4 — see §5.6 for the table).
+Every window breaches it, including the narrowest request the route can make:
+`window=7d`/`node=all` with the full field list is **3,421,184 B** (209× the
+figure below) and one node asking one metric for 7 d is still **119,531 B**
+(7.3×). The saving `metrics=` was supposed to provide measures **44 %**, not the
+~99.5 % this budget needs, because the cost is in the *rows*, not the columns
+(§5.6). The 16 KB figure above is **deliberately unchanged** — a ceiling edited
+to make a measured payload pass is not a ceiling — and the server-side remedy is
+carded as `t_d732d50d`. Until that lands, no history surface may ship against
+this budget believing it fits.
 
 ## 3. The table (the input every widget card reads)
 
@@ -397,15 +403,76 @@ is the node's **LAN address** and `sample.sparkrun_job_names` can carry
 workload names — neither may be persisted or rendered (§7). Re-measure this row
 against a powered-up fleet (see §1).
 
-### 5.6 history (the graph surface) — verdict `new surface`, **no server change**, **1 request**
+### 5.6 history (the graph surface) — verdict `new surface`, **1 request**, **server change IS needed for the size** (`t_d732d50d`)
 
-Registered here by `t_08b1e1a5`. This row is **not** part of §1's capture: as of
-2026-11-19 the deployed build on the audit host answers `404 unknown route` for
-`GET /v1/cluster/history` (measured; `/v1/cluster/monitor` and
-`/v1/cluster/status` answer 200 on the same process), so this row carries **no
-measured byte figure** and none may be invented for it until §9's re-measure
-runs. Everything below is read off the route's own payload and the projection
-that consumes it, never estimated.
+Registered here by `t_08b1e1a5`; **measured by `t_25fcf502` on 2026-11-23**
+against the deployed `hscc-api` **2.17.4** (Homebrew, launchd `com.hscc.api`),
+read-only `GET`s, token from `~/.hscc/api-token`, base derived at runtime from
+`hscc api status` and written to no file in this repo. This is *not* part of §1's
+2026-11-17 capture, which predates the route (it 404'd then; it answers 200 now).
+Wire bytes = decoded bytes on every row: the deployment sends no
+`Content-Encoding` even when `Accept-Encoding: gzip` is offered, so there is no
+compression credit to take here (§9).
+
+Fleet state during capture: 4 nodes + 4 engines reporting, recorder up since
+2026-11-19 ~23:51 (v2.16.0) = **3 d 20 h**, `~/.hscc/metrics/history.db`
+2.76 MB of a 10 MiB bound.
+
+| request (`node=all` unless noted) | tier | `resolution_s` | `source` | fields | rows host+eng | buckets served | **wire** | × 16 KiB |
+|---|---|---|---|---|---|---|---|---|
+| `window=7d` | 2 | 300 | `sqlite_store` | all 22 | 4,444 + 4,444 | **1,111 of 2,016** | **3,421,184** | 209× |
+| `window=7d` | 2 | 300 | `sqlite_store` | panel 8 | 4,444 + 4,444 | 1,111 of 2,016 | **1,898,713** | 116× |
+| `window=24h` | 1 | 60 | `sqlite_store` | all 22 | 5,756 + 5,749 | 1,439 of 1,440 | **4,361,820** | 266× |
+| `window=24h` | 1 | 60 | `sqlite_store` | panel 8 | 5,756 + 5,749 | 1,439 of 1,440 | 2,419,089 | 148× |
+| `window=6h` | 1 | 60 | `sqlite_store` | all 22 | 1,436 + 1,436 | 359 of 360 | 1,081,389 | 66× |
+| `window=6h` | 1 | 60 | `sqlite_store` | panel 8 | 1,436 + 1,436 | 359 of 360 | 600,304 | 37× |
+| `window=1h` | 1 | 60 | `sqlite_store` | all 22 | 236 + 236 | 59 of 60 | 180,185 | 11× |
+| `window=1h` | 1 | 60 | `sqlite_store` | panel 8 | 236 + 236 | 59 of 60 | 100,138 | 6.1× |
+| `window=15m` | 0 | 2 | **`recorder_ring_absent`** | all 19 | **0 + 0** | **0** | 1,253 | — empty |
+| `window=15m` | 0 | 2 | **`recorder_ring_absent`** | panel 8 | 0 + 0 | 0 | 1,081 | — empty |
+| **one node, one metric**, `window=7d` | 2 | 300 | `sqlite_store` | 1 | 1,112 + 0 | 1,112 of 2,016 | **119,531** | **7.3×** |
+| one node, panel 8, `window=7d` | 2 | 300 | `sqlite_store` | 8 | 1,112 + 1,112 | 1,112 | 474,354 | 29× |
+| all nodes, one metric, `window=7d` | 2 | 300 | `sqlite_store` | 1 | 4,448 + 0 | 1,112 | 475,818 | 29× |
+
+Two readings these numbers force, both stated rather than smoothed over:
+
+* **The 7 d figures are a lower bound, not "the 7 d size".** The store held
+  1,111 of 2,016 tier-2 buckets (55 %) because tiers roll up and never backfill,
+  so the recorder had been up 3 d 20 h of the 7 d it served. Scaled on the
+  measured per-bucket cost, a full store would serve ≈ **6.2 MB** (all fields) /
+  ≈ **3.4 MB** (panel 8) — arithmetic on the measured figures, not a new
+  measurement. Honest readiness for a full-width 7 d capture was 2026-11-26.
+* **`window=15m` is not a small payload, it is a refusal.** `source` is
+  `recorder_ring_absent` and `note` says the 2 s ring lives in the *daemon*
+  process, so the API cannot serve tier 0 at all: 1,253 B of caption and
+  **zero rows**. A surface that offers a 15 m range therefore draws nothing,
+  whatever its budget.
+
+**Why `metrics=` cannot fix this, measured.** A projected row costs ~107 B to
+carry **one** number:
+
+```
+{"tier":1,"ts":1795455360,"host":"10.0.0.x","cpu_temp_c":43.825926,"n":27,"error":null}
+```
+
+~80 B of that is per-row identity and bookkeeping — `tier`, `ts`, the node
+address string, `n`, `"error":null` — and engine rows additionally repeat a
+45-character `model` name in every row. Fitting the route's own raw
+`tier`+`since`/`until` axis at one node and one metric gives a 757 B envelope
+plus **+106.8 B per (node, bucket) row**, so 16 KiB is crossed at ~146 buckets =
+**12.2 h at tier 2**, for a single node and a single metric (measured: 49 buckets
+→ 6,000 B, 149 → 16,711 B). Each extra metric adds only ~13 B/row (150 buckets,
+one node: 1 metric 16,711 B, 8 metrics 64,396 B, 22 metrics 115,712 B). The
+projection drops *columns*; the ceiling is being spent by *rows*.
+
+So §2's ≤ 16 KB **does not hold at any window**, and there is no headroom to
+report: the largest compliant payload this route can produce at the widest window
+does not exist. The fix is a server change (`t_d732d50d`), and the three levers
+that measurement rules out — a mandatory `metrics=` list, a reduced default
+window, and plain truncation — are named there so nobody re-tries them.
+
+Everything below is read off the route's own payload and the projection that
+consumes it, never estimated.
 
 | what | the rule the surface must honour | where it is enforced |
 |---|---|---|
@@ -420,10 +487,12 @@ that consumes it, never estimated.
 | a failed read | keeps the surface's own last-known window and states its age — never zeros and never an empty chart | `WidgetData.read(using:lastKnown:_:)`, §7 |
 | raw rows in the container | forbidden, as everywhere: `hosts[].host` is a node address, `store.path` is a server path and is deliberately **undeclared** in the model so it can never be decoded, stored or rendered | §7, `ClusterHistoryStore` |
 
-This row needs no server change for the same reason §5.5 does not: the route
-already projects (`metrics=`), already states its own resolution, and already
-forwards its nulls untouched. What it needs is a surface that does not turn any
-of that into a zero.
+This row's **decoding** rules need no server change, for the reason §5.5 gives:
+the route already projects (`metrics=`), already states its own resolution, and
+already forwards its nulls untouched. What it needs on the client side is a
+surface that does not turn any of that into a zero. Its **size** needs a server
+change, which the measurement above established (`t_d732d50d`): the projection
+exists but cannot reach §2's budget, because the budget is spent on rows.
 
 ## 6. The compact endpoint — authorised, scoped to dataset 2
 
@@ -560,13 +629,16 @@ that fetched it. Rules:
   row-4 argument but not row 2 (`done` at 8.6 MB is ~300 KB gzipped — still not
   a widget payload), so it changes no verdict here. Filed as an observation for
   whoever next touches the API's HTTP layer.
-* **§5.6 has no wire measurement at all — measure it.** The audit host's
-  deployed build answers `404 unknown route` for `GET /v1/cluster/history`, so
-  no byte figure exists for that route anywhere in this file and §2's ≤ 16 KB
-  soft ceiling is **unverified** for it. The measurement has to take the worst
-  case — `window=7d`, `node=all`, the full `metrics=` list — on a build that
-  actually carries the route, and it must record the served `tier`,
-  `resolution_s` and the node/engine row counts beside the size: a 7 d figure
-  captured against an empty store proves nothing about the ceiling. Until then
-  no card may quote a payload size for history, including one that argues a
-  sparkline belongs on the cluster surface.
+* **§5.6 wire measurement — DONE by `t_25fcf502`, and the answer is a breach.**
+  Measured 2026-11-23 on the deployed `hscc-api` 2.17.4, all five windows × the
+  full and panel `metrics=` lists, plus the narrowest request the route can make;
+  the table, the served `tier`/`resolution_s`/`source` and the row/bucket counts
+  are in §5.6, so no card needs to re-measure to quote a size. §2's ≤ 16 KB
+  holds for **none** of them (119,531 B is the floor at 7 d, 4,361,820 B the
+  largest measured), and `metrics=` saves 44 % where ~99.5 % is needed. The
+  follow-up is therefore no longer "measure it" but **`t_d732d50d`**: give the
+  route a way to answer in bounded bytes. Two honesty caveats travel with those
+  numbers and must be repeated wherever they are quoted — the 7 d store was only
+  55 % filled (a full store is ≈ 1.8× the figures shown), and `window=15m`
+  returns **zero rows** from this process (`recorder_ring_absent`), so its
+  1,253 B is a caption, not a payload.
