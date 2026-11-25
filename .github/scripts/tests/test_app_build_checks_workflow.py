@@ -87,10 +87,22 @@ def test_the_heavy_compile_moved_to_its_own_macos_job():
 
 def test_both_pr_and_push_triggers_stay():
     """A workflow that stops reporting on the PR head blocks every PR forever;
-    push is the main-only backstop in pytest-legs, but here it also means every
-    merge to main is compiled."""
+    push is the main-only backstop in pytest-legs, and here it ALSO means every
+    merge to main is compiled — which is only true while the trigger is FILTERED
+    to main. So the filter is pinned, not just the two keys: the `push:` key on
+    its own is satisfied by an unfiltered trigger, and an unfiltered `push:` is
+    what made this workflow pay for a second macOS compile on every PR-branch
+    push, then redden the head SHA when the next push cancelled that duplicate
+    (t_1ecf9acc, measured on PR #836)."""
     text = _text()
     assert "\n  push:\n" in text and "\n  pull_request:\n" in text
+    assert "  push:\n    branches: [main]\n" in text, (
+        "the push trigger must read exactly the pytest-legs.yml form: filtered "
+        "to main. Unfiltered, a PR-branch push runs the whole gate a second time "
+        "(`decide_app_build.sh` says apps=true for any push event), the next "
+        "push cancels it under cancel-in-progress, and `compile` reports that "
+        "cancel as a permanent failure on the head SHA"
+    )
 
 
 def test_the_selector_is_cheap_and_gets_the_pr_shas():

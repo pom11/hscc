@@ -4,8 +4,8 @@ task: t_a8dc2f78
 - **`app-build-checks` and `address-guard` now take `push` from `main` only**,
   the form `.github/workflows/pytest-legs.yml` already uses, so a pull request
   no longer pays for a second, identical copy of the whole gate on every branch
-  commit. `app-build-checks` was the expensive one: `.github/scripts/
-  decide_app_build.sh` ends with `emit true "full-build-event:${EVENT}"`, so a
+  commit. `app-build-checks` was the expensive one: the ubuntu selector
+  `decide_app_build.sh` ends with `emit true "full-build-event:${EVENT}"`, so a
   push event always answers `apps=true` and the heavy macOS compile runs (9-27
   min per the workflow's own comment). Concurrency is `cancel-in-progress: true`
   on `${{ github.ref }}`, so the next push to the same branch cancelled the
