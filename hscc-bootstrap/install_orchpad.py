@@ -15,9 +15,23 @@ installed by orchpad's own console script, ``orchpad-hermes``, not by passing a
 flag to the main ``orchpad`` CLI: the two are separate entry points on purpose,
 and the plugin installer is the one that knows the Hermes profile layout.
 
+Copying the files is not enough: Hermes plugins are OPT-IN. Its loader reads
+``plugins.enabled`` from the ACTIVE home's config through
+``_get_enabled_plugins`` (``hermes_cli/plugins_discovery.py``, called from
+``hermes_cli/plugins.py``); a missing key is ``None`` = nothing enabled. A
+profile is its own home — ``load_config()`` reads only
+``$HERMES_HOME/config.yaml`` and the dispatcher sets ``HERMES_HOME`` to the
+profile dir — so a profile's ``plugins.enabled`` neither overlays nor inherits
+the root home's list. That is why each orchestrator profile gets ``orchpad``
+appended to its OWN ``plugins.enabled`` (existing entries and order preserved;
+no write in the steady state). The root ``config.yaml`` is never touched: the
+pad is an orchestrator surface, and operator rule 2026-11-23 keeps
+orchestrator-only surfaces off the other homes.
+
 Idempotent: the package is skipped when the pinned version is already importable
-(so a re-run does not hit the network), and ``orchpad-hermes`` only rewrites
-files whose bytes changed — its JSON summary names what it wrote.
+(so a re-run does not hit the network), ``orchpad-hermes`` only rewrites files
+whose bytes changed — its JSON summary names what it wrote — and the enable step
+is a no-op once the name is present.
 """
 
 from __future__ import annotations
@@ -34,6 +48,9 @@ from typing import Callable, List, Optional
 #: The pin. A tag, never a branch: bootstrap must be reproducible.
 PIN = "orchpad @ git+https://github.com/pom11/orchpad@v0.1.0"
 PIN_VERSION = "0.1.0"
+
+#: The plugin name Hermes must find in the profile's ``plugins.enabled``.
+PLUGIN_NAME = "orchpad"
 
 #: The files orchpad's plugin installer copies into ``<profile>/plugins/orchpad``.
 PLUGIN_FILES = ("plugin.yaml", "__init__.py", "tools.py")
@@ -69,6 +86,28 @@ def plugin_present(profile_home: Path) -> bool:
     """True when every plugin file orchpad-hermes writes is on disk."""
     target = Path(profile_home) / "plugins" / "orchpad"
     return all((target / name).is_file() for name in PLUGIN_FILES)
+
+
+def plugin_enabled(profile_home: Path, name: str = PLUGIN_NAME) -> bool:
+    """True when this home's own ``plugins.enabled`` names *name*."""
+    path = Path(profile_home) / "config.yaml"
+    try:
+        import yaml
+        with open(path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception:  # missing/unreadable -> not enabled (doctor reports it)
+        return False
+    plugins = cfg.get("plugins") if isinstance(cfg, dict) else None
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+    return isinstance(enabled, list) and name in enabled
+
+
+def enable_plugin(profile_home: Path) -> Optional[dict]:
+    """Append ``orchpad`` to THIS profile's own ``plugins.enabled``."""
+    import enable_plugins  # flat sibling; reuses its backup-then-write helper
+
+    return enable_plugins.ensure_plugin_enabled_for_home(
+        profile_home, PLUGIN_NAME)
 
 
 def installer_cmd(venv_python, hermes_home: Path, profile: str) -> list[str]:
@@ -170,6 +209,7 @@ def ensure(hermes_home, venv_python, *, apply: bool, main: Optional[str] = None,
         profile_home = home / "profiles" / name
         entry = {"profile": name, "path": str(profile_home / "plugins" / "orchpad")}
         if not apply:
+            entry["enabled"] = plugin_enabled(profile_home)
             entry["status"] = ("present" if plugin_present(profile_home)
                                else "missing")
             report["profiles"].append(entry)
@@ -190,9 +230,22 @@ def ensure(hermes_home, venv_python, *, apply: bool, main: Optional[str] = None,
             written = json.loads(res.stdout or "{}").get("written") or []
         except (TypeError, ValueError):
             written = []
+        try:
+            enable_rec = enable_plugin(profile_home)
+        except Exception as exc:  # noqa: BLE001 - name the profile, keep going
+            entry["status"] = "failed"
+            entry["error"] = (f"could not add {PLUGIN_NAME} to config.yaml "
+                              f"plugins.enabled: {exc}")[-400:]
+            ok = False
+            report["profiles"].append(entry)
+            continue
         entry["written"] = list(written)
-        entry["status"] = "installed" if written else "verified"
-        changed = changed or bool(written)
+        if enable_rec:
+            entry["enabled_added"] = list(enable_rec["added"])
+        entry["enabled"] = plugin_enabled(profile_home)
+        entry["status"] = ("installed" if written or enable_rec
+                           else "verified")
+        changed = changed or bool(written) or bool(enable_rec)
         report["profiles"].append(entry)
 
     report["ok"] = ok

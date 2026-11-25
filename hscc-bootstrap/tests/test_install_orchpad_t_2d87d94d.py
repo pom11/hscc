@@ -14,6 +14,8 @@ test reaches the network, the operator's ``~/.hermes`` or the fleet.
 import json
 import subprocess
 
+import yaml
+
 import install_orchpad as io
 
 
@@ -25,6 +27,18 @@ def _profile(home, name):
     path = home / "profiles" / name
     path.mkdir(parents=True)
     return path
+
+
+def _config(home, name, cfg):
+    path = home / "profiles" / name / "config.yaml"
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _enabled(home, name):
+    doc = yaml.safe_load(
+        (home / "profiles" / name / "config.yaml").read_text(encoding="utf-8"))
+    return (doc.get("plugins") or {}).get("enabled")
 
 
 def _plugin(home, name):
@@ -124,6 +138,100 @@ def test_a_second_apply_changes_nothing_and_hits_the_network_once(tmp_path):
     assert [e["status"] for e in second["profiles"]] == ["verified", "verified"]
     assert all(e["written"] == [] for e in second["profiles"])
     assert len([c for c in venv.calls if "pip" in c]) == 1
+
+
+def test_apply_enables_orchpad_in_each_orchestrator_profiles_own_config(tmp_path):
+    home = tmp_path / ".hermes"
+    for name in ("general", "demo-orch", "coder", "reviewer"):
+        _profile(home, name)
+    _config(home, "general", {
+        "model": {"default": "orchestrator-model"},
+        "plugins": {"enabled": ["hscc-cluster", "video_gen/openai_compat"],
+                    "entries": {"video_gen/openai_compat": {"llm": {}}}},
+    })
+    _config(home, "demo-orch", {"toolsets": ["hermes-cli"]})  # no plugins key
+    _config(home, "coder", {"plugins": {"enabled": ["hscc-cluster"]}})
+    _config(home, "reviewer", {"plugins": {"enabled": []}})
+    root = home / "config.yaml"
+    root.write_text(yaml.safe_dump(
+        {"plugins": {"enabled": ["hscc-cluster", "hscc-commands",
+                                  "sparkrun-hermes"]}}, sort_keys=False),
+        encoding="utf-8")
+    root_before = root.read_text(encoding="utf-8")
+    worker_before = (home / "profiles" / "coder" / "config.yaml").read_text(
+        encoding="utf-8")
+
+    report = io.ensure(home, "/venv/bin/python", apply=True, main="general",
+                       run=FakeVenv(), installer_run=_plugin_runner([]))
+
+    assert report["ok"] is True
+    assert _enabled(home, "general") == [
+        "hscc-cluster", "video_gen/openai_compat", "orchpad"]
+    assert _enabled(home, "demo-orch") == ["orchpad"]
+    assert _enabled(home, "coder") == ["hscc-cluster"]
+    assert _enabled(home, "reviewer") == []
+    general = yaml.safe_load(
+        (home / "profiles" / "general" / "config.yaml").read_text(
+            encoding="utf-8"))
+    assert general["plugins"]["entries"] == {
+        "video_gen/openai_compat": {"llm": {}}}
+    assert root.read_text(encoding="utf-8") == root_before
+    assert (home / "profiles" / "coder" / "config.yaml").read_text(
+        encoding="utf-8") == worker_before
+    by_name = {e["profile"]: e for e in report["profiles"]}
+    assert by_name["general"]["enabled"] is True
+    assert by_name["general"]["enabled_added"] == ["orchpad"]
+    assert by_name["demo-orch"]["enabled_added"] == ["orchpad"]
+
+
+def test_enabling_is_idempotent_and_keeps_entry_order(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "general")
+    _profile(home, "demo-orch")
+    _config(home, "general", {"plugins": {"enabled": ["b-third", "a-first"]}})
+    _config(home, "demo-orch", {"plugins": {"enabled": []}})
+
+    venv = FakeVenv()
+    installer = _plugin_runner([])
+    io.ensure(home, "/venv/bin/python", apply=True, main="general",
+              run=venv, installer_run=installer)
+
+    general = home / "profiles" / "general" / "config.yaml"
+    orch = home / "profiles" / "demo-orch" / "config.yaml"
+    assert _enabled(home, "general") == ["b-third", "a-first", "orchpad"]
+    before = {p: (p.read_text(encoding="utf-8"), p.stat().st_mtime_ns)
+              for p in (general, orch)}
+    backups = {p: len(list(p.parent.glob("config.yaml.bak-*")))
+               for p in (general, orch)}
+
+    second = io.ensure(home, "/venv/bin/python", apply=True, main="general",
+                       run=venv, installer_run=installer)
+
+    assert second["action"] == "verified"
+    for path, (text, mtime) in before.items():
+        assert path.read_text(encoding="utf-8") == text
+        assert path.stat().st_mtime_ns == mtime
+        assert len(list(path.parent.glob("config.yaml.bak-*"))) == backups[path]
+    assert all(e["enabled"] is True for e in second["profiles"])
+    assert all("enabled_added" not in e for e in second["profiles"])
+
+
+def test_report_mode_shows_files_that_are_not_enabled_and_writes_nothing(
+        tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "general")
+    _plugin(home, "general")
+    config = _config(home, "general",
+                     {"plugins": {"enabled": ["hscc-cluster"]}})
+    before = config.read_text(encoding="utf-8")
+
+    report = io.ensure(home, "/venv/bin/python", apply=False, main="general",
+                       run=FakeVenv(version=io.PIN_VERSION),
+                       installer_run=_plugin_runner([]))
+
+    assert report["profiles"][0]["status"] == "present"
+    assert report["profiles"][0]["enabled"] is False
+    assert config.read_text(encoding="utf-8") == before
 
 
 def test_report_mode_installs_nothing_and_names_the_missing_profiles(tmp_path):

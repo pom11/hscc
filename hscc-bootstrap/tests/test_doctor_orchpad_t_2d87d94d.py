@@ -12,6 +12,8 @@ Every case uses a tmp HERMES_HOME. No test reads ``~/.hermes``.
 
 import os
 
+import yaml
+
 import doctor
 import doctor_orchpad as op
 import doctor_rows
@@ -26,11 +28,16 @@ def _home(tmp_path, names):
     return home
 
 
-def _plugin(home, name):
+def _plugin(home, name, enabled=True):
     target = home / "profiles" / name / "plugins" / "orchpad"
     target.mkdir(parents=True)
     for filename in op.PLUGIN_FILES:
         (target / filename).write_text("payload\n", encoding="utf-8")
+    if enabled:
+        (home / "profiles" / name / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["hscc-cluster", "orchpad"]}},
+                           sort_keys=False), encoding="utf-8")
+    return target
 
 
 def test_all_orchestrators_covered_is_green_and_workers_are_not_named(tmp_path):
@@ -54,6 +61,22 @@ def test_a_project_orchestrator_without_the_plugin_warns(tmp_path):
     assert res["ok"] is False and res["fatal"] is False
     assert "demo-orch" in res["detail"] and "general" not in res["detail"]
     assert "orchpad-hermes" in res["fix"]
+
+
+def test_files_present_but_not_enabled_warns_and_names_the_profile(tmp_path):
+    home = _home(tmp_path, ["general", "demo-orch"])
+    _plugin(home, "general")
+    _plugin(home, "demo-orch", enabled=False)
+    (home / "profiles" / "demo-orch" / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"enabled": ["hscc-cluster"]}},
+                       sort_keys=False), encoding="utf-8")
+
+    res = op.doctor_check(hermes_home=str(home), main_name="general")
+
+    assert res["ok"] is False and res["fatal"] is False
+    assert "demo-orch" in res["detail"] and "general" not in res["detail"]
+    assert "config.yaml plugins.enabled" in res["detail"]
+    assert "bootstrap" in res["fix"]
 
 
 def test_the_main_orchestrator_without_the_plugin_warns_even_if_projects_have_it(

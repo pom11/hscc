@@ -577,6 +577,46 @@ def ensure_plugins_tier_for_home(home):
     return {"tier": tier, "added": added, "pruned": pruned}
 
 
+def ensure_plugin_enabled_for_home(home, plugin):
+    """Append ONE plugin name to one home's own ``plugins.enabled``.
+
+    The per-home half of a single-plugin install (t_2d87d94d). Hermes resolves
+    ``plugins.enabled`` from the ACTIVE home's config only: a profile is its own
+    home, ``load_config()`` reads ``$HERMES_HOME/config.yaml``, and the
+    dispatcher points ``HERMES_HOME`` at the profile dir. So a profile's list
+    neither overlays nor inherits the root home's — a plugin whose files are
+    installed but whose name is absent from THIS config never loads.
+
+    Same single-home contract and write discipline as
+    :func:`ensure_plugins_tier_for_home`: exactly the caller's home, backup
+    before a real change, append-only (existing entries and their order are
+    preserved), and no write at all in the steady state. A missing config is
+    Hermes' to create and returns None; the caller's doctor row then reports the
+    profile as not enabled.
+
+    Returns ``{"added": [plugin]}`` when the name was appended, else None.
+    """
+    home = os.path.abspath(os.path.expanduser(str(home)))
+    path = os.path.join(home, "config.yaml")
+    if not os.path.isfile(path):
+        return None
+    import yaml                                    # file-local convention (see enable())
+    try:
+        with open(path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception:
+        return None                    # unreadable/corrupt: Hermes' problem
+    if not isinstance(cfg, dict):
+        return None
+    added = _ensure_plugins_enabled(cfg, [plugin])
+    if not added:
+        return None
+    backup_util.backup_file(path)
+    with open(path, "w") as fh:
+        yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
+    return {"added": added}
+
+
 def ensure_plugins_tier_for_new_home(home):
     """Seed the tier for a home that a provisioning step has JUST created.
 

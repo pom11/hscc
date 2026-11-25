@@ -1,14 +1,18 @@
 """Doctor row: is the orchpad plugin on every orchestrator profile? (t_2d87d94d)
 
 Bootstrap installs orchpad into the Hermes venv and runs its plugin installer
-for the main orchestrator and every ``<project>-orch`` profile only. The two
-ways that posture silently decays are a profile created after bootstrap (never
-visited) and a plugin directory removed or left half-written — and the pad is
-exactly the surface nobody notices missing until an orchestrator has lost its
-follow-ups.
+for the main orchestrator and every ``<project>-orch`` profile only. The ways
+that posture silently decays are a profile created after bootstrap (never
+visited), a plugin directory removed or left half-written, and — because Hermes
+plugins are opt-in — installed files whose name is absent from that profile's
+own ``plugins.enabled`` (``_get_enabled_plugins`` in
+``hermes_cli/plugins_discovery.py``; a profile reads only its own config, it
+does not inherit the root list). The pad is exactly the surface nobody notices
+missing until an orchestrator has lost its follow-ups.
 
-READ-ONLY: this row stats the plugin files and nothing else. The repair belongs
-to bootstrap (or a direct ``orchpad-hermes`` run), and the fix text says so.
+READ-ONLY: this row stats the plugin files and reads each profile's config. The
+repair belongs to bootstrap (or a direct ``orchpad-hermes`` run plus the enable
+step), and the fix text says so.
 
 Inside a pytest process with no injected seam the row refuses, naming the seam:
 its default target is the operator's live ``~/.hermes``, so a suite must never
@@ -33,6 +37,7 @@ import doctor_rows  # flat sibling, next to this module (hscc-bootstrap/)
 CHECK_NAME = "orchpad plugin on orchestrator profiles"
 
 PLUGIN_FILES = ("plugin.yaml", "__init__.py", "tools.py")
+PLUGIN_NAME = "orchpad"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROLES_DIR = os.path.join(os.path.dirname(_HERE), "hscc-roles")
@@ -87,6 +92,24 @@ def plugin_present(profile_home) -> bool:
     return all((target / name).is_file() for name in PLUGIN_FILES)
 
 
+def plugin_enabled(profile_home, name: str = PLUGIN_NAME) -> bool:
+    """True when this home's own ``plugins.enabled`` names *name*.
+
+    Hermes plugins are opt-in, and a profile reads only its own config (no
+    root list overlay), so the files alone do not make the pad loadable.
+    """
+    path = Path(profile_home) / "config.yaml"
+    try:
+        import yaml
+        with open(path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception:  # missing/unreadable -> not enabled
+        return False
+    plugins = cfg.get("plugins") if isinstance(cfg, dict) else None
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+    return isinstance(enabled, list) and name in enabled
+
+
 def refused() -> dict:
     return {"name": CHECK_NAME, "ok": False, "fatal": False,
             "detail": "orchpad check refused inside a pytest process — "
@@ -120,12 +143,24 @@ def doctor_check(hermes_home: Optional[str] = None, *,
                 "detail": "no orchestrator profiles found — nothing to verify",
                 "fix": ""}
     missing = [home.name for home in homes if not plugin_present(home)]
-    if missing:
+    disabled = [home.name for home in homes
+                if plugin_present(home) and not plugin_enabled(home)]
+    if missing or disabled:
+        parts = []
+        if missing:
+            parts.append(f"{len(missing)} of {len(homes)} orchestrator "
+                         f"profile(s) missing the orchpad plugin: "
+                         f"{', '.join(missing)}")
+        if disabled:
+            parts.append(f"{len(disabled)} of {len(homes)} orchestrator "
+                         f"profile(s) have the orchpad files but do not name "
+                         f"orchpad in their own config.yaml plugins.enabled: "
+                         f"{', '.join(disabled)}")
         return {"name": CHECK_NAME, "ok": False, "fatal": False,
-                "detail": f"{len(missing)} of {len(homes)} orchestrator "
-                          f"profile(s) missing the orchpad plugin: "
-                          f"{', '.join(missing)}",
-                "fix": "Re-run bootstrap, or install it directly: "
+                "detail": "; ".join(parts),
+                "fix": "Re-run bootstrap (it installs the plugin and adds "
+                       "'orchpad' to each orchestrator profile's own "
+                       "config.yaml plugins.enabled), or install it directly: "
                        "orchpad-hermes --hermes-home <hermes home> --profile "
                        "<name>."}
     names = ", ".join(home.name for home in homes)

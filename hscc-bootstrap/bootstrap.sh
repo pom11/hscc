@@ -481,7 +481,7 @@ fi
 hdr "Install: orchpad (orchestrator pads)"
 if $SKIP_ROLES; then warn "skipped"
 elif $DRY_RUN; then
-  plan "orchpad: install pinned package into the Hermes venv + orchpad-hermes plugin for ${MAIN_ORCH_NAME:-general} and every <project>-orch profile (install_orchpad.py --apply)"
+  plan "orchpad: install pinned package into the Hermes venv + orchpad-hermes plugin, and enable 'orchpad' in each orchestrator profile's own config.yaml plugins.enabled, for ${MAIN_ORCH_NAME:-general} and every <project>-orch profile (install_orchpad.py --apply)"
 elif OP_JSON=$(HERMES_HOME="$HERMES_HOME" HSCC_DIR="$HSCC_DIR" MAIN_ORCH_NAME="$MAIN_ORCH_NAME" \
     "$PYBIN" "$BOOT_DIR/install_orchpad.py" --apply --python "$PYBIN" \
     --hermes-home "$HERMES_HOME" --main-name "$MAIN_ORCH_NAME" 2>&1); then
