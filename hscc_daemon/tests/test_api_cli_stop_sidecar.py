@@ -124,6 +124,18 @@ HANDLER_LATE = "@@HANDLER-LATE@@"
 #: be told apart from one whose stop was never dispatched at all.
 HANDLER_RAN = "@@HANDLER-RAN@@"
 
+#: What the `serve-wedged` child writes into its marker file from INSIDE the
+#: blocked `service_actions`. The write is the announcement that the listener loop
+#: has actually reached the seam, and the parent waits on it before signalling:
+#: a stop that arrives first lets that loop exit before `service_actions` is ever
+#: called, `shutdown()` returns at once, and the case passes on a build that still
+#: hangs (the trap t_60932269 recorded for its own wedge).
+WEDGE_MARKER_TEXT = "wedge entered"
+#: Prefix of the line the `serve-wedged` arm prints with the code `_serve` itself
+#: returned. The child's own exit status is only the harness repeating it, so this
+#: is what tells a wrong verdict from a harness that stopped forwarding one.
+SERVE_RC_PREFIX = "rc="
+
 # ━━━ load budgets, not behaviour budgets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # None of these can turn a wrong answer into a right one: they only decide how
 # long a LIVE child may take. Every one of them is measured, and the measurement
@@ -181,6 +193,10 @@ CHILD_MARKER_BUDGET = 60.0
 ENV_SIDECAR_DIR = "HSCC_FAKE_SIDECAR_DIR"
 ENV_GATEWAY_DIR = "HSCC_FAKE_GATEWAY_DIR"
 ENV_REPO_ROOT = "HSCC_REPO_ROOT"
+#: Where the `serve-wedged` child announces that its listener loop has reached the
+#: seam it is about to block in. A path, like the two above, so no
+#: machine-derived path has to be a spawn argument of the caller's Popen.
+ENV_WEDGE_MARKER = "HSCC_FAKE_WEDGE_MARKER"
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +310,10 @@ machine-derived path has to be a spawn argument of the caller's Popen.
   serve         -> `api_cli._serve` in THIS process, for the arm that needs an
                    observable exit code and a witness that the run came back
                    through _serve's finally: instead of being cut short.
+  serve-wedged  -> the same, with one listener's accept loop parked inside
+                   `service_actions`, so the bounded stop has to abandon it. The
+                   exit code and the WARN are what the arm exists to make
+                   observable; see `test_a_wedged_listener_is_abandoned_reported`.
 
 The fake gateway_bridge is imported BEFORE anything else:
 `api_cli._load_gateway_bridge()` puts the hscc-api dir on sys.path and then
@@ -365,9 +385,71 @@ if verb == "serve":
 
     print("@@MARK_STAGE@@ serve-enter", flush=True)
     _api = api_cli._load_api_server()
-    api_cli._serve(_api, ["127.0.0.1"], False, int(rest[0]))
-    print("@@SERVE_RETURNED@@", flush=True)
-    raise SystemExit(0)
+    # The verdict `_serve` returns IS the serving process's exit status in
+    # production (`_handle_start` does `os._exit(_serve(...))`), so this arm
+    # forwards it. Swallowing it here — `raise SystemExit(0)` regardless — is how
+    # a harness keeps passing while the entry path it imitates reports something
+    # else; `@@SERVE_RETURNED@@` below stays the witness that the run came back
+    # through `_serve` rather than being cut short.
+    _rc = api_cli._serve(_api, ["127.0.0.1"], False, int(rest[0]))
+    print("@@SERVE_RETURNED@@ @@SERVE_RC_PREFIX@@%s" % _rc, flush=True)
+    raise SystemExit(_rc)
+
+if verb == "serve-wedged":
+    # The BOUNDED stop seen from this entry path — the one `hscc api start` takes.
+    # One listener's accept loop is parked inside `service_actions`, the seam the
+    # stdlib calls on every pass of `serve_forever`, so that listener's
+    # `BaseServer.shutdown()` can never return and the stop has to give up on it
+    # to reach the teardown at all. t_60932269 put the bound in
+    # `_MultiServer.serve_forever`'s flag branch; this arm is about the caller that
+    # has to honour what it reports (t_54159e29), which is why the wedge goes
+    # through the real `create_servers` and the real `_serve` rather than a stub.
+    #
+    # argv: <port> <binds-csv> <host-to-wedge|->   — '-' wedges nothing, which is
+    # the control arm: everything below the wedge is byte-identical, so the pair
+    # says whether the WARN and the exit code track the wedge or just happen to
+    # appear on every stop.
+    import signal as _signal
+    import time as _time
+    _signal.signal(_signal.SIGTERM, api_cli._sigterm_handler)
+    _signal.signal(_signal.SIGINT, api_cli._sigterm_handler)
+
+    _port, _binds, _to_wedge = int(rest[0]), rest[1].split(","), rest[2]
+    _marker = os.environ["@@WEDGE_MARKER_ENV@@"]
+    _api = api_cli._load_api_server()
+    _real_create_servers = _api.create_servers
+
+    def _create_servers_with_a_wedge(*a, **kw):
+        _srv = _real_create_servers(*a, **kw)
+        for _s in _srv.servers:
+            if _s.server_address[0] != _to_wedge:
+                continue
+            # NO `self` in the signature. This is an INSTANCE attribute
+            # replacement, and the stdlib calls it as `self.service_actions()` with
+            # no arguments: a def that takes one raises TypeError inside the
+            # listener instead of wedging it, and the case passes for the wrong
+            # reason (the trap t_60932269 hit with its own wedge).
+            def _wedged_service_actions():
+                # Announce ENTRY, then block. Writing this from inside the blocked
+                # call is what makes the parent's wait meaningful — see
+                # WEDGE_MARKER_TEXT. And NO trailing newline in what it writes:
+                # this template is itself Python source inside a string, so an
+                # escape sequence typed here lands as a real newline in the
+                # GENERATED file — a SyntaxError there, not here, where every arm
+                # of the harness dies at import and each case reports a stalled
+                # child instead. TestTheHarnessIsStillPython compiles it here.
+                with open(_marker, "w") as _fh:
+                    _fh.write("@@WEDGE_ENTERED@@")
+                while True:
+                    _time.sleep(3600)
+            _s.service_actions = _wedged_service_actions
+        return _srv
+
+    _api.create_servers = _create_servers_with_a_wedge
+    print("@@MARK_STAGE@@ serve-wedged-enter", flush=True)
+    _rc = api_cli._serve(_api, _binds, False, _port)
+    print("@@SERVE_RETURNED@@ @@SERVE_RC_PREFIX@@%s" % _rc, flush=True)
+    raise SystemExit(_rc)
 
 if verb == "serve-lograce":
     # The state a stop has to survive: the signal lands while THIS thread is
@@ -481,6 +563,9 @@ raise SystemExit(api_cli.cmd_api([verb] + list(rest)))
 HARNESS = (HARNESS
            .replace("@@REPO_ROOT_ENV@@", ENV_REPO_ROOT)
            .replace("@@GATEWAY_DIR_ENV@@", ENV_GATEWAY_DIR)
+           .replace("@@WEDGE_MARKER_ENV@@", ENV_WEDGE_MARKER)
+           .replace("@@WEDGE_ENTERED@@", WEDGE_MARKER_TEXT)
+           .replace("@@SERVE_RC_PREFIX@@", SERVE_RC_PREFIX)
            .replace("@@SERVE_RETURNED@@", SERVE_RETURNED)
            .replace("@@MARK_STAGE@@", STAGE_PREFIX)
            .replace("@@MARK_RACE@@", RACE_ENTERED)
@@ -565,10 +650,12 @@ def sandbox(tmp_path):
     env = _child_env(home)
     env.update({ENV_SIDECAR_DIR: str(sidecar_dir),
                 ENV_GATEWAY_DIR: str(gateway),
-                ENV_REPO_ROOT: str(REPO)})
+                ENV_REPO_ROOT: str(REPO),
+                ENV_WEDGE_MARKER: str(tmp_path / "wedge.log")})
     box = {"home": home, "hscc": hscc, "gateway": gateway,
            "sidecar": sidecar_dir, "harness": harness, "env": env,
            "marker": sidecar_dir / "marker.log",
+           "wedge": tmp_path / "wedge.log",
            "sidecar_pid": sidecar_dir / "sidecar.pid",
            "pid_file": hscc / "api.pid", "log": hscc / "api.log",
            "procs": []}
@@ -1445,6 +1532,459 @@ def test_a_signal_landing_inside_a_log_write_still_stops(sandbox, sig):
             f"moved off the guaranteed path: {_describe(sandbox)}")
     finally:
         _reap(proc)
+
+
+# --------------------------------------------------------------------------- #
+# the bounded stop on THIS entry path: a listener the stop has to give up on
+# --------------------------------------------------------------------------- #
+
+#: Two loopback binds, not one. The number is the point: with a single listener,
+#: "it named the wedged host" and "it named every host it has" are the same
+#: sentence, and a report that blames every listener for one loop's wedge would
+#: pass. `::1` is what the sibling `test_api_multibind.py` binds unconditionally.
+BOTH_BINDS = ["127.0.0.1", "::1"]
+WEDGED_HOST = "::1"
+HEALTHY_HOST = "127.0.0.1"
+
+#: Identifies the abandoned-listener WARN in the API log — the line the operator of
+#: THIS entry path gets, since stdout here is not a channel (see the note on the
+#: two cases below). One constant shared by the cases and the pins, so a reword
+#: reddens the pair instead of quietly silencing a case.
+WEDGED_WARN = "HSCC API: WARNING: listener loop"
+
+_WEDGE_WAIT = re.compile(r"within \d+(?:\.\d+)?s")
+
+
+def _wait_wedged(sandbox, timeout=CHILD_READY_BUDGET):
+    """Block until the wedged listener has ANNOUNCED itself inside `service_actions`.
+
+    Not a courtesy. A stop that lands before the loop reaches that seam lets the
+    loop exit at its own `while not __shutdown_request` check without ever calling
+    `service_actions`, `shutdown()` comes back at once, the bounded stop reports
+    nothing abandoned — and the case passes on a build that still hangs. The wedge
+    writes the marker from inside the call it then blocks in, so waiting on this
+    file is waiting on the exact state the signal is about to arrive into.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if WEDGE_MARKER_TEXT in sandbox["wedge"].read_text():
+                return
+        except FileNotFoundError:
+            pass
+        time.sleep(0.05)
+    raise AssertionError(
+        f"no listener announced that it had reached `service_actions` ({sandbox['wedge'].name} "
+        f"never said {WEDGE_MARKER_TEXT!r} within {timeout}s), so the stop below "
+        f"would have raced the loop into its own body rather than interrupting it.\n"
+        f"{_describe(sandbox)}")
+
+
+def _warn_lines(sandbox):
+    """The abandoned-listener lines in the child's API log (usually zero or one)."""
+    try:
+        text = sandbox["log"].read_text()
+    except FileNotFoundError:
+        return []
+    return [line for line in text.splitlines() if WEDGED_WARN in line]
+
+
+def _stop_a_serving_child(sandbox, wedge_host):
+    """Run `serve-wedged`, wait for what it promises, SIGTERM it. -> (run, proc, pid).
+
+    The ORDER is part of the measurement: listening first (accept loops exist, the
+    fake sidecar is really up), then — only for the wedge arm — the wedge's own
+    entry marker, and only then the signal.
+
+    No port is handed IN and none comes OUT: the child binds `PORT_AUTO` and the
+    kernel's number is only ever needed as a witness, which `_await_listening`
+    already enforces when it reads the line back (see :data:`PORT_AUTO`).
+    """
+    proc = _popen(sandbox, "serve-wedged", str(PORT_AUTO), ",".join(BOTH_BINDS),
+                  wedge_host)
+    trail = _ChildTrail(proc)
+    _await_listening(sandbox)
+    assert _have(sandbox, SIDECAR_STARTED), (
+        f"the sidecar never started, so no stop below can prove a teardown: "
+        f"{_describe(sandbox)}")
+    sidecar_pid = _read_int(sandbox["sidecar_pid"])
+    if wedge_host != "-":
+        _wait_wedged(sandbox)
+    # From here the silence is the measurement (see :meth:`_ChildTrail.mark`): a
+    # serving child has nothing to say, and the wedge arm will say nothing for the
+    # whole 5 s the bounded stop is willing to wait.
+    trail.mark()
+    os.kill(proc.pid, signal.SIGTERM)
+    return _await_child(proc, trail), proc, sidecar_pid
+
+
+def test_a_wedged_listener_is_abandoned_reported_and_the_stop_says_so(sandbox):
+    """One listener cannot stop: the API must still tear down, and must SAY so.
+
+    `_MultiServer.serve_forever`'s flag branch bounds the wait and names what it
+    abandoned (t_60932269) — but only for a caller that reads the answer.
+    `api_cli._serve` passed the flag down and dropped the verdict, so on the path
+    `hscc api start` takes — the one writing `~/.hscc/api.pid` that `hscc api stop`
+    SIGTERMs — a stop that had given up on a loop looked exactly like one that had
+    given up nothing: no line in `~/.hscc/api.log`, and exit 0 either way.
+
+    Four witnesses, all read off the child rather than asserted about it: the
+    teardown ran (the bound bought it — that is the entire point of bounding the
+    wait), the log names the wedged host, it names ONLY the wedged host, and the
+    process reports 1 where the healthy arm reports 0.
+    """
+    run, proc, sidecar_pid = _stop_a_serving_child(sandbox, WEDGED_HOST)
+    try:
+        if run.verdict != "clean":
+            pytest.fail(
+                f"a wedged listener kept the serving process alive: it {run.verdict} "
+                f"({run.detail}) instead of coming back through `_serve` with the "
+                f"stop bounded. That is the t_60932269 defect on this entry path: "
+                f"the abandoned loop holds `shutdown()`, `serve_main`'s equivalent "
+                f"hangs its `finally:`, and `hscc api stop`'s escalation to SIGKILL "
+                f"skips the sidecar teardown the way the hang does.\n"
+                f"child output: {run.output}\n{_describe(sandbox)}")
+        assert SERVE_RETURNED + " " + SERVE_RC_PREFIX + "1" in run.output, (
+            f"the run came back through `_serve` but reported "
+            f"{run.output.splitlines()[-1]!r}: `_serve` did not return 1 for a stop "
+            f"that abandoned a listener, so the verdict is being dropped somewhere "
+            f"between `serve_forever` and the process.\n"
+            f"child output: {run.output}\n{_describe(sandbox)}")
+        assert proc.returncode == 1, (
+            f"the process exited {proc.returncode}: `hscc api start`'s grandchild "
+            f"must exit with `_serve`'s verdict, or a stop that abandoned a loop "
+            f"is indistinguishable from a clean one at the exit status too.\n"
+            f"child output: {run.output}\n{_describe(sandbox)}")
+
+        warns = _warn_lines(sandbox)
+        assert warns, (
+            f"nothing in the API log says a listener was abandoned. The exit code "
+            f"alone is no use to the operator of this path — this is the entry point "
+            f"whose stdout is the CLI's own and whose pid file closes even "
+            f"`daemon_ops.log`'s stderr echo — so the report has to be the log line "
+            f"(t_54159e29).\nchild output: {run.output}\n{_describe(sandbox)}")
+        line = warns[0]
+        assert WEDGED_HOST in line, (
+            f"the abandoned-listener line does not name the host that wedged: "
+            f"{line!r}. An unnamed give-up is a mystery the operator cannot go "
+            f"and look at.\n{_describe(sandbox)}")
+        assert HEALTHY_HOST not in line, (
+            f"the abandoned-listener line names the healthy listener too: {line!r}. "
+            f"`_shutdown_bounded` returns only the loops still blocked, and pointing "
+            f"at both sends someone to debug a listener that stopped fine.\n"
+            f"{_describe(sandbox)}")
+        assert _WEDGE_WAIT.search(line), (
+            f"the line does not say how long it waited: {line!r}. The bound is the "
+            f"promise that this is a give-up and not a hang.\n{_describe(sandbox)}")
+
+        # The point of the bound: the teardown ran even though a loop never came
+        # back. Everything below is what t_56552ecc made this file guarantee, and
+        # an unbounded stop would have lost it to the SIGKILL escalation instead.
+        assert _have(sandbox, SIDECAR_SHUTDOWN, timeout=10), (
+            f"the stop abandoned a listener and then never tore the sidecar down — "
+            f"the abandoned loop held `shutdown()`, so the bound is not being kept "
+            f"on this path: {_describe(sandbox)}")
+        assert sidecar_pid is not None and not _alive(sidecar_pid), (
+            f"the sidecar (pid {sidecar_pid}) outlived a stop that abandoned a "
+            f"listener: {_describe(sandbox)}")
+        assert "HSCC API stopped" in sandbox["log"].read_text(), (
+            f"the closing line is missing, so the `finally:` did not finish: "
+            f"{_describe(sandbox)}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+def test_a_stop_that_lost_nothing_reports_nothing(sandbox):
+    """The control for the case above, identical but for the wedge.
+
+    Without it, "reports an abandoned listener" is satisfied by a build that
+    reports an abandoned listener ALWAYS: the WARN and the 1 would then be noise on
+    every ordinary `hscc api stop`, and the loud line would stop being a signal.
+    Same binds, same harness arm, same signal — the only difference is that no
+    listener is parked inside `service_actions`, and every one of them comes back.
+    """
+    run, proc, sidecar_pid = _stop_a_serving_child(sandbox, "-")
+    try:
+        assert run.verdict == "clean", (
+            f"an ordinary stop did not return through `_serve`: it {run.verdict} "
+            f"({run.detail}).\nchild output: {run.output}\n{_describe(sandbox)}")
+        assert SERVE_RETURNED + " " + SERVE_RC_PREFIX + "0" in run.output, (
+            f"a stop that abandoned nothing should report 0 and reported "
+            f"{run.output.splitlines()[-1]!r} — a report that fires on every stop "
+            f"is not a report.\nchild output: {run.output}\n{_describe(sandbox)}")
+        assert proc.returncode == 0, (
+            f"an ordinary cooperative stop exited {proc.returncode}; the non-zero "
+            f"is reserved for the stop that gave something up.\n"
+            f"child output: {run.output}\n{_describe(sandbox)}")
+        assert not _warn_lines(sandbox), (
+            f"a clean stop wrote an abandoned-listener line: {_warn_lines(sandbox)}. "
+            f"An operator reading that on every `hscc api stop` learns to ignore it, "
+            f"which is worse than the silence it replaced.\n{_describe(sandbox)}")
+        assert _have(sandbox, SIDECAR_SHUTDOWN, timeout=10), (
+            f"the healthy stop did not tear the sidecar down: {_describe(sandbox)}")
+        assert sidecar_pid is not None and not _alive(sidecar_pid), (
+            f"the sidecar (pid {sidecar_pid}) survived an ordinary stop: "
+            f"{_describe(sandbox)}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+class TestTheVerdictIsCarried:
+    """Source pins for the handoff the behavioural cases cannot enforce.
+
+    The two cases above can only show the verdict being honoured on the one
+    machine that ran them. What they cannot stop is the next commit quietly
+    re-dropping it — `stop_clean = ...` reverting to a bare call, or
+    `_handle_start` going back to `os._exit(0)` — and both of those leave today's
+    log line and today's exit code in place for the healthy stop, so no
+    behavioural case on a healthy stop would notice. Same doctrine as
+    :class:`TestStopPathIsCooperative`.
+    """
+
+    # `TestStopPathIsCooperative` is defined further down this file, so these are
+    # lazy delegations rather than class-level aliases — an alias in a class body
+    # is a NameError at import. Delegation keeps one copy of each helper instead
+    # of a second implementation to drift.
+    @staticmethod
+    def _body(func):
+        return TestStopPathIsCooperative._body(func)
+
+    @classmethod
+    def _walk(cls, nodes):
+        return TestStopPathIsCooperative._walk(nodes)
+
+    @classmethod
+    def _calls(cls, body, attr):
+        return TestStopPathIsCooperative._calls(body, attr)
+
+    def test_serve_keeps_the_verdict_serve_forever_returns(self):
+        """The verdict must be stored, not evaluated and thrown away.
+
+        `serve_forever(...)` as a bare statement is syntactically fine and means
+        the entry path has silently un-diverged itself back into the defect this
+        file's two cases above exist to catch on a machine with a wedged loop.
+        """
+        body = self._body(api_cli._serve)
+        served = self._calls(body, "serve_forever")
+        assert served, "_serve no longer calls serve_forever at all"
+        stored = [n for n in ast.walk(body)
+                  if isinstance(n, ast.Assign)
+                  and any(n.value is call for call in served)]
+        assert stored, (
+            f"the result of `serve_forever` at line(s) {[n.lineno for n in served]} "
+            f"is evaluated and dropped: its return value is the verdict on the stop "
+            f"— False when a listener loop had to be abandoned — and not keeping it "
+            f"is the divergence t_54159e29 closes. `_serve` must assign it "
+            f"(`stop_clean = ...`) or return it")
+
+    def test_the_start_path_exits_with_serves_verdict(self):
+        """`os._exit(0)` after `_serve` reports every stop as clean.
+
+        The grandchild of `hscc api start` is the process `hscc api stop`
+        SIGTERMs; its exit status is the only thing that ever says what the stop
+        cost, so it has to be `_serve`'s verdict rather than a literal.
+        """
+        body = self._body(api_cli._handle_start)
+        served = self._calls(body, "_serve")
+        assert served, "_handle_start no longer calls _serve"
+        serve_line = min(n.lineno for n in served)
+        carried = [n for n in self._walk(body)
+                   if isinstance(n, ast.Call)
+                   and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "_exit"
+                   and any(isinstance(a, ast.Call)
+                           and isinstance(a.func, ast.Name)
+                           and a.func.id == "_serve" for a in n.args)]
+        assert carried, (
+            f"nothing after the `_serve` call at line {serve_line} exits with "
+            f"`_serve`'s return value: the serving process hard-exits with a fixed "
+            f"code again, so a stop that abandoned a listener reports 0 like one "
+            f"that did not")
+        hard_zero = [n for n in self._walk(body)
+                     if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "_exit"
+                     and n.lineno >= serve_line
+                     and len(n.args) == 1
+                     and isinstance(n.args[0], ast.Constant)
+                     and n.args[0].value == 0]
+        assert not hard_zero, (
+            f"`os._exit(0)` is back at line(s) {[n.lineno for n in hard_zero]} "
+            f"after the serve call — that is the fixed-code exit again")
+
+    def test_the_report_is_logged_and_never_printed(self):
+        """The abandoned-listener report goes to the API log at WARN, not stdout.
+
+        This entry path's stdout is the CLI's own (t_22f4a99f's DEVNULL redirect is
+        unmerged, so the grandchild still holds the caller's descriptors), and
+        `daemon_ops.log` echoes to stderr only while the pid file is ABSENT — which
+        it is not here. A `print` would therefore reach nobody, and one that raised
+        (`BrokenPipeError` on a pipe the caller closed) would abort the `finally:`
+        that owns the gateway sidecar teardown. So the channel is pinned, not
+        preferred.
+        """
+        body = self._body(api_cli._serve)
+        printed = [n for n in self._walk(body)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                   and n.func.id == "print"]
+        assert not printed, (
+            f"`print` is back in `_serve` at line(s) {[n.lineno for n in printed]}: "
+            f"on this path stdout belongs to whoever ran `hscc api start`, and a "
+            f"failed write there would abort the finally: that tears the sidecar "
+            f"down")
+        reports = [n for n in self._walk(body)
+                   if isinstance(n, ast.Call)
+                   and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "log"
+                   and any(isinstance(a, ast.Call)
+                           and isinstance(a.func, ast.Name)
+                           and a.func.id == "_abandoned_listener_report"
+                           for a in n.args)]
+        assert reports, (
+            "the abandoned-listener report no longer goes through "
+            "`daemon_ops.log`, so it is not on the API log the operator of this "
+            "path reads")
+        line = reports[0]
+        levels = [a.value for a in line.args[1:]
+                  if isinstance(a, ast.Constant) and a.value == "WARN"]
+        assert levels, (
+            f"the abandoned-listener line is not written at WARN "
+            f"(args: {[getattr(a, 'value', type(a).__name__) for a in line.args]}): "
+            f"it is a stop that happened by giving something up, and an operator "
+            f"filtering the log by level has to be able to find it")
+        files = {k.value.id for k in line.keywords
+                 if k.arg == "log_file" and isinstance(k.value, ast.Name)}
+        assert "API_LOG_FILE" in files, (
+            f"the report writes {sorted(files) or 'the default log'}, not "
+            f"API_LOG_FILE — the API's own log is where an operator looks for the "
+            f"API's stop")
+
+
+class TestTheReportLineItself:
+    """The sentence, on its own — no child, no clock, nothing to race.
+
+    Built from stand-in objects so the two claims it makes are both forced: the
+    hosts it is handed, and the number it quotes. The number matters more than it
+    looks: quoting the bound is what distinguishes a give-up from a hang, and if it
+    were a second literal in `api_cli` the two entry paths would drift into
+    reporting different seconds for the same wait.
+    """
+
+    class _Server:
+        def __init__(self, wedged):
+            self.wedged_listeners = wedged
+
+    class _Api:
+        _SHUTDOWN_WAIT_SECONDS = 7.25
+
+    def test_it_names_the_hosts_it_was_handed(self):
+        line = api_cli._abandoned_listener_report(self._Server(["::1"]),
+                                                  self._Api())
+        assert "::1" in line, line
+        line2 = api_cli._abandoned_listener_report(
+            self._Server(["127.0.0.1", "::1"]), self._Api())
+        assert "127.0.0.1" in line2 and "::1" in line2, line2
+
+    def test_it_quotes_the_bound_from_the_module_that_owns_it(self):
+        """The seconds come from the argument, never from a literal in api_cli."""
+        line = api_cli._abandoned_listener_report(self._Server(["::1"]),
+                                                  self._Api())
+        assert "7.25s" in line, (
+            f"the line does not quote the bound it was given: {line!r} — a hard-coded "
+            f"number here is how the two entry paths end up promising different waits")
+        assert not re.search(r"\b5(?:\.0)?s", line), (
+            f"the line carries a hard-coded 5s rather than the bound it was handed "
+            f"(7.25s): {line!r}")
+        # The absent-attribute arm: a caller that cannot say how long it waited
+        # still has to say that it gave up, and must not print `None`.
+        bare = api_cli._abandoned_listener_report(
+            self._Server(["::1"]), type("_Api", (), {})())
+        assert "None" not in bare and "did not stop" in bare, bare
+
+    def test_it_survives_a_server_that_reported_nothing(self):
+        """`wedged_listeners` missing must not turn the report into a crash.
+
+        The report is built inside `_serve`'s `finally:`. An exception raised there
+        does not just lose the line — it abandons the gateway sidecar teardown that
+        shares the block, which is the defect t_56552ecc closed.
+        """
+        line = api_cli._abandoned_listener_report(object(), self._Api())
+        assert "listener loop" in line and "None" not in line, line
+
+
+class TestTheHarnessIsStillPython:
+    """Compile the child sources here, where a mistake costs milliseconds.
+
+    `HARNESS`, `FAKE_BRIDGE` and `DUMMY_SIDECAR` are Python source held in
+    strings; nothing in this file's own import checks them, so the first thing to
+    notice a typo is a child that dies at exec. What that looks like from the
+    parent is not a SyntaxError but a case whose child never says anything — and
+    the waits here are deliberately patient (180 s of silence before a verdict),
+    so a stray newline in a template costs three minutes per case and reports a
+    signal handler that never had a process to run in. Measured: one `\\n` inside
+    a nested string literal reddened four cases this way on this very card.
+    """
+
+    @pytest.mark.parametrize("name,source", [
+        ("HARNESS", HARNESS),
+        ("FAKE_BRIDGE", FAKE_BRIDGE),
+        ("DUMMY_SIDECAR", DUMMY_SIDECAR),
+    ])
+    def test_the_child_source_compiles(self, name, source):
+        try:
+            compile(source, f"<{name}>", "exec")
+        except SyntaxError as exc:
+            lines = source.splitlines()
+            where = "\n".join(
+                f"  {n}: {lines[n - 1]}"
+                for n in range(max(1, (exc.lineno or 1) - 2),
+                               min(len(lines), (exc.lineno or 1) + 2) + 1))
+            pytest.fail(
+                f"{name} is not valid Python: {exc.msg} at line {exc.lineno} of "
+                f"the generated file.\n{where}\nFix it here rather than reading "
+                f"it out of a child that dies before it can say anything.")
+
+    def test_the_harness_arms_are_the_ones_the_cases_spawn(self):
+        """Every verb a case asks for must be dispatched by the harness.
+
+        An arm renamed on one side only becomes the failure above in slower form:
+        the child falls through the dispatch and exits without serving, and the
+        parent waits a full stall budget on a server that was never started.
+
+        Two doors, because the harness has two: the named arms, and the tail that
+        hands the verb to the product's own `cmd_api` (that is how `start` and
+        `stop` are reached, and it is the point of those cases — they run the real
+        dispatch). The tail is pinned to exist, or "falls through" would stop
+        meaning anything.
+        """
+        arms = {m.group(1) for m in re.finditer(
+            r'^if verb == "([\w-]+)":', HARNESS, re.MULTILINE)}
+        falls_through = re.search(
+            r"^raise SystemExit\(api_cli\.cmd_api\(\[verb\]", HARNESS,
+            re.MULTILINE)
+        assert falls_through, (
+            "the harness no longer dispatches unmatched verbs through "
+            "`api_cli.cmd_api`, so `start`/`stop` cases would exit without "
+            "running the verb they asked for")
+        # The verbs appear as literals at the call sites; the three helpers are the
+        # only ways a case reaches the harness (`_start_api` wraps `_harness_argv`
+        # because a forking verb must not have its stdout on a pipe).
+        text = Path(__file__).read_text()
+        spawned = {m.group(1) for m in re.finditer(
+            r'(?:_harness_argv|_popen|_run)\(sandbox, "([\w-]+)"', text)}
+        assert spawned, "no case spawns a harness arm any more — this pin is blind"
+        missing = sorted(spawned - arms - {"start", "stop"})
+        assert not missing, (
+            f"cases spawn {missing}, which the harness neither has an arm for nor "
+            f"forwards to `cmd_api`; its arms are {sorted(arms)}")
+        dead = sorted(arms - spawned)
+        assert not dead, (
+            f"the harness still dispatches {dead} but no case spawns it: an arm "
+            f"nothing exercises is a template nothing compiles-checks any more")
 
 
 # --------------------------------------------------------------------------- #
