@@ -49,8 +49,8 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 #: The pin. A tag, never a branch: bootstrap must be reproducible.
-PIN = "orchpad @ git+https://github.com/pom11/orchpad@v0.1.0"
-PIN_VERSION = "0.1.0"
+PIN = "orchpad @ git+https://github.com/pom11/orchpad@v0.2.0"
+PIN_VERSION = "0.2.0"
 
 #: The plugin name Hermes must find in the profile's ``plugins.enabled``.
 PLUGIN_NAME = "orchpad"
