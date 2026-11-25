@@ -835,6 +835,11 @@ class EventDrivenDaemon:
                 signal.signal(sig, lambda s, f: _STOP_EVENT.set())
             except (ValueError, OSError):
                 pass  # Can only set signal handlers in main thread
+        # A disposition is not enough: a BLOCKED mask inherited from the
+        # spawner survives fork/exec, so the handler above would never run and
+        # stop() could only be reached from another thread (t_81e00872).
+        from .util import unblock_stop_signals
+        unblock_stop_signals()
 
         # Set up EventBridge callbacks to re-evaluate triggers on state changes
         self._event_bridge.register_all_callback(self._on_state_change)

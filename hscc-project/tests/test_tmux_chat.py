@@ -408,18 +408,37 @@ def _chat_ns(tmp_path, *, exec_seam, chat_env):
 
 
 def _fake_discovery(monkeypatch, orch_id="20261013_abc"):
-    import unittest.mock as mock
     world = {"project": "pom", "topic": None,
              "orch_profile": "pom-orch", "telegram_profile": "default",
              "orch_session": orch_id,
              "orchestrator": {"id": orch_id, "title": "pom", "messages": 5,
                               "last": 1, "started": 0},
              "telegram": [], "telegram_unmapped": 0, "runtime_error": None}
-    mock.patch.object(project_cmd.session_discovery, "list_project_sessions",
-                      return_value=world).start()
+    # Registered with monkeypatch (auto-undone at teardown), never a bare
+    # mock.patch(...).start(): that survives the test and pins discovery for
+    # every later module in the same pytest process (t_af788f73).
+    monkeypatch.setattr(project_cmd.session_discovery, "list_project_sessions",
+                        lambda *a, **k: world)
     monkeypatch.setattr(project_cmd.project_lifecycle, "ensure_session",
                         lambda *a, **k: {"session": orch_id, "created": False})
     return world
+
+
+def test_fake_discovery_patch_is_scoped_to_its_test():
+    """Regression (t_af788f73): `_fake_discovery` must leave no live patch
+    behind. A bare `mock.patch.object(...).start()` is invisible to
+    monkeypatch teardown, so `test_chat_seed.py` — collected later in the same
+    process — saw the pom world and 4 seed cases failed."""
+    real = project_cmd.session_discovery.list_project_sessions
+    scoped = pytest.MonkeyPatch()
+    try:
+        assert _fake_discovery(scoped)["orchestrator"]["id"] == "20261013_abc"
+        assert project_cmd.session_discovery.list_project_sessions is not real
+    finally:
+        scoped.undo()
+    assert project_cmd.session_discovery.list_project_sessions is real, (
+        "_fake_discovery left a global mock.patch started; a later test module "
+        "would see the pom discovery world")
 
 
 def test_cmd_chat_outside_tmux_opens_named_session(monkeypatch, tmp_path):

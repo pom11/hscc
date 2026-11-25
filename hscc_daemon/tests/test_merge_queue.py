@@ -1573,6 +1573,115 @@ def test_restart_mid_run_recovers_in_flight_to_the_queue_head(tmp_path):
     assert doc["projects"]["alpha"]["queue"] == []
 
 
+def test_the_running_gates_pgid_is_in_the_ledger_while_the_leg_runs(
+        tmp_path, monkeypatch):
+    """A daemon restart can only find the orphan gate through the ledger."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7, path=_state(tmp_path))
+    seen = []
+
+    def gate(command, worktree, timeout_s, cancel_check=None, *,
+             on_start=None, **kw):
+        on_start(4242)
+        flight = mq.load_state(_state(tmp_path))[
+            "projects"]["alpha"]["in_flight"]
+        seen.append(flight.get("pgid"))
+        return "pass", ""
+
+    monkeypatch.setattr(mq, "_run_gate", gate)
+    result = mq.tick(state_path=_state(tmp_path),
+                     root=str(tmp_path / "queue"), registry_path=registry,
+                     gh_runner=gh, git_runner=subprocess.run,
+                     auto_source=lambda *a, **k: [])
+
+    assert result["processed"][0]["result"] == "merged", result
+    assert seen == [4242], seen
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert ps["in_flight"] is None
+    assert ps["queue"] == []
+
+
+def test_run_gate_hands_the_spawned_pgid_to_the_ledger_callback(
+        tmp_path, monkeypatch):
+    """The pgid exists only after Popen; a callback failure never fails a gate."""
+    fake, _calls = _fake_subprocess(
+        popem=lambda argv, kwargs: _FakeGateProc(returncode=0, pid=4242))
+    monkeypatch.setattr(mq, "subprocess", fake)
+    seen = []
+
+    verdict, _output = mq._run_gate("true", str(tmp_path), 42,
+                                    on_start=seen.append)
+    assert verdict == "pass"
+    assert seen == [4242]
+
+    def explode(_pid):
+        raise RuntimeError("ledger write failed")
+
+    verdict, _output = mq._run_gate("true", str(tmp_path), 42,
+                                    on_start=explode)
+    assert verdict == "pass", "bookkeeping may not fail the gate it records"
+
+
+def test_restart_kills_the_previous_daemons_gate_group_before_regating(
+        tmp_path):
+    """The 2.17.6 orphan: gate reparented to launchd, still in the worktree."""
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    mq.add_to_queue("alpha", 13, card="t_restart", path=_state(tmp_path))
+    doc = mq.load_state(_state(tmp_path))
+    ps = doc["projects"]["alpha"]
+    ps["in_flight"] = dict(ps["queue"].pop(0), pgid=4242, stage="gating")
+    # Recovery runs before pause/enable can stop the tick, exactly as it must:
+    # a paused queue still cannot leave a suite running in its checkout.
+    ps["paused"] = True
+    mq.save_state(doc, _state(tmp_path))
+
+    calls = []
+    alive = {4242}
+
+    def fake_kill(pgid, sig):
+        calls.append((pgid, sig))
+        if pgid not in alive:
+            raise ProcessLookupError(pgid)
+        if sig == signal.SIGKILL:
+            alive.discard(pgid)
+
+    lines, log = _logger()
+    result = mq.tick(state_path=_state(tmp_path), registry_path=registry,
+                     gh_runner=_no_runner, git_runner=_no_runner,
+                     kill_runner=fake_kill, pause=lambda _s: None, log=log)
+
+    assert result["recovered"] == ["alpha"]
+    assert [sig for _pgid, sig in calls if sig] == [
+        signal.SIGTERM, signal.SIGKILL], calls
+    assert all(pgid == 4242 for pgid, _sig in calls), calls
+    ps = mq.load_state(_state(tmp_path))["projects"]["alpha"]
+    assert [e["pr"] for e in ps["queue"]] == [13]
+    assert "pgid" not in ps["queue"][0], ps["queue"][0]
+    assert any("gate process group 4242" in ln and "TERM" in ln
+               for ln in lines), lines
+    assert any("survived TERM" in ln and "KILL" in ln for ln in lines), lines
+
+
+def test_recovery_never_signals_our_own_group_or_an_already_dead_one():
+    """A live tick's ledger must not make the daemon kill itself, ever."""
+    def explode(pgid, sig):
+        raise AssertionError(f"signalled {pgid} with {sig}")
+
+    for pgid in (os.getpgrp(), os.getpid(), 1, 0, None):
+        assert mq._reclaim_orphan_gate({"pr": 1, "pgid": pgid},
+                                       kill_runner=explode) is False
+
+    def gone(pgid, sig):
+        raise ProcessLookupError(pgid)
+
+    assert mq._reclaim_orphan_gate({"pr": 1, "pgid": 4242},
+                                   kill_runner=gone) is False
+
+
 # ── pause ──────────────────────────────────────────────────────────────────
 
 def test_pause_leaves_the_queue_untouched(tmp_path):
@@ -1604,7 +1713,7 @@ def test_remove_during_gate_cancels_before_push_and_never_merges(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 7, card="t_removed", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         mq.remove_from_queue("alpha", 7, path=_state(tmp_path))
         return "pass", ""
 
@@ -1636,7 +1745,7 @@ def test_pause_or_disable_during_gate_stops_before_push_and_keeps_entry(
                      "headRefOid": pair["head"]}})
     mq.add_to_queue("alpha", 8, card="t_hold", path=_state(tmp_path))
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         if action == "pause":
             mq.set_paused("alpha", True, path=_state(tmp_path))
         else:
@@ -1948,7 +2057,7 @@ def test_view_shows_the_live_gating_stage_while_the_gate_runs(tmp_path,
                     path=_state(tmp_path))
     seen = {}
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         seen.update(mq.view(state_path=_state(tmp_path),
                             registry_path=registry))
         return "fail", "gate exploded"
@@ -2927,7 +3036,7 @@ def test_gate_heartbeat_advances_the_stream_while_the_gate_runs(tmp_path,
     seen = []          # (timestamp, stamp) per DISTINCT stamp read in-leg
     leg = {}
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         leg["start"] = time.monotonic()
         deadline = leg["start"] + 10.0
         while time.monotonic() < deadline:
@@ -2983,11 +3092,13 @@ def test_heartbeat_stops_the_moment_the_gate_leg_ends(tmp_path, monkeypatch):
 
     interval = 0.2
     monkeypatch.setattr(mq, "LIVENESS_STAMP_S", interval)
-    # Stub matches the real `_run_gate` signature, `cancel_check` included: a
-    # stub that silently absorbed `**kwargs` would keep passing if the parameter
-    # were renamed, and the real caller would then be the only thing that knows.
+    # Stub matches the real `_run_gate` signature, `cancel_check` and `on_start`
+    # included: a stub that silently absorbed `**kwargs` would keep passing if a
+    # parameter were renamed, and the real caller would then be the only thing
+    # that knows.
     monkeypatch.setattr(mq, "_run_gate",
-                        lambda c, w, t, cancel_check=None: ("pass", ""))
+                        lambda c, w, t, cancel_check=None,
+                        on_start=None: ("pass", ""))
 
     result = mq.tick(state_path=_state(tmp_path),
                      root=str(tmp_path / "queue"), registry_path=registry,
@@ -3225,7 +3336,7 @@ def test_ci_pending_is_rechecked_in_place_without_rerunning_the_gates(
     mq.add_to_queue("alpha", 19, path=_state(tmp_path))
     gate_calls = []
 
-    def gate(command, worktree, timeout_s, cancel_check=None):
+    def gate(command, worktree, timeout_s, cancel_check=None, **kw):
         gate_calls.append(command)
         return "pass", ""
 
@@ -5214,3 +5325,237 @@ def test_a_third_sha_after_the_push_is_still_released(tmp_path, monkeypatch):
     # away, and burning the poll budget on it only slows the queue down.
     views = [argv for argv in gh.calls if argv[:3] == ["gh", "pr", "view"]]
     assert len(views) == 2, views
+
+
+# ── a red PR with no live card gets a fix card (t_30dfe9fe) ────────────────
+#
+# Hermes closes a card (done) as soon as its PR opens, so the queue's red-gate
+# handback used to comment on a done card and reassign it to nobody: #734 and
+# #767 sat stranded until an operator carded them by hand. The handback now
+# cuts a fix card on the project's board and remembers its id, so the next
+# failure of the same PR comments on that card instead of cutting another.
+
+class _FakeKanbanRunner:
+    """The two hermes verbs the handback may use: show and create."""
+
+    def __init__(self, cards=None):
+        self.cards = {card: dict(info) for card, info in (cards or {}).items()}
+        self.calls = []
+        self.bodies = {}
+        self._next = 0
+
+    def __call__(self, argv, **kwargs):
+        argv = list(argv)
+        self.calls.append(argv)
+        verb = argv[4]
+        if verb == "show":
+            card = argv[5]
+            info = self.cards.get(card)
+            if info is None:
+                return SimpleNamespace(returncode=1, stdout="",
+                                       stderr=f"no such task: {card}")
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                {"task": {"id": card, **info}}))
+        if verb == "create":
+            self._next += 1
+            card = f"t_fix_{self._next}"
+            body_path = argv[argv.index("--body-file") + 1]
+            self.bodies[card] = pathlib.Path(body_path).read_text(
+                encoding="utf-8")
+            self.cards[card] = {
+                "status": "ready",
+                "assignee": argv[argv.index("--assignee") + 1]}
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                {"id": card, "status": "ready"}))
+        raise AssertionError(f"unexpected kanban call: {argv}")
+
+
+def _gh_comment_ok(argv, cwd=None, **kwargs):
+    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
+def _handed(seen):
+    def handback(card, assignee, body):
+        seen.append((card, assignee, body))
+        return True
+    return handback
+
+
+_QUEUE_RED_BODY = ("Merge queue: gate failed after rebasing onto origin/main.\n\n"
+                   "Gate: bash scripts/run_tests.sh\n"
+                   "Attempt: 1\n\n"
+                   "FAILED hscc_daemon/tests/test_x.py::test_y - AssertionError\n\n"
+                   "Resolve it as this card's worker:\n"
+                   "1. In your own card worktree: `git fetch origin && git rebase "
+                   "origin/main`.\n")
+
+
+def _red_handback(tmp_path, entry, runner, handed, *, cfg=None, **over):
+    cfg = cfg or {"name": "alpha", "repo": "/tmp/project", "board": "alpha"}
+    over.setdefault("reason", "gate failed")
+    over.setdefault("state_path", str(tmp_path / "merge-queue-state.json"))
+    over.setdefault("project", "alpha")
+    over.setdefault("kanban_runner", runner)
+    mq._handback(entry, cfg, _QUEUE_RED_BODY, _handed(handed),
+                 _gh_comment_ok, **over)
+
+
+def test_a_red_handback_with_no_card_creates_a_fix_card(tmp_path, monkeypatch):
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner()
+    entry = {"pr": 12, "card": None, "assignee": "worker",
+             "branch": "wt/t_card"}
+    handed = []
+
+    _red_handback(tmp_path, entry, runner, handed)
+
+    assert [c[4] for c in runner.calls] == ["create"], runner.calls
+    create = runner.calls[0]
+    assert create[5] == "PR #12 red in merge queue: gate failed"
+    assert create[create.index("--assignee") + 1] == "worker"
+    assert create[create.index("--priority") + 1] == "2"
+    body = runner.bodies["t_fix_1"]
+    # The queue's failure evidence leads; the rule is on the card.
+    assert "FAILED hscc_daemon/tests/test_x.py::test_y" in body
+    assert "hscc merge-queue add alpha 12" in body
+    assert "no hand-merge" in body
+    assert "wt/t_card" in body
+    # The comment/reassign went to the NEW card, not to a cardless no-op.
+    assert handed[0][0] == "t_fix_1" and handed[0][1] == "worker"
+    assert entry["card"] == "t_fix_1"
+    state = mq.load_state(str(tmp_path / "merge-queue-state.json"))
+    assert state["projects"]["alpha"]["fix_cards"]["12"]["card"] == "t_fix_1"
+
+
+def test_a_red_handback_on_a_done_card_creates_a_fix_card(tmp_path, monkeypatch):
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner({"t_done": {"status": "done",
+                                           "assignee": "previous-worker"}})
+    entry = {"pr": 13, "card": "t_done", "assignee": None,
+             "branch": "wt/t_card"}
+    handed = []
+
+    _red_handback(tmp_path, entry, runner, handed)
+
+    assert [c[4] for c in runner.calls] == ["show", "create"], runner.calls
+    # The previous card's assignee is the target when the entry has none.
+    create = runner.calls[1]
+    assert create[create.index("--assignee") + 1] == "previous-worker"
+    assert handed[0][0] == "t_fix_1"
+    assert entry["card"] == "t_fix_1"
+
+
+def test_a_red_handback_on_an_open_card_only_comments(tmp_path, monkeypatch):
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner({"t_open": {"status": "running",
+                                           "assignee": "open-worker"}})
+    entry = {"pr": 14, "card": "t_open", "assignee": None,
+             "branch": "wt/t_card"}
+    handed = []
+
+    _red_handback(tmp_path, entry, runner, handed)
+
+    assert [c[4] for c in runner.calls] == ["show"], runner.calls
+    assert handed == [("t_open", "open-worker", _QUEUE_RED_BODY)]
+    assert entry["card"] == "t_open"
+
+
+def test_a_second_red_handback_reuses_the_created_fix_card(tmp_path,
+                                                           monkeypatch):
+    """At most one open fix card per PR, even across a re-added entry."""
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner({"t_done": {"status": "done",
+                                           "assignee": "worker"}})
+    first = {"pr": 15, "card": None, "assignee": "worker", "branch": "wt/t_card"}
+    handed = []
+
+    _red_handback(tmp_path, first, runner, handed)
+    assert [c[4] for c in runner.calls] == ["create"], runner.calls
+
+    # The red gate dropped the entry; the operator re-adds the PR naming the
+    # ORIGINAL (still done) card. The open fix card from the map must win.
+    second = {"pr": 15, "card": "t_done", "assignee": None,
+              "branch": "wt/t_card"}
+    _red_handback(tmp_path, second, runner, handed)
+
+    assert [c[4] for c in runner.calls] == ["create", "show", "show"], \
+        runner.calls
+    assert handed[-1][0] == "t_fix_1" and handed[-1][1] == "worker"
+    assert second["card"] == "t_fix_1"
+    state = mq.load_state(str(tmp_path / "merge-queue-state.json"))
+    assert state["projects"]["alpha"]["fix_cards"]["15"]["card"] == "t_fix_1"
+
+
+def test_a_gate_timeout_never_creates_a_fix_card(tmp_path, monkeypatch):
+    """A timeout is not a verdict on the code: no worker is sent to fix it."""
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner()
+    entry = {"pr": 16, "card": "t_done", "assignee": "worker",
+             "branch": "wt/t_card"}
+    handed = []
+
+    _red_handback(tmp_path, entry, runner, handed, reason=None, create=False)
+
+    assert runner.calls == []
+    assert handed[0][0] == "t_done"
+
+
+def test_a_board_aware_handback_is_told_the_projects_board(tmp_path,
+                                                           monkeypatch):
+    """The fix card lives on the project's board, so the comment must too."""
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner({"t_open": {"status": "running",
+                                           "assignee": "worker"}})
+    seen = []
+
+    def handback(card, assignee, body, *, board=None):
+        seen.append((card, board))
+        return True
+
+    mq._handback({"pr": 18, "card": "t_open"},
+                 {"name": "alpha", "repo": "/tmp/project", "board": "alpha"},
+                 _QUEUE_RED_BODY, handback, _gh_comment_ok,
+                 state_path=str(tmp_path / "state.json"), project="alpha",
+                 reason="gate failed", kanban_runner=runner)
+
+    assert seen == [("t_open", "alpha")]
+
+
+def test_default_handback_addresses_every_verb_on_the_named_board(monkeypatch):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    monkeypatch.setattr(mq.subprocess, "run", run)
+
+    assert mq.default_handback("t_x", "worker", "msg", board="alpha") is True
+    assert calls[0] == ["/bin/hermes", "kanban", "--board", "alpha",
+                        "comment", "t_x", "msg"]
+    assert calls[1] == ["/bin/hermes", "kanban", "--board", "alpha",
+                        "reassign", "t_x", "worker", "--reclaim"]
+    assert calls[2] == ["/bin/hermes", "kanban", "--board", "alpha",
+                        "unblock", "t_x"]
+
+
+def test_an_unreadable_board_does_not_cut_a_duplicate(tmp_path, monkeypatch):
+    """A transient show error is not proof the card is gone."""
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+
+    class LockedBoard(_FakeKanbanRunner):
+        def __call__(self, argv, **kwargs):
+            self.calls.append(list(argv))
+            return SimpleNamespace(returncode=1, stdout="",
+                                   stderr="database is locked")
+
+    runner = LockedBoard({"t_open": {"status": "running"}})
+    entry = {"pr": 17, "card": "t_open", "assignee": "worker",
+             "branch": "wt/t_card"}
+    handed = []
+
+    _red_handback(tmp_path, entry, runner, handed)
+
+    assert [c[4] for c in runner.calls] == ["show"], runner.calls
+    assert handed[0][0] == "t_open"

@@ -72,6 +72,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -91,6 +92,12 @@ DEFAULT_GATE_TIMEOUT_S = 3600
 DEFAULT_PROCESS_TIMEOUT_S = 120
 MAX_GATE_TAIL_LINES = 40
 MAX_ERROR_ATTEMPTS = 3
+
+#: How long a gate group orphaned by a daemon restart gets to honour SIGTERM
+#: before it is SIGKILLed (see :func:`_reclaim_orphan_gate`).  The gate runs in
+#: its own session, so the kernel does not take it down with the daemon.
+ORPHAN_GATE_TERM_GRACE_S = 5.0
+ORPHAN_GATE_TERM_POLLS = 20
 
 #: Cap on the retry error kept in ``last_error``. The first line stays the
 #: exception type + message (what a surface renders), followed by the tail of
@@ -214,6 +221,16 @@ _CANCEL_THREAD_PREFIX = "mq-gate-cancel"
 PR_URL_RE = re.compile(
     r"https?://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/pull/"
     r"(?P<number>[1-9][0-9]*)")
+
+#: Card statuses that mean "no worker will ever pick this up again". Hermes
+#: closes (``done``) a card when its PR opens, so this is the common case for a
+#: queued PR: commenting on that card and reassigning it is a no-op and the red
+#: PR is stranded. ``archived`` is the same from the other end.
+CLOSED_CARD_STATUSES = ("done", "archived")
+
+#: Priority for a fix card the queue has to cut because the handed-back card
+#: is gone. Same as the operator's own "fix this red PR" cards (2).
+FIX_CARD_PRIORITY = 2
 
 #: A project's ``origin`` remote, as github.com/<owner>/<repo> (https or ssh).
 _REMOTE_SLUG_RE = re.compile(
@@ -446,6 +463,11 @@ def _project_state(doc, project):
     # one PR; a hold is the per-PR lever (t_662753d6). Unlike the red-gate
     # suppression it is NOT lifted by a head change — only by `unhold`.
     ps.setdefault("held", [])
+    # The fix card the queue cut for a PR whose own card was already done:
+    # `{ "<pr>": {card, assignee, at} }`. It outlives the queue entry (a red
+    # gate drops the PR), so a later failure of the same PR reuses the card
+    # instead of cutting a duplicate one.
+    ps.setdefault("fix_cards", {})
     ps.setdefault("in_flight", None)
     ps.setdefault("last", None)
     return ps
@@ -1681,6 +1703,82 @@ def _kill_gate_group(proc, *, reap=True):
         pass
 
 
+def _gate_group_alive(pgid, kill_runner=None):
+    """True when process group ``pgid`` still has a live member.
+
+    Signal 0 asks the kernel without delivering anything.  ``kill_runner`` is
+    the same injection point :func:`_reclaim_orphan_gate` uses, so a test can
+    answer "alive" / "gone" without any real process existing.
+    """
+    kill = kill_runner or os.killpg
+    try:
+        kill(int(pgid), 0)
+    except ProcessLookupError:
+        return False
+    except Exception:
+        # PermissionError means the group exists but is not ours to signal;
+        # for an unreadable/odd error, trying the TERM is still the safer
+        # answer than declaring a possibly-running suite gone.
+        return True
+    return True
+
+
+def _reclaim_orphan_gate(flight, *, project=None, log=None, kill_runner=None,
+                         pause=None):
+    """TERM then KILL the gate group a PREVIOUS daemon left in the ledger.
+
+    ``launchctl bootout/bootstrap`` kills the daemon, but a gate it spawned runs
+    with ``start_new_session=True``: the kernel reparents it to launchd instead
+    of taking it down.  Measured on 2.17.6 (2026-11-25): after a daemon restart
+    ``bash scripts/run_tests.sh`` ran with ppid 1 and its pytest child kept the
+    gate worktree busy while the new daemon started its own gate in that same
+    checkout.
+
+    The ledger is the only thing that survives the restart, so the gate's pgid
+    is written there the moment the leg starts (``_run_gate(on_start=...)``).
+    This sends TERM, waits :data:`ORPHAN_GATE_TERM_GRACE_S` (bounded polls),
+    then KILL, and logs both steps.
+
+    It refuses to signal our OWN process group or pid: a ledger written by a
+    still-live tick must never make recovery kill the daemon itself.  Anything
+    that is not an integer, not a group (``<= 1``), or already gone is a no-op.
+
+    Returns True when the group was signalled (or TERMed to death).
+    """
+    log = log or (lambda *a, **k: None)
+    try:
+        pgid = int(flight.get("pgid") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if pgid <= 1 or pgid in (os.getpid(), os.getpgrp()):
+        return False
+    kill = kill_runner or os.killpg
+    if not _gate_group_alive(pgid, kill):
+        return False
+    pr = flight.get("pr")
+    log(f"merge-queue {project}: gate process group {pgid} from the previous "
+        f"daemon is still alive (PR #{pr}); sending TERM", "WARN")
+    try:
+        kill(pgid, signal.SIGTERM)
+    except Exception:
+        pass
+    pause = pause or time.sleep
+    polls = max(1, int(ORPHAN_GATE_TERM_POLLS))
+    for _ in range(polls):
+        if not _gate_group_alive(pgid, kill):
+            log(f"merge-queue {project}: orphaned gate group {pgid} exited on "
+                "TERM", "INFO")
+            return True
+        pause(ORPHAN_GATE_TERM_GRACE_S / polls)
+    log(f"merge-queue {project}: orphaned gate group {pgid} survived TERM; "
+        "sending KILL", "WARN")
+    try:
+        kill(pgid, signal.SIGKILL)
+    except Exception:
+        pass
+    return True
+
+
 class _GateCancelWatch:
     """Stop a gate leg whose entry has left the queue, group and all.
 
@@ -1773,7 +1871,7 @@ class _GateCancelWatch:
 
 
 def _run_gate(command, worktree, timeout_s, cancel_check=None,
-              *, cancel_poll_s=None):
+              *, cancel_poll_s=None, on_start=None):
     """Run one shell gate; returns ``(verdict, output)``.
 
     ``verdict`` is one of ``"pass"``, ``"fail"``, ``"timeout"`` or
@@ -1819,6 +1917,15 @@ def _run_gate(command, worktree, timeout_s, cancel_check=None,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
                                 start_new_session=True)
+        if on_start is not None:
+            # The pgid exists only once Popen ran, and a gate that later
+            # outlives the daemon can only be found through the ledger.  A
+            # bookkeeping failure must never stop the gate: the runner's
+            # cleanup is best-effort by the same rule as _kill_gate_group.
+            try:
+                on_start(int(proc.pid))
+            except Exception:
+                pass
         watch = _GateCancelWatch(proc, cancel_check, poll_s=cancel_poll_s)
         watch.start()
         try:
@@ -1877,25 +1984,262 @@ def _push_branch(worktree, info, git_runner):
 
 # ── card handback ───────────────────────────────────────────────────────────
 
-def default_handback(card, assignee, message):
+def _hermes_cli():
+    """The hermes binary a handback may run, or None (same seam as before)."""
+    try:
+        from .lifecycle import find_hermes_bin
+        return find_hermes_bin()
+    except Exception:
+        return None
+
+
+def _default_kanban_runner(argv, **kwargs):
+    return subprocess.run(argv, **kwargs)
+
+
+def _kanban_run(args, runner=None):
+    """One ``hermes kanban`` call, or None when hermes cannot be started."""
+    hermes = _hermes_cli()
+    if not hermes:
+        return None
+    runner = runner or _default_kanban_runner
+    try:
+        return runner([hermes, "kanban", *args], capture_output=True,
+                      text=True, timeout=60)
+    except Exception:
+        return None
+
+
+def _card_on_board(card, board, runner=None):
+    """``(exists, status, assignee)`` for ``card`` on ``board``.
+
+    ``exists`` is ``None`` when the board could not be read at all — that is
+    NOT "no such card", so the caller must never cut a duplicate on a transient
+    read error. ``show --json`` answers ``{"task": {...}}``.
+    """
+    if not card or not board:
+        return False, None, None
+    proc = _kanban_run(["--board", str(board), "show", str(card), "--json"],
+                       runner=runner)
+    if proc is None:
+        return None, None, None
+    if proc.returncode != 0:
+        err = str(getattr(proc, "stderr", "") or "").lower()
+        if "no such task" in err or "not found" in err:
+            return False, None, None
+        return None, None, None
+    try:
+        doc = json.loads(proc.stdout or "{}")
+    except (TypeError, ValueError):
+        return None, None, None
+    task = doc.get("task") if isinstance(doc, dict) else None
+    if not isinstance(task, dict):
+        task = doc if isinstance(doc, dict) else {}
+    status = str(task.get("status") or "").strip().lower() or None
+    who = str(task.get("assignee") or "").strip() or None
+    return True, status, who
+
+
+def _fix_card_reason(body):
+    """The title suffix for a queue-cut fix card: the body's first line."""
+    first = next((line.strip() for line in (body or "").splitlines()
+                  if line.strip()), "")
+    first = re.sub(r"^merge queue:\s*", "", first, flags=re.IGNORECASE)
+    return (first.rstrip(".").strip() or "needs a fix")[:80]
+
+
+def _fix_card_body(body, project, pr, branch=None):
+    """The queue's failure body plus the one rule a fix card's worker must know."""
+    where = f" (`{branch}`)" if branch else ""
+    return (f"{(body or '').rstrip()}\n\n"
+            "---\n"
+            f"Fix on the PR branch{where}, push, then "
+            f"`hscc merge-queue add {project} {pr}`; no hand-merge.\n")
+
+
+def _remembered_fix_card(state_path, project, pr):
+    """``(card, assignee)`` recorded for this PR's fix card, if any."""
+    if not state_path or not project or pr is None:
+        return None, None
+    try:
+        ps = _project_state(load_state(state_path), project)
+        fixes = ps.get("fix_cards")
+        record = (fixes.get(str(int(pr)))
+                  if isinstance(fixes, dict) else None)
+    except (TypeError, ValueError, OSError):
+        return None, None
+    if not isinstance(record, dict):
+        return None, None
+    return record.get("card"), record.get("assignee")
+
+
+def _remember_fix_card(entry, cfg, card, assignee, *, state_path, project):
+    """Put the created card on the entry AND in the project's by-PR map.
+
+    The entry is what a second hand-back in the same wait-list lifetime reads;
+    the map is what survives a red gate dropping the entry, so a re-added PR
+    comments on its existing fix card instead of cutting another.
+    """
+    entry["card"] = card
+    if assignee:
+        entry["assignee"] = assignee
+    if not state_path or not project:
+        return
+    pr = _entry_pr(entry)
+    if pr is None:
+        return
+    with _file_lock():
+        doc = load_state(state_path)
+        ps = _project_state(doc, project)
+        for holder in (ps.get("queue") or [], ps.get("waiting") or []):
+            found = _find_entry(holder, pr)
+            if found is not None:
+                found["card"] = card
+                if assignee:
+                    found["assignee"] = assignee
+        flight = ps.get("in_flight")
+        if isinstance(flight, dict) and _entry_pr(flight) == pr:
+            flight["card"] = card
+            if assignee:
+                flight["assignee"] = assignee
+        last = ps.get("last")
+        if isinstance(last, dict) and _entry_pr(last) == pr:
+            last["card"] = card
+        fixes = ps.get("fix_cards")
+        if not isinstance(fixes, dict):
+            fixes = ps["fix_cards"] = {}
+        fixes[str(pr)] = {"card": card, "assignee": assignee,
+                          "at": _now_iso()}
+        save_state(doc, state_path)
+
+
+def _ensure_fix_card(entry, cfg, body, reason=None, *, state_path=None,
+                     project=None, log=None, runner=None):
+    """``(card, assignee)`` a hand-back can actually reach.
+
+    An OPEN card is reused exactly as today. A missing card, or one already
+    ``done``/``archived``, has no worker behind it: the queue creates a new
+    fix card on the project's board through the sanctioned hermes CLI, with the
+    failure body and the "fix, push, re-add" rule, and records its id on the
+    entry and in the project's by-PR map.
+    """
+    log = log or (lambda *a, **k: None)
+    cfg = cfg or {}
+    project = project or cfg.get("name")
+    board = str(cfg.get("board") or "").strip()
+    pr = _entry_pr(entry)
+    card = entry.get("card")
+    assignee = entry.get("assignee")
+    if not board or pr is None:
+        return card, assignee
+
+    remembered, remembered_who = _remembered_fix_card(state_path, project, pr)
+    candidates = []
+    for candidate in (card, remembered):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    card_assignee = None
+    for candidate in candidates:
+        exists, status, who = _card_on_board(candidate, board, runner=runner)
+        if who and not card_assignee:
+            card_assignee = who
+        if exists is not False and status not in CLOSED_CARD_STATUSES:
+            resolved = assignee or who or remembered_who
+            if candidate != card:
+                # Reused from the by-PR map after the entry was dropped: put it
+                # back on the entry (and the ledger) so every later hand-back
+                # reaches it directly. It may also be the live fix card while
+                # the entry still names the ORIGINAL card, which is done.
+                _remember_fix_card(entry, cfg, candidate, resolved,
+                                   state_path=state_path, project=project)
+            return candidate, resolved
+    assignee = assignee or card_assignee or remembered_who or f"{board}-orch"
+
+    reason = str(reason or _fix_card_reason(body)).strip() or "needs a fix"
+    title = f"PR #{pr} red in merge queue: {reason}"
+    text = _fix_card_body(body, project or board, pr,
+                          branch=entry.get("branch"))
+    fd, path = tempfile.mkstemp(prefix="merge-queue-fix-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        proc = _kanban_run([
+            "--board", board, "create", title,
+            "--body-file", path,
+            "--assignee", str(assignee),
+            "--priority", str(FIX_CARD_PRIORITY),
+            "--json"], runner=runner)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+    new_card = None
+    if proc is not None and proc.returncode == 0:
+        try:
+            doc = json.loads(proc.stdout or "{}")
+        except (TypeError, ValueError):
+            doc = {}
+        if isinstance(doc, dict):
+            new_card = doc.get("id") or doc.get("task_id")
+    if not new_card:
+        detail = _tail(getattr(proc, "stderr", "") if proc is not None
+                       else "hermes not found", 3)
+        log(f"merge-queue: could not create a fix card for PR #{pr} on board "
+            f"{board!r}: {detail or 'no task id in hermes output'}", "WARN")
+        return card, entry.get("assignee")
+
+    new_card = str(new_card)
+    _remember_fix_card(entry, cfg, new_card, assignee,
+                       state_path=state_path, project=project)
+    log(f"merge-queue: PR #{pr} had no live card; created fix card "
+        f"{new_card} on board {board!r} for {assignee}", "WARN")
+    return new_card, assignee
+
+
+def _accepts_kwarg(fn, name):
+    """Does ``fn`` take keyword ``name``? Explicit ``<name>_capable`` wins.
+
+    Every handback fake is written against the original three positional
+    arguments, so the board is handed only to a callable that says it can take
+    it — a ``TypeError`` swallowed by the handback's own ``except`` would lose
+    the comment silently.
+    """
+    flag = getattr(fn, f"{name}_capable", None)
+    if flag is not None:
+        return bool(flag)
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    for param in params.values():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == name and param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY):
+            return True
+    return False
+
+
+def default_handback(card, assignee, message, *, board=None):
     """Comment + reassign (+ unblock) through the sanctioned hermes CLI.
 
     Mirrors ``escalate_watcher._default_reassign``: the daemon never writes a
-    board directly for a handback. Returns True when the comment landed.
+    board directly for a handback. ``board`` names the project's board
+    explicitly — the same one the fix card was created on — because the
+    daemon's current hermes board is not necessarily that board. Returns True
+    when the comment landed.
     """
     if not card:
         return False
-    try:
-        from .lifecycle import find_hermes_bin
-        hermes = find_hermes_bin()
-    except Exception:
-        hermes = None
+    hermes = _hermes_cli()
     if not hermes:
         return False
+    prefix = ["--board", str(board)] if board else []
 
     def run(args):
         try:
-            return subprocess.run([hermes, "kanban", *args],
+            return subprocess.run([hermes, "kanban", *prefix, *args],
                                   capture_output=True, text=True,
                                   timeout=60)
         except Exception:
@@ -2147,10 +2491,31 @@ def _update_flight(state_path, project, pr, **fields):
         _stream_stamp(project=project, pr=pr, stage=stage)
 
 
-def _handback(entry, cfg, body, handback, gh_runner, log=None):
+def _handback(entry, cfg, body, handback, gh_runner, log=None, *,
+              reason=None, create=True, state_path=None, project=None,
+              kanban_runner=None):
+    """Comment on the PR, then hand its card back to a worker.
+
+    ``create`` is false for a non-verdict hand-back (a gate timeout): there is
+    nothing for a fix card's worker to do, so the queue must not cut one.
+    """
+    log = log or (lambda *a, **k: None)
     _comment_pr(cfg["repo"], entry["pr"], body, gh_runner, log=log)
+    card, assignee = entry.get("card"), entry.get("assignee")
+    if create:
+        try:
+            card, assignee = _ensure_fix_card(
+                entry, cfg, body, reason, state_path=state_path,
+                project=project or cfg.get("name"), log=log,
+                runner=kanban_runner)
+        except Exception as exc:
+            log(f"merge-queue: PR #{entry.get('pr')} card hand-back failed: "
+                f"{type(exc).__name__}: {exc}", "WARN")
     try:
-        handback(entry.get("card"), entry.get("assignee"), body)
+        if _accepts_kwarg(handback, "board"):
+            handback(card, assignee, body, board=(cfg or {}).get("board"))
+        else:
+            handback(card, assignee, body)
     except Exception:
         pass
 
@@ -2330,7 +2695,9 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                 f"{output}")
         _finish(doc, project, state_path, ps, "conflict", entry,
                 conflicted=conflicted, log=log)
-        _handback(entry, cfg, body, handback, gh_runner, log=log)
+        _handback(entry, cfg, body, handback, gh_runner, log=log,
+                  reason="rebase conflict", state_path=state_path,
+                  project=project)
         log(f"merge-queue {project}: PR #{entry['pr']} conflict in {names}",
             "WARN")
         return {"pr": entry["pr"], "result": "conflict",
@@ -2364,11 +2731,33 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
         # the predicate is handed IN and polled from beside the leg.  Same
         # function, same arguments as the checkpoints: a mid-leg answer cannot
         # disagree with the one the leg was started on.
-        with _GateLiveness(project, entry["pr"], command):
-            verdict, output = _run_gate(
-                command, worktree, timeout_s,
-                cancel_check=lambda: _cancel_reason(state_path, project,
-                                                    entry, cfg))
+        # The leg's pgid goes into the ledger the moment Popen returns it, and
+        # is removed in the finally.  A daemon restart kills the daemon but not
+        # this session (start_new_session=True), so the ledger is the only way
+        # the next tick can find and kill the orphan before re-gating
+        # (t_593c32a4).  Cleared on every way out of the leg, so a finished
+        # gate can never leave a recycled pgid behind for recovery to signal.
+        gate_pgids = []
+
+        def _record_gate_pgid(pid):
+            gate_pgids.append(int(pid))
+            _update_flight(state_path, project, entry["pr"],
+                           pgid=int(pid), gate=command)
+
+        try:
+            with _GateLiveness(project, entry["pr"], command):
+                verdict, output = _run_gate(
+                    command, worktree, timeout_s,
+                    cancel_check=lambda: _cancel_reason(state_path, project,
+                                                        entry, cfg),
+                    on_start=_record_gate_pgid)
+        finally:
+            if gate_pgids:
+                try:
+                    _update_flight(state_path, project, entry["pr"],
+                                   pgid=None)
+                except Exception:
+                    pass
         if verdict == "cancelled":
             # The entry left the queue while the leg ran. Resolve it through the
             # same `_stop_cancelled` a checkpoint uses — drop on `removed`,
@@ -2407,7 +2796,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                 "needed from you; do not rebase or 'fix the gate' because of "
                 "this comment.\n"
                 f"{output}")
-            _handback(entry, cfg, body, handback, gh_runner, log=log)
+            _handback(entry, cfg, body, handback, gh_runner, log=log,
+                      create=False, state_path=state_path, project=project)
             log(f"merge-queue {project}: PR #{entry['pr']} gate timed out "
                 f"after {timeout_s}s: {command} (not a test failure)", "WARN")
             return {"pr": entry["pr"], "result": "gate-timeout",
@@ -2427,7 +2817,9 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
                     f"{resolve_instructions(info.get('headRefName'), base)}\n")
             _finish(doc, project, state_path, ps, "red-gate", entry,
                     gate=command, head_sha=info.get("headRefOid"), log=log)
-            _handback(entry, cfg, body, handback, gh_runner, log=log)
+            _handback(entry, cfg, body, handback, gh_runner, log=log,
+                      reason="gate failed", state_path=state_path,
+                      project=project)
             log(f"merge-queue {project}: PR #{entry['pr']} gate failed: "
                 f"{command}", "WARN")
             return {"pr": entry["pr"], "result": "red-gate",
@@ -2895,7 +3287,10 @@ def _hand_back_own_red(project, cfg, base, candidates, *, state_path, base_sha,
                              _failing_check_names(info), entry, card)
         target = dict(entry)
         target["card"], target["assignee"] = card, assignee
-        _handback(target, cfg, body, handback, gh_runner, log=log)
+        _handback(target, cfg, body, handback, gh_runner, log=log,
+                  reason=("rebase conflict" if reason == "conflict"
+                          else "checks red"),
+                  state_path=state_path, project=project)
         patches[pr] = {"handed_back_at": _now_iso(),
                        "handed_back_main_sha": base_sha}
         log(f"merge-queue {project}: PR #{pr} handed back to card "
@@ -3398,7 +3793,8 @@ def _settle_pushed_head(project, cfg, entry, info, head_sha, *, base,
             f"{resolve_instructions(entry.get('branch'), base)}\n")
         _finish(None, project, state_path, None, "red-ci", entry,
                 head_sha=head_sha, log=log)
-        _handback(entry, cfg, body, handback, gh_runner, log=log)
+        _handback(entry, cfg, body, handback, gh_runner, log=log,
+                  reason="CI red", state_path=state_path, project=project)
         log(f"merge-queue {project}: PR #{pr} CI red on pushed head "
             f"{head_sha[:12]}", "WARN")
         return {"pr": pr, "result": "red-ci", "head_sha": head_sha}
@@ -3562,7 +3958,8 @@ def _outcome_line(log, project, entry, outcome):
 
 def tick(*, state_path=None, root=None, registry_path=None,
          git_runner=None, gh_runner=None, handback=None, auto_source=None,
-         config_loader=None, log=None, now=None):
+         config_loader=None, log=None, now=None, kill_runner=None,
+         pause=None):
     """One daemon tick: recover, auto-enqueue, process at most one PR per repo."""
     state_path = state_path or state_file()
     log = log or (lambda *a, **k: None)
@@ -3591,6 +3988,16 @@ def tick(*, state_path=None, root=None, registry_path=None,
                 # re-rebase and re-gate work that is already pushed.
                 continue
             if flight:
+                # A launchd restart reparents the old gate to launchd instead
+                # of killing it (its own session survives the daemon), and this
+                # loop is the first thing a new daemon runs. Kill that group
+                # BEFORE the entry goes back to the head and re-gates in the
+                # same checkout, or two suites fight over one worktree.
+                _reclaim_orphan_gate(flight, project=name, log=log,
+                                     kill_runner=kill_runner, pause=pause)
+                # The recorded group belongs to the run that just died; the
+                # re-gated leg records its own.
+                flight.pop("pgid", None)
                 ps["in_flight"] = None
                 if not any(int(e.get("pr", 0)) == int(flight.get("pr", 0))
                            for e in ps["queue"]):
