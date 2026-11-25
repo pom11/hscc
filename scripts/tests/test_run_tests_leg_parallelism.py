@@ -39,6 +39,15 @@ RUNNER = SCRIPTS / "run_tests.sh"
 LEG_A, LEG_B, LEG_C = "hscc-commands", "sparkrun-hermes", "memori_byodb"
 THREE = f"{LEG_A} {LEG_B} {LEG_C}"
 
+#: The one roster leg whose NAME is a nested path, and therefore the only leg
+#: that can prove a leg log is a FILE and not a directory component. Every other
+#: leg name is one flat component, so a log path built by splicing the name in
+#: raw works for eleven legs and fails silently for this one: `…/1-.github/scripts.log`
+#: names a file inside a directory that was never created, the redirect fails,
+#: the leg never runs, and it reads red with no FAILED line to capture. That is
+#: how `.github/scripts` was red on every packed run of t_6c2123f9's roster.
+LEG_SLASHY = ".github/scripts"
+
 #: Written to a tmp dir and pointed at by HSCC_TEST_PY. It receives exactly what
 #: the runner gives python (`-m pytest -q -rs <dir>/tests -p no:cacheprovider
 #: -m not loadstress ...`), so it can report the argv it was handed and derive
@@ -550,6 +559,37 @@ def test_the_per_leg_logs_do_not_pile_up_in_tmp(tmp_path):
             f"files outlived their run: {created}"
         dirs.append(d)
     assert len(set(dirs)) == 2, f"two runs shared one log dir: {dirs}"
+
+
+def test_a_leg_whose_name_is_a_path_still_runs(tmp_path):
+    """A leg log must be a FILE for every leg name the roster can contain.
+
+    Eleven of the twelve names are one flat path component, so a log path built
+    by splicing the leg name into a filename raw passes eleven tests and silently
+    loses the twelfth: `.github/scripts` turned `$LEG_TMP/1-.github/scripts.log`
+    into a file in a directory that does not exist. The redirect then fails in
+    the child before `env` is execed, so pytest never ran, the wrapper recorded
+    nothing, and the leg read red off `wait`'s status — a red with no `FAILED`
+    line, which is exactly the un-capturable third red of t_6c2123f9's p=2
+    roster (measured: `line 939: …/1-.github/scripts.log: No such file or
+    directory`, `elapsed=0s rc=1`).
+
+    Asserting on the block being NON-EMPTY is the whole test: the runner prints
+    the `━━━ <leg> ━━━` header whether or not the log opened, so a header with
+    nothing under it is this defect, and a green run of the stub cannot produce
+    one.
+    """
+    r = _run(tmp_path, plan=_plan([(LEG_A, 0.2, 0), (LEG_SLASHY, 0.2, 0)]),
+             parallel=2, legs=f"{LEG_A} {LEG_SLASHY}")
+    assert r["rc"] == 0, (
+        f"a leg named with a '/' read red (rc={r['rc']}):\n{r['log']}")
+    assert f"  ✓ {LEG_SLASHY}" in r["log"], r["log"]
+    head = f"━━━ {LEG_SLASHY} ━━━"
+    assert head in r["log"], r["log"]
+    block = r["log"].split(head, 1)[1].split("━━━")[0]
+    assert "7 passed" in block, (
+        f"the {LEG_SLASHY} block printed no pytest output at all — the leg's log "
+        f"could not be opened, so pytest was never execed:\n{r['log']}")
 
 
 def test_heartbeat_seconds_zero_silences_the_watcher_in_a_pack(tmp_path):
