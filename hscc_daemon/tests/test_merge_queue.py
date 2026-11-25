@@ -5441,11 +5441,20 @@ class _FakeKanbanRunner:
             body_path = argv[argv.index("--body-file") + 1]
             self.bodies[card] = pathlib.Path(body_path).read_text(
                 encoding="utf-8")
+            initial = (argv[argv.index("--initial-status") + 1]
+                       if "--initial-status" in argv else "ready")
             self.cards[card] = {
-                "status": "ready",
+                "status": initial,
                 "assignee": argv[argv.index("--assignee") + 1]}
             return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
-                {"id": card, "status": "ready"}))
+                {"id": card, "status": initial}))
+        if verb == "block":
+            card = argv[5]
+            info = self.cards.setdefault(card, {})
+            info.update(status="blocked",
+                        block_kind=argv[argv.index("--kind") + 1])
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                {"id": card}))
         raise AssertionError(f"unexpected kanban call: {argv}")
 
 
@@ -5493,6 +5502,9 @@ def test_a_red_handback_with_no_card_creates_a_fix_card(tmp_path, monkeypatch):
     assert create[5] == "PR #12 red in merge queue: gate failed"
     assert create[create.index("--assignee") + 1] == "worker"
     assert create[create.index("--priority") + 1] == "2"
+    # No fix_card block in this registry row: the card is dispatchable.
+    assert "--initial-status" not in create
+    assert not create[5].startswith("[opencode]")
     body = runner.bodies["t_fix_1"]
     # The queue's failure evidence leads; the rule is on the card.
     assert "FAILED hscc_daemon/tests/test_x.py::test_y" in body
@@ -5638,3 +5650,85 @@ def test_an_unreadable_board_does_not_cut_a_duplicate(tmp_path, monkeypatch):
 
     assert [c[4] for c in runner.calls] == ["show"], runner.calls
     assert handed[0][0] == "t_open"
+
+
+def _gh_comment_runner(seen):
+    def run(argv, cwd=None, **kwargs):
+        argv = list(argv)
+        if argv[:3] == ["gh", "pr", "comment"]:
+            seen.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    return run
+
+
+def _parked_cfg(**fix_card):
+    return {"name": "alpha", "repo": "/tmp/project", "board": "alpha",
+            "fix_card": {"assignee": "coder", "park": True, **fix_card}}
+
+
+def test_a_parked_fix_card_is_blocked_typed_and_assigned_to_the_pane(
+        tmp_path, monkeypatch):
+    """park=true cuts an [opencode] card no cluster worker can claim."""
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner()
+    entry = {"pr": 19, "card": None, "assignee": "worker",
+             "branch": "wt/t_card"}
+    handed, comments = [], []
+
+    mq._handback(entry, _parked_cfg(), _QUEUE_RED_BODY, _handed(handed),
+                 _gh_comment_runner(comments),
+                 reason="gate failed",
+                 state_path=str(tmp_path / "merge-queue-state.json"),
+                 project="alpha", kanban_runner=runner)
+
+    assert [c[4] for c in runner.calls] == ["create", "block"], runner.calls
+    create = runner.calls[0]
+    assert create[5] == ("[opencode] PR #19 red in merge queue: gate failed")
+    assert create[create.index("--assignee") + 1] == "coder"
+    assert create[create.index("--initial-status") + 1] == "blocked"
+    block = runner.calls[1]
+    assert "t_fix_1" in block and block.index("--kind") < block.index("t_fix_1")
+    assert block[block.index("--kind") + 1] == "capability"
+    assert handed[0][0] == "t_fix_1" and handed[0][1] == "coder"
+    assert entry["card"] == "t_fix_1"
+    # The PR's handback comment names the parked card the driver must run.
+    assert comments, "no PR comment"
+    body = comments[-1][comments[-1].index("--body") + 1]
+    assert "t_fix_1" in body and "OpenCode" in body
+    state = mq.load_state(str(tmp_path / "merge-queue-state.json"))
+    assert state["projects"]["alpha"]["fix_cards"]["19"]["card"] == "t_fix_1"
+
+
+def test_a_parked_fix_card_reuses_an_open_card_without_cutting_another(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    runner = _FakeKanbanRunner({"t_open": {"status": "blocked",
+                                           "assignee": "coder",
+                                           "block_kind": "capability"}})
+    entry = {"pr": 20, "card": "t_open", "assignee": None,
+             "branch": "wt/t_card"}
+    handed = []
+
+    _red_handback(tmp_path, entry, runner, handed, cfg=_parked_cfg())
+
+    assert [c[4] for c in runner.calls] == ["show"], runner.calls
+    assert handed[0][0] == "t_open" and handed[0][1] == "coder"
+    assert entry["card"] == "t_open"
+
+
+def test_the_default_handback_never_unblocks_a_parked_card(monkeypatch):
+    """An unblock would hand the parked card straight to the cluster."""
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mq, "_hermes_cli", lambda: "/bin/hermes")
+    monkeypatch.setattr(mq.subprocess, "run", run)
+
+    assert mq.default_handback("t_x", "coder", "msg", board="alpha",
+                               parked=True) is True
+    verbs = [call[4] for call in calls]
+    assert verbs == ["comment", "reassign"], calls
+    assert not any("unblock" in call for call in calls), calls

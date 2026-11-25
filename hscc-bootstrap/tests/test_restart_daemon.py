@@ -770,8 +770,8 @@ def test_orphan_guard_pattern_is_narrow():
 
     MATCH = [
         # launchd-supervised loop (the plist's own argv)
-        "/Users/op/.hermes/hermes-agent/venv/bin/python "
-        "/Users/op/.hermes/plugins/hscc_daemon/hscc.py start-daemon",
+        "/Users/hscc-fixture/.hermes/hermes-agent/venv/bin/python "
+        "/Users/hscc-fixture/.hermes/plugins/hscc_daemon/hscc.py start-daemon",
         # the incident: brew console script, orphaned, PPID 1
         "/opt/homebrew/Cellar/python/3.13/bin/python3.13 "
         "/opt/homebrew/bin/hscc start",
@@ -783,8 +783,8 @@ def test_orphan_guard_pattern_is_narrow():
         "/opt/homebrew/bin/hscc stop",
         "/opt/homebrew/bin/hscc start-daemon-something-else",
         "/usr/bin/python3 -m pytest hscc-bootstrap/tests -q",
-        "bash /Users/op/.hermes/plugins/hscc-bootstrap/restart_daemon.sh",
-        "vim /Users/op/.hermes/plugins/hscc_daemon/hscc.py",
+        "bash /Users/hscc-fixture/.hermes/plugins/hscc-bootstrap/restart_daemon.sh",
+        "vim /Users/hscc-fixture/.hermes/plugins/hscc_daemon/hscc.py",
         "hscc project chat my-project",
         "/bin/zsh -c flightdeck daemon --start-daemon",
     ]

@@ -124,7 +124,7 @@ python3 ~/.sparkrun-local/scripts/model-check.py download-all   # Sync all NAS m
 - **HuggingFace repo naming**: `org/model` → `models--org--model`. The `hf_repo_name()`
   function in model-check.py handles this.
 - **sparkrun auto-mounts HF cache**: The recipe env `HF_HOME=/cache/huggingface` maps
-  to host's `/home/spark/.cache/huggingface` via bind mount.
+  to host's `/home/<ssh_user>/.cache/huggingface` via bind mount.
 - **sparkrun status parsing**: When parsing `sparkrun status` output for host IPs, NEVER count dots in "Job:" lines — file paths like `.sparkrun-local/recipes/official/qwen3.6-35b-a3b-fp8-vllm.yaml` contain dots and will be falsely identified as IPs. Always extract IPs from the line AFTER "Job:" (the `solo IP Up ...` line). For idle hosts, only parse from within the "Idle hosts" section, not globally.
 - **Empty dirs confuse checks**: Always count files (`find ... -type f | wc -l`)
   rather than checking directory existence when detecting cached models.

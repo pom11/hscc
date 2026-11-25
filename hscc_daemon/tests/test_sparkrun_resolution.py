@@ -1063,8 +1063,8 @@ class TestServiceEnvironmentDeclaration:
 
     def test_install_plist_path_includes_local_bin(self):
         from hscc_daemon import install
-        path = install._daemon_path_env("/Users/example")
-        assert "/Users/example/.local/bin" in path
+        path = install._daemon_path_env("/Users/hscc-fixture")
+        assert "/Users/hscc-fixture/.local/bin" in path
 
     def test_install_rendered_plist_and_systemd_unit_include_local_bin(self):
         """Pin the RENDERED service definitions, not just the helper — the

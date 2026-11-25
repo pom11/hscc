@@ -32,7 +32,7 @@ import hscc_daemon.api_cli as api_cli
 
 PRINT_RUNNING = """\
 GuiJob: com.hscc.api
-	path = /Users/dev/Library/LaunchAgents/com.hscc.api.plist
+	path = /Users/hscc-fixture/Library/LaunchAgents/com.hscc.api.plist
 	type = LaunchAgent
 	state = running
 
@@ -42,7 +42,7 @@ GuiJob: com.hscc.api
 
 PRINT_LOADED_NO_PID = """\
 GuiJob: com.hscc.api
-	path = /Users/dev/Library/LaunchAgents/com.hscc.api.plist
+	path = /Users/hscc-fixture/Library/LaunchAgents/com.hscc.api.plist
 	type = LaunchAgent
 	state = not running
 """

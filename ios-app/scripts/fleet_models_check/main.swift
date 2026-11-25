@@ -96,7 +96,7 @@ expect(FleetServing.header(workloadCount: 1) == "Models · 1 serving",
 //    (hscc-cluster/hscc.py takes the first token of the `Job:` line: normally
 //    a recipe path, "?" never reaches `name`.)
 // ---------------------------------------------------------------------------
-expect(FleetServing.modelDisplayName("/home/devuser/.sparkrun-local/recipes/local-fixed/qwen3.8-max-fp8-hscc.yaml")
+expect(FleetServing.modelDisplayName("/home/hscc-fixture/.sparkrun-local/recipes/local-fixed/qwen3.8-max-fp8-hscc.yaml")
         == "qwen3.8-max-fp8-hscc",
        "path + .yaml -> stem (live shape)")
 expect(FleetServing.modelDisplayName("qwen3-30b") == "qwen3-30b",
@@ -111,7 +111,7 @@ expect(FleetServing.modelDisplayName(".yaml") == ".yaml",
        "a stem-less '.yaml' still shows something (never an empty headline)")
 expect(FleetServing.modelDisplayName("") == "",
        "empty name passes through (no crash); the row is then honestly empty")
-expect(!FleetServing.modelDisplayName("/home/devuser/.sparkrun-local/recipes/local-fixed/qwen3.8-max-fp8-hscc.yaml")
+expect(!FleetServing.modelDisplayName("/home/hscc-fixture/.sparkrun-local/recipes/local-fixed/qwen3.8-max-fp8-hscc.yaml")
         .contains("devuser"),
        "the live-shaped path leaves NO home directory on screen")
 

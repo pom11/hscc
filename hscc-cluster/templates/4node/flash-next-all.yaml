@@ -25,7 +25,7 @@
 #
 # At ~6 ms per PLE row lookup the model is unusable regardless of GPU speed. The
 # NAS is a STAGING source only. Containers already mount the LOCAL cache
-# (/home/spark/.cache/huggingface -> /cache/huggingface, HF_HUB_CACHE=
+# (/home/<ssh_user>/.cache/huggingface -> /cache/huggingface, HF_HUB_CACHE=
 # /cache/huggingface/hub) because `distribution.model.enabled: false` makes
 # sparkrun fall back to the default local path — so all this template needs is
 # the model present locally on all four nodes:
