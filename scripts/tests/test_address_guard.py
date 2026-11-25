@@ -562,6 +562,12 @@ def _home(root, user=_REAL_USER, rest=""):
     ("~/.hermes/gateway.sock", None),
     ("/usr/local/bin/python3", None),
     ("/private/var/folders/9x/T/pytest-of-someone", None),
+    # clean: a user component that cannot be an account (t_34de41c3). Assembled,
+    # because writing the ellipsis form literally would plant the finding here.
+    ("/Users/" + "." * 3 + "/dev/eco", None),                    # prose ellipsis
+    ("/home/" + "." + "local/bin/hscc", None),                   # a dotfile, not a home
+    # trips: a digit-led account name is still a concrete user
+    (f"/Users/{'2'}fac/x", True),
 ])
 def test_find_in_text_home_verdicts(text, expect_hit):
     hits = address_guard.home_hits(text)
@@ -570,6 +576,43 @@ def test_find_in_text_home_verdicts(text, expect_hit):
     else:
         assert hits, f"missed the home path in {text!r}"
         assert address_guard.is_home_occurrence(hits[0][1])
+
+
+def test_a_newline_escaped_home_path_still_trips_the_branch():
+    """THE reason this branch has a lookahead and not a lookbehind (t_34de41c3).
+
+    A home path written after a ``\\n`` escape inside a string literal has a WORD
+    CHARACTER in front of the slash in the file bytes — the `n` of the escape. Any
+    left-boundary lookbehind over the path-name class (``(?<![A-Za-z0-9._-])``,
+    the shape proposed for the relative-path false positives) therefore declines
+    it, and the hook, the pytest gate and the CI backstop all pass a real leak
+    committed as ``".../bin/zsh\\n/Users/<user>/.ssh/id_rsa\\n"``.
+
+    Same failure family as the ``.pyc`` trap that forces the build-artefact
+    refusal, and the reason ``\\b`` is refused here. If a future change adds a
+    left boundary to ``_HOME_BRANCH``, this test is the one that goes red.
+    """
+    planted = "/bin/zsh\\n" + _home("/Users", rest="/.ssh/id_rsa") + "\\n"
+    assert "\\n" in planted, "the escape must be the two bytes backslash-n"
+    hits = address_guard.home_hits(planted)
+    assert hits, f"a \\n escape must not hide a home path: {planted!r}"
+    assert hits[0][1].startswith(_home("/Users", rest="/.ssh")), hits
+
+
+def test_a_home_path_after_a_word_char_still_trips_the_branch():
+    """The quote/paren/start-of-line family, widened to the adjacency a
+    lookbehind would eat — no context may hide the branch (t_3480956c's rule,
+    re-pinned for t_34de41c3)."""
+    for ctx, label in (
+            (f'"{_home("/Users", rest="/x")}"', "double quote"),
+            (f"({_home('/home', rest='/x')})", "paren"),
+            (_home("/Users", rest="/x"), "start of line"),
+            (f"cmd --home={_home('/home', rest='/x')}", "after ="),
+            (f"file://{_home('/Users', rest='/x')}", "after a URL scheme"),
+            (f"| {_home('/home', rest='/x')} |", "Markdown table cell"),
+            (f"<code>{_home('/Users', rest='/x')}</code>", "HTML code element"),
+    ):
+        assert address_guard.home_hits(ctx), f"{label}: the branch went blind"
 
 
 def test_an_address_never_hides_behind_a_home_path_on_the_same_line():

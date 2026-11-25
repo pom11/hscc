@@ -112,6 +112,24 @@ _HOME_USER_CHARS = "A-Za-z0-9._-"
 # the ``/Users/<user>`` prefix, and a shorter match never UNDER-reports.
 _HOME_TAIL_STOP = r"\s'\"`<>|;,)()\[\]{}"
 
+# A user-name component must START alphanumeric. This kills the two shapes the
+# strictness above manufactures as findings — a prose ellipsis (`/Users/` plus
+# `...`) and a dotfile mistaken for an account (`/home/.local/bin` in a test's
+# docstring) — and no real POSIX account name begins with `.`.
+#
+# It is a LOOKAHEAD, and that is the whole reason it is allowed here. A lookahead
+# can only shorten or decline a match at a position the engine already reached;
+# it cannot stop the engine from *reaching* the `/Users/` that starts the offence.
+# A left-boundary LOOKBEHIND (`(?<![A-Za-z0-9._-])`) was measured over the tracked
+# tree on t_34de41c3 as the fix for three relative-path false positives, and it
+# costs a blind spot: a home path written after a `\n` escape inside a string
+# literal (`".../bin/zsh\n/Users/<user>/.ssh/id_rsa"`) has a word char in front of
+# the slash in the FILE BYTES, so the lookbehind declines it and every gate — the
+# hook, the pytest gate and the CI backstop — passes a real leak. That is the
+# `.pyc` boundary trap one layer up, and the same reason this branch refuses `\b`.
+# Pinned by test_a_newline_escaped_home_path_still_trips_the_branch.
+_HOME_USER_START = r"(?=[A-Za-z0-9])"
+
 
 def _unsanctioned_home_lookahead():
     """Lookaheads that skip a sanctioned fixture user and match every other one.
@@ -131,6 +149,7 @@ def _unsanctioned_home_lookahead():
 _HOME_BRANCH = (
     r"(?:/Users|/home)/"
     + _unsanctioned_home_lookahead()
+    + _HOME_USER_START
     + "[" + _HOME_USER_CHARS + "]+"
     r"(?:/[^" + _HOME_TAIL_STOP + r"]*)?"
 )
