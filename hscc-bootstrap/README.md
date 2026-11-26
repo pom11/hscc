@@ -43,6 +43,19 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    pointer write the CLI makes; the legacy `default` board keeps its cards.
    The doctor row kanban current board (main orchestrator) warns (never
    fatal) on drift with the one-line `hermes kanban boards switch <name>` fix.
+4a2. **Install: orchpad (orchestrator pads)** — `install_orchpad.py --apply`
+   installs the pinned orchpad into the Hermes venv, runs its `orchpad-hermes`
+   plugin installer on the main orchestrator and every `<project>-orch`
+   profile, and appends `orchpad` to each of those profiles' own
+   `plugins.enabled`. **A user may have installed orchpad before hscc** and
+   this stage must not break that: a standalone install (pipx, `uv tool`,
+   another venv) is never touched; in the Hermes venv a version at or above the
+   pin is left as it is (no downgrade), a local/editable checkout is left alone
+   whatever its version (`user-managed`), and only a missing or older regular
+   install is installed/upgraded to the pin. Existing `plugins.enabled` entries
+   and the user's pads are kept. `--skip-orchpad-package` never pip-installs
+   (the venv is shared and real; the isolated-install tests use it) and
+   reports the profiles `skipped` when no orchpad is there. Non-fatal.
 4b. **Install: snap firmware-notifier mask (log-churn quarantine)** —
    `install_notifier_mask.py` masks snap firmware-updater's crash-looping desktop
    notifier **and the timer that starts it** for the desktop user on every
@@ -121,7 +134,9 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 `--yes` non-interactive · `--dry-run` print every planned write, perform none ·
 `--force` regenerate serving.json AND overwrite operator-drifted plugin files
 without the preserve-and-flag ceremony (GAP-E-1) · `--no-backup` ·
-`--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli`.
+`--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli` ·
+`--skip-node-recovery` · `--skip-orchpad-package` (never pip-install orchpad
+into the shared Hermes venv).
 
 ## Running from a brew libexec tree (t_bc5a3fee, real layout pinned t_0f5616fd)
 

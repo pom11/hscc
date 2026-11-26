@@ -61,7 +61,17 @@ Skipped steps and why:
                          t_5b560adf the child's `sparkrun` is a sandbox stub, so this
                          flag is defence in depth rather than the only seal — the
                          stage no longer has the real cluster to ssh to.
-Those four are the only steps that intentionally write outside the home.
+  --skip-orchpad-package pip-installs orchpad INTO the Hermes venv (shared, real).
+                         The sandbox's `hermes-agent` is a symlink to the live
+                         tree, so without the flag the stage installed into the
+                         LIVE venv with console-script shebangs pointing into this
+                         test's tmp dir; once pytest deleted it, the live
+                         `bin/orchpad` + `orchpad-hermes` were dead and the 2.17.8
+                         bootstrap's orchpad stage failed on every profile. The
+                         plugin step still runs (from an orchpad already in the
+                         venv) and only writes into the sandbox profiles; the test
+                         below asserts the live venv's orchpad files are untouched.
+Those five are the only steps that intentionally write outside the home.
 """
 
 import hashlib
@@ -245,12 +255,39 @@ def _env(sandbox):
     return env
 
 
+#: Every step that writes outside the sandbox home (module docstring).
+SKIP_ARGS = ("--skip-cli", "--skip-daemon", "--skip-patches",
+             "--skip-node-recovery", "--skip-orchpad-package")
+
+
 def _run(sandbox, extra=()):
     return subprocess.run(
-        ["bash", str(BOOTSTRAP), "--yes",
-         "--skip-cli", "--skip-daemon", "--skip-patches",
-         "--skip-node-recovery", *extra],
+        ["bash", str(BOOTSTRAP), "--yes", *SKIP_ARGS, *extra],
         capture_output=True, text=True, env=_env(sandbox), timeout=900)
+
+
+def _live_orchpad_files(sandbox) -> dict:
+    """md5 of every orchpad file in the REAL venv the sandbox symlinks to.
+
+    Console scripts (``bin/orchpad*``) carry the shebang that went stale, and
+    the dist-info ``RECORD`` changes on any reinstall, so together they show
+    whether the run wrote into the shared venv.
+    """
+    venv = (sandbox["hermes"] / "hermes-agent" / "venv").resolve()
+    found = {}
+    for path in sorted((venv / "bin").glob("orchpad*")):
+        found[str(path)] = _md5(path)
+    for path in sorted(venv.glob("lib/python*/site-packages/orchpad-*.dist-info/RECORD")):
+        found[str(path)] = _md5(path)
+    return found
+
+
+def test_every_shared_write_step_is_skipped():
+    """The orchpad package step joined the list after it leaked into the live venv."""
+    assert "--skip-orchpad-package" in SKIP_ARGS
+    text = BOOTSTRAP.read_text(encoding="utf-8")
+    for flag in SKIP_ARGS:
+        assert f"{flag})" in text, f"bootstrap.sh does not parse {flag}"
 
 
 @needs_runtime
@@ -258,6 +295,7 @@ def test_installer_completes_and_is_self_contained(sandbox):
     live_cfg = Path.home() / ".hermes" / "config.yaml"
     live_trig = Path.home() / ".hscc" / "triggers.json"
     before = (_md5(live_cfg), _md5(live_trig))
+    live_orchpad = _live_orchpad_files(sandbox)
 
     r = _run(sandbox)
     out = r.stdout + r.stderr
@@ -283,6 +321,8 @@ def test_installer_completes_and_is_self_contained(sandbox):
     # And nothing reached the operator's live state.
     assert (_md5(live_cfg), _md5(live_trig)) == before, \
         "the isolated install modified LIVE state"
+    assert _live_orchpad_files(sandbox) == live_orchpad, \
+        "the isolated install wrote orchpad into the LIVE Hermes venv"
 
 
 @needs_runtime
