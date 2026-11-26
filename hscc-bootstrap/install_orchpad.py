@@ -35,6 +35,31 @@ Idempotent: the package is skipped when the pinned version is already importable
 (so a re-run does not hit the network), ``orchpad-hermes`` only rewrites files
 whose bytes changed — its JSON summary names what it wrote — and the enable step
 is a no-op once the name is present.
+
+orchpad is a standalone tool, so a user may have installed it BEFORE hscc, and
+this installer must never break that install:
+
+* a standalone install (pipx, ``uv tool``, another venv) lives outside the
+  Hermes venv and is never looked at or touched;
+* in the Hermes venv, a version at or above the pin is left exactly as it is
+  (no downgrade, no reinstall, no network) and its own ``orchpad-hermes``
+  writes the plugin files;
+* an editable or local-checkout install (``pip install -e``, ``direct_url.json``
+  with ``dir_info``) is the user's working copy, whatever its version: it is
+  left alone and reported as ``user-managed``;
+* only a missing package, or a regular install OLDER than the pin, is
+  installed/upgraded to the pin;
+* the enable step only appends ``orchpad`` to a profile's ``plugins.enabled``,
+  keeping every entry the user already has, and the user's pads (data) are
+  never written by this module.
+
+``--no-package`` (bootstrap ``--skip-orchpad-package``) checks the package but
+never installs it: the isolated-install tests run the real bootstrap with a
+sandbox home whose ``hermes-agent`` is a symlink to the SHARED live venv, and a
+pip install there once rewrote the live ``bin/orchpad`` with a shebang into a
+deleted pytest tmp dir (2.17.8 bootstrap: orchpad stage failed on every
+profile). Without a usable package the profiles are reported ``skipped``, which
+is not a failure.
 """
 
 from __future__ import annotations
@@ -96,13 +121,76 @@ def resolve_venv_python(hermes_home=None,
     return None
 
 
-def installed_version(venv_python, run: Runner = _run) -> Optional[str]:
-    """The orchpad version importable from *venv_python*, or None."""
-    res = run([str(venv_python), "-I", "-c",
-               "import importlib.metadata as m; print(m.version('orchpad'))"])
+#: One probe for version + "is this the user's working copy". PEP 610:
+#: ``direct_url.json`` with ``dir_info`` = installed from a local directory
+#: (editable or not); a git/archive URL (our own pin) has ``vcs_info`` /
+#: ``archive_info`` instead.
+_PROBE = (
+    "import importlib.metadata as m, json\n"
+    "d = m.distribution('orchpad')\n"
+    "u = d.read_text('direct_url.json')\n"
+    "local = False\n"
+    "if u:\n"
+    "    try:\n"
+    "        local = 'dir_info' in json.loads(u)\n"
+    "    except ValueError:\n"
+    "        pass\n"
+    "print(json.dumps({'version': d.version, 'local': local}))\n"
+)
+
+
+def installed_info(venv_python, run: Runner = _run) -> Optional[dict]:
+    """``{"version", "local"}`` for the orchpad in *venv_python*, or None."""
+    res = run([str(venv_python), "-I", "-c", _PROBE])
     if res.returncode != 0:
         return None
-    return (res.stdout or "").strip() or None
+    text = (res.stdout or "").strip()
+    try:
+        info = json.loads(text.splitlines()[-1])
+    except (IndexError, ValueError):
+        return {"version": text, "local": False} if text else None
+    if not isinstance(info, dict) or not info.get("version"):
+        return None
+    return {"version": str(info["version"]), "local": bool(info.get("local"))}
+
+
+def installed_version(venv_python, run: Runner = _run) -> Optional[str]:
+    """The orchpad version importable from *venv_python*, or None."""
+    info = installed_info(venv_python, run)
+    return info["version"] if info else None
+
+
+def _numeric(text: str) -> tuple:
+    """Leading numeric release parts: ``"0.2.0rc1"`` -> ``(0, 2, 0)``."""
+    parts = []
+    for piece in str(text).split("."):
+        digits = ""
+        for ch in piece:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+        if digits != piece:
+            break
+    return tuple(parts)
+
+
+def satisfies_pin(version: Optional[str]) -> bool:
+    """True when *version* is the pin or newer (a user is never downgraded)."""
+    if not version:
+        return False
+    try:
+        from packaging.version import InvalidVersion, Version
+        try:
+            return Version(version) >= Version(PIN_VERSION)
+        except InvalidVersion:
+            pass
+    except ImportError:
+        pass
+    have = _numeric(version)
+    return bool(have) and have >= _numeric(PIN_VERSION)
 
 
 def install_package(venv_python, run: Runner = _run, uv: Optional[str] = None):
@@ -215,20 +303,33 @@ def orchestrator_profiles(hermes_home, main: str) -> List[str]:
     return names
 
 
-def _ensure_package(venv_python, apply: bool, run: Runner):
+def _ensure_package(venv_python, apply: bool, run: Runner,
+                    install: bool = True):
     """Ensure the pinned package once; return (report, usable, changed).
 
     Shared by the multi-profile fan-out and the single-profile repair path so
     "already importable" and "installation failed" mean the same thing
-    everywhere.
+    everywhere. A user's own install is never replaced (module docstring):
+    ``user-managed`` for a local/editable checkout, ``present`` at or above
+    the pin. *install* False (``--no-package``) reports and never installs.
     """
-    before = installed_version(venv_python, run)
+    info = installed_info(venv_python, run)
+    before = info["version"] if info else None
     package = {"pin": PIN, "expected": PIN_VERSION, "found": before}
-    if before == PIN_VERSION:
-        package["status"] = "present"
+    if info and info["local"]:
+        package["status"] = "user-managed"
+        package["note"] = ("installed from a local checkout; left as the "
+                           "user installed it")
         return package, True, False
-    if not apply:
-        package["status"] = "missing"
+    if satisfies_pin(before):
+        package["status"] = "present"
+        if before != PIN_VERSION:
+            package["note"] = "newer than the pin; left as installed"
+        return package, True, False
+    if not apply or not install:
+        package["status"] = "outdated" if before else "missing"
+        if apply and not install:
+            package["note"] = "package install skipped (--no-package)"
         return package, False, False
     res = install_package(venv_python, run)
     after = installed_version(venv_python, run)
@@ -280,15 +381,23 @@ def _install_profile(hermes_home: Path, name: str, venv_python,
 
 def ensure(hermes_home, venv_python, *, apply: bool, main: Optional[str] = None,
            hscc_dir: Optional[str] = None, run: Runner = _run,
-           installer_run: Optional[Runner] = None) -> dict:
-    """Report (and with *apply*, install) orchpad on the orchestrator homes."""
+           installer_run: Optional[Runner] = None,
+           install_package: bool = True) -> dict:
+    """Report (and with *apply*, install) orchpad on the orchestrator homes.
+
+    *install_package* False (``--no-package``) never pip-installs: profiles are
+    reported ``skipped`` when the venv has no usable orchpad, which keeps
+    ``ok`` true (module docstring: the isolated-install tests).
+    """
     home = hermes_root(hermes_home)
     main = main_name(main, hscc_dir)
     profiles = orchestrator_profiles(home, main)
     installer_run = installer_run or run
 
-    package, usable, changed = _ensure_package(venv_python, apply, run)
+    package, usable, changed = _ensure_package(venv_python, apply, run,
+                                               install=install_package)
     ok = package["status"] != "failed"
+    skipped = apply and not usable and not install_package
 
     report = {"ok": ok, "package": package, "main": main, "profiles": []}
     for name in profiles:
@@ -305,7 +414,7 @@ def ensure(hermes_home, venv_python, *, apply: bool, main: Optional[str] = None,
             report["profiles"].append(
                 {"profile": name,
                  "path": str(profile_home / "plugins" / "orchpad"),
-                 "status": "unknown"})
+                 "status": "skipped" if skipped else "unknown"})
             continue
         entry = _install_profile(home, name, venv_python, installer_run)
         if entry["status"] == "failed":
@@ -316,6 +425,7 @@ def ensure(hermes_home, venv_python, *, apply: bool, main: Optional[str] = None,
 
     report["ok"] = ok
     report["action"] = ("failed" if not ok
+                        else "skipped" if skipped
                         else "installed" if changed
                         else "verified" if apply else "reported")
     return report
@@ -386,6 +496,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="the main orchestrator's profile name")
     ap.add_argument("--profile", default=None,
                     help="ensure just this profile (e.g. <project>-orch)")
+    ap.add_argument("--no-package", action="store_true",
+                    help="never install the package into the venv; use what "
+                         "is there (isolated-install tests)")
     args = ap.parse_args(argv)
     if args.profile:
         status = ensure_profile(
@@ -395,7 +508,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                   "profile": args.profile, "status": status}
     else:
         report = ensure(args.hermes_home, args.python, apply=args.apply,
-                        main=args.main_name)
+                        main=args.main_name,
+                        install_package=not args.no_package)
     print(json.dumps(report))
     return 0 if report["ok"] else 1
 

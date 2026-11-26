@@ -54,6 +54,7 @@ unset _cand _py _parent _root 2>/dev/null || true
 
 ASSUME_YES=false; FORCE=false; NO_BACKUP=false; DRY_RUN=false
 SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false; SKIP_PATCHES=false; SKIP_CLI=false
+SKIP_ORCHPAD_PACKAGE=false
 SKIP_NODE_RECOVERY=false
 for a in "$@"; do case "$a" in
   --yes|-y) ASSUME_YES=true ;;
@@ -66,7 +67,8 @@ for a in "$@"; do case "$a" in
   --skip-patches) SKIP_PATCHES=true ;;
   --skip-cli) SKIP_CLI=true ;;
   --skip-node-recovery) SKIP_NODE_RECOVERY=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery]"; echo "  --dry-run: print every planned write (skills, role profiles, main orchestrator board, ~/.hscc state + serving.json, plugins payload, node hardware watchdog, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node (panic-to-reboot sysctls, hardware watchdog; the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; exit 0 ;;
+  --skip-orchpad-package) SKIP_ORCHPAD_PACKAGE=true ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--dry-run] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli|--skip-node-recovery|--skip-orchpad-package]"; echo "  --dry-run: print every planned write (skills, role profiles, main orchestrator board, ~/.hscc state + serving.json, plugins payload, node hardware watchdog, daemon, CLI shim) and perform NONE."; echo "  --skip-node-recovery: do not touch ANY fleet node (panic-to-reboot sysctls, hardware watchdog; the isolated-install tests use it; the fleet apply is an operator/orchestrator action)."; echo "  --skip-orchpad-package: never pip-install orchpad into the Hermes venv (shared, real); the plugin step still runs from an orchpad already there. The isolated-install tests use it."; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -478,13 +480,19 @@ fi
 # AFTER orch-all so every orchestrator home exists. Non-fatal: the pad is an
 # orchestrator convenience, and `hscc doctor` reports any profile left without
 # it.
+# A user may have installed orchpad BEFORE hscc: install_orchpad.py never
+# downgrades or replaces it (a version at/above the pin, or a local/editable
+# checkout, is left exactly as it is) and only appends to plugins.enabled.
+# --skip-orchpad-package: the venv is shared and real (same reason as
+# --skip-cli), so the isolated-install tests must not pip-install into it.
 hdr "Install: orchpad (orchestrator pads)"
 if $SKIP_ROLES; then warn "skipped"
 elif $DRY_RUN; then
   plan "orchpad: install pinned package into the Hermes venv + orchpad-hermes plugin, and enable 'orchpad' in each orchestrator profile's own config.yaml plugins.enabled, for ${MAIN_ORCH_NAME:-general} and every <project>-orch profile (install_orchpad.py --apply)"
 elif OP_JSON=$(HERMES_HOME="$HERMES_HOME" HSCC_DIR="$HSCC_DIR" MAIN_ORCH_NAME="$MAIN_ORCH_NAME" \
     "$PYBIN" "$BOOT_DIR/install_orchpad.py" --apply --python "$PYBIN" \
-    --hermes-home "$HERMES_HOME" --main-name "$MAIN_ORCH_NAME" 2>&1); then
+    --hermes-home "$HERMES_HOME" --main-name "$MAIN_ORCH_NAME" \
+    $($SKIP_ORCHPAD_PACKAGE && echo --no-package) 2>&1); then
   OP_ACTION=$(printf '%s' "$OP_JSON" | "$PYBIN" -c "
 import sys, json
 d = json.load(sys.stdin)

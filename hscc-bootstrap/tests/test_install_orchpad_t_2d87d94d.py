@@ -435,3 +435,126 @@ def test_the_main_name_comes_from_the_one_resolver(tmp_path, monkeypatch):
     monkeypatch.delenv("MAIN_ORCH_NAME", raising=False)
 
     assert io.main_name(hscc_dir=str(hscc)) == "ops"
+
+
+# --- a user may have installed orchpad BEFORE hscc: never break that install --
+
+class UserVenv(FakeVenv):
+    """FakeVenv that answers the JSON probe, with a local (editable) flag."""
+
+    def __init__(self, version=None, local=False):
+        super().__init__(version)
+        self.local = local
+
+    def __call__(self, argv):
+        if "-I" in argv and self.version:
+            self.calls.append(list(argv))
+            return _cp(argv, 0, json.dumps(
+                {"version": self.version, "local": self.local}) + "\n")
+        return super().__call__(argv)
+
+
+def _pip_calls(venv):
+    return [c for c in venv.calls if "pip" in c]
+
+
+def test_a_newer_user_install_is_never_downgraded(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "general")
+    venv = UserVenv(version="9.1.0")
+    calls = []
+    report = io.ensure(home, "/venv/bin/python", apply=True, main="general",
+                       run=venv, installer_run=_plugin_runner(calls))
+    assert report["ok"] is True
+    assert report["package"]["status"] == "present"
+    assert report["package"]["found"] == "9.1.0"
+    assert "newer" in report["package"]["note"]
+    assert _pip_calls(venv) == []
+    assert [e["status"] for e in report["profiles"]] == ["installed"]
+    assert "orchpad" in _enabled(home, "general")
+
+
+def test_a_local_or_editable_user_install_is_left_alone(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "general")
+    venv = UserVenv(version="0.1.0", local=True)  # older, but the user's checkout
+    calls = []
+    report = io.ensure(home, "/venv/bin/python", apply=True, main="general",
+                       run=venv, installer_run=_plugin_runner(calls))
+    assert report["ok"] is True
+    assert report["package"]["status"] == "user-managed"
+    assert _pip_calls(venv) == []
+    assert venv.version == "0.1.0"
+    assert report["profiles"][0]["status"] == "installed"
+
+
+def test_an_older_regular_install_is_upgraded_to_the_pin(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "general")
+    venv = UserVenv(version="0.1.0")
+    report = io.ensure(home, "/venv/bin/python", apply=True, main="general",
+                       run=venv, installer_run=_plugin_runner([]))
+    assert report["package"]["status"] == "installed"
+    assert len(_pip_calls(venv)) == 1
+    assert venv.version == io.PIN_VERSION
+
+
+def test_existing_enabled_plugins_survive_the_enable_step(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "general")
+    _config(home, "general", {"plugins": {"enabled": ["mine", "orchpad-x"]},
+                              "model": "keep"})
+    io.ensure(home, "/venv/bin/python", apply=True, main="general",
+              run=UserVenv(version=io.PIN_VERSION),
+              installer_run=_plugin_runner([]))
+    assert _enabled(home, "general") == ["mine", "orchpad-x", "orchpad"]
+
+
+def test_no_package_never_installs_and_skips_cleanly(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "general")
+    _profile(home, "demo-orch")
+    venv = UserVenv(version=None)
+    calls = []
+    report = io.ensure(home, "/venv/bin/python", apply=True, main="general",
+                       run=venv, installer_run=_plugin_runner(calls),
+                       install_package=False)
+    assert report["ok"] is True
+    assert report["action"] == "skipped"
+    assert report["package"]["status"] == "missing"
+    assert _pip_calls(venv) == [] and calls == []
+    assert [e["status"] for e in report["profiles"]] == ["skipped", "skipped"]
+
+
+def test_no_package_still_installs_the_plugin_from_a_present_package(tmp_path):
+    home = tmp_path / ".hermes"
+    _profile(home, "general")
+    venv = UserVenv(version=io.PIN_VERSION)
+    report = io.ensure(home, "/venv/bin/python", apply=True, main="general",
+                       run=venv, installer_run=_plugin_runner([]),
+                       install_package=False)
+    assert report["ok"] is True
+    assert _pip_calls(venv) == []
+    assert report["profiles"][0]["status"] == "installed"
+
+
+def test_no_package_flag_reaches_ensure(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def fake_ensure(*args, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "action": "skipped"}
+
+    monkeypatch.setattr(io, "ensure", fake_ensure)
+    assert io.main(["--apply", "--no-package", "--hermes-home",
+                    str(tmp_path), "--python", "/venv/bin/python"]) == 0
+    assert seen["install_package"] is False
+
+
+def test_satisfies_pin_compares_versions_not_strings():
+    assert io.satisfies_pin(io.PIN_VERSION)
+    assert io.satisfies_pin("0.10.0")
+    assert io.satisfies_pin("1.0")
+    assert not io.satisfies_pin("0.1.9")
+    assert not io.satisfies_pin(None)
+    assert not io.satisfies_pin("")

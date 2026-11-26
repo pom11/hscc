@@ -47,7 +47,7 @@ FAKE_CLUSTER = json.dumps([
      "cache_dir": "", "default": True}])
 
 BASE_ARGS = ("--skip-cli", "--skip-daemon", "--skip-patches",
-             "--skip-node-recovery")
+             "--skip-node-recovery", "--skip-orchpad-package")
 
 
 def _payload_tree(tmp_path):
