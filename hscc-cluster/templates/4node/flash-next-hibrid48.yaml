@@ -1,0 +1,95 @@
+# 4-node ALL-FLASH-NEXT on the hibrid48 export — same model on every node,
+# 262k context everywhere. Successor of 4node-flash-next-all (same shape, same
+# routing, same reasoning tiers; only the recipe, the per-node cap and the
+# kanban caps change).
+#
+# USE THIS WHEN you want the uniform Qwen3.8-Flash-Next fleet and the fastest
+# decode measured on GB10 for it. The recipe is myllmbox's vLLM build serving
+# myllmbox/Qwen3.8-Flash-Next-hibrid48 (spark-arena recipe
+# 14ac40a1-3274-4286-be44-f0e4c452ef20, image v5.2 pinned by digest: RecoverSSM,
+# dynamic MTP depth 3-7, Marlin NVFP4 MoE, demand-paged NVFP4 n-gram table).
+#
+# ── WHY THIS RECIPE. MEASURED 2026-11-26/27, ONE GB10 PER CANDIDATE. ───────
+# llama-benchy 0.4.0, code corpus (typescript.js), pp 2048, tg 512, 3 runs,
+# GPU clock cap 2200 MHz. Decode t/s (aggregate across concurrent streams):
+#
+#                     depth 32k         depth 128k        depth 258k
+#   concurrency     1    4    10      1    2    4       1    2
+#   hibrid48 v5.2  53   99   105     53   73   83      52   68
+#   hibrid48 v5.4  53   69    78     53   44   61      54   77
+#   eugr FP4-Local 36   66    78     42   56   68      38   53
+#   (old fleet recipe, eugr b12x + the NVFP4 export: ~30 at 32k c1)
+#
+# v5.2 ties v5.4 on one stream and leads by 20-40% at 2-10 streams below 128k,
+# which is where a kanban fleet lives. All three passed the same 30-case tool
+# call + exact-answer gate 30/30. v5.4 (vLLM 0.32, fuller CUDA graphs) is the
+# one to re-test when its multi-stream numbers catch up.
+#
+# ── max_num_seqs 5 IS SIZED TO THE KV POOL, NOT TO THE 32k PEAK. ───────────
+# The recipe's KV pool holds 223 blocks x 3264 = ~728k tokens. Five 128k
+# requests fit; six do not, and the bench shows what happens then: at 128k
+# depth throughput falls from 83 t/s (c4) to 9.5 (c6) with 175 s TTFT, the
+# same cliff at 258k past two streams. Capping running sequences at 5 keeps
+# the node on the near side of that cliff; the cost at short context is small
+# (32k: 99 t/s at c4 vs 105 at c10). Excess requests wait in vLLM's queue, and
+# least-in-flight routing sends the next one to a less busy node first.
+#
+# ── THE MODEL MUST BE ON EACH NODE'S LOCAL NVMe. ───────────────────────────
+# sparkrun mounts the node-local HF cache (~/.cache/huggingface). The n-gram
+# table is demand-paged per token; serving it from a network share makes the
+# model unusable regardless of GPU speed. 105 GB per node: pull once
+# (`sparkrun model-cache repair myllmbox/Qwen3.8-Flash-Next-hibrid48 -H <node>
+# --transfer-mode delegated`), then fan out node-to-node over the CX7 fabric.
+#
+# The recipe file is a pinned copy of the registry recipe with three launch
+# fixes for sparkrun 0.4 ({model} in the serve command, entrypoint "",
+# scratch under /tmp/mbx for non-root containers), host 0.0.0.0, and no
+# --served-model-name (hscc injects the concrete id plus the role alias).
+# Every engine flag, env var and default is the origin's.
+name: 4node-flash-next-hibrid48
+version: 4
+
+# ROLE-AGNOSTIC POOL — see 4node-flash-next-all for the full rationale. Every
+# unit advertises both aliases and gets a distinct port (8000..8003); without
+# distinct ports the proxy dedupes the tp=1 replicas into one backend. Verify
+# after applying with `sparkrun proxy status`: four backends per alias.
+uniform_pool: true
+description: "4 nodes: Qwen3.8-Flash-Next hibrid48 (myllmbox vLLM) on every node at 262k context. Uniform fleet - 1 orchestrator + 3-node load-balanced pool, same model everywhere. ~53 t/s per stream, ~100 t/s per node at 4-10 streams (32k). cluster_size=4."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/hibrid48-v52-fleet-vllm.yaml"
+  # The recipe ships max_num_seqs 16; the KV pool fits 5 x 128k (see header).
+  max_num_seqs: 5
+
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/hibrid48-v52-fleet-vllm.yaml"
+        max_num_seqs: 5
+    workers: remaining
+    proxy: true
+
+routing:
+  delegation: family-coding
+  compaction: family-coding
+  auxiliaries: family-coding
+
+# Kanban concurrency, owned by the template (apply writes kanban.* in hermes
+# config). This is the operator's live value: 6 cards fleet-wide, 2 per
+# profile. Six cards plus the orchestrators keep every node at or under the
+# 5-sequence cap above. Pinned by
+# hscc-cluster/tests/test_template_declarations.py::TestShippedTemplateCapsMatchSOT.
+caps:
+  max_in_progress: 6
+  max_in_progress_per_profile: 2
+
+proxy:
+  families:
+    coding:
+      routing: least-in-flight
+
+# Same chat template as the NVFP4 export: low | medium | xhigh only.
+reasoning:
+  max: xhigh
+  standard: medium
+  light: low

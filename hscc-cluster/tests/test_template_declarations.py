@@ -385,6 +385,8 @@ class TestShippedTemplateCapsMatchSOT:
     silent rewrite of the live values. That was real: flash-next-all shipped
     declaring per-profile 2 (77be50d1, 2026-10-29) while the operator's live
     kanban caps had moved to 12/3 — apply would have stomped 3 back to 2.
+    The live caps later moved to 6/2; every shipped flash-next template is
+    checked against the same pair.
 
     The SOT pair is pinned explicitly below — it is NOT CAPS_MIGRATION_DEFAULTS
     (30/10), which is the bootstrap fill-if-absent default (enable_plugins.py,
@@ -394,29 +396,32 @@ class TestShippedTemplateCapsMatchSOT:
     atomic change instead of a silent divergence.
     """
 
-    OPERATOR_CAPS_SOT = {"max_in_progress": 12, "max_in_progress_per_profile": 3}
+    OPERATOR_CAPS_SOT = {"max_in_progress": 6, "max_in_progress_per_profile": 2}
+    SHIPPED = ("flash-next-all", "flash-next-hibrid48")
 
-    def _shipped_caps(self):
+    def _shipped_caps(self, stem):
         tests_dir = os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(os.path.dirname(tests_dir),
-                            "templates", "4node", "flash-next-all.yaml")
+                            "templates", "4node", stem + ".yaml")
         return (yaml.safe_load(open(path)) or {}).get("caps") or {}
 
-    def test_declared_caps_equal_the_operator_sot(self):
-        caps = self._shipped_caps()
+    @pytest.mark.parametrize("stem", SHIPPED)
+    def test_declared_caps_equal_the_operator_sot(self, stem):
+        caps = self._shipped_caps(stem)
         assert {k: caps.get(k) for k in self.OPERATOR_CAPS_SOT} == \
             self.OPERATOR_CAPS_SOT, (
-            "flash-next-all caps diverged from the operator SOT 12/3 — "
+            f"{stem} caps diverged from the operator SOT 6/2 — "
             "`hscc template apply` would rewrite the live config to the "
             "template's numbers (GAP-E-3 footgun)")
 
-    def test_apply_against_live_sot_config_rewrites_nothing(self, tmp_path):
+    @pytest.mark.parametrize("stem", SHIPPED)
+    def test_apply_against_live_sot_config_rewrites_nothing(self, tmp_path, stem):
         """The footgun itself, made unmissable: apply the SHIPPED template
-        against a config seeded with the live 12/3 and nothing may move."""
+        against a config seeded with the live 6/2 and nothing may move."""
         conf = tmp_path / "config.yaml"
         yaml.safe_dump({"kanban": dict(self.OPERATOR_CAPS_SOT),
                         "model": {"default": "m"}}, conf.open("w"))
-        tpl = ct._load_intent("4node-flash-next-all")
+        tpl = ct._load_intent("4node-" + stem)
         res = ct._apply_caps_declaration(tpl, config_yaml=conf)
         assert res["declared"] == self.OPERATOR_CAPS_SOT
         assert res["changed"] is False, (
