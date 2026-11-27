@@ -56,11 +56,17 @@ name: address-guard
 # above): a check is only selectable once it has run successfully in the repo
 # within 7 days, and a workflow that triggers on `push` but NOT `pull_request`
 # never runs on the PR head and leaves the PR permanently blocked — so keep BOTH
-# triggers below. This repo has no branch protection today; I did not test
-# enforcement against your live `main`.
+# triggers below. `push` is filtered to `main` (pytest-legs.yml's form): an
+# unfiltered push ran this whole job a second time for every commit pushed to a
+# PR branch, for a diff `pull_request` already covers, and the group below is
+# per-ref with room for one pending run, so the duplicate arrived by replacing —
+# and cancelling — the run ahead of it (t_d8119645). A check that may be made
+# required must not accrue cancelled results (t_1ecf9acc). This repo has no
+# branch protection today; I did not test enforcement against your live `main`.
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:

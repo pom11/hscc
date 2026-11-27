@@ -416,7 +416,18 @@ def test_the_advisory_sweep_is_not_in_the_required_checks_chain():
 
 
 def test_no_other_workflow_silently_lost_its_triggers():
-    """Cheap neighbourhood guard: the two older jobs keep push+pull_request."""
+    """Cheap neighbourhood guard: the two older jobs keep push+pull_request, AND
+    keep push filtered to main — the form all three workflows agree on. The
+    second half matters as much as the first: an unfiltered `push:` runs the
+    whole gate a second time for every commit pushed to a PR branch, and for
+    app-build-checks that duplicate is a macOS compile whose cancellation by the
+    next push leaves a permanently non-green check on the head SHA (t_1ecf9acc,
+    measured on PR #836)."""
     for name in ("address-guard.yml", "app-build-checks.yml"):
         text = (WORKFLOWS / name).read_text(encoding="utf-8")
         assert "\n  push:\n" in text and "\n  pull_request:\n" in text, f"{name} lost a trigger"
+        assert "  push:\n    branches: [main]\n" in text, (
+            f"{name} widened its push trigger back to every branch: a PR then "
+            "pays twice for the same gate on every branch commit, and a "
+            "cancelled duplicate is a check that can never read green"
+        )
