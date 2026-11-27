@@ -966,6 +966,10 @@ def _row(project, state, *, entry=None, last=None, position=None, now_s):
         "assignee": entry.get("assignee"),
         "attempts": int(entry.get("attempts") or 0),
         "is_last": last is not None,
+        # A waiting row says WHY it waits (t_cab1f418). Absent on every
+        # other state: the engine only stamps entries it probed and left.
+        "waiting_reason": entry.get("waiting_reason"),
+        "waiting_detail": entry.get("waiting_detail"),
     }
 
 
@@ -1054,6 +1058,11 @@ def view(*, registry_path=None, state_path=None, board=None, now=None):
         # or state write between them must report the same timestamp, so a
         # widget cannot present stale rows as freshly generated.
         "generated_at": doc.get("generated_at"),
+        # "How long since the last engine tick" belongs ON the surface
+        # (t_cab1f418): an operator must not have to stat the state files by
+        # hand to tell a healthy idle from a stalled engine.
+        "engine": engine_liveness(doc, health=read_health_stamp(),
+                                  now=now_s),
         "projects": out,
         "rows": all_rows,
         "count": len(all_rows),
@@ -1500,6 +1509,102 @@ def _pr_ready(info, *, required_checks=False):
     )
 
 
+# ── waiting reason: a refusal that names itself ───────────────────────────
+#
+# 2026-11-27 incident: an operator read `merge-queue list hscc`, saw two
+# waiting PRs exposed as bare `{pr, attempts}` rows, and filed an
+# escalation. The engine had been correctly REFUSING both every tick —
+# GitHub answered `mergeable: CONFLICTING` for each — and said nothing
+# anywhere that surface reads. A queue that refuses work silently is
+# indistinguishable from a queue that stopped taking work.
+#
+# These codes exist to be ASSERTED and RENDERED, not logged: the surfaces
+# carry them, and no log line is required to see one. Classification is
+# reporting only — no queue decision may branch on it.
+
+#: A dirty head and failing checks are different work; conflating them sent
+#: people to CI for a conflict (t_cab1f418).
+WAITING_REASON_CLOSED = "closed"
+WAITING_REASON_DRAFT = "draft"
+WAITING_REASON_DIRTY_HEAD = "dirty-head"
+WAITING_REASON_CHECKS_FAILING = "checks-failing"
+WAITING_REASON_CHANGES_REQUESTED = "changes-requested"
+WAITING_REASON_CHECKS_PENDING = "checks-pending"
+WAITING_REASON_MERGE_UNKNOWN = "merge-unknown"
+
+
+def _waiting_reason(info, *, required_checks=None):
+    """Why a ``gh pr view`` answer makes this PR not ready: ``(code, detail)``.
+
+    A pure classifier over fields ``pr_view`` already fetches — it decides
+    nothing and fetches nothing, and answers None for a PR that IS
+    :func:`_pr_ready`. The branch order is the actionable order: a
+    CONFLICTING head stays dirty-headed whatever CI says, and an operator
+    reading ``dirty-head`` rebases while one reading ``checks-failing``
+    opens the checks. Those two (plus "another PR holds the claim", which is
+    the in-flight row, not a waiting reason) looked like one state on
+    2026-11-27; they never may again.
+
+    ``required_checks`` is tri-state exactly as :func:`_pr_ready` and
+    :func:`_checks_verdict` take it: False = no required checks, None =
+    could not determine. Pass the caller's answer through verbatim —
+    normalizing None would call an empty rollup green when the answer is
+    merely unknown, exactly the misclassification this exists to prevent.
+    """
+    if not isinstance(info, dict):
+        return None
+    if _pr_ready(info, required_checks=required_checks):
+        return None
+    state = str(info.get("state") or "").upper()
+    if state and state != "OPEN":
+        return WAITING_REASON_CLOSED, f"GitHub says state={state}"
+    if info.get("isDraft"):
+        return WAITING_REASON_DRAFT, "the PR is a draft"
+    mergeable = str(info.get("mergeable") or "").upper()
+    checks = _checks_verdict(info, required_checks=required_checks)
+    if mergeable == "CONFLICTING":
+        return (WAITING_REASON_DIRTY_HEAD,
+                "mergeable=CONFLICTING — the head does not apply onto the "
+                "base as it stands; rebase the branch")
+    if checks == "red":
+        names = _failing_check_names(info)
+        return (WAITING_REASON_CHECKS_FAILING,
+                "CI is red" + (f": {', '.join(names)}" if names else ""))
+    if str(info.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED":
+        return WAITING_REASON_CHANGES_REQUESTED, \
+            "reviewDecision=CHANGES_REQUESTED"
+    if checks == "pending":
+        return WAITING_REASON_CHECKS_PENDING, "CI is still running"
+    if mergeable in ("", "UNKNOWN"):
+        return WAITING_REASON_MERGE_UNKNOWN, \
+            "GitHub has not decided `mergeable` yet"
+    return None
+
+
+def _waiting_reason_patch(reason):
+    """The entry fields for one classified reason (None passes through)."""
+    if reason is None:
+        return None
+    return {"waiting_reason": reason[0], "waiting_detail": reason[1],
+            "waiting_reason_at": _now_iso()}
+
+
+def _record_waiting_reason(state_path, project, pr, info, *,
+                           required_checks=None):
+    """Stamp WHY this PR waits onto the entry itself (a read-surface field).
+
+    Purely reporting: it moves nothing, and no queue decision reads it. The
+    caller has already parked the entry; the wait-list drain re-probes and
+    refreshes the reason every tick after.
+    """
+    pr_no = _entry_pr({"pr": pr})
+    patch = _waiting_reason_patch(
+        _waiting_reason(info, required_checks=required_checks))
+    if pr_no is None or patch is None:
+        return
+    _stamp_waiting(state_path, project, {pr_no: patch})
+
+
 def pr_view(repo, pr, runner=None):
     """``gh pr view`` JSON for one PR, or None when it cannot be read."""
     runner = runner or _default_runner
@@ -1659,6 +1764,47 @@ def _stream_stamp(*, project, pr, stage, gate=None, elapsed_s=None):
         # written from inside the run must be at least as forgiving — a
         # health-reporting write must never fail the work it reports on.
         return None
+
+
+def read_health_stamp():
+    """This stream's last stamp, or None. Never raises; read-only."""
+    try:
+        from .state import read_state
+        return read_state(STREAM_NAME)
+    except Exception:
+        return None
+
+
+def engine_liveness(doc, *, health=None, now=None):
+    """How long ago the engine last proved it is alive, from BOTH stamps.
+
+    Neither stamp alone answers "is the engine alive": the LEDGER
+    (``generated_at``) advances on every tick that RETURNS — every tick
+    while the queue is idle — but freezes at the leg's start through a gate
+    leg as long as :data:`DEFAULT_GATE_TIMEOUT_S`; the health STAMP
+    advances from INSIDE a leg (:class:`_GateLiveness`) but says nothing
+    between legs. The fresher of the two is the honest "seconds since last
+    engine activity": no claim with a fresh number is a healthy idle, a
+    stale one is not (t_cab1f418: a healthy busy queue read as a 4-hour
+    livelock precisely because no surface showed either clock).
+    """
+    now_s = float(time.time() if now is None else now)
+    ledger_at = doc.get("generated_at") if isinstance(doc, dict) else None
+    health_at = (health or {}).get("timestamp") if isinstance(health,
+                                                              dict) else None
+    ledger_age = _age_seconds(ledger_at, now_s)
+    health_age = _age_seconds(health_at, now_s)
+    ages = [age for age in (ledger_age, health_age) if age is not None]
+    flight = ((health or {}).get("in_flight")
+              if isinstance(health, dict) else None)
+    return {
+        "ledger_written_at": ledger_at,
+        "ledger_age_s": ledger_age,
+        "health_written_at": health_at,
+        "health_age_s": health_age,
+        "seconds_since_last_write": min(ages) if ages else None,
+        "in_flight": flight if isinstance(flight, dict) else None,
+    }
 
 
 class _GateLiveness:
@@ -2904,6 +3050,8 @@ def process_entry(project, cfg, entry, *, doc=None, state_path=None,
             return {"pr": entry["pr"], "result": "mergeable-unknown"}
         # Not green yet: leave it at the head of the queue, no handback.
         _requeue_waiting(state_path, project, entry)
+        _record_waiting_reason(state_path, project, entry.get("pr"), info,
+                               required_checks=required)
         log(f"merge-queue {project}: PR #{entry['pr']} checks not green; "
             "moved to the wait list", "INFO")
         return {"pr": entry["pr"], "result": "waiting"}
@@ -3800,6 +3948,7 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
     ready = []
     red = []
     drops = {}
+    reasons = {}
     for entry in waiting:
         info = pr_view(cfg["repo"], entry.get("pr"), runner=gh_runner)
         if not isinstance(info, dict):
@@ -3841,8 +3990,22 @@ def _drain_waiting(project, cfg, *, state_path, git_runner=None,
             continue
         if _waiting_own_red(entry, info):
             red.append((entry, info))
+        # Every entry this pass probed and left waiting OWES its reason on the
+        # entry itself (t_cab1f418): a wait list of bare `{pr, attempts}` rows
+        # made a queue that refused work read as a queue that stopped taking
+        # it. Reporting only — nothing below branches on these fields.
+        if pr is not None:
+            patch = _waiting_reason_patch(
+                _waiting_reason(info, required_checks=required))
+            if patch is not None:
+                reasons[pr] = patch
     if drops:
         _drop_waiting(state_path, project, drops)
+    if reasons:
+        # After the drops so a landed/closed PR's row is never stamped on an
+        # entry the same pass removed; `_stamp_waiting` re-reads fresh and
+        # skips anything that already left the wait list.
+        _stamp_waiting(state_path, project, reasons)
     # Not green because its own checks are red/cancelled: the wait list used to
     # be passive about that forever. Two answers, and the SAME base sha decides
     # which, so it is probed once here and handed to both passes:

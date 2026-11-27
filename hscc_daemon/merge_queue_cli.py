@@ -155,6 +155,8 @@ def _status_doc(registry_path=None, state_path=None):
             "queue_len": len(ps.get("queue") or []),
             "queue": list(ps.get("queue") or []),
             "waiting_len": len(ps.get("waiting") or []),
+            # Entries pass through whole, so the `waiting_reason` the engine
+            # stamps lands in --json without this projection inventing any.
             "waiting": list(ps.get("waiting") or []),
             "held_len": len(held),
             "held": held,
@@ -162,7 +164,27 @@ def _status_doc(registry_path=None, state_path=None):
             "last": ps.get("last"),
             "repo": (cfg or {}).get("repo"),
         }
+    # One engine, one clock — and it belongs on the surface, not in a
+    # hand-stat of ~/.hscc/state (t_cab1f418: "in_flight: None, no
+    # timestamps" read as a 4-hour livelock on a healthy busy engine).
+    out["engine"] = mq.engine_liveness(doc, health=mq.read_health_stamp())
     return out
+
+
+def _engine_line(engine):
+    """The one line the liveness block deserves."""
+    secs = engine.get("seconds_since_last_write")
+    if secs is None:
+        return "engine: no state write on record (never ticked?)"
+    line = f"engine: {secs}s since last state write"
+    if engine.get("ledger_age_s") is not None \
+            and engine.get("health_age_s") is not None:
+        line += (f" (ledger {engine['ledger_age_s']}s ago, health stamp "
+                 f"{engine['health_age_s']}s ago)")
+    flight = engine.get("in_flight") or {}
+    if flight.get("pr") is not None:
+        line += f" — gating PR #{flight['pr']}"
+    return line
 
 
 def cmd_merge_queue(argv):
@@ -227,7 +249,11 @@ def cmd_merge_queue(argv):
                 return _error(f"unknown project {project!r}", json_mode)
             rows = {project: rows[project]}
         if json_mode:
-            print(json.dumps({"ok": True, "projects": rows}))
+            # The engine clock rides the JSON too — whoever consumes this
+            # must be able to tell a healthy idle from a stalled engine
+            # without stat-ing state files (t_cab1f418).
+            print(json.dumps({"ok": True, "engine": data["engine"],
+                              "projects": rows}))
             return 0
         console = _console()
         empty = True
@@ -240,10 +266,26 @@ def cmd_merge_queue(argv):
                     f"assignee={entry.get('assignee') or '-'}")
             for entry in row["waiting"]:
                 empty = False
+                # The WHY rides the entry — a wait list of bare numbers is
+                # how a queue refusing dirty heads read as a dead queue
+                # (t_cab1f418).
+                reason = entry.get("waiting_reason")
+                why = (f"  why={reason}"
+                       f" ({entry['waiting_detail']})"
+                       if reason and entry.get("waiting_detail")
+                       else f"  why={reason}" if reason else "")
                 console.print(
                     f"{name}  PR #{entry.get('pr')}  waiting  "
                     f"card={entry.get('card') or '-'}  "
-                    f"assignee={entry.get('assignee') or '-'}")
+                    f"assignee={entry.get('assignee') or '-'}" + why)
+            flight = row.get("in_flight")
+            if isinstance(flight, dict) and flight:
+                # A held claim is queue content, not noise: `list` used to
+                # print "merge queue is empty" while an engine gated a PR.
+                empty = False
+                console.print(
+                    f"{name}  PR #{flight.get('pr')}  in-flight "
+                    f"(stage={flight.get('stage') or 'running'})")
             for entry in row["held"]:
                 empty = False
                 console.print(
@@ -251,6 +293,7 @@ def cmd_merge_queue(argv):
                     f"{entry.get('reason') or '(no reason given)'}")
         if empty:
             console.print("merge queue is empty")
+        console.print(_engine_line(data["engine"]))
         return 0
 
     if sub == "add":
