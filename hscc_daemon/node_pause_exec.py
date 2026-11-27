@@ -54,6 +54,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime
 
 from . import node_pauses, serving, suite_fence, util
@@ -961,10 +962,67 @@ def unit_is_serving(node, port, timeout=5):
 #: working unit as "not back" and leaves the node parked.
 RESUME_CONFIRM_PATHS = ("/health", "/v1/models")
 
-#: One confirmation GET's bound. Short on purpose: this is the final yes/no
-#: after a launch client returned, not a load wait — a unit still loading simply
-#: answers "not yet" and the pause stays recorded for the next attempt.
+#: One confirmation GET's bound. Short on purpose: each ask is a cheap
+#: yes/no against a unit that may still be loading.
 RESUME_CONFIRM_TIMEOUT = 2
+
+#: How often the INTERACTIVE resume re-asks the confirmation endpoints while a
+#: failed or cut-loose launch client's unit is still loading. A real unit of
+#: this size takes 5-7 minutes; the live case answered after ~347 s.
+RESUME_CONFIRM_POLL = 5
+
+#: How long that interactive poll may run before the resume decides "NOT
+#: confirmed" (t_611dbad7). This is deliberately separate from the launch
+#: client's bound: the client is cut loose at SPARKRUN_LAUNCH_WAIT_TIMEOUT
+#: (240 s), which is often well before the unit answers. The daemon expiry
+#: stream passes 0 instead, keeping its ask-once behaviour so a stalled unit
+#: cannot hold its stream thread for 15 minutes.
+RESUME_CONFIRM_BUDGET = 900
+
+
+def resume_confirm_budget():
+    """Seconds the interactive resume may keep polling after a failed client.
+
+    ``HSCC_RESUME_CONFIRM_BUDGET`` overrides :data:`RESUME_CONFIRM_BUDGET` per
+    call (so an operator can tune one invocation without a restart); a value of
+    0 keeps today's ask-once behaviour, which is what the daemon stream uses.
+    An unreadable value falls back to the default rather than guessing a wait.
+    """
+    raw = os.environ.get("HSCC_RESUME_CONFIRM_BUDGET")
+    if raw is None or not raw.strip():
+        return RESUME_CONFIRM_BUDGET
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return RESUME_CONFIRM_BUDGET
+
+
+def _await_resume_confirmation(ready, budget, clock=None, wait=None):
+    """Re-ask ``ready`` every poll until it confirms or ``budget`` runs out.
+
+    READ-ONLY: the relaunch already happened, so this may only ask the unit's
+    endpoints — never launch again. ``clock``/``wait`` are injectable so tests
+    can advance time without sleeping. The poll count is capped independently
+    of the clock, so a frozen fake clock cannot spin forever.
+    """
+    clock = clock or time.monotonic
+    wait = wait or util.wait_seconds
+    budget = max(0.0, budget)
+    deadline = clock() + budget
+    polls_left = max(
+        1, int((budget + RESUME_CONFIRM_POLL - 1) // RESUME_CONFIRM_POLL))
+    while polls_left > 0:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return False
+        wait(min(RESUME_CONFIRM_POLL, remaining))
+        polls_left -= 1
+        try:
+            if ready():
+                return True
+        except Exception:  # noqa: BLE001 — an unaskable probe is "not yet"
+            pass
+    return False
 
 
 def unit_is_answering(node, port, timeout=RESUME_CONFIRM_TIMEOUT):
@@ -1013,7 +1071,8 @@ def _ready_probe_for(is_answering):
     return ready_for
 
 
-def _run_units(units, apply, key, verb, run, echo, ready_for=None):
+def _run_units(units, apply, key, verb, run, echo, ready_for=None,
+               confirm_budget=0, clock=None, wait=None):
     """Shared dry-run/apply driver for stop_units and resume_units.
 
     ``key`` is the per-unit argv (``stop_cmd`` / ``resume_cmd``). Dry-run is the
@@ -1029,6 +1088,13 @@ def _run_units(units, apply, key, verb, run, echo, ready_for=None):
     loose is reported with ``detached`` plus a printed line saying plainly that
     the health probe — not the client — proved the restart. Never a silent kill
     and never a false "relaunch failed".
+
+    ``confirm_budget`` (t_611dbad7) is the READ-ONLY re-ask window that follows
+    a failed or cut-loose client: 0 asks once (the daemon stream's posture), a
+    positive value polls ``/health`` + ``/v1/models`` every
+    ``RESUME_CONFIRM_POLL`` seconds up to that many seconds (the CLI's). The
+    relaunch is never repeated from this path. ``clock``/``wait`` are the
+    injectable time seams for tests.
     """
     results = []
     for unit in (units or []):
@@ -1058,13 +1124,20 @@ def _run_units(units, apply, key, verb, run, echo, ready_for=None):
                 # The CLIENT is not the verdict (t_611dbad7). A client can exit
                 # non-zero, or be cut loose at its bound, while the unit is
                 # already serving; asking the unit's own /health + /v1/models
-                # once more is what turns that into a confirmed resume. This is
+                # once more is what turns that into a confirmed resume. When it
+                # is still loading, the interactive caller's budget keeps asking
+                # (read-only — the relaunch above already happened). This is
                 # deliberately the resume-only probe (no inference token): the
                 # launch-path probe is untouched.
                 try:
                     confirmed = bool(ready())
                 except Exception:  # noqa: BLE001 — a probe that cannot ask is "no"
                     confirmed = False
+                if not confirmed and confirm_budget > 0:
+                    echo(f"  unit not answering yet, waiting up to "
+                         f"{confirm_budget:g} s for /health + /v1/models")
+                    confirmed = _await_resume_confirmation(
+                        ready, confirm_budget, clock=clock, wait=wait)
                 if confirmed:
                     ok = True
                     verified_by = verified_by or "health probe"
@@ -1124,7 +1197,7 @@ def stop_units(units, apply=False, run=None, echo=print):
 
 
 def resume_units(units, apply=False, run=None, echo=print,
-                 serving_probe=None):
+                 serving_probe=None, confirm_budget=0, clock=None, wait=None):
     """Restart the recorded units via sparkrun's ``--ensure`` path.
 
     Same recipe, same flags, same ``--cluster`` as recorded at pause time: the
@@ -1148,16 +1221,21 @@ def resume_units(units, apply=False, run=None, echo=print,
     Confirmation is the RESUME-only pair ``/health`` + ``/v1/models``
     (t_611dbad7), never an inference token and never the client's exit code: a
     reasoning model can answer both endpoints while its first generated token is
-    still minutes away. A client that failed or was cut loose is followed by one
-    more endpoint ask, so a serving unit is resumed instead of left parked.
+    still minutes away. A client that failed or was cut loose is followed by an
+    endpoint ask; ``confirm_budget > 0`` keeps asking every
+    ``RESUME_CONFIRM_POLL`` seconds up to that budget (the interactive path),
+    while the default 0 asks once and keeps today's behaviour for the daemon
+    stream. This wait only reads the endpoints — it never relaunches.
 
     ``serving_probe`` is that check, injectable for tests: ``(node, port) ->
-    bool``. The default is :func:`unit_is_answering`.
+    bool``. The default is :func:`unit_is_answering`. ``clock``/``wait`` are the
+    injectable time seams for the extended wait.
     """
     return _run_units(units, apply, "resume_cmd", "resume",
                       run or util.run_cmd, echo,
                       ready_for=_ready_probe_for(serving_probe
-                                                 or unit_is_answering))
+                                                 or unit_is_answering),
+                      confirm_budget=confirm_budget, clock=clock, wait=wait)
 
 
 # ── the resume policy (ONE implementation for the CLI and the daemon tick) ──
@@ -1190,7 +1268,7 @@ RESUME_DRY_RUN = "dry_run"
 
 def resume_host(host, entry, apply=False, directory=None, echo=print,
                 reason=None, run=None, pauses=None, now=None, confirm=None,
-                serving_probe=None):
+                serving_probe=None, confirm_budget=0, clock=None, wait=None):
     """Restart the units ``entry`` recorded, then end the pause.
 
     This IS the resume policy — ``hscc node resume`` and the daemon's
@@ -1254,6 +1332,13 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
     the health probe proved rather than the client (t_09708c17). The resume's
     confirmation is the ``/health`` + ``/v1/models`` pair only (t_611dbad7), so
     a serving reasoning model is never held parked waiting for a token.
+
+    ``confirm_budget`` is the READ-ONLY window for re-asking those endpoints
+    after the client failed or was cut loose: 0 asks once (the daemon tick's
+    explicit posture), while the interactive CLI passes its larger
+    :func:`resume_confirm_budget` so a unit that needs minutes to load is not
+    declared unconfirmed at the launch client's bound. ``clock``/``wait`` are
+    the injectable time seams for tests.
     """
     from . import heal_breaker, node_pauses
 
@@ -1354,7 +1439,9 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
             return res
         units = [by_id[uid] for uid in recorded]
         out = resume_units(units, apply=apply, run=run, echo=echo,
-                           serving_probe=serving_probe)
+                           serving_probe=serving_probe,
+                           confirm_budget=confirm_budget,
+                           clock=clock, wait=wait)
         res["restarts"] = out["units"]
         # Which launches had to be cut loose because their CLIENT never returned
         # (t_09708c17). Reaching the clear below means every one of them was then
@@ -1520,6 +1607,8 @@ def auto_resume_expired(now=None, directory=None, apply=True, echo=None,
       3. resume the rest through :func:`resume_host` — the SAME function
          ``hscc node resume`` runs, so the confirmation gate, the
          rebuild-or-refuse rule and the clear pairing are shared, not restated.
+         The confirmation budget is passed as 0 explicitly: this stream asks
+         the resume endpoints once and never takes the CLI's extended wait.
 
     THE SPAN GUARD, which the CLI cannot need and a tick must.
     ``hscc node resume`` refuses a host that only appears in another entry's
@@ -1577,7 +1666,11 @@ def auto_resume_expired(now=None, directory=None, apply=True, echo=None,
             # The SAME snapshot and clock, handed down: the pass must not ask a
             # second read whether the span is clear after deciding from the first
             # that this host was due.
-            pauses=pauses, now=now, serving_probe=serving_probe)
+            pauses=pauses, now=now, serving_probe=serving_probe,
+            # The daemon stream must NOT inherit the CLI's extended confirmation
+            # wait (t_611dbad7): 0 asks the resume endpoints once, exactly as
+            # before, so a slow unit cannot hold this stream thread for 15 min.
+            confirm_budget=0)
         results.append(res)
         if res.get("action") == RESUME_RESUMED:
             resumed.append(host)

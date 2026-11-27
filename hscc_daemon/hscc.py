@@ -1875,7 +1875,10 @@ def _node_resume(argv):
 
     This function owns only the argument grammar, the "is this host paused at
     all" answer (which needs the whole overlay to name the span owner) and the
-    exit code.
+    exit code. The applied path passes the interactive confirmation budget
+    (``RESUME_CONFIRM_BUDGET``, env-overridable), so a unit that outlives the
+    launch client's bound is still polled until it answers; the daemon tick
+    passes 0 and keeps its ask-once posture.
 
     The overlay stores unit IDS (node_pauses keeps the entry to six typed
     keys), so the launch commands are rebuilt by the executor's `plan()` from
@@ -1942,8 +1945,9 @@ def _node_resume(argv):
         # The preview keeps the executor's own dry-run posture: it prints the
         # commands it would issue and cannot end the pause either.
         return 0 if node_pause_exec.resume_host(host, entry)["ok"] else 1
-    res = node_pause_exec.resume_host(host, entry, apply=True,
-                                      confirm=_confirm)
+    res = node_pause_exec.resume_host(
+        host, entry, apply=True, confirm=_confirm,
+        confirm_budget=node_pause_exec.resume_confirm_budget())
     return 0 if res["ok"] else 1
 
 

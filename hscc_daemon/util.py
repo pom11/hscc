@@ -45,6 +45,17 @@ def _ready_says_go(ready):
         return False
 
 
+def wait_seconds(seconds):
+    """Wait ``seconds`` on the monotonic clock.
+
+    A named seam: the node-resume confirmation poll injects a fake so no test
+    ever sleeps, while production keeps the ordinary wall-clock wait.
+    """
+    import time
+
+    time.sleep(max(0.0, seconds))
+
+
 def run_cmd_until_ready(args, ready, timeout=120, poll=2.0, env=None,
                         verified_by="health probe"):
     """Run ``args`` with a BOUNDED wait that can end EARLY because the workload

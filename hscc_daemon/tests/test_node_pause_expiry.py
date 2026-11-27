@@ -876,6 +876,48 @@ class TestTickContract:
         assert json.loads(blob)["resumed"] == [W1]
 
 
+# ── the stream keeps its ask-once confirmation (t_611dbad7 follow-up) ───────
+class TestExpiryStreamNeverExtendsTheWait:
+    def test_a_cut_loose_client_gets_one_ask_and_the_pause_stays(
+            self, fleet, overlay):
+        """The daemon stream must not inherit the CLI's extended budget.
+
+        One ask, pause kept, retried next tick — a slow unit must never hold
+        this supervised stream thread for the CLI's 900 s window.
+        """
+        seed(overlay, units=("w1",), span_nodes=(W1,))
+        asks, launches = [], []
+
+        def cut_loose(cmd, timeout=None, ready=None, **kw):
+            launches.append(list(cmd))
+            return {"ok": False, "output": "client cut loose", "stderr": "",
+                    "detached": True, "timed_out": True}
+
+        def probe(node, port):
+            asks.append((str(node), port))
+            return len(asks) > 1  # would resume if the stream waited
+
+        seen = {}
+        real = npe.resume_host
+
+        def spy(host, entry, **kw):
+            seen.update(kw)
+            return real(host, entry, **kw)
+
+        lines = Lines()
+        report = npe.auto_resume_expired(now=NOW, directory=overlay,
+                                         echo=lines, run=cut_loose,
+                                         serving_probe=probe, resume=spy)
+        assert report["resumed"] == [] and report["kept"], report
+        assert seen["confirm_budget"] == 0, (
+            "the expiry stream must pass 0 explicitly; a default budget would "
+            "hold the stream thread for the CLI's extended wait")
+        assert len(asks) == 1, asks
+        assert len(launches) == 1, launches
+        assert node_pauses.paused(W1, directory=overlay) is not None
+        assert any("NOT confirmed" in line for line in lines.lines), lines.text
+
+
 # ── wiring: the stream really runs in the loop (daemon_ops) ─────────────────
 class TestStreamIsWiredIntoTheLoop:
     """The tick body is only a feature once ``run_daemon_loop`` starts a thread
