@@ -821,6 +821,107 @@ class TestApplyWarnSetsSuccessFalse:
         return ct, hscc
 
 
+# ── t_cf6bf476: a failed LAUNCH step no longer vetoes the applied record ──────
+
+class TestLaunchFailureRecordsAppliedUnconfirmed:
+    """t_cf6bf476: when every CONFIG step wrote cleanly but a LAUNCH step
+    (provision / gateway-restart) reports non-OK, apply still records
+    ``applied_template.json`` — with a ``launch_unconfirmed`` flag naming the
+    unconfirmed steps — because the file means "what was written to the nodes",
+    not "what was confirmed serving". Before the fix one failed launch step
+    silently kept the OLD template as the record and `template status` lied.
+    """
+
+    def _setup(self, tmp_path, monkeypatch, n_workers=3):
+        # Same hermetic tmp-HOME harness as TestApplyWarnSetsSuccessFalse.
+        return TestApplyWarnSetsSuccessFalse()._setup(tmp_path, monkeypatch,
+                                                      n_workers)
+
+    def _provision_failed(self, monkeypatch):
+        monkeypatch.setattr(
+            "cluster_template._provision_models",
+            lambda plan, **k: {"status": "warn",
+                               "failed": [{"node": "192.0.2.2",
+                                           "recipe": "m.yaml",
+                                           "error": "oom"}],
+                               "note": "1 model(s) failed to launch"})
+
+    def test_failed_launch_step_still_records_new_template(
+            self, tmp_path, monkeypatch):
+        ct, hscc = self._setup(tmp_path, monkeypatch, n_workers=3)
+        self._provision_failed(monkeypatch)
+        res = ct.apply_template("single-family", confirm=True)
+        # The apply is STILL not a success — the launch is unconfirmed.
+        assert res["success"] is False
+        # But what WAS written to the nodes is recorded: the NEW template.
+        state = json.loads((hscc / "applied_template.json").read_text())
+        assert state["template"] == "single-family"
+        assert state["launch_unconfirmed"] is True
+        assert state["unconfirmed_steps"] == ["provision"]
+        # The apply report carries the same flag for the operator.
+        assert res["launch_unconfirmed"] is True
+
+    def test_status_read_path_reports_new_template_after_failed_launch(
+            self, tmp_path, monkeypatch):
+        ct, hscc = self._setup(tmp_path, monkeypatch, n_workers=3)
+        # An OLD template was applied cleanly before this run.
+        (hscc / "applied_template.json").write_text(json.dumps(
+            {"template": "colocated-two-models", "units": 3}))
+        self._provision_failed(monkeypatch)
+        ct.apply_template("single-family", confirm=True)
+        status = ct.applied_status()
+        assert status["applied"]["template"] == "single-family"
+        assert status["applied"]["launch_unconfirmed"] is True
+
+    def test_all_green_records_clean_applied_state(
+            self, tmp_path, monkeypatch):
+        ct, hscc = self._setup(tmp_path, monkeypatch, n_workers=3)
+        monkeypatch.setattr(
+            "cluster_template._provision_models",
+            lambda plan, **k: {"status": "ok", "provisioned": ["192.0.2.2"],
+                               "note": "1 ensured"})
+        res = ct.apply_template("single-family", confirm=True)
+        assert res["success"] is True
+        state = json.loads((hscc / "applied_template.json").read_text())
+        assert state["template"] == "single-family"
+        # An untouched green record gains NOTHING — full-green records stay
+        # byte-for-byte what they were (§7 byte-identity for the happy path).
+        assert "launch_unconfirmed" not in state
+        assert "unconfirmed_steps" not in state
+
+    def test_config_side_warn_still_vetoes_the_record(
+            self, tmp_path, monkeypatch):
+        """The veto is only lifted for LAUNCH steps. A config-side step (e.g.
+        proxy-declaration) reporting warn means hscc's OWN write claim is
+        false — the record must NOT be trusted, so nothing is recorded."""
+        ct, hscc = self._setup(tmp_path, monkeypatch, n_workers=3)
+        monkeypatch.setattr(
+            "cluster_template._provision_models",
+            lambda plan, **k: {"status": "ok", "provisioned": [],
+                               "note": "test"})
+        monkeypatch.setattr(
+            ct, "_apply_proxy_declaration",
+            lambda tpl, plan: {"error": "sparkrun write path unreachable",
+                               "source": "declared", "policy": "least-busy",
+                               "written": [], "changed": False,
+                               "restart_required": False,
+                               "inert_recorded": [], "note": ""})
+        # Generic path: make a CONFIG-side step report warn directly.
+        real_report = ct._proxy_step_report
+
+        def warn_report(*a, **k):
+            rep = real_report(*a, **k)
+            rep["status"] = "warn"
+            rep["note"] = "simulated config-side failure"
+            return rep
+
+        monkeypatch.setattr(ct, "_proxy_step_report", warn_report)
+        res = ct.apply_template("single-family", confirm=True)
+        assert res["success"] is False
+        assert "launch_unconfirmed" not in res
+        assert not (hscc / "applied_template.json").exists()
+
+
 # ── Fix 3: stop-swallow records per-node failures ─────────────────────────────
 
 class TestStopFailuresRecorded:
