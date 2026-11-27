@@ -61,7 +61,7 @@ def _running(burners, timeout, command):
     proc = subprocess.Popen(
         ["/bin/sh", str(HARNESS), str(burners), str(timeout), "--", *command],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        env=env, start_new_session=True)
+        env=env, start_new_session=True, preexec_fn=_born_able_to_trap)
     try:
         yield proc, tag
     finally:
@@ -82,6 +82,44 @@ def _running(burners, timeout, command):
 
 def _burners_of(tag, count):
     return _wait_for(lambda: len(_survivors(tag)) == count)
+
+
+# The harness traps INT, TERM and HUP — and a POSIX shell is NOT ALLOWED to trap
+# a signal it was born ignoring (POSIX shell specification; bash 3.2 obeys).
+# Inherited ignores are sticky: `execve` preserves them, CPython does not
+# install its own SIGINT handler over one, and every child of the suite
+# inherits them again.
+#
+# Which makes the arm below depend on how the GATE happened to start the suite.
+# A command run asynchronously by a non-interactive shell -- `( pytest ... ) &`,
+# which is exactly how scripts/run_tests.sh starts every leg in parallel mode,
+# and how every reproduction of this stall was launched -- is required to start
+# with SIGINT (and SIGQUIT) ignored. Measured on this host, in that shape:
+#
+#   async  sh -c '... &'  -> python: <Handlers.SIG_IGN: 1>  -> harness has no
+#                                                             INT handler, and
+#                                                             the kernel
+#                                                             DISCARDS the INT
+#   foreground sh -c     -> python: <built-in function default_int_handler>
+#                                                             -> trap works
+#
+# That is the whole flake: the same file passes foreground and fails 5/5
+# backgrounded, at load 3-4 on 14 cpus, with no timing term anywhere (the
+# stalled harness has no internal end -- it dies only at its own 60 s watchdog).
+# The harness is not stuck in `wait`, it never HAD a handler to run: card
+# t_44a09412 read a stalled harness's dispositions from outside and got
+# `ignored INT=1 / caught INT=0` with `caught TERM=1 HUP=1` (the TERM rescue trap
+# did run), i.e. the kernel discarded the SIGINT. See
+# docs/audits/load-burners-sigint-trace-stage_t_5f9fab03.md.
+#
+# So the test resets the dispositions it is about to depend on, in the child
+# between fork and exec, at the last link it owns. The harness is then born able
+# to trap what the test delivers, whatever shape the suite was started in -- no
+# retry, no skip, no widened timeout, and no change to the harness itself.
+# test_the_reset_is_what_the_int_arm_rests_on() below is what pins it.
+def _born_able_to_trap():
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_DFL)
 
 
 def test_burners_run_in_their_own_process_groups():
@@ -111,6 +149,35 @@ def test_signal_to_the_harness_takes_every_burner_with_it(sig, status):
         assert _wait_for(lambda: not _survivors(tag)), (
             "burners %r survived %s of the harness — the exact orphan shape "
             "t_71ed3b1c exists to prevent" % (_survivors(tag), sig.name))
+
+
+def test_the_reset_is_what_the_int_arm_rests_on():
+    """Non-vacuity for the launcher reset: force the bad birth, then trap anyway.
+
+    The arm above only proves the harness traps INT when the suite happened to be
+    born able to deliver it — which is why the same file passed 60/60 launched in
+    the foreground and failed 5/5 launched as `( … ) &`. This case removes the
+    confound: it puts the *suite process itself* in the state an asynchronous
+    command of a non-interactive shell is born in (SIGINT ignored), launches the
+    harness from there, and still requires INT to be trapped.
+
+    Without `_born_able_to_trap` the ignore is inherited across `execve`, bash 3.2
+    cannot `trap` it, the kernel discards the SIGINT, and THIS case goes red in
+    every launch shape — so the reset cannot be quietly dropped later. The
+    disposition is restored in a finally; nothing else in the suite sees it.
+    """
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        with _running(2, 60, ["sleep", "60"]) as (proc, tag):
+            assert _burners_of(tag, 2), "no burners to prove the trap against"
+            proc.send_signal(signal.SIGINT)
+            assert proc.wait(timeout=10) == 128 + signal.SIGINT, (
+                "the harness was born with SIGINT ignored and the launcher reset "
+                "did not undo it: the INT was discarded, not delivered")
+            assert _wait_for(lambda: not _survivors(tag)), (
+                "burners %r survived the reset INT" % (_survivors(tag),))
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def test_hard_timeout_fires_and_kills_the_burners():
