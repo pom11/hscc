@@ -2983,6 +2983,42 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         else:
             checks.append(Check(install_gpu_clock_cap.CHECK_NAME, True,
                                 detail="skipped (fleet checks off)", fatal=False))
+    # sparkrun execution reservations (t_7dd19947) — same self-contained
+    # shape as the notifier / GPU-clock blocks: own module, own check, the
+    # transport refuses to exist inside pytest. A dead-owner reservation row
+    # in sparkrun's operations ledger blocks the NEXT launch with
+    # "resources busy or require reconciliation"; this row is the visibility
+    # half (WARN, never fatal), doctor --fix is the release half (see
+    # run_doctor_fix). Liveness is asked ON the node through sparkrun's own
+    # bridge — a local pid probe here is false-empty, and false-empty reads
+    # as "no reservations".
+    #
+    # The row runs whenever fleet checks run, WITHOUT the --fix flag: probe
+    # mode calls sparkrun's read-only ``reservations()`` and writes nothing.
+    try:
+        import doctor_sparkrun_reservations as _dsr
+    except ImportError:
+        checks.append(Check("sparkrun reservations (stale execution claims)",
+                            not fleet_checks,
+                            detail=("doctor_sparkrun_reservations.py missing — "
+                                    "execution reservations cannot be verified"
+                                    if fleet_checks else
+                                    "skipped (fleet checks off)"),
+                            fix="Restore hscc-bootstrap/"
+                                "doctor_sparkrun_reservations.py (re-run "
+                                "bootstrap).",
+                            fatal=False))
+    else:
+        if fleet_checks:
+            sr = _dsr.check(_node_hosts(_cluster_runner),
+                            ssh_factory=_dsr._default_ssh_factory())
+            checks.append(Check(name=sr["name"], ok=sr["ok"],
+                                detail=sr["detail"], fix=sr["fix"],
+                                fatal=sr["fatal"]))
+        else:
+            checks.append(Check(_dsr.CHECK_NAME, True,
+                                detail="skipped (fleet checks off)",
+                                fatal=False))
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
         "ok": not fatal_failed,
@@ -3259,7 +3295,8 @@ def _write_yaml(config_path, cfg):
 
 def run_doctor_fix(config_path: Optional[str] = None,
                    hermes_home: Optional[str] = None,
-                   *, _cluster_runner=None, _http_get=None) -> dict:
+                   *, _cluster_runner=None, _http_get=None,
+                   ssh_factory=None) -> dict:
     """Run doctor + fix all non-fatal HSCC config drift.
 
     Reads the current config, runs checks, then calls enable_plugins.enable()
@@ -3270,6 +3307,13 @@ def run_doctor_fix(config_path: Optional[str] = None,
     reports from the Card D migration). ``_http_get`` is injectable for tests
     (mirrors ``_check_models_served``) so the endpoint probe never needs the
     real network in the test suite.
+
+    ``ssh_factory`` is the sparkrun-reservation release seam (t_7dd19947): the
+    ONLY mutating fleet action ``--fix`` takes. Default None means the
+    feature module's production transport — which refuses to exist inside a
+    pytest process, so a suite can never release against the live cluster by
+    forgetting to inject. Release calls sparkrun's own
+    ``reconcile_reservation`` per dead owner, ON the owner's node.
     """
     checks_result = run_doctor(hermes_home, _cluster_runner=_cluster_runner,
                                _http_get=_http_get)
@@ -3356,6 +3400,23 @@ def run_doctor_fix(config_path: Optional[str] = None,
                 )
             if alias_changes:
                 _write_yaml(config_path, cur_cfg)
+
+    # sparkrun execution reservations (t_7dd19947) — the release half of the
+    # doctor row. THIS is the explicit flag the defect demands: nothing is
+    # deleted on a plain doctor run, and even here the only rows released are
+    # dead-owner claims, one sparkrun ``reconcile_reservation`` per owner,
+    # executed ON the owner's node through sparkrun's own bridge. sparkrun
+    # re-checks liveness inside its transaction, so an owner that came back
+    # alive is LEFT and named. A node whose probe fails is NOT touched —
+    # "we could not look" never licenses a delete.
+    try:
+        import doctor_sparkrun_reservations as _dsr
+    except ImportError:
+        fixes_applied.append("doctor_sparkrun_reservations.py missing — "
+                             "stale reservations could not be reconciled")
+    else:
+        fixes_applied.extend(_dsr.release_stale(
+            _node_hosts(_cluster_runner), ssh_factory=ssh_factory))
 
     return {**checks_result, "fixes_applied": fixes_applied,
             "alias_conversion_refused": alias_conversion_refused}
