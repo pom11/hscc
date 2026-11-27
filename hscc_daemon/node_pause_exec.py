@@ -69,8 +69,8 @@ SPARKRUN_CONTROL_TIMEOUT = 120
 #: verify's 600 s stream-staleness floor: the expiry tick runs this in a
 #: supervised stream thread and cannot hand the stream to a wedged client. The
 #: wait usually ends far earlier than this — the moment the unit answers its own
-#: /v1/models the client is cut loose and the restart is reported as verified by
-#: the health probe (which is the ONLY honest success signal for a
+#: /health and /v1/models the client is cut loose and the restart is reported as
+#: verified by the health probe (which is the ONLY honest success signal for a
 #: ``sparkrun run`` client that hangs on its child ssh session after the
 #: container is already serving: the operator's live launch sat 40 min on a
 #: machine whose model answered in 10). The endpoint is re-asked every couple of
@@ -953,7 +953,46 @@ def unit_is_serving(node, port, timeout=5):
     return bool(res.get("ok")) and res.get("status") == 200
 
 
-def _ready_probe_for(is_serving):
+#: The endpoints a resumed unit must answer before its pause is cleared
+#: (t_611dbad7). Both are plain reads: `/health` proves the engine process is
+#: up and `/v1/models` proves its serving layer is answering. Neither asks for
+#: generated text, which is the point — a reasoning model can be fully serving
+#: long before its first token finishes thinking, so an inference probe reads a
+#: working unit as "not back" and leaves the node parked.
+RESUME_CONFIRM_PATHS = ("/health", "/v1/models")
+
+#: One confirmation GET's bound. Short on purpose: this is the final yes/no
+#: after a launch client returned, not a load wait — a unit still loading simply
+#: answers "not yet" and the pause stays recorded for the next attempt.
+RESUME_CONFIRM_TIMEOUT = 2
+
+
+def unit_is_answering(node, port, timeout=RESUME_CONFIRM_TIMEOUT):
+    """True when this unit answers BOTH resume-confirmation endpoints.
+
+    This is the RESUME verdict only (t_611dbad7), kept separate from the
+    launch-path probe so a change there cannot re-gate a resume on inference.
+    ``/health`` and ``/v1/models`` answer as soon as the unit is serving, with no
+    generation and therefore no first-token wait; a unit that answers both is
+    confirmed even when the launch client was cut loose or exited non-zero.
+
+    A plain GET of the unit's own port — never the proxy, sparkrun, an alias
+    comparison, or ``/v1/chat/completions``. Unreachable, refused, or any
+    non-200 answer is False ("not confirmed"), never an exception: the caller
+    uses this against units that may still be loading.
+    """
+    for path in RESUME_CONFIRM_PATHS:
+        try:
+            res = util.http_check("http://%s:%s%s" % (node, port, path),
+                                  timeout=timeout)
+        except Exception:  # noqa: BLE001 — "cannot ask" IS the answer "not up"
+            return False
+        if not res.get("ok") or res.get("status") != 200:
+            return False
+    return True
+
+
+def _ready_probe_for(is_answering):
     """The ``ready`` callable factory :func:`_run_units` asks per unit.
 
     Returns ``None`` for a unit it cannot ask about (no nodes, no port) — the
@@ -969,7 +1008,7 @@ def _ready_probe_for(is_serving):
             return None
 
         def ready():
-            return all(is_serving(str(node), port) for node in nodes)
+            return all(is_answering(str(node), port) for node in nodes)
         return ready
     return ready_for
 
@@ -1012,8 +1051,23 @@ def _run_units(units, apply, key, verb, run, echo, ready_for=None):
             except Exception as e:  # noqa: BLE001 — a shell-out must not abort the batch
                 res = {"ok": False, "output": "", "stderr": str(e)}
             ok = bool(res and res.get("ok"))
+            client_ok = ok
             detached = bool(res and res.get("detached"))
             verified_by = (res or {}).get("verified_by")
+            if not ok and ready is not None:
+                # The CLIENT is not the verdict (t_611dbad7). A client can exit
+                # non-zero, or be cut loose at its bound, while the unit is
+                # already serving; asking the unit's own /health + /v1/models
+                # once more is what turns that into a confirmed resume. This is
+                # deliberately the resume-only probe (no inference token): the
+                # launch-path probe is untouched.
+                try:
+                    confirmed = bool(ready())
+                except Exception:  # noqa: BLE001 — a probe that cannot ask is "no"
+                    confirmed = False
+                if confirmed:
+                    ok = True
+                    verified_by = verified_by or "health probe"
             if detached:
                 # The operator's rule for this shape: say what was cut loose and
                 # what actually proved the outcome. A launch we had to detach and
@@ -1023,11 +1077,16 @@ def _run_units(units, apply, key, verb, run, echo, ready_for=None):
                     echo(f"  the launch client did not exit within {bound}s and "
                          f"was cut loose; the restart is verified by the "
                          f"{verified_by or 'health probe'} ({', '.join(nodes)} "
-                         f"answering /v1/models), not by the client")
+                         f"answering /health and /v1/models), not by the client")
                 else:
                     echo(f"  the launch client did not exit within {bound}s and "
-                         f"was cut loose; the unit never answered the health "
-                         f"probe either, so this restart is NOT confirmed")
+                         f"was cut loose; the unit never answered /health and "
+                         f"/v1/models either, so this restart is NOT confirmed")
+            elif ok and not client_ok:
+                echo(f"  the launch client did not confirm the restart, but the "
+                     f"unit answers /health and /v1/models on "
+                     f"{', '.join(nodes)}; the restart is verified by the "
+                     f"{verified_by or 'health probe'}, not by the client")
             results.append({"unit_id": unit_id, "cmd": cmd, "nodes": nodes,
                             "applied": True, "ok": ok,
                             "detached": detached, "verified_by": verified_by,
@@ -1081,18 +1140,24 @@ def resume_units(units, apply=False, run=None, echo=print,
     tens of minutes after the container it started is serving, and a resume that
     waited for that client would report a working restart as a failure and keep
     the node parked. Each launch is therefore cut loose as soon as the unit
-    answers its own ``/v1/models`` (``SPARKRUN_LAUNCH_WAIT_TIMEOUT`` is the hard
-    backstop), and the printed line says plainly that the health probe verified
-    it and the client was detached — never a silent kill, and never a false
-    "relaunch failed" for a unit that came up.
+    answers (``SPARKRUN_LAUNCH_WAIT_TIMEOUT`` is the hard backstop), and the
+    printed line says plainly that the health probe verified it and the client
+    was detached — never a silent kill, and never a false "relaunch failed" for
+    a unit that came up.
+
+    Confirmation is the RESUME-only pair ``/health`` + ``/v1/models``
+    (t_611dbad7), never an inference token and never the client's exit code: a
+    reasoning model can answer both endpoints while its first generated token is
+    still minutes away. A client that failed or was cut loose is followed by one
+    more endpoint ask, so a serving unit is resumed instead of left parked.
 
     ``serving_probe`` is that check, injectable for tests: ``(node, port) ->
-    bool``. The default is :func:`unit_is_serving`.
+    bool``. The default is :func:`unit_is_answering`.
     """
     return _run_units(units, apply, "resume_cmd", "resume",
                       run or util.run_cmd, echo,
                       ready_for=_ready_probe_for(serving_probe
-                                                 or unit_is_serving))
+                                                 or unit_is_answering))
 
 
 # ── the resume policy (ONE implementation for the CLI and the daemon tick) ──
@@ -1186,7 +1251,9 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
     log row; the human-readable detail is already in ``echo``'s output.
     ``detached`` names the units whose launch CLIENT never came back and had to
     be cut loose — a RESUME_RESUMED with a non-empty ``detached`` is a restart
-    the health probe proved rather than the client (t_09708c17).
+    the health probe proved rather than the client (t_09708c17). The resume's
+    confirmation is the ``/health`` + ``/v1/models`` pair only (t_611dbad7), so
+    a serving reasoning model is never held parked waiting for a token.
     """
     from . import heal_breaker, node_pauses
 
@@ -1342,8 +1409,8 @@ def resume_host(host, entry, apply=False, directory=None, echo=print,
         # wedged sparkrun client gets mistaken for a broken node.
         echo(f"  note: the launch client(s) for {', '.join(res['detached'])} "
              f"never returned and were cut loose — the restart was verified by "
-             f"the health probe (the unit answering /v1/models), not by the "
-             f"client.")
+             f"the health probe (the unit answering /health and /v1/models), "
+             f"not by the client.")
     if heal_breaker.clear(
             host, reason=reason or f"hscc node resume {host}"):
         heal_breaker.reset_alert(host)

@@ -17,10 +17,12 @@ Hermetic by construction — the card's rule, and the fleet's own rule
 Nothing here reads the operator's serving.json or talks to the cluster.
 """
 
+import http.server
 import inspect
 import json
 import os
 import sys
+import threading
 import time
 
 import pytest
@@ -1502,3 +1504,142 @@ class TestBoundedLaunchWait:
         assert npe.unit_is_serving(RESUME_NODE, 8003) is False, \
             "a probe that cannot ask must answer 'not up', never raise"
 
+
+
+# ── t_611dbad7: resume is confirmed by /health + /v1/models, not a token ────
+class _ResumeEndpoints(http.server.BaseHTTPRequestHandler):
+    """A fake unit that answers the two resume endpoints and nothing else.
+
+    It deliberately has no inference path: a POST (``/v1/chat/completions`` or
+    anything else) is recorded and refused at once, so a probe that waits for a
+    generated token fails fast instead of hanging the test.
+    """
+
+    def do_GET(self):  # noqa: N802 — stdlib handler name
+        self.server.asked.append(self.path)
+        if self.path in npe.RESUME_CONFIRM_PATHS:
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(404)
+
+    def do_POST(self):  # noqa: N802 — stdlib handler name
+        self.server.asked.append(self.path)
+        self.send_response(500)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format, *args):  # noqa: A002 — stdlib handler name
+        pass
+
+
+class TestResumeConfirmationEndpoints:
+    """A reasoning unit is up when its endpoints answer — not when a client
+    returns and not when it emits a token (t_611dbad7)."""
+
+    @pytest.fixture
+    def resume_endpoints(self):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+                                                 _ResumeEndpoints)
+        server.daemon_threads = True
+        server.asked = []
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    @staticmethod
+    def _unit(server, unit_id="reasoner"):
+        return {"unit_id": unit_id, "nodes": ["127.0.0.1"],
+                "port": server.server_address[1],
+                "resume_cmd": RESUME_LAUNCH, "observed": False}
+
+    def test_the_resume_probe_asks_both_endpoints_and_no_inference(
+            self, monkeypatch):
+        """The verdict is a plain GET of /health and /v1/models. There is no
+        chat-completions request anywhere in the confirmation path."""
+        asked = []
+
+        def fake_http_check(url, timeout=5):
+            asked.append(url)
+            return {"ok": True, "status": 200}
+
+        monkeypatch.setattr(util, "http_check", fake_http_check)
+        assert npe.unit_is_answering(RESUME_NODE, 8003) is True
+        assert asked == [f"http://{RESUME_NODE}:8003/health",
+                         f"http://{RESUME_NODE}:8003/v1/models"]
+        assert not any("chat/completions" in url for url in asked)
+
+    def test_both_endpoints_must_answer(self, monkeypatch):
+        for missing in npe.RESUME_CONFIRM_PATHS:
+            def fake_http_check(url, timeout=5, _missing=missing):
+                status = 503 if url.endswith(_missing) else 200
+                return {"ok": True, "status": status}
+
+            monkeypatch.setattr(util, "http_check", fake_http_check)
+            assert npe.unit_is_answering(RESUME_NODE, 8003) is False, (
+                f"{missing} answered non-200 but the unit was called ready")
+
+    def test_a_fake_unit_answers_both_endpoints_without_a_token(
+            self, resume_endpoints):
+        port = resume_endpoints.server_address[1]
+        assert npe.unit_is_answering("127.0.0.1", port) is True
+        assert resume_endpoints.asked == ["/health", "/v1/models"]
+
+    def test_a_failed_client_does_not_leave_a_serving_unit_parked(
+            self, resume_endpoints):
+        """The acceptance case: the launch client exits non-zero, the unit
+        answers /health and /v1/models, and the restart is confirmed."""
+        lines = Lines()
+
+        def failed_client(cmd, timeout=None, ready=None, **kw):
+            return {"ok": False, "output": "client exited 1", "stderr": ""}
+
+        res = npe.resume_units([self._unit(resume_endpoints)], apply=True,
+                               echo=lines, run=failed_client)
+        assert res["ok"] is True, res
+        row = res["units"][0]
+        assert row["ok"] is True and row["error"] is None
+        assert row["verified_by"] == "health probe"
+        assert resume_endpoints.asked == ["/health", "/v1/models"]
+        assert any("not by the client" in line for line in lines.lines), \
+            lines.text
+
+    def test_a_reasoning_unit_with_no_token_still_unparks_the_node(
+            self, resume_endpoints, monkeypatch, tmp_path):
+        """End to end through the policy: RESUMED, pause cleared, and the only
+        endpoints asked are the two that actually answer."""
+        from hscc_daemon import node_pauses
+
+        host = "127.0.0.1"
+        overlay = str(tmp_path / "overlay")
+        node_pauses.pause(host, reason="test", units=["reasoner"],
+                          span_nodes=[host], stopped=True,
+                          directory=overlay)
+        unit = self._unit(resume_endpoints)
+        monkeypatch.setattr(npe, "plan",
+                            lambda _host: {"ok": True, "units": [unit]})
+        entry = node_pauses.paused(host, directory=overlay)
+        lines = Lines()
+
+        def cut_loose(cmd, timeout=None, ready=None, **kw):
+            return {"ok": False, "output": "client cut loose", "stderr": "",
+                    "detached": True, "timed_out": True}
+
+        res = npe.resume_host(host, entry, apply=True, directory=overlay,
+                              echo=lines, run=cut_loose)
+        assert res["action"] == npe.RESUME_RESUMED, res
+        assert res["ok"] is True and res["pause_cleared"] is True
+        assert res["detached"] == ["reasoner"]
+        assert node_pauses.paused(host, directory=overlay) is None
+        assert resume_endpoints.asked == ["/health", "/v1/models"]
+        assert any("not by the client" in line for line in lines.lines), \
+            lines.text
