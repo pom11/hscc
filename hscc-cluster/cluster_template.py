@@ -1373,6 +1373,16 @@ def validate_resolved_plan(plan: Any) -> List[str]:
     return errors
 
 
+# Launch-side steps (t_cf6bf476): the steps that CONFIRM the fleet is serving,
+# as opposed to writing hscc's own files. A non-OK here means the cluster may
+# not be up with the new layout — but it does NOT contradict what apply already
+# WROTE (serving.json, models.json, config.yaml, routing, caps). So such a step
+# fails the apply yet still lets the applied record be written, flagged
+# `launch_unconfirmed`, instead of vetoing it and leaving `template status`
+# pointing at the OLD template after a successful config switch.
+_LAUNCH_STEPS = frozenset({"provision", "gateway-restart"})
+
+
 def apply_template(template_name: str, confirm: bool = False,
                    recreate: bool = False, *, _http_get=None) -> dict:
     """Apply a cluster template (v2 intent). Resolves it against the live cluster,
@@ -1677,6 +1687,23 @@ def apply_template(template_name: str, confirm: bool = False,
         # After provision + gateway-restart, check that no step ended in a
         # non-OK state — warn/error means the cluster was only partially
         # brought up, so apply is not a success.
+        #
+        # t_cf6bf476: a non-OK LAUNCH step (models not confirmed serving, or the
+        # gateway not confirmed restarted) still fails the apply, but it no
+        # longer vetoes the applied record — serving/models/config/routing/caps
+        # were all WRITTEN to the nodes, and an unconfirmed launch doesn't
+        # change that fact. The record gains a `launch_unconfirmed` flag naming
+        # the steps instead, so `template status` tells the truth about which
+        # template is deployed while staying honest about what is unproven.
+        # A non-OK CONFIG-side step keeps the full veto: it means one of hscc's
+        # own write claims is false, so nothing may be recorded as applied.
+        unconfirmed = [step.get("step", "?") for step in result["steps"]
+                       if step.get("status") in ("warn", "error", "fail")
+                       and step.get("step") in _LAUNCH_STEPS]
+        if unconfirmed:
+            result["success"] = False
+            result["launch_unconfirmed"] = True
+            result["unconfirmed_steps"] = unconfirmed
         for step in result["steps"]:
             status = step.get("status", "")
             if status in ("warn", "error", "fail"):
@@ -1698,8 +1725,14 @@ def apply_template(template_name: str, confirm: bool = False,
                      if rolled_back else "no snapshot to restore"),
         })
 
-    # Record which template is now live (so `status` can answer "what's applied?")
-    if result["success"]:
+    # Record which template is now live (so `status` can answer "what's applied?").
+    # Recorded for a clean apply, and ALSO for a launch-unconfirmed one
+    # (t_cf6bf476 — the record says what was WRITTEN; the flag says what was
+    # not confirmed). A failed apply that rolled back, or one whose CONFIG-side
+    # steps are not green, records nothing: that record would describe files
+    # that are not on the nodes.
+    if (result["success"] or result.get("launch_unconfirmed")) \
+            and not result.get("rolled_back"):
         decl_record = _applied_declaration_record(tpl, plan, ep_decision,
                                                   ep, px, cp)
         try:
@@ -1724,6 +1757,12 @@ def apply_template(template_name: str, confirm: bool = False,
                 # indistinguishable. Absent entirely for a pre-v4 apply, which
                 # keeps an old record byte-identical (§7).
                 **({"declarations": decl_record} if decl_record else {}),
+                # t_cf6bf476: recorded only when a launch step was non-OK — a
+                # clean apply's record stays byte-identical to what it always
+                # was (same no-phantom-key rule as `declarations` above).
+                **({"launch_unconfirmed": True,
+                    "unconfirmed_steps": result.get("unconfirmed_steps", [])}
+                   if result.get("launch_unconfirmed") else {}),
             }, backup=False)
         except Exception:
             pass
