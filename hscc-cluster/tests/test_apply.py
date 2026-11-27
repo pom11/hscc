@@ -921,6 +921,49 @@ class TestLaunchFailureRecordsAppliedUnconfirmed:
         assert "launch_unconfirmed" not in res
         assert not (hscc / "applied_template.json").exists()
 
+    def test_config_side_warn_plus_launch_warn_records_nothing(
+            self, tmp_path, monkeypatch):
+        """t_59c72c12: the config-side veto is not diluted by a CONCURRENT
+        launch warn. Before the fix `unconfirmed` filtered to launch steps, so
+        a provision warn alone set launch_unconfirmed — and the record was then
+        written despite the failed proxy-declaration write, flagged with a name
+        (`launch_unconfirmed: ["provision"]`) that actively misattributed the
+        gap to the launch. This is the case reachable on main today, since
+        proxy-declaration warn + provision warn is a live combination.
+        Nothing may be recorded."""
+        ct, hscc = self._setup(tmp_path, monkeypatch, n_workers=3)
+        self._provision_failed(monkeypatch)  # launch-side warn
+        monkeypatch.setattr(
+            ct, "_apply_proxy_declaration",
+            lambda tpl, plan: {"error": "sparkrun write path unreachable",
+                               "source": "declared", "policy": "least-busy",
+                               "written": [], "changed": False,
+                               "restart_required": False,
+                               "inert_recorded": [], "note": ""})
+        real_report = ct._proxy_step_report
+
+        def warn_report(*a, **k):
+            rep = real_report(*a, **k)
+            rep["status"] = "warn"
+            rep["note"] = "simulated config-side failure"
+            return rep
+
+        monkeypatch.setattr(ct, "_proxy_step_report", warn_report)
+        # Hermetic: Step 4's install_proxy archives the REAL daemon's
+        # litellm.log through hscc_daemon.proxy_log_archive, which ignores the
+        # tmp-HOME monkeypatches (pre-existing harness trait). This test needs
+        # no filesystem side effect at all — stub the preservation seam.
+        monkeypatch.setattr(ct, "_archive_proxy_log_before_start",
+                            lambda reason: None)
+        res = ct.apply_template("single-family", confirm=True)
+        assert res["success"] is False
+        # Launch-only waiver NOT granted: a config step is non-OK too.
+        assert "launch_unconfirmed" not in res
+        assert "unconfirmed_steps" not in res
+        # The whole point: the file means "these files are on the nodes" and
+        # a config write that did not land makes that claim false.
+        assert not (hscc / "applied_template.json").exists()
+
 
 # ── Fix 3: stop-swallow records per-node failures ─────────────────────────────
 

@@ -1700,10 +1700,20 @@ def apply_template(template_name: str, confirm: bool = False,
         unconfirmed = [step.get("step", "?") for step in result["steps"]
                        if step.get("status") in ("warn", "error", "fail")
                        and step.get("step") in _LAUNCH_STEPS]
+        # t_59c72c12: the launch-side waiver is granted ONLY when EVERY non-OK
+        # step is a launch step. A config-side non-OK step anywhere — even
+        # alongside a launch warn — reasserts the full veto above: the record's
+        # meaning is "these files are on the nodes", and a failed config write
+        # makes that claim false no matter which launch step was unconfirmed.
+        config_side_non_ok = any(
+            step.get("status") in ("warn", "error", "fail")
+            and step.get("step") not in _LAUNCH_STEPS
+            for step in result["steps"])
         if unconfirmed:
             result["success"] = False
-            result["launch_unconfirmed"] = True
-            result["unconfirmed_steps"] = unconfirmed
+            if not config_side_non_ok:
+                result["launch_unconfirmed"] = True
+                result["unconfirmed_steps"] = unconfirmed
         for step in result["steps"]:
             status = step.get("status", "")
             if status in ("warn", "error", "fail"):
