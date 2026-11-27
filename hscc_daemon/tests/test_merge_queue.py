@@ -5979,3 +5979,238 @@ def test_a_busy_repo_explains_the_entry_it_did_not_claim(tmp_path):
     ps = mq.load_state(state)["projects"]["alpha"]
     assert [e["pr"] for e in ps["queue"]] == [7]
     assert any("PR #7" in msg and "#21" in msg for _level, msg in lines), lines
+
+
+# ── t_cab1f418: a readable engine ────────────────────────────────────────
+#
+# Measured 2026-11-27, 19:41 EET: the state file held a live gating claim
+# (PR #847, elapsed 90.4 s), `merge-queue list hscc --json` answered
+# `in_flight: None` with two waiting PRs exposed as bare `{pr, attempts}`
+# rows, and the last merge-queue log line was 4 hours old. The engine was
+# alive and REFUSING those waiting PRs every tick — GitHub answered
+# `mergeable: CONFLICTING` for each — and none of that was on a surface.
+# These tests pin the fix: a live claim survives every projection, every
+# waiting entry says why it waits, and the surfaces carry a liveness
+# clock. All of them assert FIELDS on the surfaces, never log lines — the
+# fix adds no log volume, so a log-asserting test would pin the noise the
+# card forbade, not the signal.
+
+
+def _leg_reading_gate(store, state, *, extra=None):
+    """A gate stub that samples every read surface from INSIDE the leg.
+
+    The only way to catch a projection that drops a live claim: read the
+    surfaces at the instant the claim is unavoidably live, mid-gate.
+    """
+
+    def gate(command, worktree, timeout_s, cancel_check=None, *,
+             on_start=None, **kw):
+        on_start(4242)
+        store["file"] = mq.load_state(state)["projects"]["alpha"].get(
+            "in_flight")
+        if extra is not None:
+            extra()
+        return "pass", ""
+
+    return gate
+
+
+def test_a_live_claim_survives_the_cli_projection_from_inside_the_leg(
+        tmp_path, monkeypatch):
+    """Pinned BOTH directions at the one instant the claim cannot be missed.
+
+    Direction 1: the state file holds a live claim and the CLI/view
+    projection drops it (today's incident) — the equality fails.
+    Direction 2: a projection grows a phantom claim the file does not hold
+    — the same equality fails. Neither half is a warning; both are red.
+    """
+    from hscc_daemon import merge_queue_cli
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, path=state)
+    store = {}
+
+    def read_surfaces():
+        store["status"] = merge_queue_cli._status_doc(
+            registry_path=registry, state_path=state)
+        store["view"] = mq.view(state_path=state, registry_path=registry)
+
+    monkeypatch.setattr(mq, "_run_gate", _leg_reading_gate(
+        store, state, extra=read_surfaces))
+    result = mq.tick(state_path=state, root=str(tmp_path / "queue"),
+                     registry_path=registry, gh_runner=gh,
+                     git_runner=subprocess.run,
+                     auto_source=lambda *a, **k: [])
+    assert result["processed"][0]["result"] == "merged", result
+
+    held = store["file"]
+    assert held and held.get("pr") == 7, store["file"]
+    # Direction 1+2, one identity: the CLI projection IS the state file.
+    assert store["status"]["projects"]["alpha"]["in_flight"] == held
+    # And the row surface: PR 7 is a live row, not a dropped one.
+    rows = [r for r in store["view"]["rows"] if r.get("pr") == 7]
+    assert rows and rows[0]["pr"] == 7, store["view"]["rows"]
+    assert rows[0]["state"] not in ("waiting", "queued"), rows
+
+
+def test_list_surfaces_name_the_held_claim_and_print_the_engine_line(
+        tmp_path, monkeypatch, capsys):
+    """`list` used to print "merge queue is empty" while a gate ran.
+
+    Command-level (the operator's exact surface), from inside the leg:
+    the JSON carries the claim, the human line prints it, and every
+    rendering answers "when was the engine last heard from" without the
+    operator stat-ing ~/.hscc/state by hand.
+    """
+    from hscc_daemon import merge_queue_cli
+    pair = _repo_pair(tmp_path)
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    monkeypatch.setenv("HSCC_HOME", str(tmp_path / "hscc-home"))
+    monkeypatch.setenv("FLIGHTDECK_REGISTRY", registry)
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]}})
+    mq.add_to_queue("alpha", 7)          # default path == the tmp home
+    store = {}
+
+    def read_cmds():
+        assert merge_queue_cli.cmd_merge_queue(
+            ["list", "alpha", "--json"]) == 0
+        store["json"] = json.loads(capsys.readouterr().out)
+        assert merge_queue_cli.cmd_merge_queue(["list", "alpha"]) == 0
+        store["list"] = capsys.readouterr().out
+        assert merge_queue_cli.cmd_merge_queue(["status", "--json"]) == 0
+        store["status"] = json.loads(capsys.readouterr().out)
+
+    monkeypatch.setattr(mq, "_run_gate", _leg_reading_gate(
+        store, mq.state_file(), extra=read_cmds))
+    result = mq.tick(root=str(tmp_path / "queue"), gh_runner=gh,
+                     git_runner=subprocess.run,
+                     auto_source=lambda *a, **k: [])
+    assert result["processed"][0]["result"] == "merged", result
+
+    assert store["file"] and store["file"]["pr"] == 7, store["file"]
+    row = store["json"]["projects"]["alpha"]
+    assert row["in_flight"]["pr"] == 7, store["json"]
+    assert "in-flight" in store["list"] and "PR #7" in store["list"], \
+        store["list"]
+    # The liveness clock, on all three renderings.
+    assert store["json"]["engine"]["seconds_since_last_write"] is not None
+    assert store["status"]["engine"]["seconds_since_last_write"] is not None
+    assert "engine:" in store["list"], store["list"]
+
+
+def merge_queue_status_doc(state, registry):
+    from hscc_daemon import merge_queue_cli
+    return merge_queue_cli._status_doc(registry_path=registry,
+                                       state_path=state)
+
+
+def test_a_dirty_head_waits_saying_dirty_never_checks_failing(tmp_path):
+    """The two refusals that looked like one state are distinct fields.
+
+    PR #7 waits DIRTY (mergeable=CONFLICTING), PR #8 waits RED. The
+    waiting entries themselves — no log — name the difference, and the
+    row and CLI surfaces carry it.
+    """
+    pair = _repo_pair(tmp_path)
+    second_head = _new_branch(pair["repo"], "wt/t_second")
+    registry = _registry(tmp_path, pair["repo"], gates=["true"])
+    red = [{"__typename": "CheckRun", "status": "COMPLETED",
+            "conclusion": "FAILURE", "name": "guard"}]
+    gh = FakeGh({7: {"headRefName": pair["branch"],
+                     "headRefOid": pair["head"]},
+                 8: {"headRefName": "wt/t_second",
+                     "headRefOid": second_head}},
+                views={7: [{"mergeable": "CONFLICTING"}] * 4,
+                       8: [{"statusCheckRollup": red}] * 3})
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, path=state)
+    mq.add_to_queue("alpha", 8, path=state)
+
+    run_tick = lambda: mq.tick(
+        state_path=state, root=str(tmp_path / "queue"),
+        registry_path=registry, gh_runner=gh, git_runner=subprocess.run,
+        auto_source=lambda *a, **k: [])
+    assert run_tick()["processed"][0]["result"] == "waiting"    # parks #7
+    run_tick()                                                  # parks #8
+
+    ps = mq.load_state(state)["projects"]["alpha"]
+    by_pr = {e["pr"]: e for e in ps["waiting"]}
+    assert set(by_pr) == {7, 8}, ps["waiting"]
+    assert by_pr[7]["waiting_reason"] == mq.WAITING_REASON_DIRTY_HEAD, by_pr
+    assert "CONFLICTING" in by_pr[7]["waiting_detail"]
+    assert by_pr[8]["waiting_reason"] == mq.WAITING_REASON_CHECKS_FAILING
+    assert "guard" in by_pr[8]["waiting_detail"]
+    assert by_pr[7]["waiting_reason"] != by_pr[8]["waiting_reason"]
+    assert by_pr[7]["waiting_reason_at"] and by_pr[8]["waiting_reason_at"]
+
+    row7 = [r for r in mq.view(state_path=state,
+                               registry_path=registry)["rows"]
+            if r["pr"] == 7 and r["state"] == "waiting"]
+    assert row7 and row7[0]["waiting_reason"] == "dirty-head", row7
+
+    doc = merge_queue_status_doc(state, registry)
+    waiting = {e["pr"]: e for e in doc["projects"]["alpha"]["waiting"]}
+    assert waiting[7]["waiting_reason"] == "dirty-head", doc
+
+
+def test_the_engine_clock_separates_a_healthy_idle_from_a_stalled_engine(
+        tmp_path, monkeypatch):
+    """'No claim, 400 s since last tick' is health; '4 hours' is not.
+
+    Both halves of today's confusion: the LEDGER freezes for a whole gate
+    leg, so its age alone can call a live gating engine dead; the health
+    stamp heartbeats from INSIDE the leg and is the fresher truth. The
+    block exposes the fresher of the two, so neither shape is read wrong.
+    """
+    import datetime as dt
+
+    def age(seconds):
+        return (dt.datetime.now(dt.timezone.utc)
+                - dt.timedelta(seconds=seconds)).isoformat()
+
+    state = _state(tmp_path)
+    mq.add_to_queue("alpha", 7, path=state)
+
+    def freeze(seconds, fn):
+        # Manual set/restore, NOT monkeypatch.undo(): undo reverts EVERY
+        # patch on this test's name-stack — including the module's autouse
+        # STATE_DIR redirect and the conftest seal — and the next read then
+        # hits the OPERATOR's live ~/.hscc/state, where the daemon's own
+        # heartbeat lands as a "fresh health stamp" 46 s old. (Measured:
+        # exactly that, on the first draft of this test.)
+        real = mq._now_iso
+        mq._now_iso = lambda: age(seconds)
+        try:
+            fn()
+        finally:
+            mq._now_iso = real
+
+    # A healthy idle: last tick's stamp, 400 s ago, no claim anywhere.
+    freeze(400, lambda: mq.save_state(mq.load_state(state), state))
+    eng = mq.view(state_path=state,
+                  registry_path=str(tmp_path / "none.yaml"))["engine"]
+    assert 395 <= eng["seconds_since_last_write"] <= 405, eng
+    assert eng["in_flight"] is None, eng
+
+    # 4 hours with nothing written: the incident's shape, now visible.
+    freeze(4 * 3600, lambda: mq.save_state(mq.load_state(state), state))
+    eng = mq.view(state_path=state,
+                  registry_path=str(tmp_path / "none.yaml"))["engine"]
+    assert eng["seconds_since_last_write"] >= 4 * 3600 - 5, eng
+
+    # And the incident's other half: a gate leg whose LEGITIMATE ledger is
+    # hours old. One heartbeat stamp flips the verdict — engine alive,
+    # gating #7 — from the same surface.
+    mq._stream_stamp(project="alpha", pr=7, stage="gating",
+                     gate='HSCC_TEST_LEGS="hscc_daemon scripts" bash '
+                          "scripts/run_tests.sh", elapsed_s=90.4)
+    eng = mq.view(state_path=state,
+                  registry_path=str(tmp_path / "none.yaml"))["engine"]
+    assert eng["seconds_since_last_write"] < 5, eng
+    assert eng["ledger_age_s"] >= 4 * 3600 - 5, eng
+    assert eng["in_flight"]["pr"] == 7, eng
+    assert eng["in_flight"]["stage"] == "gating", eng

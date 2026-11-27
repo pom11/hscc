@@ -249,7 +249,11 @@ def cmd_merge_queue(argv):
                 return _error(f"unknown project {project!r}", json_mode)
             rows = {project: rows[project]}
         if json_mode:
-            print(json.dumps({"ok": True, "projects": rows}))
+            # The engine clock rides the JSON too — whoever consumes this
+            # must be able to tell a healthy idle from a stalled engine
+            # without stat-ing state files (t_cab1f418).
+            print(json.dumps({"ok": True, "engine": data["engine"],
+                              "projects": rows}))
             return 0
         console = _console()
         empty = True
