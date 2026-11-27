@@ -3181,7 +3181,8 @@ class TestUniformPoolChatEndpointAndProviderPruning:
 
 
 class TestServeCmdCarriedAcrossRewrite:
-    """`serve_cmd` records must survive a serving.json rewrite.
+    """`serve_cmd` records must survive a serving.json rewrite — when they
+    still describe their unit.
 
     Step 1 rebuilds serving.json from the plan (no serve_cmd), and provision
     only re-stamps units it actually (re)launched — under `--ensure` an
@@ -3189,12 +3190,32 @@ class TestServeCmdCarriedAcrossRewrite:
     every record, drift became permanently uncheckable, and every later apply
     warned and returned success=False, which stopped applied_template.json
     from updating.
+
+    NARROWED (t_207ee360, deliberate): the carry preserves a record only while
+    its PLACEMENT still matches the unit's fields (recipe path, ``--hosts``
+    node set, ``--port``). Across a template switch those fields change, and
+    the previous recipe's command then contradicts the unit it sits on — every
+    daemon status read prints ``serve_cmd refused`` for it, forever (live
+    incident: the operator's ``orch`` unit, fixed by hand). The half that must
+    NOT regress: a record whose placement still matches — even with a
+    flag-only difference from the current render, i.e. an override or drift
+    signal — is still carried verbatim.
     """
 
     def _prev(self, tmp_path, units):
         p = tmp_path / "serving.json"
         p.write_text(json.dumps({"version": 2, "units": units}))
         return p
+
+    def _rendered(self, recipe="~/recipes/a.yaml", hosts="192.0.2.2",
+                  port=8000, tp=1, **kw):
+        return cluster_template._render_serve_cmd(
+            "hscc", hosts, port, recipe, "orchestrator-model", tp, **kw)
+
+    def _unit(self, recipe="~/recipes/a.yaml", nodes=("192.0.2.2",),
+              port=8000):
+        return {"id": "orch", "role": "orchestrator", "recipe": recipe,
+                "nodes": list(nodes), "port": port}
 
     def test_carries_recorded_commands(self, monkeypatch, tmp_path):
         prev = self._prev(tmp_path, [
@@ -3233,6 +3254,106 @@ class TestServeCmdCarriedAcrossRewrite:
         monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
         fresh = {"version": 2, "units": [{"id": "orch"}, {"id": "w1"}]}
         assert cluster_template._carry_serve_cmds(fresh) == 0
+
+    # ── t_207ee360: the narrowing — placement must still describe the unit ──
+
+    def test_recipe_change_drops_the_stale_record(self, monkeypatch, tmp_path):
+        """A template switch changes the unit's recipe; the OLD recipe's
+        command contradicts it and is stale by definition — carried, it made
+        every later status read print `serve_cmd refused` for that unit."""
+        old = self._rendered(recipe="~/recipes/a.yaml")
+        prev = self._prev(tmp_path, [dict(self._unit(recipe="~/recipes/a.yaml"),
+                                          serve_cmd=old)])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [self._unit(recipe="~/recipes/b.yaml")]}
+        stale: list = []
+        assert cluster_template._carry_serve_cmds(fresh, stale_out=stale) == 0
+        assert "serve_cmd" not in fresh["units"][0]
+        assert len(stale) == 1 and stale[0].startswith("orch: ")
+        assert "recipe" in stale[0]
+
+    def test_recipe_unchanged_keeps_the_flag_override(self, monkeypatch, tmp_path):
+        """The half of the pin that must NOT regress: placement matches, only
+        a FLAG differs (here a recorded gpu-mem the current render dropped) —
+        that is drift/override EVIDENCE and survives byte-identical."""
+        rec = self._rendered(recipe="~/recipes/a.yaml", gpu_mem=0.55)
+        # sanity: this record is genuinely non-equivalent to today's render —
+        # a re-render-to-current design would have destroyed the override.
+        assert not cluster_template.serve_cmds_equivalent(
+            rec, self._rendered(recipe="~/recipes/a.yaml"))
+        prev = self._prev(tmp_path, [dict(self._unit(), serve_cmd=rec)])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [self._unit()]}
+        stale: list = []
+        assert cluster_template._carry_serve_cmds(fresh, stale_out=stale) == 1
+        assert fresh["units"][0]["serve_cmd"] == rec
+        assert stale == []
+
+    def test_hosts_change_drops_the_stale_record(self, monkeypatch, tmp_path):
+        old = self._rendered(hosts="192.0.2.2")
+        prev = self._prev(tmp_path, [dict(self._unit(), serve_cmd=old)])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [self._unit(nodes=("192.0.2.7",))]}
+        assert cluster_template._carry_serve_cmds(fresh) == 0
+        assert "serve_cmd" not in fresh["units"][0]
+
+    def test_port_change_drops_the_stale_record(self, monkeypatch, tmp_path):
+        old = self._rendered(port=8000)
+        prev = self._prev(tmp_path, [dict(self._unit(), serve_cmd=old)])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [self._unit(port=8100)]}
+        assert cluster_template._carry_serve_cmds(fresh) == 0
+        assert "serve_cmd" not in fresh["units"][0]
+
+    def test_normalisation_is_the_arbiter_not_raw_strings(self, monkeypatch,
+                                                          tmp_path):
+        """A legacy record without the explicit `--tp 1` token (rendering
+        changed, launch did not) still carries: placement is judged through
+        `_serve_cmd_flags`, so cosmetic render drift never reads as stale."""
+        legacy = ["sparkrun", "run", "~/recipes/a.yaml", "--cluster", "hscc",
+                  "--hosts", "192.0.2.2", "--port", "8000", "--no-follow",
+                  "--ensure", "--served-model-name", "a orchestrator-model"]
+        prev = self._prev(tmp_path, [dict(self._unit(), serve_cmd=legacy)])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [self._unit()]}
+        assert cluster_template._carry_serve_cmds(fresh) == 1
+        assert fresh["units"][0]["serve_cmd"] == legacy
+
+    def test_units_without_placement_are_judged_neither_way(self, monkeypatch,
+                                                            tmp_path):
+        """A unit that declares no recipe/nodes/port gives the guard nothing
+        to condemn it with — conservative carry (the old behaviour), never a
+        drop on absence of evidence."""
+        prev = self._prev(tmp_path, [{"id": "orch",
+                                      "serve_cmd": self._rendered()}])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [{"id": "orch"}]}
+        assert cluster_template._carry_serve_cmds(fresh) == 1
+
+    def test_dropped_record_leaves_the_status_read_nothing_to_refuse(
+            self, monkeypatch, tmp_path):
+        """Acceptance, end-to-end against the DAEMON guard that printed the
+        live ERROR: the pre-carry record IS refused; the post-carry unit (no
+        record) has nothing left to refuse."""
+        from hscc_daemon import serving as daemon_serving
+        old = self._rendered(recipe="~/recipes/a.yaml")
+        new_unit = self._unit(recipe="~/recipes/b.yaml")
+        # The defect, pinned: this exact pair made every status read refuse.
+        assert "recipe" in daemon_serving._serve_cmd_placement_mismatch(
+            dict(new_unit, serve_cmd=old))
+        prev = self._prev(tmp_path, [dict(self._unit(recipe="~/recipes/a.yaml"),
+                                          serve_cmd=old)])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [dict(new_unit)]}
+        cluster_template._carry_serve_cmds(fresh)
+        assert "serve_cmd" not in fresh["units"][0]
+        # Post-fix: no placement reason, and the derived-vs-record canary has
+        # no record to disagree with.
+        assert daemon_serving._serve_cmd_placement_mismatch(
+            fresh["units"][0]) == ""
+        assert daemon_serving._serve_cmd_mismatch(
+            fresh["units"][0],
+            self._rendered(recipe="~/recipes/b.yaml")) == ""
 
 
 class TestServingJsonRecordsPoolShape:
