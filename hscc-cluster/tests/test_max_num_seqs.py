@@ -371,8 +371,10 @@ class TestFlashNextAllShipsCap:
     """4node/flash-next-all caps BOTH models at 5 (the per-node rule; the
     recipe default of 8 exceeds it)."""
 
-    def test_both_models_cap_at_five(self):
-        tpl = ct._load_intent("4node-flash-next-all")
+    @pytest.mark.parametrize("name", ["4node-flash-next-all",
+                                      "4node-flash-next-hibrid48"])
+    def test_both_models_cap_at_five(self, name):
+        tpl = ct._load_intent(name)
         assert tpl.orchestrator.max_num_seqs == 5
         assert tpl.families, "template lost its families"
         for fam in tpl.families:

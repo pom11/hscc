@@ -118,19 +118,14 @@ routing:
   compaction: family-coding
   auxiliaries: family-coding
 # Kanban concurrency, owned by the template (apply writes kanban.* in hermes
-# config). Operator rule: at most ~5 RUNNING requests per node for a decent
-# decode speed. 4 nodes x 5 = 20 request slots; cards are ~1 in-flight request
-# each, but the 9-ish orchestrators, subagents and auxiliary calls share the
-# same nodes, so 12 cards leaves that headroom (measured 2026-10-29: 12 cards
-# + orchestrators = 4-6 running per node). Per-profile 3 keeps one role from
-# taking every slot; it is the operator's live value (raised from the 2 this
-# block first shipped with — every config backup up to
-# config.yaml.bak-20261029-pause still carries 2). Pinned against drift by
+# config). The operator's live value is 6 cards fleet-wide, 2 per profile
+# (lowered from 12/3 after measuring that the GB10 workers saturate around six
+# concurrent cards). Pinned against drift by
 # hscc-cluster/tests/test_template_declarations.py::TestShippedTemplateCapsMatchSOT:
 # if the operator SOT moves again, move BOTH this block and the pin together.
 caps:
-  max_in_progress: 12
-  max_in_progress_per_profile: 3
+  max_in_progress: 6
+  max_in_progress_per_profile: 2
 
 # Balancer: least-in-flight over the uniform pool (the default for a
 # uniform_pool template, declared explicitly so the template states it).

@@ -97,8 +97,9 @@ def test_apply_without_block_or_tier_writes_nothing(tmp_path):
         isinstance(v, dict) and "reasoning_effort" in v for v in d["auxiliary"].values())
 
 
-def test_shipped_flash_next_template_declares_its_vocabulary():
-    path = os.path.join(os.path.dirname(_HERE), "templates", "4node", "flash-next-all.yaml")
+@pytest.mark.parametrize("stem", ["flash-next-all", "flash-next-hibrid48"])
+def test_shipped_flash_next_template_declares_its_vocabulary(stem):
+    path = os.path.join(os.path.dirname(_HERE), "templates", "4node", stem + ".yaml")
     d = yaml.safe_load(open(path))
     assert d["version"] == 4
     assert d["reasoning"] == TIERS
