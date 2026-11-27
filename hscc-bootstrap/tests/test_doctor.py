@@ -886,6 +886,24 @@ class TestRunDoctor:
                     shutil.rmtree(hermes_home, ignore_errors=True)
 
 
+def _clean_local_runner():
+    """A local reservation ledger that answered, and answered EMPTY.
+
+    Pass this as ``run_doctor_fix(local_runner=...)`` in any case that
+    asserts an empty ``fixes_applied``: since t_5f419e01 the release half
+    probes THIS machine's own sparkrun reservation ledger on every fix run —
+    the row that blocked the .244 orchestrator launch lived there, not on a
+    node — and the production local runner REFUSES to exist inside a pytest
+    process. An unanswered local probe is reported ``NOT touched`` and never
+    dropped silently, which is the right answer for a suite that forgot its
+    transport but is not what a "nothing needed fixing" assertion is about.
+    """
+    def clean_runner(payload_argv, timeout):
+        return {"ok": True, "code": 0, "stderr": "",
+                "stdout": '{"mode": "probe", "reservations": []}'}
+    return clean_runner
+
+
 class TestRunDoctorFix:
     def test_returns_fixes_key(self):
         tmpdir = tempfile.mkdtemp()
@@ -911,6 +929,7 @@ class TestRunDoctorFix:
             result = doctor.run_doctor_fix(
                 config_path=None, hermes_home=tmpdir,
                 _cluster_runner=lambda: "[]",
+                local_runner=_clean_local_runner(),
             )
             assert "fixes_applied" in result
             assert result["fixes_applied"] == []
@@ -1471,6 +1490,10 @@ class TestDoctorFixNoopWhenFresh:
             # that _fake_http_unreachable already models in 0 s. run_doctor_fix
             # now forwards _http_get to run_doctor, so the checks honour it too.
             _http_get=_fake_http_unreachable,
+            # And the same reasoning one layer down: an empty fixes_applied
+            # here means "the config was already right", so the reservation
+            # row's LOCAL leg has to be answered rather than left to refuse.
+            local_runner=_clean_local_runner(),
         )
         assert res["fixes_applied"] == []
 
