@@ -1467,11 +1467,18 @@ def apply_template(template_name: str, confirm: bool = False,
         serving = _ti().to_serving_json(plan)
         # Carry forward recorded serve commands; see _carry_serve_cmds for why
         # dropping them made every subsequent apply warn and report failure.
-        carried = _carry_serve_cmds(serving)
+        # A record whose placement contradicts its (new) unit is NOT carried —
+        # it is stale by definition and would make every later status read
+        # refuse it (t_207ee360); the dropped ones are named in the step.
+        stale_serve_cmds: List[str] = []
+        carried = _carry_serve_cmds(serving, stale_out=stale_serve_cmds)
         write_json(SERVING_JSON, serving, backup=True)
-        result["steps"].append({"step": "serving.json", "status": "ok",
-                                "units": len(serving["units"]),
-                                "serve_cmds_carried": carried})
+        step1 = {"step": "serving.json", "status": "ok",
+                 "units": len(serving["units"]),
+                 "serve_cmds_carried": carried}
+        if stale_serve_cmds:
+            step1["serve_cmds_stale_dropped"] = stale_serve_cmds
+        result["steps"].append(step1)
 
         # Step 2: Write models.json
         models = _build_models_json(plan)
@@ -2637,7 +2644,61 @@ def _build_proxy_config(resolved_family) -> dict:
     }
 
 
-def _carry_serve_cmds(serving: dict) -> int:
+def _serve_cmd_placement_conflict(sc: Any, unit: dict) -> str:
+    """'' when a recorded ``serve_cmd`` still describes ``unit``; else the reason.
+
+    Placement = the fields that decide WHERE a workload starts: the recipe path,
+    the ``--hosts`` node set, the ``--port``. Deliberately the SAME definition
+    the daemon's status-read guard uses before it will trust a record
+    (``hscc_daemon/serving.py:_serve_cmd_placement_mismatch``) — the two modules
+    mirror each other's placement rule (as they already mirror
+    ``_serve_cmd_flags``/``_option_overrides``), because the carry decision and
+    the refusal decision MUST agree: a record apply would carry but a status
+    read would refuse is exactly the permanently-noisy state t_207ee360 put the
+    operator's ``orch`` unit into. The flags half (``--served-model-name`` /
+    ``--tp`` / ``-o``) is NOT compared: a flag-only difference is drift EVIDENCE
+    — the whole reason the carry exists — and the next apply's drift check is
+    its arbiter, not the carry.
+
+    Values are read through :func:`_serve_cmd_flags` (never raw string
+    equality on the argv) so a cosmetically-rendered record — a missing
+    ``--tp``, an ``--option`` spelled ``-o`` — is not mistaken for a
+    placement conflict.
+
+    '' also answers records the check cannot judge (non-list, non-string
+    tokens, or a unit that declares nothing to compare against): refusing to
+    carry a record we cannot actually condemn would delete the very
+    no-op-apply evidence the carry exists to preserve.
+    """
+    if not isinstance(sc, list) or not sc:
+        return ""
+    if not all(isinstance(tok, str) for tok in sc):
+        return ""
+    flags = _serve_cmd_flags(list(sc))
+    unit_recipe = os.path.expanduser(str(unit.get("recipe") or ""))
+    if unit_recipe:
+        pos = flags.get("positional") or []
+        rec_recipe = ""
+        if "run" in pos[:-1]:  # token AFTER "run", as the daemon's _flag_after reads it
+            rec_recipe = pos[pos.index("run") + 1]
+        if os.path.expanduser(rec_recipe) != unit_recipe:
+            return (f"serve_cmd recipe {rec_recipe!r} != unit recipe "
+                    f"{unit_recipe!r}")
+    nodes = sorted(str(n) for n in (unit.get("nodes") or []) if n)
+    if nodes:
+        hosts = flags.get("--hosts")
+        hosts = hosts if isinstance(hosts, str) else ""
+        if sorted(h.strip() for h in hosts.split(",") if h.strip()) != nodes:
+            return f"serve_cmd --hosts {hosts!r} != unit nodes {nodes!r}"
+    unit_port = str(unit.get("port") or "")
+    sc_port = flags.get("--port")
+    if unit_port and isinstance(sc_port, str) and sc_port != unit_port:
+        return f"serve_cmd --port {sc_port!r} != unit port {unit_port!r}"
+    return ""
+
+
+def _carry_serve_cmds(serving: dict, *,
+                      stale_out: Optional[List[str]] = None) -> int:
     """Carry recorded ``serve_cmd`` values across a serving.json rewrite.
 
     ``to_serving_json`` rebuilds units from the plan and carries no
@@ -2653,6 +2714,19 @@ def _carry_serve_cmds(serving: dict) -> int:
     did change, the carried value differs from the freshly rendered one and the
     drift check reports real drift — which is its job — instead of silently
     degrading to "not checked".
+
+    NARROWED (t_207ee360): preserve only a record that still PLACEMENT-
+    DESCRIBES its unit. A template switch changes the unit's recipe/hosts/port,
+    and the old command then contradicts the unit it is attached to — every
+    daemon status read ("refuse a corrupt record, stay loud") prints
+    ``serve_cmd refused`` for it, permanently. Such a record is stale by
+    definition and is DROPPED here (never rewritten: provision stamps only
+    what it actually launched, and the carry must not claim a launch that did
+    not happen). Placement is judged by the same rule the status read applies —
+    see :func:`_serve_cmd_placement_conflict`.
+
+    ``stale_out``, when given, collects ``"unit-id: reason"`` for each dropped
+    record so the apply step can name them.
 
     Returns how many records were carried.
     """
@@ -2670,9 +2744,15 @@ def _carry_serve_cmds(serving: dict) -> int:
         if not isinstance(u, dict) or u.get("serve_cmd"):
             continue
         sc = recorded.get(u.get("id"))
-        if sc:
-            u["serve_cmd"] = sc
-            carried += 1
+        if not sc:
+            continue
+        conflict = _serve_cmd_placement_conflict(sc, u)
+        if conflict:
+            if stale_out is not None:
+                stale_out.append(f"{u.get('id')}: {conflict}")
+            continue
+        u["serve_cmd"] = sc
+        carried += 1
     return carried
 
 
