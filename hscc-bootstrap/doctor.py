@@ -2983,15 +2983,22 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         else:
             checks.append(Check(install_gpu_clock_cap.CHECK_NAME, True,
                                 detail="skipped (fleet checks off)", fatal=False))
-    # sparkrun execution reservations (t_7dd19947) — same self-contained
-    # shape as the notifier / GPU-clock blocks: own module, own check, the
-    # transport refuses to exist inside pytest. A dead-owner reservation row
-    # in sparkrun's operations ledger blocks the NEXT launch with
-    # "resources busy or require reconciliation"; this row is the visibility
-    # half (WARN, never fatal), doctor --fix is the release half (see
-    # run_doctor_fix). Liveness is asked ON the node through sparkrun's own
-    # bridge — a local pid probe here is false-empty, and false-empty reads
-    # as "no reservations".
+    # sparkrun execution reservations (t_7dd19947, t_5f419e01) — same
+    # self-contained shape as the notifier / GPU-clock blocks: own module, own
+    # check, and BOTH of its transports refuse to exist inside pytest. A
+    # dead-owner reservation row in sparkrun's operations ledger blocks the
+    # NEXT launch with "resources busy or require reconciliation"; this row is
+    # the visibility half (WARN, never fatal), doctor --fix is the release
+    # half (see run_doctor_fix).
+    #
+    # Liveness is asked WHERE THE OWNER PROCESS LIVES, which is two places,
+    # not one: each node answers for its own ledger, and THIS machine answers
+    # for its own. The second half is the one that mattered in the incident —
+    # a locally-spawned sparkrun client holds its claims in the gateway's own
+    # ledger, and a node-only probe reports this host clean while the launch
+    # under it is blocked. A row probed on the wrong host is worse than
+    # missing: a platform-mismatched identity compare reads a LIVE owner as
+    # dead, and "dead" is the only thing that licenses a delete.
     #
     # The row runs whenever fleet checks run, WITHOUT the --fix flag: probe
     # mode calls sparkrun's read-only ``reservations()`` and writes nothing.
@@ -3296,7 +3303,7 @@ def _write_yaml(config_path, cfg):
 def run_doctor_fix(config_path: Optional[str] = None,
                    hermes_home: Optional[str] = None,
                    *, _cluster_runner=None, _http_get=None,
-                   ssh_factory=None) -> dict:
+                   ssh_factory=None, local_runner=None) -> dict:
     """Run doctor + fix all non-fatal HSCC config drift.
 
     Reads the current config, runs checks, then calls enable_plugins.enable()
@@ -3308,12 +3315,15 @@ def run_doctor_fix(config_path: Optional[str] = None,
     (mirrors ``_check_models_served``) so the endpoint probe never needs the
     real network in the test suite.
 
-    ``ssh_factory`` is the sparkrun-reservation release seam (t_7dd19947): the
-    ONLY mutating fleet action ``--fix`` takes. Default None means the
-    feature module's production transport — which refuses to exist inside a
-    pytest process, so a suite can never release against the live cluster by
-    forgetting to inject. Release calls sparkrun's own
-    ``reconcile_reservation`` per dead owner, ON the owner's node.
+    ``ssh_factory`` and ``local_runner`` are the sparkrun-reservation release
+    seams (t_7dd19947, t_5f419e01): the ONLY mutating fleet action ``--fix``
+    takes. Default None means the feature module's production transport —
+    which refuses to exist inside a pytest process, so a suite can never
+    release against the live cluster, or against the operator's own local
+    ledger, by forgetting to inject. Release calls sparkrun's own
+    ``reconcile_reservation`` per dead owner, ON THE MACHINE THAT OWNS THAT
+    OWNER — a node's ledger on that node, and this machine's own ledger HERE
+    (t_5f419e01: the row that blocked the orch launch was a local one).
     """
     checks_result = run_doctor(hermes_home, _cluster_runner=_cluster_runner,
                                _http_get=_http_get)
@@ -3401,14 +3411,16 @@ def run_doctor_fix(config_path: Optional[str] = None,
             if alias_changes:
                 _write_yaml(config_path, cur_cfg)
 
-    # sparkrun execution reservations (t_7dd19947) — the release half of the
-    # doctor row. THIS is the explicit flag the defect demands: nothing is
-    # deleted on a plain doctor run, and even here the only rows released are
-    # dead-owner claims, one sparkrun ``reconcile_reservation`` per owner,
-    # executed ON the owner's node through sparkrun's own bridge. sparkrun
-    # re-checks liveness inside its transaction, so an owner that came back
-    # alive is LEFT and named. A node whose probe fails is NOT touched —
-    # "we could not look" never licenses a delete.
+    # sparkrun execution reservations (t_7dd19947, t_5f419e01) — the release
+    # half of the doctor row. THIS is the explicit flag the defect demands:
+    # nothing is deleted on a plain doctor run, and even here the only rows
+    # released are dead-owner claims, one sparkrun ``reconcile_reservation``
+    # per owner, executed on the machine that owns that owner's ledger — a
+    # node through sparkrun's own bridge, this machine under its own sparkrun
+    # venv python. sparkrun re-checks liveness inside its transaction, so an
+    # owner that came back alive is LEFT and named. A target whose probe fails
+    # is NOT touched — "we could not look" never licenses a delete, local
+    # included.
     try:
         import doctor_sparkrun_reservations as _dsr
     except ImportError:
@@ -3416,7 +3428,8 @@ def run_doctor_fix(config_path: Optional[str] = None,
                              "stale reservations could not be reconciled")
     else:
         fixes_applied.extend(_dsr.release_stale(
-            _node_hosts(_cluster_runner), ssh_factory=ssh_factory))
+            _node_hosts(_cluster_runner), ssh_factory=ssh_factory,
+            local_runner=local_runner))
 
     return {**checks_result, "fixes_applied": fixes_applied,
             "alias_conversion_refused": alias_conversion_refused}
