@@ -1643,3 +1643,108 @@ class TestResumeConfirmationEndpoints:
         assert resume_endpoints.asked == ["/health", "/v1/models"]
         assert any("not by the client" in line for line in lines.lines), \
             lines.text
+
+
+class _StepClock:
+    """A monotonic clock that moves only when the injected wait advances it."""
+
+    def __init__(self, start=0.0):
+        self.now = float(start)
+
+    def __call__(self):
+        return self.now
+
+    def wait(self, seconds):
+        self.now += float(seconds)
+
+
+class TestExtendedResumeConfirmationWindow:
+    """A cut-loose client's unit may need minutes to load (t_611dbad7).
+
+    The launch client is cut loose at 240 s; the live unit answered after
+    ~347 s. The single post-client ask therefore still said "not confirmed",
+    so the interactive resume now keeps RE-READING the endpoints within its
+    own budget. The daemon expiry stream deliberately does not inherit it.
+    """
+
+    @staticmethod
+    def _seed(monkeypatch, tmp_path, budget, answers, echo=None):
+        from hscc_daemon import node_pauses
+
+        host = RESUME_NODE
+        overlay = str(tmp_path / "overlay")
+        node_pauses.pause(host, reason="test", units=["reasoner"],
+                          span_nodes=[host], stopped=True,
+                          directory=overlay)
+        unit = {"unit_id": "reasoner", "nodes": [host], "port": 8003,
+                "resume_cmd": RESUME_LAUNCH, "observed": False}
+        monkeypatch.setattr(npe, "plan",
+                            lambda _host: {"ok": True, "units": [unit]})
+        entry = node_pauses.paused(host, directory=overlay)
+        lines = echo or Lines()
+        launches, asks = [], []
+
+        def cut_loose(cmd, timeout=None, ready=None, **kw):
+            launches.append(list(cmd))
+            return {"ok": False, "output": "client cut loose", "stderr": "",
+                    "detached": True, "timed_out": True}
+
+        def probe(node, port):
+            asks.append((str(node), port))
+            return answers.pop(0) if answers else False
+
+        clock = _StepClock()
+        res = npe.resume_host(
+            host, entry, apply=True, directory=overlay, echo=lines,
+            run=cut_loose, serving_probe=probe, confirm_budget=budget,
+            clock=clock, wait=clock.wait)
+        return res, host, overlay, launches, asks, clock, lines
+
+    def test_a_unit_that_answers_late_is_resumed_with_no_second_launch(
+            self, monkeypatch, tmp_path):
+        """Cut loose, still loading, then answers on the third ask: RESUMED,
+        pause cleared, exactly one launch."""
+        from hscc_daemon import node_pauses
+
+        res, host, overlay, launches, asks, clock, lines = self._seed(
+            monkeypatch, tmp_path, npe.RESUME_CONFIRM_BUDGET,
+            [False, False, True])
+        assert res["action"] == npe.RESUME_RESUMED, res
+        assert res["ok"] is True and res["pause_cleared"] is True
+        assert len(launches) == 1, "the extended wait must never relaunch"
+        assert len(asks) == 3, asks
+        assert clock.now == npe.RESUME_CONFIRM_POLL * 2
+        assert node_pauses.paused(host, directory=overlay) is None
+        expected = (f"unit not answering yet, waiting up to "
+                    f"{npe.RESUME_CONFIRM_BUDGET} s for /health + /v1/models")
+        assert sum(expected in line for line in lines.lines) == 1, lines.text
+
+    def test_a_unit_that_never_answers_is_bounded_and_keeps_the_pause(
+            self, monkeypatch, tmp_path):
+        """Never answers within the budget: NOT confirmed, pause kept, and the
+        poll count is the budget's bound — not an endless loop."""
+        from hscc_daemon import node_pauses
+
+        budget = npe.RESUME_CONFIRM_POLL * 4
+        res, host, overlay, launches, asks, clock, lines = self._seed(
+            monkeypatch, tmp_path, budget, [])
+        assert res["action"] == npe.RESUME_KEPT, res
+        assert res["ok"] is False and res["pause_cleared"] is False
+        assert node_pauses.paused(host, directory=overlay) is not None
+        assert len(launches) == 1
+        assert len(asks) == 1 + budget // npe.RESUME_CONFIRM_POLL, asks
+        assert clock.now == budget
+        assert res["restarts"][0]["error"]
+        assert any("NOT confirmed" in line for line in lines.lines), lines.text
+
+    def test_the_cli_budget_is_900_by_default_and_env_overridable(
+            self, monkeypatch):
+        monkeypatch.delenv("HSCC_RESUME_CONFIRM_BUDGET", raising=False)
+        assert npe.RESUME_CONFIRM_BUDGET == 900
+        assert npe.resume_confirm_budget() == 900
+        monkeypatch.setenv("HSCC_RESUME_CONFIRM_BUDGET", "45")
+        assert npe.resume_confirm_budget() == 45
+        monkeypatch.setenv("HSCC_RESUME_CONFIRM_BUDGET", "0")
+        assert npe.resume_confirm_budget() == 0
+        monkeypatch.setenv("HSCC_RESUME_CONFIRM_BUDGET", "not-a-number")
+        assert npe.resume_confirm_budget() == 900

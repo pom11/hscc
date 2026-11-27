@@ -1052,6 +1052,11 @@ class TestResume:
         # overlay holds since #568). This test guards that a FAILED restart keeps
         # BOTH the pause and that strike — heal_breaker.clear() runs only after a
         # successful restart, so clearing the strike here would be the bug.
+        #
+        # This is the failed-restart contract, not the extended-confirmation
+        # case: budget 0 keeps the old ask-once posture, so the test cannot
+        # spend the CLI's 900 s window against a real endpoint.
+        monkeypatch.setenv("HSCC_RESUME_CONFIRM_BUDGET", "0")
         heal_breaker.note_heal(W1)
         assert heal_breaker.strike_count(W1) == 1, (
             "the strike must be EARNED before the pause — without this pin "
@@ -1274,6 +1279,7 @@ class TestResumePolicyIsShared:
     def test_the_verb_calls_the_executors_resume_policy(self, fleet,
                                                         monkeypatch):
         seen = []
+        monkeypatch.delenv("HSCC_RESUME_CONFIRM_BUDGET", raising=False)
 
         def fake_resume(host, entry, **kw):
             seen.append((host, dict(entry), kw))
@@ -1293,7 +1299,10 @@ class TestResumePolicyIsShared:
         assert callable(kw["confirm"]), (
             "the question is handed INTO the shared policy — a second copy of "
             "it in the verb would drift from the tick's no-ask posture")
-        assert set(kw) == {"apply", "confirm"}, kw
+        assert set(kw) == {"apply", "confirm", "confirm_budget"}, kw
+        assert kw["confirm_budget"] == npe.RESUME_CONFIRM_BUDGET, (
+            "the interactive verb is the caller that gets the extended "
+            "confirmation budget; the daemon stream passes 0 instead")
         assert fleet.calls == [], (
             "the verb no longer restarts anything by itself — resume_host does")
 
