@@ -23,6 +23,7 @@ in roster order. That inversion is the whole point of per-leg files.
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -83,6 +84,85 @@ exit "$rc"
 
 def _plan(spec):
     return " ".join(f"{leg}:{secs}:{rc}" for leg, secs, rc in spec)
+
+
+#: A `HSCC_TEST_PY` stand-in that reports the signal dispositions the RUNNER
+#: handed the leg, instead of running pytest. Written to a tmp dir by
+#: :func:`_run_births`.
+BIRTH_STUB = """#!/usr/bin/env bash
+set -u
+exec "{python}" "{probe}"
+"""
+
+#: Reports INT/QUIT as the child sees them. Only `SIG_IGN` survives `execve`; a
+#: handled disposition resets to `SIG_DFL`, which is why CPython's own
+#: `default_int_handler` here means "born default, able to trap".
+BIRTH_PROBE = """\
+import os
+import signal
+import sys
+
+
+def _name(disp):
+    if disp == signal.SIG_IGN:
+        return "SIG_IGN"
+    if disp == signal.SIG_DFL:
+        return "SIG_DFL"
+    return "HANDLER"
+
+
+lines = []
+for sig, label in ((signal.SIGINT, "INT"), (signal.SIGQUIT, "QUIT")):
+    lines.append("%s=%s" % (label, _name(signal.getsignal(sig))))
+with open(os.environ["BIRTH_OUT"], "a") as handle:
+    handle.write(" ".join(lines) + "\\n")
+print("7 passed in 0s")
+sys.exit(0)
+"""
+
+
+def _born_able_to_trap():
+    """Reset the signals a leg's children may need to trap, after fork, pre-exec.
+
+    The same shape as the reset `test_load_burners.py` puts on its own launcher:
+    this file spawns the runner, so the runner is the child that must be born
+    able to trap, and whatever shape started THIS suite must not decide what the
+    legs inherit. Without it this file's answer would depend on how the suite
+    itself was launched, which is the exact dependency t_65131ac6 was filed for.
+    """
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_DFL)
+
+
+def _run_births(tmp_path, *, parallel, plan):
+    """Run the shipped runner with a birth-reporting stand-in interpreter.
+
+    Returns one `INT=… QUIT=…` line per leg that ran. The runner is launched from
+    a parent that has just reset INT/TERM/HUP to `SIG_DFL`, so the answer is the
+    runner's own doing and not the launch shape of the suite that asks.
+    """
+    stub = tmp_path / "birth_py.sh"
+    probe = tmp_path / "birth_probe.py"
+    out = tmp_path / "births.txt"
+    probe.write_text(BIRTH_PROBE)
+    stub.write_text(BIRTH_STUB.format(python=sys.executable, probe=str(probe)))
+    stub.chmod(0o755)
+    out.write_text("")
+    env = dict(os.environ)
+    env.update({"HSCC_TEST_PY": str(stub), "BIRTH_OUT": str(out),
+                "STUB_TRACE": str(tmp_path / "trace.txt"),
+                "STUB_ARGV": str(tmp_path / "argv.tsv"),
+                "STUB_PLAN": plan, "HSCC_LEG_HEARTBEAT_SECONDS": "0",
+                "HSCC_TEST_LEGS": f"{LEG_A} {LEG_B}"})
+    env["HSCC_TEST_PARALLEL"] = str(parallel)
+    log = tmp_path / "run.log"
+    with open(log, "wb") as fh:
+        subprocess.run(["bash", str(RUNNER)], stdout=fh, stderr=subprocess.STDOUT,
+                       env=env, timeout=180, cwd=str(REPO),
+                       preexec_fn=_born_able_to_trap)
+    return out.read_text().splitlines(), log.read_text()
+
+
 
 
 def _run(tmp_path, *, plan, parallel=None, heartbeat=0, extra_argv=(), legs=THREE,
@@ -378,6 +458,60 @@ def test_pack_and_serial_hand_pytest_the_same_argv(tmp_path):
     for leg, a in by_leg(pack).items():
         assert "-m not loadstress" in a.replace('"', ""), f"{leg}: {a}"
         assert "-k not slow" in a.replace('"', ""), f"operator argv lost: {a}"
+
+
+def _births(lines):
+    """`INT=HANDLER QUIT=SIG_DFL` lines -> the dispositions that must agree."""
+    parsed = []
+    for line in lines:
+        fields = dict(part.split("=", 1) for part in line.split())
+        parsed.append({k: fields.get(k, "MISSING") for k in ("INT", "QUIT")})
+    return parsed
+
+
+def test_pack_and_serial_hand_the_leg_the_same_signal_birth(tmp_path):
+    """A packed leg must not inherit a signal posture a serial leg does not.
+
+    WHY THIS IS A CONTRACT AND NOT A CURIOSITY. A leg started as an asynchronous
+    command of a non-interactive shell starts with INT and QUIT ignored (POSIX,
+    "if job control is not in effect"), the ignore survives `execve`, CPython
+    declines to install its own SIGINT handler over one, and a POSIX shell may
+    not `trap` a signal it was born ignoring. Anything a leg then hands to a
+    trapping child — `scripts/load_burners.sh`'s INT trap is the measured case
+    (t_65131ac6/#833) — is silently discarded instead of delivered.
+
+    What is pinned here is the one part the runner owns: `set -m` at the head of
+    the pack is what stops bash ADDING that ignore to its own `&` children, so the
+    pack must report exactly what the serial path reports. Drop `set -m` and this
+    goes red in the pack half (the serial half stays default), which is the drift
+    that would otherwise surface as a signal-test flake two layers away.
+
+    The suite's OWN birth is deliberately not the question: the runner is launched
+    behind `_born_able_to_trap`, because an ignore handed down by however this
+    suite was started cannot be undone from inside the runner either (measured: a
+    runner born ignoring hands BOTH postures an ignoring leg, `set -m` included) —
+    that half belongs to the launcher, which is where #833 fixed it.
+    """
+    plan = _plan([(LEG_A, 0.2, 0), (LEG_B, 0.2, 0)])
+    pack = _run_births(tmp_path / _mk(tmp_path, "bp"), plan=plan, parallel=3)
+    serial = _run_births(tmp_path / _mk(tmp_path, "bs"), plan=plan, parallel=1)
+    pack_births, serial_births = _births(pack[0]), _births(serial[0])
+
+    assert len(pack_births) == 2 and len(serial_births) == 2, (
+        f"expected one report per leg; pack={pack[0]!r} serial={serial[0]!r}\n"
+        f"pack log:\n{pack[1]}\nserial log:\n{serial[1]}")
+    assert pack_births == serial_births, (
+        f"the two launch shapes hand a leg different signal postures: "
+        f"pack={pack_births} serial={serial_births}. A leg whose trap-a-child "
+        f"signal is ignored only in the pack is the t_65131ac6 flake shape.")
+    for birth in pack_births:
+        for sig, disp in birth.items():
+            assert disp != "SIG_IGN", (
+                f"legs are born with {sig} ignored ({birth}): every trap a leg's "
+                f"child installs for it is void, and the signal is discarded "
+                f"rather than delivered. `set -m` at the head of the pack is what "
+                f"prevents this — see the comment at the async launch in "
+                f"run_tests.sh.")
 
 
 # ── liveness: the reason the heartbeat exists ───────────────────────────────
