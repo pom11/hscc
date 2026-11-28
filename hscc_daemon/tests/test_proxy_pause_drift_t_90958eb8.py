@@ -271,6 +271,22 @@ class _Rig:
                             lambda serving_data=None, probe=None:
                             (set(healthy_units), scope))
         self.port = port or _FakePort(monkeypatch, refuse_plain_start=False)
+        # t_e2f9a9ad: the state half of liveness stays present (the fake port
+        # owns the port half). Without this the check would ask the planted CLI
+        # on every tick and add a status call to every command assertion.
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: TRACKED_PID)
+        # Detached replays go through Popen, not run_cmd. Keep them FAKE too:
+        # record the exact argv and let the fake port react, so no test starts a
+        # child process and verification is deterministic.
+        self.replays = []
+
+        def _fake_popen(argv, **kw):
+            argv = list(argv)
+            self.replays.append(argv)
+            self.port.after(argv[1:])
+            return type("_Proc", (), {"pid": 99999})()
+
+        monkeypatch.setattr(health, "_proxy_popen", _fake_popen)
         # The reap (lsof + SIGTERM of a listener) has its own suite in
         # test_health.py; here it is a step in the order, never the subject, and
         # it must never reach for a real signal.
@@ -507,11 +523,16 @@ class TestRepairNeverLeavesTheProxyDown:
         assert health.check_proxy() is False          # tick 1: left the port down
         assert rig.state()["cooldown_s"] == health.PROXY_RELAUNCH_DOWN_COOLDOWN_S
         rig.age_last_relaunch(90)                     # 90 s later, still < 300 s
-        before = len(start_argvs(fake_sparkrun))
+        before = len(rig.replays)
         health.check_proxy()                          # tick 2
-        assert len(start_argvs(fake_sparkrun)) > before, (
+        assert len(rig.replays) > before, (
             "a down proxy was left suppressed by a 300 s cooldown 90 s in "
             f"(cmds: {sparkrun_log(fake_sparkrun)})")
+        # t_e2f9a9ad: the retry is the recorded argv replayed detached, not a
+        # freshly rebuilt command.
+        recorded = health._proxy_recorded_argv()
+        assert recorded is not None
+        assert rig.replays[-1] == recorded
 
     def test_a_failed_repair_with_the_port_listening_keeps_the_normal_wait(
             self, tmp_hfcc_dir, monkeypatch, fake_sparkrun, alerts):

@@ -213,6 +213,11 @@ class TestCheckProxyWiring:
         # makes — 10.0.0.x placeholder range).
         monkeypatch.setattr(serving, "ORCH_NODES", {HOST_ORCH})
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: _serving())
+        # t_e2f9a9ad: liveness is a separate pair of signals; keep both live so
+        # these cases exercise alias coverage, not a dead proxy.
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: (4242, "litellm --config /tmp/stub.yaml"))
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 4242)
         # Proxy itself healthy: merged catalogue serves both aliases.
         monkeypatch.setattr(
             health, "_proxy_models_probe",

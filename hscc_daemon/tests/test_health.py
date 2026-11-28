@@ -1755,7 +1755,9 @@ class TestCheckProxy:
 
     def _setup(self, tmp_hfcc_dir, monkeypatch, nodes, probe=None,
                serving_data=_SERVING_NO_UNITS, backend=None,
-               healthy_units=None, fleet_hp=None, completion=None):
+               healthy_units=None, fleet_hp=None, completion=None,
+               listener=(4242, "litellm --config /tmp/stub.yaml"),
+               tracked=4242):
         from hscc_daemon import health, serving
         from hscc_daemon import state as state_mod
         monkeypatch.setattr(health, "log", lambda *a, **kw: None)
@@ -1764,6 +1766,13 @@ class TestCheckProxy:
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
         monkeypatch.setattr(serving, "KEEPALIVE_NODES", set(nodes))
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: serving_data)
+        # t_e2f9a9ad: check_proxy now reads the port + sparkrun's state before
+        # the catalogue. Default both to a LIVE proxy so every pre-existing test
+        # keeps exercising the branch it was written for; dead-signal tests pass
+        # listener=None / tracked=None explicitly.
+        listener = (None, None) if listener is None else listener
+        monkeypatch.setattr(health, "_proxy_listener", lambda: listener)
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: tracked)
         # Dep-bump guard: the router-drift probe must NEVER read the operator's
         # live ~/.config/sparkrun + ~/.cache/sparkrun from a test. Default stub
         # is the neutral "skip"; drift-specific tests override it.
@@ -1898,7 +1907,11 @@ class TestCheckProxy:
             ]},
             backend={"ok": True, "backends": {"192.0.2.2:8001"}, "error": ""},
             healthy_units={"192.0.2.2:8001", "192.0.2.3:8002"},
-            fleet_hp={"192.0.2.2:8001", "192.0.2.3:8002"})
+            fleet_hp={"192.0.2.2:8001", "192.0.2.3:8002"},
+            # A listening port + a state record keep liveness live; the owner
+            # is foreign, so the drift repair is the orphan path this test
+            # pins (not the tracked-gateway adopt path, t_f4ee3ce6).
+            listener=(333, "some-other-server"), tracked=222)
         calls = []
         monkeypatch.setattr(health, "run_cmd",
                             lambda a, **k: calls.append(list(a)) or {"ok": True})
@@ -1956,7 +1969,8 @@ class TestCheckProxy:
             tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2", "192.0.2.3"],
             probe={"ok": True, "models": ["worker-model"], "error": ""},
             backend={"ok": True, "backends": {"192.0.2.2:8001"}, "error": ""},
-            healthy_units=healthy_units)
+            healthy_units=healthy_units,
+            listener=(333, "some-other-server"), tracked=222)
         repaired = []
         monkeypatch.setattr(health2, "_proxy_repair_orphan",
                             lambda hosts: repaired.append(list(hosts))
@@ -2604,6 +2618,169 @@ class TestCheckProxy:
         assert out["ok"] is False and "refused" in out["error"]
 
 
+class TestProxyLivenessReplay:
+    """t_e2f9a9ad — a dead proxy is detected from EITHER liveness signal and
+    restarted by replaying the argv hscc actually recorded, detached.
+
+    Incident 2026-11-27: after a manual ``sparkrun proxy sync`` the proxy was
+    gone (nothing on :4000, ``No proxy state found``) and the keeper neither
+    noticed nor restarted it. The catalogue probe was the only input the
+    decision had; the port and sparkrun's own state were never independent
+    signals, and the restart command was rebuilt rather than replayed.
+
+    Fakes only: the port probe and the state surface are functions, the spawn is
+    a fake ``Popen``, and the recorded argv is hscc's own state (never a
+    fabricated sparkrun state file).
+    """
+
+    RECORDED = ["/opt/fake/bin/sparkrun", "proxy", "start",
+                "--port", "4000", "--cluster", "hscc"]
+
+    def _rig(self, tmp_hfcc_dir, monkeypatch, *, listener, tracked,
+             probe=None):
+        from hscc_daemon import health
+        health = TestCheckProxy()._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["192.0.2.2"],
+            probe=probe if probe is not None else {
+                "ok": False, "models": [], "error": "connection refused"},
+            serving_data={"version": 2, "units": []},
+            listener=listener, tracked=tracked)
+        state_dir = tmp_hfcc_dir / "state"
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        monkeypatch.setattr(health, "_archive_proxy_log_before_restart",
+                            lambda reason: None)
+        monkeypatch.setattr(health, "send_macos_notification",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(health, "emit_event", lambda *a, **kw: None)
+        return health, state_dir
+
+    def _popen(self, health, monkeypatch, calls, *, player=None):
+        def fake_popen(argv, **kwargs):
+            calls.append((list(argv), dict(kwargs)))
+            if player is not None:
+                player()
+            return type("_Proc", (), {"pid": 8888})()
+        monkeypatch.setattr(health, "_proxy_popen", fake_popen)
+
+    @staticmethod
+    def _state(state_dir):
+        return json.loads((state_dir / "proxy.json").read_text())
+
+    def test_port_dead_replays_the_exact_recorded_argv(
+            self, tmp_hfcc_dir, monkeypatch):
+        owner = {"value": (None, None)}
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch, listener=None, tracked=4242)
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: owner["value"])
+        assert health.record_proxy_launch_argv(self.RECORDED) is not None
+        calls = []
+        seen_at_spawn = {}
+
+        def player():
+            # Detection + report must be DURABLE before the proxy is touched.
+            seen_at_spawn.update(self._state(state_dir))
+            owner["value"] = (777, "litellm --config /tmp/x.yaml")
+
+        self._popen(health, monkeypatch, calls, player=player)
+        assert health.check_proxy() is True
+        assert len(calls) == 1
+        argv, kwargs = calls[0]
+        assert argv == self.RECORDED, "replay changed the recorded argv"
+        assert kwargs.get("start_new_session") is True
+        assert kwargs.get("close_fds") is True
+        assert seen_at_spawn["restart_state"] == "issued"
+        assert seen_at_spawn["restart_argv"] == self.RECORDED
+        assert "nothing listening" in seen_at_spawn["reason"]
+        st = self._state(state_dir)
+        assert st["restart_state"] == "verified"
+        assert st["restart_verified"] is True
+        assert st["restart_argv"] == self.RECORDED
+        assert st["liveness"] == {"listening_pid": None,
+                                  "tracked_pid": 4242}
+
+    def test_state_missing_while_the_port_is_bound_is_dead_too(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The OTHER independent signal: a live-looking catalogue on a bound
+        port cannot hide a vanished sparkrun state record."""
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch,
+            listener=(777, "litellm --config /tmp/x.yaml"), tracked=None,
+            probe={"ok": True, "models": ["some-model"], "error": ""})
+        assert health.record_proxy_launch_argv(self.RECORDED) is not None
+        calls = []
+        self._popen(health, monkeypatch, calls)
+        assert health.check_proxy() is True
+        assert [c[0] for c in calls] == [self.RECORDED]
+        st = self._state(state_dir)
+        assert "no proxy state" in st["reason"]
+        assert st["liveness"] == {"listening_pid": 777, "tracked_pid": None}
+        assert st["restart_argv"] == self.RECORDED
+
+    def test_healthy_proxy_issues_no_restart(self, tmp_hfcc_dir, monkeypatch):
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch,
+            listener=(777, "litellm --config /tmp/x.yaml"), tracked=777,
+            probe={"ok": True, "models": ["worker-model"], "error": ""})
+        calls = []
+        ran = []
+        self._popen(health, monkeypatch, calls)
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda a, **k: ran.append(list(a)) or {"ok": True})
+        assert health.check_proxy() is True
+        assert calls == [], "a healthy proxy was restarted"
+        assert not [c for c in ran if "start" in c], \
+            f"a healthy proxy issued a start: {ran}"
+        st = self._state(state_dir)
+        assert st["ok"] is True
+        assert "restart_argv" not in st
+
+    def test_a_successful_start_records_the_argv_it_just_issued(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The replay seed is written on the way OUT, not reconstructed later:
+        a plain relaunch that succeeds becomes the next tick's exact argv."""
+        health, _state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch,
+            listener=(777, "litellm --config /tmp/x.yaml"), tracked=777,
+            probe={"ok": True, "models": [], "error": ""})
+        ran = []
+        monkeypatch.setattr(
+            health, "run_cmd",
+            lambda a, **k: ran.append(list(a)) or {"ok": True})
+        assert health.check_proxy() is True
+        assert len(ran) == 1
+        assert health._proxy_recorded_argv() == ran[0]
+        assert ran[0][1:3] == ["proxy", "start"]
+
+    def test_recorded_argv_survives_the_watchdog_rewriting_its_state(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The seed lives in its own stream: every healthy tick rewrites
+        proxy.json, and none of those writes may erase the replay argv."""
+        health, _state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch,
+            listener=(777, "litellm --config /tmp/x.yaml"), tracked=777,
+            probe={"ok": True, "models": ["worker-model"], "error": ""})
+        assert health.record_proxy_launch_argv(self.RECORDED) is not None
+        assert health.check_proxy() is True
+        assert health._proxy_recorded_argv() == self.RECORDED
+
+    def test_unverified_replay_is_reported_as_pending_not_back(
+            self, tmp_hfcc_dir, monkeypatch):
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch, listener=None, tracked=4242)
+        monkeypatch.setattr(health, "PROXY_REPAIR_VERIFY_WAIT_S", 0.0)
+        assert health.record_proxy_launch_argv(self.RECORDED) is not None
+        calls = []
+        self._popen(health, monkeypatch, calls)
+        assert health.check_proxy() is False
+        assert len(calls) == 1
+        st = self._state(state_dir)
+        assert st["restart_state"] == "issued"
+        assert st["restart_verified"] is False
+        assert "PENDING" in st["message"]
+        assert st["proxy_down"] is True
+
+
 class TestProxyCompletionProbe:
     """t_f0b8051b — check_proxy must probe a real completion THROUGH :4000.
 
@@ -2939,6 +3116,13 @@ class TestProxyRelaunchStall:
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
         monkeypatch.setattr(serving, "KEEPALIVE_NODES", {"192.0.2.2"})
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: self._SERVING)
+        # t_e2f9a9ad: the liveness pair is a separate signal from the catalogue.
+        # This incident is a HOLLOW tracked proxy (port owner present, state
+        # present), so both signals stay live and the pre-existing repair path is
+        # the one under test.
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: (12477, "litellm --config /tmp/x.yaml"))
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 12477)
         monkeypatch.setattr(health, "_proxy_models_probe",
                             lambda url, timeout=5: {"ok": False, "models": [],
                                                     "error": "Connection refused"})

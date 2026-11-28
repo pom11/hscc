@@ -172,6 +172,11 @@ def _proxy_env(tmp_hfcc_dir, monkeypatch):
     monkeypatch.setattr(serving, "KEEPALIVE_NODES", {WORKER})
     monkeypatch.setattr(serving, "load_serving",
                         lambda *a, **k: {"version": 2, "units": []})
+    # t_e2f9a9ad: keep the liveness pair live; this negative control is the
+    # catalogue-failure relaunch shape, not a dead port/state pair.
+    monkeypatch.setattr(health, "_proxy_listener",
+                        lambda: (4242, "litellm --config /tmp/stub.yaml"))
+    monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 4242)
     monkeypatch.setattr(health, "_router_drift_probe",
                         lambda: {"status": "skip", "warn": False, "detail": "stubbed"})
     monkeypatch.setattr(health, "_proxy_models_probe",

@@ -247,6 +247,11 @@ class _ProxyRig:
         ]}
         monkeypatch.setattr(serving, "load_serving",
                             lambda *a, **k: serving_data)
+        # t_e2f9a9ad: both liveness signals stay live — this suite is about the
+        # pause/drift repair path, not a dead port or a vanished state record.
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: (4242, "litellm --config /tmp/stub.yaml"))
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 4242)
         monkeypatch.setattr(
             health, "_router_drift_probe",
             lambda: {"status": "skip", "warn": False, "detail": "stubbed"})
