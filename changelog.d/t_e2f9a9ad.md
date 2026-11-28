@@ -23,6 +23,27 @@ task: t_e2f9a9ad
   record the argv they execute, and `hscc cluster apply`'s `install_proxy`
   records `sparkrun proxy start --port <port> --cluster hscc` after a successful
   start, so the port and cluster survive a later replay.
+- **A replay still starting is observed, not spawned again.** The first replay
+  tick could only wait `PROXY_REPAIR_VERIFY_WAIT_S` (20 s); a litellm-through-uvx
+  launch often takes longer, so the next tick found the port free and started a
+  SECOND detached proxy. While the durable `restart_state: issued` row is
+  younger than `PROXY_RELAUNCH_DOWN_COOLDOWN_S` and its `restart_pid` is alive,
+  `check_proxy` now observes the port only — no lease, no strike, no spawn — and
+  writes `verified` if the child has bound. A dead child with a free port still
+  replays (the dead-entrypoint case), and a verified successful listener resets
+  the streak.
+- **Replay attempts are bounded by the existing durable streak.** An argv that
+  never binds used to spawn once per tick forever. The replay path now counts
+  against `relaunch_streak` / `PROXY_RELAUNCH_MAX_CONSECUTIVE`: at the cap it
+  stops spawning and raises the existing `proxy.relaunch.stalled` alarm instead,
+  so a broken replay pages once rather than storming.
+- **The replay executes the same sparkrun binary that was recorded.** `install_proxy`
+  records the bare `sparkrun` name from an interactive shell, but the daemon runs
+  under a launchd PATH where that name can resolve to a different install or not
+  at all. The recorded list is kept verbatim and `argv[0]` is resolved at REPLAY
+  time through `hscc_daemon.sparkrun_bin.exec_argv`; an absolute `argv[0]` passes
+  through unchanged and every recorded argument (port, cluster) stays
+  byte-identical. The resolved argv is what `restart_argv` carries.
 ---
 kind: Verified
 task: t_e2f9a9ad
@@ -31,7 +52,13 @@ task: t_e2f9a9ad
   port-dead and state-missing signals independently, exact-argv replay,
   durable-before-spawn ordering, no restart on a healthy proxy, pending (not
   "back") when nothing is observed, and the recorded argv surviving a state
-  rewrite.
+  rewrite. Follow-up cases pin the slow binder (tick 1 spawns; tick 2 with the
+  PID alive spawns nothing; a later tick verifies), a dead child with a free port
+  (exactly one new spawn), an always-failing argv (spawn count stops at
+  `PROXY_RELAUNCH_MAX_CONSECUTIVE` and the stall alarm fires), and replay-time
+  binary resolution (bare name resolved through a fake `exec_argv`, absolute
+  name untouched, arguments byte-identical).
 - `hscc-cluster/tests/test_apply.py`: `install_proxy` records the exact
   `--port 4000 --cluster hscc` argv for the daemon's replay.
-- Run: `HSCC_TEST_LEGS=hscc_daemon bash scripts/run_tests.sh`.
+- Run: `HSCC_TEST_LEGS=hscc_daemon bash scripts/run_tests.sh` and
+  `HSCC_TEST_LEGS=hscc-cluster bash scripts/run_tests.sh` — both green.

@@ -2780,6 +2780,165 @@ class TestProxyLivenessReplay:
         assert "PENDING" in st["message"]
         assert st["proxy_down"] is True
 
+    # ── t_e2f9a9ad review: in-flight guard + bounded replays ───────────────
+
+    @staticmethod
+    def _clock_at_issued(state_dir, offset_s):
+        """An injected clock ``offset_s`` after the row's last restart stamp."""
+        import datetime
+        st = json.loads((state_dir / "proxy.json").read_text())
+        issued = datetime.datetime.fromisoformat(st["restart_issued_at"])
+        return lambda: issued + datetime.timedelta(seconds=offset_s)
+
+    def _alarm_sinks(self, health, monkeypatch):
+        notes, events = [], []
+        monkeypatch.setattr(
+            health, "send_macos_notification",
+            lambda title, body, priority="normal", **kw:
+                notes.append((title, body, priority)) or True)
+        monkeypatch.setattr(
+            health, "emit_event",
+            lambda t, p, severity="info", **kw:
+                events.append((t, p, severity)) or True)
+        return notes, events
+
+    def test_slow_binder_is_observed_not_spawned_again(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Tick 1 spawns; tick 2 inside the down window with the recorded PID
+        still alive spawns NOTHING; a later tick verifies the bound port."""
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch, listener=None, tracked=4242)
+        monkeypatch.setattr(health, "PROXY_REPAIR_VERIFY_WAIT_S", 0.0)
+        owner = {"value": (None, None)}
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: owner["value"])
+        monkeypatch.setattr(health, "_proxy_pid_alive",
+                            lambda pid: int(pid) == 8888)
+        assert health.record_proxy_launch_argv(self.RECORDED) is not None
+        calls = []
+        self._popen(health, monkeypatch, calls)
+
+        assert health.check_proxy() is False
+        assert len(calls) == 1, "the first dead tick did not spawn"
+
+        monkeypatch.setattr(health, "_proxy_clock",
+                            self._clock_at_issued(state_dir, 5))
+        assert health.check_proxy() is False
+        assert len(calls) == 1, "an in-flight replay was spawned a second time"
+        st = self._state(state_dir)
+        assert st["restart_state"] == "issued"
+        assert st["restart_pid"] == 8888
+        assert st["restart_argv"] == self.RECORDED
+
+        # The fake child eventually binds; the next tick sees it and verifies
+        # WITHOUT spawning another proxy.
+        owner["value"] = (777, "litellm --config /tmp/x.yaml")
+        assert health.check_proxy() is True
+        assert len(calls) == 1, "verification spawned another proxy"
+        st = self._state(state_dir)
+        assert st["restart_state"] == "verified"
+        assert st["restart_verified"] is True
+        assert st["restart_pid"] == 8888
+        assert st["restart_argv"] == self.RECORDED
+        assert "relaunch_streak" not in st, \
+            "a verified listener must reset the failed-replay streak"
+
+    def test_dead_child_and_free_port_allows_exactly_one_new_spawn(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The dead-entrypoint case the cooldown bypass exists for: the recorded
+        child is gone and the port is still free, so one new replay is allowed."""
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch, listener=None, tracked=4242)
+        monkeypatch.setattr(health, "PROXY_REPAIR_VERIFY_WAIT_S", 0.0)
+        assert health.record_proxy_launch_argv(self.RECORDED) is not None
+        calls = []
+        self._popen(health, monkeypatch, calls)
+
+        assert health.check_proxy() is False
+        assert len(calls) == 1
+
+        monkeypatch.setattr(health, "_proxy_pid_alive", lambda pid: False)
+        monkeypatch.setattr(health, "_proxy_clock",
+                            self._clock_at_issued(state_dir, 5))
+        assert health.check_proxy() is False
+        assert len(calls) == 2, \
+            "a dead replay child did not get exactly one new spawn"
+        st = self._state(state_dir)
+        assert st["restart_state"] == "issued"
+        assert st["restart_pid"] == 8888
+
+    def test_always_failing_replay_stops_at_the_cap_and_alarms(
+            self, tmp_hfcc_dir, monkeypatch):
+        """An argv that never binds must not spawn on every tick forever: the
+        durable streak caps the spawns and the pre-existing stall alarm fires."""
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch, listener=None, tracked=4242)
+        monkeypatch.setattr(health, "PROXY_REPAIR_VERIFY_WAIT_S", 0.0)
+        monkeypatch.setattr(health, "_proxy_pid_alive", lambda pid: False)
+        assert health.record_proxy_launch_argv(self.RECORDED) is not None
+        calls = []
+        self._popen(health, monkeypatch, calls)
+        notes, events = self._alarm_sinks(health, monkeypatch)
+
+        for _ in range(health.PROXY_RELAUNCH_MAX_CONSECUTIVE + 3):
+            assert health.check_proxy() is False
+
+        assert len(calls) == health.PROXY_RELAUNCH_MAX_CONSECUTIVE, \
+            f"replays were not bounded at the cap: {len(calls)} spawns"
+        st = self._state(state_dir)
+        assert st["relaunch_streak"] == health.PROXY_RELAUNCH_MAX_CONSECUTIVE
+        assert len(notes) == 1, "the capped replay loop did not page once"
+        assert [e[0] for e in events] == ["proxy.relaunch.stalled"]
+
+    # ── t_e2f9a9ad review: replay resolves the sparkrun binary ─────────────
+
+    def test_bare_recorded_name_resolves_at_replay_time(
+            self, tmp_hfcc_dir, monkeypatch):
+        """`install_proxy` records the bare name an interactive shell used; the
+        daemon must resolve it at REPLAY time without touching the record."""
+        bare = ["sparkrun", "proxy", "start",
+                "--port", "4000", "--cluster", "hscc"]
+        resolved = ["/opt/fake/install/bin/sparkrun"] + bare[1:]
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch, listener=None, tracked=4242)
+        monkeypatch.setattr(health, "PROXY_REPAIR_VERIFY_WAIT_S", 0.0)
+        asked = []
+
+        def fake_exec(argv):
+            asked.append(list(argv))
+            return resolved
+        monkeypatch.setattr(health.sparkrun_bin, "exec_argv", fake_exec)
+        assert health.record_proxy_launch_argv(bare) is not None
+        calls = []
+        self._popen(health, monkeypatch, calls)
+
+        assert health.check_proxy() is False
+        assert asked == [bare], "replay did not resolve the RECORDED argv"
+        assert calls[0][0] == resolved
+        assert calls[0][0][1:] == bare[1:], \
+            "resolving argv[0] changed a recorded argument"
+        assert health._proxy_recorded_argv() == bare, \
+            "the recorded list must stay verbatim"
+        assert self._state(state_dir)["restart_argv"] == resolved
+
+    def test_absolute_recorded_name_passes_through_unchanged(
+            self, tmp_hfcc_dir, monkeypatch):
+        health, state_dir = self._rig(
+            tmp_hfcc_dir, monkeypatch, listener=None, tracked=4242)
+        monkeypatch.setattr(health, "PROXY_REPAIR_VERIFY_WAIT_S", 0.0)
+        monkeypatch.setattr(health.sparkrun_bin, "exec_argv",
+                            lambda argv: list(argv))
+        assert health.record_proxy_launch_argv(self.RECORDED) is not None
+        calls = []
+        self._popen(health, monkeypatch, calls)
+
+        assert health.check_proxy() is False
+        assert calls[0][0] == self.RECORDED
+        st = self._state(state_dir)
+        assert st["restart_argv"] == self.RECORDED
+        assert st["restart_argv"][1:] == self.RECORDED[1:]
+
+
 
 class TestProxyCompletionProbe:
     """t_f0b8051b — check_proxy must probe a real completion THROUGH :4000.

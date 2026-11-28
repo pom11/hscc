@@ -1646,8 +1646,12 @@ def _proxy_stall_stamp():
     return stamp or None
 
 
-def _seconds_since_stamp(stamp):
-    """Seconds elapsed since an ISO stamp; None if missing/unparsable."""
+def _seconds_since_stamp(stamp, now=None):
+    """Seconds elapsed since an ISO stamp; None if missing/unparsable.
+
+    ``now`` is the clock seam (a timezone-aware datetime) for callers that must
+    evaluate a durable window deterministically; production leaves it None.
+    """
     if not stamp:
         return None
     try:
@@ -1656,7 +1660,8 @@ def _seconds_since_stamp(stamp):
         return None
     if then.tzinfo is None:
         then = then.replace(tzinfo=datetime.timezone.utc)
-    return (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds()
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    return (current - then).total_seconds()
 
 
 def _proxy_relaunch_cooldown_state():
@@ -1704,6 +1709,71 @@ def _proxy_relaunch_window():
     except (TypeError, ValueError):
         return PROXY_RELAUNCH_COOLDOWN_S
     return window if window > 0 else PROXY_RELAUNCH_COOLDOWN_S
+
+
+# ── in-flight detached replay (t_e2f9a9ad review) ───────────────────────────
+# The first replay tick can only WAIT PROXY_REPAIR_VERIFY_WAIT_S (20 s) for the
+# port. A litellm-through-uvx launch legitimately takes longer, so without this
+# guard the next tick saw a free port and spawned a SECOND detached proxy; an
+# argv that always fails did that every tick forever. The issued row is the
+# in-flight record: while its recorded child PID is alive inside the down
+# window, a tick may OBSERVE the port but must not spawn again. A dead child with
+# a free port is the dead-entrypoint case the cooldown bypass exists for, so it
+# is allowed to replay again — bounded by the existing durable streak.
+def _proxy_clock():
+    """Clock seam for the in-flight restart window (tests inject a fixed time)."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _proxy_pid_alive(pid):
+    """True when ``pid`` names a live process, via ``os.kill(pid, 0)``.
+
+    EPERM means the process EXISTS but belongs to another user, which is still
+    alive; only ESRCH (ProcessLookupError) or an unusable pid is dead. Seam so
+    tests inject liveness instead of forking a child.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _proxy_restart_in_flight(now=None):
+    """The still-running detached replay described by the proxy state row, or None.
+
+    In flight means ALL of: ``restart_state == "issued"``, the stamp is younger
+    than PROXY_RELAUNCH_DOWN_COOLDOWN_S, and the recorded ``restart_pid`` is
+    alive. Anything else means a new replay is allowed (a verified row starts
+    over; a dead child with a free port is the dead-entrypoint case).
+    """
+    from .state import read_state
+    prev = read_state("proxy")
+    if not isinstance(prev, dict) or prev.get("restart_state") != "issued":
+        return None
+    age = _seconds_since_stamp(
+        prev.get("restart_issued_at"),
+        now=now if now is not None else _proxy_clock())
+    if age is None or age < 0 or age >= PROXY_RELAUNCH_DOWN_COOLDOWN_S:
+        return None
+    pid = prev.get("restart_pid")
+    if pid is None or not _proxy_pid_alive(pid):
+        return None
+    return {"pid": pid,
+            "argv": list(prev.get("restart_argv") or []),
+            "issued_at": prev.get("restart_issued_at"),
+            "age_s": age,
+            "log": prev.get("restart_log")}
 
 
 # ── proxy-check VERDICT logging (t_e26aaa56) ────────────────────────────────
@@ -3380,6 +3450,14 @@ def check_proxy(pause_directory=None):
     # PROXY_RELAUNCH_DOWN_COOLDOWN_S for why sleeping on a dead entrypoint is
     # the one shape the cooldown must not cover).
     window = _proxy_relaunch_window()
+    # The in-flight detached replay and the bounded replay streak are read
+    # BEFORE the cooldown test (t_e2f9a9ad review): a still-starting child must
+    # be observed, not bypassed into a second spawn by the dead-proxy exemption.
+    inflight = _proxy_restart_in_flight()
+    recorded_argv = _proxy_recorded_argv()
+    prev_streak = _proxy_relaunch_streak()
+    replay_capped = bool(liveness_dead_reason and recorded_argv and
+                         prev_streak >= PROXY_RELAUNCH_MAX_CONSECUTIVE)
     r = {"ok": False, "skipped": "cooldown"}
     suppressed = False
     deferred = False
@@ -3387,14 +3465,23 @@ def check_proxy(pause_directory=None):
     # from `deferred` on purpose — a deferral says "another repair is in flight",
     # a skip says "no repair belongs here", and a reader must not confuse them.
     paused_skip = False
+    # Observation-only tick for an in-flight replay: no lease, no strike, no
+    # spawn — just the port verdict written back to the issued row.
+    inflight_observed = False
+    # The durable replay streak is at its cap: stop spawning, raise the stall
+    # alarm path instead (the bounded half of t_e2f9a9ad review).
+    capped = False
     attempted = False
     replay = None
     replay_issued_at = None
     # A CONFIRMED DEAD PROXY DOES NOT WAIT OUT A COOLDOWN. The 300 s window
     # exists to stop hammering a fault a start cannot fix; :4000 refusing every
     # connection is not that shape. Sleeping it out is how a dead entrypoint
-    # stays dead for minutes after a prior attempt stamped the window.
-    if since is not None and since < window and not liveness_dead_reason:
+    # stays dead for minutes after a prior attempt stamped the window. An
+    # in-flight replay is the exception on the non-dead side: its row must still
+    # be finished (observed) rather than suppressed for the whole window.
+    if since is not None and since < window and not liveness_dead_reason \
+            and inflight is None:
         suppressed = True
         wait = int(window - since)
         log(f"proxy relaunch suppressed — attempted {int(since)}s ago "
@@ -3431,7 +3518,8 @@ def check_proxy(pause_directory=None):
         proxy_repair_key = (relaunch_hosts or ["?"])[0]
         pause = _pause_covering_repair(proxy_repair_key, pause_directory)
         lease_ok, holder = (
-            (False, None) if pause is not None else
+            (False, None) if (pause is not None or inflight is not None
+                              or replay_capped) else
             heal_lease.acquire("proxy-relaunch",
                                f"worker proxy on :{PROXY_PORT}"))
         if pause is not None:
@@ -3440,6 +3528,56 @@ def check_proxy(pause_directory=None):
                        f"{_pause_label(pause)} — a parked node is not a fault "
                        f"(no lease taken, no strike counted, no `proxy start`)")
             log(f"proxy relaunch {message}", "WARN")
+        elif inflight is not None:
+            # IN-FLIGHT REPLAY (t_e2f9a9ad review): the previous tick's detached
+            # child is still alive inside the down window. Observe ONLY — no
+            # lease, no strike, no spawn. A litellm-through-uvx launch can take
+            # longer than PROXY_REPAIR_VERIFY_WAIT_S, and spawning again here is
+            # what produced the second proxy (or the every-tick storm when the
+            # argv always fails).
+            inflight_observed = True
+            replay_issued_at = inflight.get("issued_at")
+            replay_argv = list(inflight.get("argv") or [])
+            replay_pid = inflight.get("pid")
+            owner, owner_cmd = _proxy_listener()
+            verified = owner is not None
+            replay = {
+                "ok": verified, "healthy": verified, "verified": verified,
+                "proxy_down": not verified, "argv": replay_argv,
+                "port_owner": owner, "spawn_pid": replay_pid,
+                "log": inflight.get("log"), "output": ""}
+            r = replay
+            if verified:
+                replay["output"] = (
+                    f"in-flight replay PID {replay_pid} is listening on "
+                    f":{PROXY_PORT} (owner PID {owner})")
+                message = (f"replay PID {replay_pid} now listening on "
+                           f":{PROXY_PORT} — verified without another spawn")
+            else:
+                replay["output"] = (
+                    f"in-flight replay PID {replay_pid} still has not bound "
+                    f":{PROXY_PORT} ({inflight['age_s']:.0f}s old); observing "
+                    "only, not spawning another proxy")
+                message = ("replay still in flight — observing the port only "
+                           "(no second spawn)")
+            log(message, "INFO" if verified else "WARN")
+        elif replay_capped:
+            # BOUNDED REPLAYS (t_e2f9a9ad review): the durable streak reached
+            # PROXY_RELAUNCH_MAX_CONSECUTIVE. Stop spawning and let the existing
+            # stall alarm path below page the operator; a replay whose argv
+            # always fails must not run forever.
+            capped = True
+            r = {"ok": False, "healthy": False, "verified": False,
+                 "proxy_down": liveness.get("listening_pid") is None,
+                 "argv": list(recorded_argv or []),
+                 "port_owner": liveness.get("listening_pid"),
+                 "spawn_pid": None, "log": None,
+                 "output": (f"replay streak at cap "
+                            f"({prev_streak}/{PROXY_RELAUNCH_MAX_CONSECUTIVE}) — "
+                            "not spawning another detached replay")}
+            message = (f"replay capped after {prev_streak} consecutive failed "
+                       f"attempts — not spawning again; stall alarm raised")
+            log(message, "ERROR")
         elif not lease_ok:
             deferred = True
             message = f"deferred — heal in progress: {heal_lease.describe(holder)}"
@@ -3479,13 +3617,14 @@ def check_proxy(pause_directory=None):
                 # see _proxy_start_hosts for why filtering there would un-arm
                 # the pause skip.
                 start_hosts = _proxy_start_hosts(relaunch_hosts, pause_directory)
-                prev_streak = _proxy_relaunch_streak()
+                # prev_streak / recorded_argv were read BEFORE the cooldown and
+                # cap gates above, so this tick's attempt count and replay seed
+                # are the same values those gates decided on.
                 # This tick is attempt number prev_streak+1. The MAX-th
                 # consecutive stalled attempt escalates (two polite plain
                 # starts, then the repair that clears the hollow PID) and the
                 # same tick raises the stall alarm.
                 escalated = (prev_streak + 1) >= PROXY_RELAUNCH_MAX_CONSECUTIVE
-                recorded_argv = _proxy_recorded_argv()
                 try:
                     if liveness_dead_reason and recorded_argv:
                         # DETACHED REPLAY OF THE RECORDED ORIGINAL ARGV
@@ -3496,11 +3635,19 @@ def check_proxy(pause_directory=None):
                         # its own session; this process only observes the port
                         # again afterwards and never claims more than it saw.
                         replay_issued_at = now_iso()
-                        replay_argv = list(recorded_argv)
+                        # RESOLVE argv[0] AT REPLAY TIME (t_e2f9a9ad review).
+                        # The recorded list is kept verbatim (install_proxy records
+                        # the bare `sparkrun` an interactive shell used), but the
+                        # daemon runs under launchd's PATH, where that name can
+                        # resolve to a different install or not at all. Only the
+                        # executable is rewritten; every recorded argument —
+                        # port/cluster included — stays byte-identical.
+                        replay_argv = list(
+                            _sparkrun_exec_argv(list(recorded_argv)))
                         log(f"proxy watchdog: :{PROXY_PORT} is DEAD "
                             f"({liveness_dead_reason}) — replaying recorded "
                             f"argv detached: {replay_argv}", "WARN")
-                        write_state("proxy", _proxy_verdict_carry({
+                        issued_row = _proxy_verdict_carry({
                             "ok": False, "port": PROXY_PORT,
                             "last_check": replay_issued_at,
                             "reason": liveness_dead_reason,
@@ -3511,13 +3658,26 @@ def check_proxy(pause_directory=None):
                             "restart_argv": replay_argv,
                             "restart_issued_at": replay_issued_at,
                             "liveness": dict(liveness),
+                            # Carry the attempt count into the pre-spawn row for
+                            # the same reason as the stamp below: if this process
+                            # dies during the observation window, the next tick
+                            # must still see that a replay was issued (and the
+                            # streak it belongs to), not a clean slate.
+                            "relaunch_streak": prev_streak + 1,
                             # Stamp the down-window here too: if this process
                             # dies between spawn and the final write, the next
                             # tick must still see an attempt happened.
                             "last_relaunch": replay_issued_at,
                             "cooldown_s": PROXY_RELAUNCH_DOWN_COOLDOWN_S,
                             PROXY_VERDICT_STATE_KEY: verdict_block,
-                        }))
+                        })
+                        # The alert throttle must survive this intermediate write
+                        # too: dropping it here would let every replay tick page
+                        # the operator even though the alarm is once-per-window.
+                        prev_alert = _proxy_stall_stamp()
+                        if prev_alert:
+                            issued_row["stall_alerted_at"] = prev_alert
+                        write_state("proxy", issued_row)
                         _archive_proxy_log_before_restart("detached replay")
                         replay = _proxy_replay_and_verify(replay_argv)
                         r = replay
@@ -3612,7 +3772,8 @@ def check_proxy(pause_directory=None):
     # nothing downstream could alarm on it. A paused_skip tick attempted
     # NOTHING, so it is not a failed repair and must not read as one (the same
     # argument as `suppressed` / `deferred`, three lines below).
-    if not ok and not suppressed and not deferred and not paused_skip:
+    if not ok and not suppressed and not deferred and not paused_skip \
+            and not inflight_observed:
         detail = (r.get('output') or r.get('stderr') or 'no command output')[:400]
         if r.get("healthy"):
             # t_640be7a2: the port IS served by the tracked proxy's own process
@@ -3628,7 +3789,15 @@ def check_proxy(pause_directory=None):
         else:
             log(f"proxy repair on :{PROXY_PORT} FAILED ({message}): "
                 f"{detail}", "ERROR")
-    new_streak = _proxy_relaunch_streak() + (1 if attempted else 0)
+    # A VERIFIED, SUCCESSFUL listener ends the failed-replay streak (t_e2f9a9ad
+    # review): observing the recorded child on the port is recovery, not another
+    # failed attempt. An in-flight tick that has not bound yet leaves the streak
+    # alone, and a repair whose command failed while the OLD proxy still served
+    # keeps its escalation armament (the pin in test_proxy_repair_pid_identity).
+    if r.get("verified") and ok:
+        new_streak = 0
+    else:
+        new_streak = prev_streak + (1 if attempted else 0)
     # REPAIR NEVER LEAVES :4000 DOWN (t_90958eb8, fix 2). `proxy_down` is the
     # repair's own verdict that NOTHING is listening on the port — i.e. :4000
     # refuses every connection right now. The streak gate above exists so a
@@ -3646,9 +3815,11 @@ def check_proxy(pause_directory=None):
     # unrecoverable for MAX consecutive attempts. `attempted` keeps
     # cooldown/lease/breaker-deferred ticks (which did nothing) out of the
     # count and out of the alarm; `not ok` keeps the moment an escalated
-    # repair SUCCEEDS from raising a false alarm on its own tick. The
-    # intentional-autodown window never alerts.
-    if attempted and not ok and not _intentional_window() \
+    # repair SUCCEEDS from raising a false alarm on its own tick. `capped` is
+    # the replay branch at PROXY_RELAUNCH_MAX_CONSECUTIVE: it did not spawn,
+    # and raising this alarm instead of replaying again is the bounded end of
+    # the loop. The intentional-autodown window never alerts.
+    if (attempted or capped) and not ok and not _intentional_window() \
             and (new_streak >= PROXY_RELAUNCH_MAX_CONSECUTIVE or down_after):
         alerted, alert_stamp = _proxy_stall_alert(
             relaunch_hosts, new_streak, r.get("output") or "", reason,
@@ -3677,7 +3848,8 @@ def check_proxy(pause_directory=None):
                   # same truth for a node the operator parked: no lease, no
                   # strike, no command — and the reason is in `message`.
                   "relaunch_failed": (not ok and not suppressed and not deferred
-                                      and not paused_skip),
+                                      and not paused_skip
+                                      and not inflight_observed),
                   "deferred": deferred,
                   "paused": paused_skip,
                   # The repair's own verdict on whether anything answers the
@@ -3697,19 +3869,20 @@ def check_proxy(pause_directory=None):
                   "completion_ok": completion_ok,
                   "completion": completion_detail,
                   "message": message}
-    if not ok and not suppressed and not deferred and not paused_skip:
+    if not ok and not suppressed and not deferred and not paused_skip \
+            and not inflight_observed:
         proxy_data["relaunch_error"] = (r.get("output") or r.get("stderr") or "")[:400]
     if new_streak:
         # NOT cleared by a merely-successful exit code: only the healthy
         # branch (probes pass) clears the streak. `sparkrun proxy start`
         # exiting 0 over a dead/empty proxy is a documented shape (10-11).
         proxy_data["relaunch_streak"] = new_streak
-    if suppressed or deferred or paused_skip:
+    if suppressed or deferred or paused_skip or inflight_observed or capped:
         # Carry the ORIGINAL attempt stamp forward verbatim. Re-stamping on a
-        # suppressed/deferred/paused tick would push the window out every tick
-        # and make the cooldown perpetual (never retries, never recovers) — and a
-        # pause tick in particular must not buy the cooldown a fresh 300 s for a
-        # repair that was never attempted.
+        # suppressed/deferred/paused/observed/capped tick would push the window
+        # out every tick and make the cooldown perpetual (never retries, never
+        # recovers) — and a pause tick in particular must not buy the cooldown a
+        # fresh 300 s for a repair that was never attempted.
         stamp = _proxy_relaunch_stamp()
         if stamp:
             proxy_data["last_relaunch"] = stamp
