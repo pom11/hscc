@@ -553,6 +553,13 @@ class _Rig:
                             lambda name, data, severity="info", **kw: True)
         self.owner_after_start = owner_after
         self.start_ok = start_ok
+        # t_e2f9a9ad: the tick now reads liveness BEFORE the catalogue, so an
+        # empty port table would be a DEAD proxy (plain start), not the drift
+        # repair these cases pin. Start from a bound, FOREIGN listener: the
+        # port signal is live, the state record is live, and the drift branch
+        # still routes through the orphan repair.
+        if health.PROXY_PORT not in port.owners:
+            port.set_owner(FOREIGN, "some-other-server")
         # The planted CLI runs for real (that is what the call log records) and
         # the port-owner table follows the same argv, so the verdict a test gets
         # is the verdict the commands produced.

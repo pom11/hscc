@@ -274,6 +274,25 @@ def _reset_proxy_log_archive_once() -> None:
     _proxy_log_archived_this_run = False
 
 
+def _record_proxy_launch_argv(argv) -> None:
+    """Record the argv this apply used to start the gateway (t_e2f9a9ad).
+
+    The daemon's keeper replays this EXACT list when it finds the proxy dead,
+    so the port/cluster arguments survive a restart. Goes through the peer
+    package the same way :func:`_archive_proxy_log_before_start` does; a
+    standalone hscc-cluster invocation with no hscc_daemon importable simply
+    records nothing. Never fails an apply.
+    """
+    try:
+        try:
+            from . import fleet as _fleet
+        except ImportError:
+            import fleet as _fleet
+        _fleet._daemon_mod("health").record_proxy_launch_argv(argv)
+    except Exception:
+        return None
+
+
 def _archive_proxy_log_before_start(reason):
     """Seam: copy the outgoing litellm log aside, THEN ask for a start.
 
@@ -437,11 +456,12 @@ def install_proxy(family) -> dict:
     load_error = ""
     already_running = False
     running_port = None
+    start_argv = ["sparkrun", "proxy", "start",
+                  "--port", str(family.proxy_port),
+                  "--cluster", "hscc"]
     try:
         r = subprocess.run(
-            ["sparkrun", "proxy", "start",
-             "--port", str(family.proxy_port),
-             "--cluster", "hscc"],
+            start_argv,
             capture_output=True, text=True, timeout=30)
         loaded = r.returncode == 0
         if not loaded:
@@ -456,6 +476,10 @@ def install_proxy(family) -> dict:
                 load_error = ""
     except Exception as e:
         load_error = str(e)
+    if loaded:
+        # The replay seed: exactly the argv above, including the port and
+        # cluster that make this the same proxy (t_e2f9a9ad).
+        _record_proxy_launch_argv(start_argv)
 
     return {
         "family": family.name,

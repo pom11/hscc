@@ -274,6 +274,33 @@ class TestInstallProxySparkrun:
         assert res["port"] == 4000
         assert res["via"] == "sparkrun-proxy"
 
+    def test_records_the_exact_start_argv_for_daemon_replay(
+            self, tmp_path, monkeypatch):
+        """t_e2f9a9ad: the daemon's keeper needs the argv this apply actually
+        used — port and cluster included — so a dead proxy is replayed, not
+        rebuilt from defaults."""
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock, patch
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+
+        monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(tmp_path / "state"))
+
+        with patch.object(subprocess, "run",
+                          lambda argv, **k: MagicMock(returncode=0,
+                                                     stderr="", stdout="")):
+            fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M",
+                                ["192.0.2.2"], 8000, 1, 1)])
+            res = install_proxy(fam)
+
+        assert res["loaded"] is True
+        assert health._proxy_recorded_argv() == [
+            "sparkrun", "proxy", "start", "--port", "4000",
+            "--cluster", "hscc"]
+
     def test_records_error_on_failure(self, tmp_path, monkeypatch):
         import cluster_template as ct
         import subprocess

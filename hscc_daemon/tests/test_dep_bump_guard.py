@@ -776,6 +776,10 @@ class TestProxyStreamCarriesDrift:
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
         monkeypatch.setattr(serving, "KEEPALIVE_NODES", {"192.0.2.1"})
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: self._SERVING_NO_UNITS)
+        # t_e2f9a9ad: keep the liveness pair off the live port/state surface.
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: (4242, "litellm --config /tmp/stub.yaml"))
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 4242)
         monkeypatch.setattr(health, "_proxy_models_probe",
                             lambda url, timeout=5: {
                                 "ok": True, "models": ["worker-model", "orchestrator-model"],

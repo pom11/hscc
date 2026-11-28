@@ -92,6 +92,12 @@ class _Harness:
         # ── the serving layer and every probe: stubbed ──
         monkeypatch.setattr(serving, "KEEPALIVE_NODES", {NODE})
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: SERVING)
+        # t_e2f9a9ad: the liveness pair is read before the catalogue. Keep the
+        # proxy visibly alive so these cases stay about the VERDICT LINE, not a
+        # restart, and no test touches the real :4000 or sparkrun state.
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: (4242, "litellm --config /tmp/stub.yaml"))
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 4242)
         monkeypatch.setattr(health, "_router_drift_probe",
                             lambda: {"status": "skip", "warn": False,
                                      "detail": "stubbed"})
